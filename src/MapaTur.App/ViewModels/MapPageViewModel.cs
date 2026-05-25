@@ -142,9 +142,14 @@ public sealed partial class MapPageViewModel : ObservableObject
             StatusMessage = Localization.AppStrings.StatusFileNotFound;
             logger.LogWarning(ex, "MBTiles file not found");
         }
-        catch (Exception ex) when (ex is InvalidDataException or InvalidOperationException)
+        catch (Exception ex)
         {
-            StatusMessage = $"Could not load archive: {ex.Message}";
+            // Includes COMException from the Windows file picker, SQLite errors from
+            // BruTile, IO errors, etc. Surface type + HRESULT (if any) + message.
+            int? hresult = ex.HResult != 0 ? ex.HResult : null;
+            string hresultText = hresult is not null ? $" (0x{hresult:X8})" : string.Empty;
+            string detail = string.IsNullOrEmpty(ex.Message) ? "(no message)" : ex.Message;
+            StatusMessage = $"Could not load archive: {ex.GetType().Name}{hresultText}: {detail}";
             logger.LogError(ex, "Failed to open MBTiles archive");
         }
     }

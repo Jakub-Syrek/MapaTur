@@ -26,6 +26,13 @@ public sealed class OverpassHttpClient : IOverpassClient
         ArgumentNullException.ThrowIfNull(httpClient);
         this.httpClient = httpClient;
         this.endpoint = endpoint ?? new Uri(DefaultEndpoint);
+
+        // The public Overpass mirrors reject requests without a User-Agent to deter
+        // anonymous scraping bots. Set one once on the shared client.
+        if (!this.httpClient.DefaultRequestHeaders.UserAgent.Any())
+        {
+            this.httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("MapaTur/0.1 (+https://github.com/Jakub-Syrek/MapaTur)");
+        }
     }
 
     /// <inheritdoc />
@@ -40,6 +47,7 @@ public sealed class OverpassHttpClient : IOverpassClient
                 new("data", query),
             }),
         };
+        request.Headers.Accept.ParseAdd("application/json");
 
         using var response = await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
