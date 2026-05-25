@@ -99,7 +99,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         this.exportRouteToGpxUseCase = exportRouteToGpxUseCase;
         this.logger = logger;
         Map = new Map();
-        StatusMessage = "No data loaded. Open MBTiles, import a TCX track, or download trails for this area.";
+        StatusMessage = Localization.AppStrings.StatusInitial;
     }
 
     /// <summary>The route most recently planned, or null when no route has been computed yet.</summary>
@@ -127,7 +127,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     {
         try
         {
-            string? path = await filePicker.PickFileAsync("Select MBTiles archive");
+            string? path = await filePicker.PickFileAsync(Localization.AppStrings.FilePickerMBTiles);
             if (path is null)
             {
                 return;
@@ -139,7 +139,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         }
         catch (FileNotFoundException ex)
         {
-            StatusMessage = "Selected file does not exist.";
+            StatusMessage = Localization.AppStrings.StatusFileNotFound;
             logger.LogWarning(ex, "MBTiles file not found");
         }
         catch (Exception ex) when (ex is InvalidDataException or InvalidOperationException)
@@ -158,7 +158,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     {
         try
         {
-            string? path = await filePicker.PickFileAsync("Select TCX track");
+            string? path = await filePicker.PickFileAsync(Localization.AppStrings.FilePickerTcx);
             if (path is null)
             {
                 return;
@@ -167,7 +167,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             var tracks = await importTcxFileUseCase.HandleAsync(path);
             if (tracks.Count == 0)
             {
-                StatusMessage = "TCX file contained no tracks with positions.";
+                StatusMessage = Localization.AppStrings.StatusTcxNoTracks;
                 return;
             }
 
@@ -181,7 +181,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         }
         catch (FileNotFoundException ex)
         {
-            StatusMessage = "Selected file does not exist.";
+            StatusMessage = Localization.AppStrings.StatusFileNotFound;
             logger.LogWarning(ex, "TCX file not found");
         }
         catch (InvalidDataException ex)
@@ -207,22 +207,22 @@ public sealed partial class MapPageViewModel : ObservableObject
         var bounds = ViewportBounds.FromMercatorExtent(GetCurrentExtent());
         if (bounds is null)
         {
-            StatusMessage = "Map viewport is not ready yet. Try again after the map has rendered.";
+            StatusMessage = Localization.AppStrings.StatusViewportNotReady;
             return;
         }
 
         try
         {
             IsBusy = true;
-            StatusMessage = "Downloading trails from OSM Overpass…";
+            StatusMessage = Localization.AppStrings.StatusDownloadingTrails;
 
             var trails = await overpassClient.FetchHikingTrailsAsync(bounds.Value).ConfigureAwait(true);
             await trailRepository.UpsertAsync(trails).ConfigureAwait(true);
             trailRenderer.RenderTrails(Map, trails);
 
             StatusMessage = trails.Count == 0
-                ? "No hiking trails found in this area."
-                : $"Loaded {trails.Count} hiking trail(s) in the current viewport.";
+                ? Localization.AppStrings.StatusNoTrailsFound
+                : $"{trails.Count} {Localization.AppStrings.DownloadTrails}";
             logger.LogInformation("Downloaded {Count} trails for bounds {Bounds}", trails.Count, bounds);
         }
         catch (HttpRequestException ex)
@@ -237,7 +237,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         }
         catch (TaskCanceledException ex)
         {
-            StatusMessage = "Overpass request timed out. Try a smaller area.";
+            StatusMessage = Localization.AppStrings.StatusOverpassTimeout;
             logger.LogWarning(ex, "Overpass request timed out");
         }
         finally
@@ -272,7 +272,7 @@ public sealed partial class MapPageViewModel : ObservableObject
 
         if (waypoints.Count == 1)
         {
-            StatusMessage = "Origin set. Tap the map again to set the destination and compute a route.";
+            StatusMessage = Localization.AppStrings.StatusOriginSet;
             return;
         }
 
@@ -286,7 +286,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         waypoints.Clear();
         LastPlannedRoute = null;
         routeRenderer.Clear(Map);
-        StatusMessage = "Route cleared.";
+        StatusMessage = Localization.AppStrings.StatusRouteCleared;
     }
 
     /// <summary>
@@ -298,7 +298,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     {
         if (LastPlannedRoute is null)
         {
-            StatusMessage = "Plan a route first by tapping two points on the map.";
+            StatusMessage = Localization.AppStrings.StatusExportPlanFirst;
             return;
         }
 
@@ -327,14 +327,14 @@ public sealed partial class MapPageViewModel : ObservableObject
         try
         {
             IsBusy = true;
-            StatusMessage = "Planning route…";
+            StatusMessage = Localization.AppStrings.StatusPlanningRoute;
 
             var request = new RouteRequest(waypoints[0], waypoints[1], RouteProfile.FastestTime);
             var route = await planRouteUseCase.HandleAsync(request).ConfigureAwait(true);
 
             if (route is null)
             {
-                StatusMessage = "No route found. Make sure trails are downloaded for both endpoints (use 'Download Trails').";
+                StatusMessage = Localization.AppStrings.StatusNoRouteFound;
                 return;
             }
 

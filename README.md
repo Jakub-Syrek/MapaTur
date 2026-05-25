@@ -33,6 +33,17 @@ dotnet test
 
 Requires .NET 10 SDK and MAUI workload (`dotnet workload install maui`).
 
+## Localization
+
+UI is available in English (default) and Polish. The application picks the language from
+`CultureInfo.CurrentUICulture` at startup (configured by the host OS).
+
+## Privacy
+
+MapaTur is offline-first and does not collect telemetry. The only outbound network call is
+the Overpass trail download you explicitly trigger. See [docs/PRIVACY.md](docs/PRIVACY.md)
+for the full policy.
+
 ## License
 
 Copyright (c) Jakub Syrek. All rights reserved.

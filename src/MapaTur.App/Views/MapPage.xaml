@@ -3,28 +3,34 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
              xmlns:mapsui="clr-namespace:Mapsui.UI.Maui;assembly=Mapsui.UI.Maui"
              xmlns:vm="clr-namespace:MapaTur.App.ViewModels"
+             xmlns:loc="clr-namespace:MapaTur.App.Localization"
              x:Class="MapaTur.App.Views.MapPage"
              x:DataType="vm:MapPageViewModel"
-             Title="MapaTur">
+             Title="{x:Static loc:AppStrings.AppTitle}">
 
     <Grid RowDefinitions="Auto,*,Auto" Padding="0">
 
         <HorizontalStackLayout Grid.Row="0" Padding="12" Spacing="12" BackgroundColor="{AppThemeBinding Light=#F4F4F5, Dark=#1F1F23}">
-            <Button Text="Open MBTiles"
+            <Button Text="{x:Static loc:AppStrings.OpenMBTiles}"
                     Command="{Binding OpenMBTilesCommand}"
-                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
-            <Button Text="Open TCX"
+                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
+                    SemanticProperties.Hint="{x:Static loc:AppStrings.OpenMBTiles}" />
+            <Button Text="{x:Static loc:AppStrings.OpenTcx}"
                     Command="{Binding OpenTcxCommand}"
-                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
-            <Button Text="Download Trails (viewport)"
+                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
+                    SemanticProperties.Hint="{x:Static loc:AppStrings.OpenTcx}" />
+            <Button Text="{x:Static loc:AppStrings.DownloadTrails}"
                     Command="{Binding DownloadTrailsForViewportCommand}"
-                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
-            <Button Text="Clear Route"
+                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
+                    SemanticProperties.Hint="{x:Static loc:AppStrings.DownloadTrails}" />
+            <Button Text="{x:Static loc:AppStrings.ClearRoute}"
                     Command="{Binding ClearRouteCommand}"
-                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
-            <Button Text="Export GPX"
+                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
+                    SemanticProperties.Hint="{x:Static loc:AppStrings.ClearRoute}" />
+            <Button Text="{x:Static loc:AppStrings.ExportGpx}"
                     Command="{Binding ExportRouteCommand}"
-                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
+                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
+                    SemanticProperties.Hint="{x:Static loc:AppStrings.ExportGpx}" />
             <ActivityIndicator IsRunning="{Binding IsBusy}"
                                IsVisible="{Binding IsBusy}"
                                VerticalOptions="Center" />
@@ -32,13 +38,15 @@
 
         <mapsui:MapControl x:Name="MapControl"
                            Grid.Row="1"
-                           Map="{Binding Map}" />
+                           Map="{Binding Map}"
+                           SemanticProperties.Description="{x:Static loc:AppStrings.AccessibilityMapControl}" />
 
         <Label Grid.Row="2"
                Padding="12,8"
                Text="{Binding StatusMessage}"
                BackgroundColor="{AppThemeBinding Light=#F4F4F5, Dark=#1F1F23}"
-               TextColor="{AppThemeBinding Light=#27272A, Dark=#E4E4E7}" />
+               TextColor="{AppThemeBinding Light=#18181B, Dark=#FAFAFA}"
+               SemanticProperties.HeadingLevel="Level2" />
     </Grid>
 
 </ContentPage>

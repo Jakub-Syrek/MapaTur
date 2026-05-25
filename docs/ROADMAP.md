@@ -77,11 +77,11 @@ Tap-to-plan + GPX export delivered; multi-waypoint editor and off-trail UI taggi
 
 ## M6 — Release polish
 
-- [ ] Localization (PL, EN)
-- [ ] Dark mode
-- [ ] Accessibility audit (font sizing, contrast, screen reader labels)
-- [ ] App icons and splash for all platforms
-- [ ] Signed builds in release pipeline (Play Store, App Store, MSIX)
-- [ ] Privacy policy
+- [x] Localization (PL, EN) via .resx + `AppStrings` static accessor
+- [x] Dark-mode polish: improved status-bar contrast for both themes
+- [x] Accessibility: `SemanticProperties.Hint` on toolbar buttons; screen-reader description on map; heading level on status bar
+- [ ] App icons and splash for all platforms (still using MAUI defaults — needs brand assets)
+- [ ] Signed builds in release pipeline (requires signing certs/keys; out of scope)
+- [x] Privacy policy ([docs/PRIVACY.md](PRIVACY.md))
 
-**DoD:** signed `.apk`, `.ipa`, and `.msix` artifacts produced by tagged release workflow, ready for store submission.
+**DoD:** signed `.apk`, `.ipa`, and `.msix` artifacts produced by tagged release workflow, ready for store submission. Functional polish delivered; signing pipeline awaits credentials.

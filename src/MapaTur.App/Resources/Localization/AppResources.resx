@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype"><value>text/microsoft-resx</value></resheader>
+  <resheader name="version"><value>2.0</value></resheader>
+  <resheader name="reader"><value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+  <resheader name="writer"><value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+
+  <data name="AppTitle" xml:space="preserve">
+    <value>MapaTur</value>
+  </data>
+  <data name="OpenMBTiles" xml:space="preserve">
+    <value>Open MBTiles</value>
+  </data>
+  <data name="OpenTcx" xml:space="preserve">
+    <value>Open TCX</value>
+  </data>
+  <data name="DownloadTrails" xml:space="preserve">
+    <value>Download Trails (viewport)</value>
+  </data>
+  <data name="ClearRoute" xml:space="preserve">
+    <value>Clear Route</value>
+  </data>
+  <data name="ExportGpx" xml:space="preserve">
+    <value>Export GPX</value>
+  </data>
+  <data name="StatusInitial" xml:space="preserve">
+    <value>No data loaded. Open MBTiles, import a TCX track, or download trails for this area.</value>
+  </data>
+  <data name="StatusOriginSet" xml:space="preserve">
+    <value>Origin set. Tap the map again to set the destination and compute a route.</value>
+  </data>
+  <data name="StatusPlanningRoute" xml:space="preserve">
+    <value>Planning route…</value>
+  </data>
+  <data name="StatusDownloadingTrails" xml:space="preserve">
+    <value>Downloading trails from OSM Overpass…</value>
+  </data>
+  <data name="StatusNoTrailsFound" xml:space="preserve">
+    <value>No hiking trails found in this area.</value>
+  </data>
+  <data name="StatusNoRouteFound" xml:space="preserve">
+    <value>No route found. Make sure trails are downloaded for both endpoints (use 'Download Trails').</value>
+  </data>
+  <data name="StatusRouteCleared" xml:space="preserve">
+    <value>Route cleared.</value>
+  </data>
+  <data name="StatusViewportNotReady" xml:space="preserve">
+    <value>Map viewport is not ready yet. Try again after the map has rendered.</value>
+  </data>
+  <data name="StatusOverpassTimeout" xml:space="preserve">
+    <value>Overpass request timed out. Try a smaller area.</value>
+  </data>
+  <data name="StatusExportPlanFirst" xml:space="preserve">
+    <value>Plan a route first by tapping two points on the map.</value>
+  </data>
+  <data name="StatusTcxNoTracks" xml:space="preserve">
+    <value>TCX file contained no tracks with positions.</value>
+  </data>
+  <data name="StatusFileNotFound" xml:space="preserve">
+    <value>Selected file does not exist.</value>
+  </data>
+  <data name="FilePickerMBTiles" xml:space="preserve">
+    <value>Select MBTiles archive</value>
+  </data>
+  <data name="FilePickerTcx" xml:space="preserve">
+    <value>Select TCX track</value>
+  </data>
+  <data name="AccessibilityMapControl" xml:space="preserve">
+    <value>Interactive map. Tap to set route waypoints.</value>
+  </data>
+</root>

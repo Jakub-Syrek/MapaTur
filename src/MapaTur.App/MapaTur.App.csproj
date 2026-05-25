@@ -67,6 +67,16 @@
 
 		<!-- Raw Assets (also remove the "Resources\Raw" prefix) -->
 		<MauiAsset Include="Resources\Raw\**" LogicalName="%(RecursiveDir)%(Filename)%(Extension)" />
+
+		<!-- Localization: embed resx as satellite resources. -->
+		<EmbeddedResource Update="Resources\Localization\AppResources.resx">
+			<Generator></Generator>
+			<LogicalName>MapaTur.App.Resources.Localization.AppResources.resources</LogicalName>
+		</EmbeddedResource>
+		<EmbeddedResource Update="Resources\Localization\AppResources.pl.resx">
+			<Generator></Generator>
+			<WithCulture>true</WithCulture>
+		</EmbeddedResource>
 	</ItemGroup>
 
 	<ItemGroup>
