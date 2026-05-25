@@ -3,12 +3,13 @@
     x:Class="MapaTur.App.AppShell"
     xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
     xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
-    xmlns:local="clr-namespace:MapaTur.App"
-    Title="MapaTur.App">
+    xmlns:views="clr-namespace:MapaTur.App.Views"
+    Title="MapaTur"
+    FlyoutBehavior="Disabled">
 
     <ShellContent
-        Title="Home"
-        ContentTemplate="{DataTemplate local:MainPage}"
-        Route="MainPage" />
+        Title="Map"
+        ContentTemplate="{DataTemplate views:MapPage}"
+        Route="MapPage" />
 
 </Shell>

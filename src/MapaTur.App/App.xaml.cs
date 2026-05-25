@@ -1,16 +1,19 @@
-﻿using Microsoft.Extensions.DependencyInjection;
+﻿namespace MapaTur.App;
 
-namespace MapaTur.App;
-
-public partial class App : Application
+/// <summary>
+/// Root MAUI application object.
+/// </summary>
+public partial class App : Microsoft.Maui.Controls.Application
 {
-	public App()
-	{
-		InitializeComponent();
-	}
+    /// <summary>Initializes the application and loads its resource dictionary.</summary>
+    public App()
+    {
+        InitializeComponent();
+    }
 
-	protected override Window CreateWindow(IActivationState? activationState)
-	{
-		return new Window(new AppShell());
-	}
+    /// <inheritdoc />
+    protected override Window CreateWindow(IActivationState? activationState)
+    {
+        return new Window(new AppShell());
+    }
 }

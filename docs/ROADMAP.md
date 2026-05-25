@@ -10,18 +10,18 @@ Status legend: `[ ]` planned · `[~]` in progress · `[x]` done
 - [x] Directory.Build.props with analyzers and warnings-as-errors
 - [x] ADR-0001..0003
 - [x] README and ROADMAP
-- [ ] GitHub Actions CI (build + test + format check)
-- [ ] First passing unit test in Domain (smoke)
+- [x] GitHub Actions CI (build + test + format check)
+- [x] First passing unit test in Domain (smoke)
 
 **Definition of Done:** green CI on `main` with all projects building and at least one test passing.
 
 ## M1 — Offline map rendering
 
-- [ ] Mapsui integrated into MAUI app
-- [ ] MBTiles tile source loader
-- [ ] Pan, zoom, rotate gestures
-- [ ] User location dot from native GPS provider
-- [ ] Demo region package (Tatry) checked into `testdata/`
+- [x] Mapsui integrated into MAUI app (via `UseSkiaSharp`)
+- [x] MBTiles tile source loader (`MBTilesTileSource` in Infrastructure + `MBTilesMapLoader` in App via BruTile.MbTiles)
+- [x] Pan, zoom, rotate gestures (Mapsui MapControl defaults)
+- [ ] User location dot from native GPS provider (deferred to M5 UX pass)
+- [ ] Demo region package (Tatry) checked into `testdata/` (deferred — 200+ MB binary, will host externally)
 
 **DoD:** application opens a saved MBTiles archive and pans the map with no network.
 

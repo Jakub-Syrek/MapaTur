@@ -7,18 +7,21 @@
 
   <ItemGroup>
     <!-- Map and geometry -->
-    <PackageVersion Include="Mapsui" Version="5.0.0" />
-    <PackageVersion Include="Mapsui.Maui" Version="5.0.0" />
+    <PackageVersion Include="Mapsui" Version="5.0.2" />
+    <PackageVersion Include="Mapsui.Maui" Version="5.0.2" />
     <PackageVersion Include="BruTile" Version="6.0.0" />
-    <PackageVersion Include="NetTopologySuite" Version="2.5.0" />
+    <PackageVersion Include="BruTile.MbTiles" Version="6.0.0" />
+    <PackageVersion Include="NetTopologySuite" Version="2.6.0" />
+    <PackageVersion Include="SkiaSharp.Views.Maui.Controls" Version="3.119.4" />
 
     <!-- Storage -->
-    <PackageVersion Include="Microsoft.Data.Sqlite" Version="9.0.0" />
+    <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.0" />
+    <PackageVersion Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.11" />
 
     <!-- DI / Logging / Config -->
-    <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="9.0.0" />
-    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.0" />
-    <PackageVersion Include="Microsoft.Extensions.Hosting" Version="9.0.0" />
+    <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="10.0.0" />
+    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+    <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
     <PackageVersion Include="Serilog" Version="4.2.0" />
     <PackageVersion Include="Serilog.Extensions.Logging" Version="9.0.0" />
     <PackageVersion Include="Serilog.Sinks.File" Version="6.0.0" />
