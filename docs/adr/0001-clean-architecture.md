@@ -30,7 +30,7 @@ Infrastructure (MapaTur.Infrastructure)
 - **Domain** contains entities, value objects and domain services. Pure C#, no IO, no framework references.
 - **Application** orchestrates use cases and defines ports (interfaces) for infrastructure. No IO either.
 - **Infrastructure** implements the ports: SQLite, HTTP clients (Overpass), file system, XML parsers.
-- **Routing** is a separate domain-aligned module because the graph engine is large and benefits from independent evolution and testing. It depends only on Domain.
+- **Routing** is a separate domain-aligned module because the graph engine is large and benefits from independent evolution and testing. It depends only on Domain. Application may reference Routing to consume the algorithms (e.g. `TrailRoutePlanner` lives in Application and uses `AStarRouter` + cost functions from Routing).
 - **Presentation** is the MAUI app. It consumes Application use cases via DI and contains no business logic.
 
 ## Consequences

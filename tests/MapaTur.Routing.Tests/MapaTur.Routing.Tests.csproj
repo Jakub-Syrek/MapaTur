@@ -23,6 +23,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\MapaTur.Routing\MapaTur.Routing.csproj" />
+    <ProjectReference Include="..\..\src\MapaTur.Domain\MapaTur.Domain.csproj" />
   </ItemGroup>
 
 </Project>

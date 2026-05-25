@@ -50,13 +50,15 @@ The rendering pipeline is wired end-to-end; UI trigger and viewport-aware downlo
 
 ## M4 — Route planning (A*)
 
-- [ ] Graph builder from trail data
-- [ ] A* implementation with pluggable `IEdgeCostFunction`
-- [ ] Naismith's rule + Tobler hiking function for time estimation
-- [ ] Elevation profile generation
-- [ ] `PlanRouteUseCase` returning `Route` aggregate
+- [x] Graph builder from trail data (`TrailGraph.Build` with proximity snapping)
+- [x] A* implementation with pluggable `IEdgeCostFunction`
+- [x] Tobler hiking function (`ToblerHikingFunction`); Naismith subsumed by Tobler slope-aware speed
+- [x] Elevation profile generation (delivered in M2 via `ElevationProfile.FromPoints`)
+- [x] `PlanRouteUseCase` returning `Route` aggregate
+- [x] `TrailRoutePlanner` orchestrates repository + graph + A*
+- [ ] UI button to set start/end and visualise the planned route (deferred to M5 with waypoint editor)
 
-**DoD:** user picks two points on trails, receives a planned route with distance, ascent, and ETA within ±10% of reference plans.
+**DoD:** user picks two points on trails, receives a planned route with distance, ascent, and ETA within ±10% of reference plans. (Programmatic API delivered; UI integration in M5.)
 
 ## M5 — Off-trail and planner UI
 

@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\MapaTur.Domain\MapaTur.Domain.csproj" />
+    <ProjectReference Include="..\MapaTur.Routing\MapaTur.Routing.csproj" />
   </ItemGroup>
 
   <PropertyGroup>
