@@ -1,0 +1,5 @@
+[*.cs]
+# Test method names follow Method_Scenario_Expectation convention.
+dotnet_diagnostic.CA1707.severity = none
+# Tests instantiate types directly; constructor naming rules don't apply.
+dotnet_diagnostic.CA1515.severity = none

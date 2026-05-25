@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  build-and-test:
+    name: Build and test (core libraries)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Restore core libraries
+        run: |
+          dotnet restore src/MapaTur.Domain/MapaTur.Domain.csproj
+          dotnet restore src/MapaTur.Application/MapaTur.Application.csproj
+          dotnet restore src/MapaTur.Infrastructure/MapaTur.Infrastructure.csproj
+          dotnet restore src/MapaTur.Routing/MapaTur.Routing.csproj
+          dotnet restore tests/MapaTur.Domain.Tests/MapaTur.Domain.Tests.csproj
+          dotnet restore tests/MapaTur.Application.Tests/MapaTur.Application.Tests.csproj
+          dotnet restore tests/MapaTur.Infrastructure.Tests/MapaTur.Infrastructure.Tests.csproj
+          dotnet restore tests/MapaTur.Routing.Tests/MapaTur.Routing.Tests.csproj
+          dotnet restore tests/MapaTur.Integration.Tests/MapaTur.Integration.Tests.csproj
+
+      - name: Build core libraries
+        run: |
+          dotnet build src/MapaTur.Domain/MapaTur.Domain.csproj --no-restore -c Release
+          dotnet build src/MapaTur.Application/MapaTur.Application.csproj --no-restore -c Release
+          dotnet build src/MapaTur.Infrastructure/MapaTur.Infrastructure.csproj --no-restore -c Release
+          dotnet build src/MapaTur.Routing/MapaTur.Routing.csproj --no-restore -c Release
+
+      - name: Run tests
+        run: |
+          dotnet test tests/MapaTur.Domain.Tests/MapaTur.Domain.Tests.csproj --no-restore -c Release --collect:"XPlat Code Coverage" --results-directory ./coverage
+          dotnet test tests/MapaTur.Application.Tests/MapaTur.Application.Tests.csproj --no-restore -c Release --collect:"XPlat Code Coverage" --results-directory ./coverage
+          dotnet test tests/MapaTur.Infrastructure.Tests/MapaTur.Infrastructure.Tests.csproj --no-restore -c Release --collect:"XPlat Code Coverage" --results-directory ./coverage
+          dotnet test tests/MapaTur.Routing.Tests/MapaTur.Routing.Tests.csproj --no-restore -c Release --collect:"XPlat Code Coverage" --results-directory ./coverage
+          dotnet test tests/MapaTur.Integration.Tests/MapaTur.Integration.Tests.csproj --no-restore -c Release --collect:"XPlat Code Coverage" --results-directory ./coverage
+
+      - name: Upload coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: ./coverage
+
+  format-check:
+    name: Format check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Verify formatting
+        run: |
+          dotnet format src/MapaTur.Domain/MapaTur.Domain.csproj --verify-no-changes --severity warn
+          dotnet format src/MapaTur.Application/MapaTur.Application.csproj --verify-no-changes --severity warn
+          dotnet format src/MapaTur.Infrastructure/MapaTur.Infrastructure.csproj --verify-no-changes --severity warn
+          dotnet format src/MapaTur.Routing/MapaTur.Routing.csproj --verify-no-changes --severity warn
+
+  maui-build:
+    name: MAUI build (Windows)
+    runs-on: windows-latest
+    needs: build-and-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Install MAUI workload
+        run: dotnet workload install maui-windows maui-android
+
+      - name: Restore MAUI app
+        run: dotnet restore src/MapaTur.App/MapaTur.App.csproj
+
+      - name: Build MAUI app (Windows target)
+        run: dotnet build src/MapaTur.App/MapaTur.App.csproj --no-restore -c Release -f net10.0-windows10.0.19041.0

@@ -1,0 +1,16 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/MapaTur.App/MapaTur.App.csproj" />
+    <Project Path="src/MapaTur.Application/MapaTur.Application.csproj" />
+    <Project Path="src/MapaTur.Domain/MapaTur.Domain.csproj" />
+    <Project Path="src/MapaTur.Infrastructure/MapaTur.Infrastructure.csproj" />
+    <Project Path="src/MapaTur.Routing/MapaTur.Routing.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/MapaTur.Application.Tests/MapaTur.Application.Tests.csproj" />
+    <Project Path="tests/MapaTur.Domain.Tests/MapaTur.Domain.Tests.csproj" />
+    <Project Path="tests/MapaTur.Infrastructure.Tests/MapaTur.Infrastructure.Tests.csproj" />
+    <Project Path="tests/MapaTur.Integration.Tests/MapaTur.Integration.Tests.csproj" />
+    <Project Path="tests/MapaTur.Routing.Tests/MapaTur.Routing.Tests.csproj" />
+  </Folder>
+</Solution>
