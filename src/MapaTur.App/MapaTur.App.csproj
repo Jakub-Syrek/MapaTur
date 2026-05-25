@@ -74,6 +74,7 @@
 		<PackageReference Include="CommunityToolkit.Mvvm" />
 		<PackageReference Include="Mapsui.Maui" />
 		<PackageReference Include="Mapsui.Nts" />
+		<PackageReference Include="Microsoft.Extensions.Http" />
 		<PackageReference Include="Microsoft.Maui.Controls" />
 		<PackageReference Include="Microsoft.Extensions.Logging.Debug" />
 		<PackageReference Include="Serilog" />

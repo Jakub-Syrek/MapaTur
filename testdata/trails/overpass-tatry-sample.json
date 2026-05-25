@@ -1,0 +1,65 @@
+{
+  "version": 0.6,
+  "generator": "Overpass API",
+  "elements": [
+    {
+      "type": "relation",
+      "id": 100001,
+      "members": [
+        { "type": "way", "ref": 200001, "role": "" },
+        { "type": "way", "ref": 200002, "role": "" }
+      ],
+      "tags": {
+        "route": "hiking",
+        "name": "Czerwone Wierchy via Kasprowy",
+        "osmc:symbol": "red:white:red_stripe"
+      }
+    },
+    {
+      "type": "relation",
+      "id": 100002,
+      "members": [
+        { "type": "way", "ref": 200003, "role": "" }
+      ],
+      "tags": {
+        "route": "hiking",
+        "name": "Dolina Roztoki",
+        "osmc:symbol": "blue:white:blue_stripe"
+      }
+    },
+    {
+      "type": "relation",
+      "id": 100003,
+      "members": [],
+      "tags": {
+        "route": "hiking",
+        "name": "Empty relation"
+      }
+    },
+    {
+      "type": "way",
+      "id": 200001,
+      "geometry": [
+        { "lat": 49.2326, "lon": 19.9819 },
+        { "lat": 49.2310, "lon": 19.9850 },
+        { "lat": 49.2290, "lon": 19.9880 }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 200002,
+      "geometry": [
+        { "lat": 49.2290, "lon": 19.9880 },
+        { "lat": 49.2275, "lon": 19.9905 }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 200003,
+      "geometry": [
+        { "lat": 49.2400, "lon": 20.0100 },
+        { "lat": 49.2420, "lon": 20.0120 }
+      ]
+    }
+  ]
+}

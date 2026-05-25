@@ -37,12 +37,16 @@ Status legend: `[ ]` planned · `[~]` in progress · `[x]` done
 
 ## M3 — Official trail data
 
-- [ ] Overpass query builder for `route=hiking` in a bounding box
-- [ ] SQLite + SpatiaLite schema for trails
-- [ ] Trail color mapping from `osmc:symbol` (PTTK convention)
-- [ ] Trail layer rendering with zoom-dependent styling
+- [x] Overpass query builder for `route=hiking` in a bounding box (`OverpassQueryBuilder`)
+- [x] Overpass JSON response parser stitching member ways into trail geometry
+- [x] `OverpassHttpClient` with configurable endpoint and `HttpClient` DI
+- [x] Plain SQLite trail repository with bbox column index (SpatiaLite deferred)
+- [x] Trail color mapping from `osmc:symbol` (PTTK convention) via `OsmcSymbolParser`
+- [x] Trail layer renderer grouping by PTTK colour, rendered as Mapsui polylines
+- [ ] UI button to download trails for current viewport (deferred to M5 — needs MRect→lat/lon conversion)
 
 **DoD:** known PTTK trails (red, blue, green, yellow, black) display with correct colors in the Tatry region.
+The rendering pipeline is wired end-to-end; UI trigger and viewport-aware download remain.
 
 ## M4 — Route planning (A*)
 

@@ -3,8 +3,10 @@ using MapaTur.App.ViewModels;
 using MapaTur.App.Views;
 using MapaTur.Application.Maps;
 using MapaTur.Application.Tracks;
+using MapaTur.Application.Trails;
 using MapaTur.Infrastructure.Maps.MBTiles;
 using MapaTur.Infrastructure.Tracks;
+using MapaTur.Infrastructure.Trails.Overpass;
 using Microsoft.Extensions.Logging;
 using Serilog;
 using Serilog.Events;
@@ -69,8 +71,11 @@ public static class MauiProgram
         services.AddSingleton<IOfflineMapLoader, MBTilesMapLoader>();
         services.AddSingleton<ITileSourceFactory, MBTilesTileSourceFactory>();
         services.AddSingleton<ITrackLayerRenderer, MapsuiTrackLayerRenderer>();
+        services.AddSingleton<ITrailLayerRenderer, MapsuiTrailLayerRenderer>();
         services.AddSingleton<ITcxParser, TcxParser>();
         services.AddTransient<ImportTcxFileUseCase>();
+
+        services.AddHttpClient<IOverpassClient, OverpassHttpClient>();
 
         services.AddTransient<MapPageViewModel>();
         services.AddTransient<MapPage>();
