@@ -27,4 +27,8 @@
     <ProjectReference Include="..\..\src\MapaTur.Infrastructure\MapaTur.Infrastructure.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="..\..\testdata\**\*" Link="testdata\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

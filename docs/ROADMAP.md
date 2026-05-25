@@ -27,10 +27,11 @@ Status legend: `[ ]` planned · `[~]` in progress · `[x]` done
 
 ## M2 — TCX import
 
-- [ ] TCX schema parser (Garmin Training Center XML v2)
-- [ ] `Track` domain model populated from TCX
-- [ ] `ImportTcxFileUseCase` with file picker integration
-- [ ] Polyline overlay rendering on map
+- [x] TCX schema parser (Garmin Training Center XML v2)
+- [x] `Track` / `TrackPoint` / `ElevationProfile` domain model
+- [x] `ImportTcxFileUseCase` reading from disk
+- [x] Polyline overlay rendering on map (Mapsui NTS + Spherical Mercator projection)
+- [x] Sample `testdata/tracks/sample-tatry.tcx` fixture for parser tests
 
 **DoD:** user picks a `.tcx` from disk, the recorded track appears on the map as a polyline with elevation profile available.
 

@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2">
+  <Activities>
+    <Activity Sport="Hiking">
+      <Id>2026-03-12T07:30:00Z</Id>
+      <Lap StartTime="2026-03-12T07:30:00Z">
+        <TotalTimeSeconds>900</TotalTimeSeconds>
+        <DistanceMeters>1500</DistanceMeters>
+        <Track>
+          <Trackpoint>
+            <Time>2026-03-12T07:30:00Z</Time>
+            <Position>
+              <LatitudeDegrees>49.2326</LatitudeDegrees>
+              <LongitudeDegrees>19.9819</LongitudeDegrees>
+            </Position>
+            <AltitudeMeters>1985.0</AltitudeMeters>
+            <HeartRateBpm><Value>105</Value></HeartRateBpm>
+          </Trackpoint>
+          <Trackpoint>
+            <Time>2026-03-12T07:35:00Z</Time>
+            <Position>
+              <LatitudeDegrees>49.2310</LatitudeDegrees>
+              <LongitudeDegrees>19.9850</LongitudeDegrees>
+            </Position>
+            <AltitudeMeters>2040.0</AltitudeMeters>
+            <HeartRateBpm><Value>120</Value></HeartRateBpm>
+          </Trackpoint>
+          <Trackpoint>
+            <Time>2026-03-12T07:38:00Z</Time>
+            <!-- Paused point without Position should be skipped -->
+            <AltitudeMeters>2050.0</AltitudeMeters>
+          </Trackpoint>
+          <Trackpoint>
+            <Time>2026-03-12T07:42:00Z</Time>
+            <Position>
+              <LatitudeDegrees>49.2290</LatitudeDegrees>
+              <LongitudeDegrees>19.9880</LongitudeDegrees>
+            </Position>
+            <AltitudeMeters>2095.0</AltitudeMeters>
+          </Trackpoint>
+          <Trackpoint>
+            <Time>2026-03-12T07:45:00Z</Time>
+            <Position>
+              <LatitudeDegrees>49.2275</LatitudeDegrees>
+              <LongitudeDegrees>19.9905</LongitudeDegrees>
+            </Position>
+            <AltitudeMeters>2065.0</AltitudeMeters>
+          </Trackpoint>
+        </Track>
+      </Lap>
+    </Activity>
+  </Activities>
+</TrainingCenterDatabase>

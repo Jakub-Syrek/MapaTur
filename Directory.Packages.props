@@ -9,6 +9,7 @@
     <!-- Map and geometry -->
     <PackageVersion Include="Mapsui" Version="5.0.2" />
     <PackageVersion Include="Mapsui.Maui" Version="5.0.2" />
+    <PackageVersion Include="Mapsui.Nts" Version="5.0.2" />
     <PackageVersion Include="BruTile" Version="6.0.0" />
     <PackageVersion Include="BruTile.MbTiles" Version="6.0.0" />
     <PackageVersion Include="NetTopologySuite" Version="2.6.0" />

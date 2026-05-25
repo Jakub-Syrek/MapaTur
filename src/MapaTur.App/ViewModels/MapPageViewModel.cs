@@ -1,6 +1,7 @@
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using MapaTur.App.Services;
+using MapaTur.Application.Tracks;
 using Microsoft.Extensions.Logging;
 using Map = Mapsui.Map;
 
@@ -14,6 +15,8 @@ public sealed partial class MapPageViewModel : ObservableObject
 {
     private readonly IFilePickerService filePicker;
     private readonly IOfflineMapLoader mapLoader;
+    private readonly ITrackLayerRenderer trackRenderer;
+    private readonly ImportTcxFileUseCase importTcxFileUseCase;
     private readonly ILogger<MapPageViewModel> logger;
 
     [ObservableProperty]
@@ -22,20 +25,31 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <summary>
     /// Initializes a new instance of the view model.
     /// </summary>
-    /// <param name="filePicker">File picker service used to obtain MBTiles paths.</param>
+    /// <param name="filePicker">File picker service used to obtain MBTiles/TCX paths.</param>
     /// <param name="mapLoader">Tile archive loader.</param>
+    /// <param name="trackRenderer">Track polyline renderer.</param>
+    /// <param name="importTcxFileUseCase">TCX import use case.</param>
     /// <param name="logger">Logger.</param>
-    public MapPageViewModel(IFilePickerService filePicker, IOfflineMapLoader mapLoader, ILogger<MapPageViewModel> logger)
+    public MapPageViewModel(
+        IFilePickerService filePicker,
+        IOfflineMapLoader mapLoader,
+        ITrackLayerRenderer trackRenderer,
+        ImportTcxFileUseCase importTcxFileUseCase,
+        ILogger<MapPageViewModel> logger)
     {
         ArgumentNullException.ThrowIfNull(filePicker);
         ArgumentNullException.ThrowIfNull(mapLoader);
+        ArgumentNullException.ThrowIfNull(trackRenderer);
+        ArgumentNullException.ThrowIfNull(importTcxFileUseCase);
         ArgumentNullException.ThrowIfNull(logger);
 
         this.filePicker = filePicker;
         this.mapLoader = mapLoader;
+        this.trackRenderer = trackRenderer;
+        this.importTcxFileUseCase = importTcxFileUseCase;
         this.logger = logger;
         Map = new Map();
-        StatusMessage = "No tile archive loaded. Tap 'Open MBTiles' to start.";
+        StatusMessage = "No data loaded. Open an MBTiles archive or a TCX track to start.";
     }
 
     /// <summary>Mapsui map model bound to the MapControl.</summary>
@@ -69,6 +83,48 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             StatusMessage = $"Could not load archive: {ex.Message}";
             logger.LogError(ex, "Failed to open MBTiles archive");
+        }
+    }
+
+    /// <summary>
+    /// Prompts the user for a TCX file and renders its first track on the map.
+    /// </summary>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    [RelayCommand]
+    public async Task OpenTcxAsync()
+    {
+        try
+        {
+            string? path = await filePicker.PickFileAsync("Select TCX track");
+            if (path is null)
+            {
+                return;
+            }
+
+            var tracks = await importTcxFileUseCase.HandleAsync(path);
+            if (tracks.Count == 0)
+            {
+                StatusMessage = "TCX file contained no tracks with positions.";
+                return;
+            }
+
+            var track = tracks[0];
+            trackRenderer.RenderTrack(Map, track);
+
+            double distanceKilometers = track.ComputeDistanceMeters() / 1000.0;
+            var profile = track.ComputeElevationProfile();
+            StatusMessage = $"Loaded {track.Name}: {distanceKilometers:F2} km, +{profile.TotalAscentMeters:F0} m / -{profile.TotalDescentMeters:F0} m.";
+            logger.LogInformation("Imported TCX {Path} with {PointCount} points", path, track.Points.Count);
+        }
+        catch (FileNotFoundException ex)
+        {
+            StatusMessage = "Selected file does not exist.";
+            logger.LogWarning(ex, "TCX file not found");
+        }
+        catch (InvalidDataException ex)
+        {
+            StatusMessage = $"Could not parse TCX: {ex.Message}";
+            logger.LogError(ex, "Failed to parse TCX file");
         }
     }
 }

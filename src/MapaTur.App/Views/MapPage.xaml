@@ -12,6 +12,8 @@
         <HorizontalStackLayout Grid.Row="0" Padding="12" Spacing="12" BackgroundColor="{AppThemeBinding Light=#F4F4F5, Dark=#1F1F23}">
             <Button Text="Open MBTiles"
                     Command="{Binding OpenMBTilesCommand}" />
+            <Button Text="Open TCX"
+                    Command="{Binding OpenTcxCommand}" />
         </HorizontalStackLayout>
 
         <mapsui:MapControl x:Name="MapControl"
