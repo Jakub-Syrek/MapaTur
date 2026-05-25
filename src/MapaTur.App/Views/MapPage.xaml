@@ -11,9 +11,23 @@
 
         <HorizontalStackLayout Grid.Row="0" Padding="12" Spacing="12" BackgroundColor="{AppThemeBinding Light=#F4F4F5, Dark=#1F1F23}">
             <Button Text="Open MBTiles"
-                    Command="{Binding OpenMBTilesCommand}" />
+                    Command="{Binding OpenMBTilesCommand}"
+                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
             <Button Text="Open TCX"
-                    Command="{Binding OpenTcxCommand}" />
+                    Command="{Binding OpenTcxCommand}"
+                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
+            <Button Text="Download Trails (viewport)"
+                    Command="{Binding DownloadTrailsForViewportCommand}"
+                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
+            <Button Text="Clear Route"
+                    Command="{Binding ClearRouteCommand}"
+                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
+            <Button Text="Export GPX"
+                    Command="{Binding ExportRouteCommand}"
+                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
+            <ActivityIndicator IsRunning="{Binding IsBusy}"
+                               IsVisible="{Binding IsBusy}"
+                               VerticalOptions="Center" />
         </HorizontalStackLayout>
 
         <mapsui:MapControl x:Name="MapControl"

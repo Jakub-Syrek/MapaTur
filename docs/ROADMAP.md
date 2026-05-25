@@ -62,13 +62,18 @@ The rendering pipeline is wired end-to-end; UI trigger and viewport-aware downlo
 
 ## M5 — Off-trail and planner UI
 
-- [ ] Hybrid graph with off-trail edges (higher cost)
-- [ ] Waypoint editor with drag-and-drop
-- [ ] Configurable cost profile (avoid off-trail, prefer marked trails, etc.)
-- [ ] GPX export
-- [ ] Route persistence to user database
+- [x] Viewport→bounds projection (`ViewportBounds.FromMercatorExtent`) + Download Trails button
+- [x] Tap-to-add waypoint (2 taps = plan route), `IRouteLayerRenderer` violet polyline + amber markers
+- [x] `ExportRouteToGpxUseCase` + `GpxWriter` (GPX 1.1 with invariant culture coords, elevation when available)
+- [x] `IFileSaverService` abstraction; `AppDataFileSaverService` writes to `<AppData>/exports/`
+- [x] Default map view centered on Tatry on first appearance
+- [x] Clear Route button
+- [ ] Off-trail edges in graph (off-trail cost penalty exists; builder needs UI to mark segments)
+- [ ] Drag-and-drop waypoint editor with intermediate waypoints (current: only origin+destination)
+- [ ] Route persistence to user database (current: in-memory only)
 
 **DoD:** user creates a multi-waypoint route mixing trails and off-trail segments and exports it as a valid GPX file.
+Tap-to-plan + GPX export delivered; multi-waypoint editor and off-trail UI tagging deferred.
 
 ## M6 — Release polish
 

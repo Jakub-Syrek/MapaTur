@@ -2,10 +2,13 @@ using MapaTur.App.Services;
 using MapaTur.App.ViewModels;
 using MapaTur.App.Views;
 using MapaTur.Application.Maps;
+using MapaTur.Application.Routing;
 using MapaTur.Application.Tracks;
 using MapaTur.Application.Trails;
 using MapaTur.Infrastructure.Maps.MBTiles;
+using MapaTur.Infrastructure.Routing;
 using MapaTur.Infrastructure.Tracks;
+using MapaTur.Infrastructure.Trails;
 using MapaTur.Infrastructure.Trails.Overpass;
 using Microsoft.Extensions.Logging;
 using Serilog;
@@ -68,14 +71,27 @@ public static class MauiProgram
     private static void RegisterServices(IServiceCollection services)
     {
         services.AddSingleton<IFilePickerService, MauiFilePickerService>();
+        services.AddSingleton<IFileSaverService, AppDataFileSaverService>();
         services.AddSingleton<IOfflineMapLoader, MBTilesMapLoader>();
         services.AddSingleton<ITileSourceFactory, MBTilesTileSourceFactory>();
         services.AddSingleton<ITrackLayerRenderer, MapsuiTrackLayerRenderer>();
         services.AddSingleton<ITrailLayerRenderer, MapsuiTrailLayerRenderer>();
+        services.AddSingleton<IRouteLayerRenderer, MapsuiRouteLayerRenderer>();
         services.AddSingleton<ITcxParser, TcxParser>();
         services.AddTransient<ImportTcxFileUseCase>();
 
-        services.AddHttpClient<IOverpassClient, OverpassHttpClient>();
+        services.AddSingleton<ITrailRepository>(_ =>
+            new SqliteTrailRepository(Path.Combine(FileSystem.AppDataDirectory, "mapatur-trails.db")));
+        services.AddSingleton<IRoutePlanner, TrailRoutePlanner>();
+        services.AddSingleton<IGpxWriter, GpxWriter>();
+        services.AddTransient<PlanRouteUseCase>();
+        services.AddTransient<ExportRouteToGpxUseCase>();
+
+        services.AddHttpClient<IOverpassClient, OverpassHttpClient>(client =>
+        {
+            // Overpass main endpoint is rate-limited; 90s covers most regional queries.
+            client.Timeout = TimeSpan.FromSeconds(90);
+        });
 
         services.AddTransient<MapPageViewModel>();
         services.AddTransient<MapPage>();
