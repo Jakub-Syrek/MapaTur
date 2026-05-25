@@ -335,7 +335,9 @@ public sealed partial class MapPageViewModel : ObservableObject
             StatusMessage = Localization.AppStrings.StatusPlanningRoute;
 
             var request = new RouteRequest(waypoints[0], waypoints[1], RouteProfile.FastestTime);
-            var route = await planRouteUseCase.HandleAsync(request).ConfigureAwait(true);
+            // Push graph build + A* off the UI thread. The use case is CPU-bound past
+            // its first await; without Task.Run the window freezes on big trail sets.
+            var route = await Task.Run(() => planRouteUseCase.HandleAsync(request)).ConfigureAwait(true);
 
             if (route is null)
             {
