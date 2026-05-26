@@ -54,6 +54,9 @@ public static class AppStrings
     /// <summary>Status shown when no trails are found in the queried area.</summary>
     public static string StatusNoTrailsFound => Get(nameof(StatusNoTrailsFound));
 
+    /// <summary>Format string for the "loaded N trails" status. Use with <see cref="string.Format(IFormatProvider?, string, object?)"/>.</summary>
+    public static string StatusTrailsLoadedFormat => Get(nameof(StatusTrailsLoadedFormat));
+
     /// <summary>Status shown when A* cannot find a path between the two waypoints.</summary>
     public static string StatusNoRouteFound => Get(nameof(StatusNoRouteFound));
 

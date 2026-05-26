@@ -261,7 +261,7 @@ public sealed partial class MapPageViewModel : ObservableObject
 
             StatusMessage = trails.Count == 0
                 ? Localization.AppStrings.StatusNoTrailsFound
-                : $"{trails.Count} {Localization.AppStrings.DownloadTrails}";
+                : string.Format(System.Globalization.CultureInfo.CurrentUICulture, Localization.AppStrings.StatusTrailsLoadedFormat, trails.Count);
             logger.LogInformation("Downloaded {Count} trails for bounds {Bounds}", trails.Count, bounds);
         }
         catch (HttpRequestException ex)

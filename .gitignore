@@ -484,3 +484,10 @@ $RECYCLE.BIN/
 # Claude Code local settings
 .claude/settings.local.json
 run.ps1
+
+# DEM / hillshade build artefacts (regenerate via testdata/maps/generate-tatry-hillshade-real.py)
+testdata/maps/.dem-cache/
+testdata/maps/tatry-hillshade-real.mbtiles
+
+# User-supplied / commercial map archives (license-restricted, don't redistribute)
+maps/

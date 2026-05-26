@@ -47,6 +47,10 @@
   <data name="StatusNoTrailsFound" xml:space="preserve">
     <value>W tym obszarze nie znaleziono szlaków pieszych.</value>
   </data>
+  <data name="StatusTrailsLoadedFormat" xml:space="preserve">
+    <value>Pobrano {0} szlak(ów/i) pieszych dla tego widoku.</value>
+    <comment>{0} to liczba szlaków.</comment>
+  </data>
   <data name="StatusNoRouteFound" xml:space="preserve">
     <value>Nie znaleziono trasy. Upewnij się, że szlaki są pobrane dla obu punktów (przycisk „Pobierz szlaki”).</value>
   </data>

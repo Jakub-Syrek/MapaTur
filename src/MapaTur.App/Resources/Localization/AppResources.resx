@@ -47,6 +47,10 @@
   <data name="StatusNoTrailsFound" xml:space="preserve">
     <value>No hiking trails found in this area.</value>
   </data>
+  <data name="StatusTrailsLoadedFormat" xml:space="preserve">
+    <value>Loaded {0} hiking trail(s) for this viewport.</value>
+    <comment>{0} is the trail count.</comment>
+  </data>
   <data name="StatusNoRouteFound" xml:space="preserve">
     <value>No route found. Make sure trails are downloaded for both endpoints (use 'Download Trails').</value>
   </data>
