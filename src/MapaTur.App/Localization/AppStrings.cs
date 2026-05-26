@@ -18,6 +18,15 @@ public static class AppStrings
     /// <summary>"Open MBTiles" button label.</summary>
     public static string OpenMBTiles => Get(nameof(OpenMBTiles));
 
+    /// <summary>"Open Hillshade" button label.</summary>
+    public static string OpenHillshade => Get(nameof(OpenHillshade));
+
+    /// <summary>Title of the hillshade picker dialog.</summary>
+    public static string FilePickerHillshade => Get(nameof(FilePickerHillshade));
+
+    /// <summary>Status shown after a hillshade archive loads.</summary>
+    public static string StatusHillshadeLoaded => Get(nameof(StatusHillshadeLoaded));
+
     /// <summary>"Open TCX" button label.</summary>
     public static string OpenTcx => Get(nameof(OpenTcx));
 

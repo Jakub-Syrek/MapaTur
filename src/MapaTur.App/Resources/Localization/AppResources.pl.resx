@@ -11,6 +11,15 @@
   <data name="OpenMBTiles" xml:space="preserve">
     <value>Wczytaj MBTiles</value>
   </data>
+  <data name="OpenHillshade" xml:space="preserve">
+    <value>Wczytaj hillshade</value>
+  </data>
+  <data name="FilePickerHillshade" xml:space="preserve">
+    <value>Wybierz archiwum hillshade MBTiles</value>
+  </data>
+  <data name="StatusHillshadeLoaded" xml:space="preserve">
+    <value>Wczytano hillshade</value>
+  </data>
   <data name="OpenTcx" xml:space="preserve">
     <value>Wczytaj TCX</value>
   </data>

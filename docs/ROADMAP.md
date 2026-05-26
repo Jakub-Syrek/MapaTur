@@ -2,6 +2,23 @@
 
 Status legend: `[ ]` planned · `[~]` in progress · `[x]` done
 
+## M7 — Hillshade base layer
+
+- [x] `MBTilesLayerKind` (Basemap / Hillshade) on `IOfflineMapLoader` so a single
+      loader handles both roles
+- [x] `MBTilesMapLoader` insertion order: hillshade at index 0 (under everything),
+      basemap above hillshade but below vector overlays; opacity 0.55 for hillshade
+- [x] Localized "Wczytaj hillshade" / "Open Hillshade" button + `OpenHillshadeAsync`
+      command in `MapPageViewModel`
+- [x] Demo hillshade generator ([`testdata/maps/generate-tatry-hillshade.py`](../testdata/maps/generate-tatry-hillshade.py))
+      producing 354 Lambertian-shaded PNG tiles for the Tatra bbox (zoom 10..13)
+- [ ] Replace synthetic peaks with SRTM 1-arc DEM pipeline (out of scope for the
+      bundled demo)
+
+**DoD:** user loads a hillshade MBTiles alongside a basemap; the shaded relief
+sits beneath the basemap at reduced opacity so terrain texture shows through.
+
+
 ## M0 — Foundations
 
 - [x] Repository initialized, GitHub remote configured

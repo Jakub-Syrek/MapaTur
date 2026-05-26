@@ -155,6 +155,40 @@ public sealed partial class MapPageViewModel : ObservableObject
     }
 
     /// <summary>
+    /// Prompts the user for a hillshade MBTiles file and loads it as the bottom layer.
+    /// </summary>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    [RelayCommand]
+    public async Task OpenHillshadeAsync()
+    {
+        try
+        {
+            string? path = await filePicker.PickFileAsync(Localization.AppStrings.FilePickerHillshade);
+            if (path is null)
+            {
+                return;
+            }
+
+            mapLoader.LoadMBTilesArchive(Map, path, MBTilesLayerKind.Hillshade);
+            StatusMessage = $"{Localization.AppStrings.StatusHillshadeLoaded}: {Path.GetFileName(path)}";
+            logger.LogInformation("Loaded hillshade MBTiles archive {Path}", path);
+        }
+        catch (FileNotFoundException ex)
+        {
+            StatusMessage = Localization.AppStrings.StatusFileNotFound;
+            logger.LogWarning(ex, "Hillshade file not found");
+        }
+        catch (Exception ex)
+        {
+            int? hresult = ex.HResult != 0 ? ex.HResult : null;
+            string hresultText = hresult is not null ? $" (0x{hresult:X8})" : string.Empty;
+            string detail = string.IsNullOrEmpty(ex.Message) ? "(no message)" : ex.Message;
+            StatusMessage = $"Could not load hillshade: {ex.GetType().Name}{hresultText}: {detail}";
+            logger.LogError(ex, "Failed to open hillshade archive");
+        }
+    }
+
+    /// <summary>
     /// Prompts the user for a TCX file and renders its first track on the map.
     /// </summary>
     /// <returns>A task representing the asynchronous operation.</returns>

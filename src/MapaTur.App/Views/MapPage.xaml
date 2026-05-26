@@ -15,6 +15,10 @@
                     Command="{Binding OpenMBTilesCommand}"
                     IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
                     SemanticProperties.Hint="{x:Static loc:AppStrings.OpenMBTiles}" />
+            <Button Text="{x:Static loc:AppStrings.OpenHillshade}"
+                    Command="{Binding OpenHillshadeCommand}"
+                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
+                    SemanticProperties.Hint="{x:Static loc:AppStrings.OpenHillshade}" />
             <Button Text="{x:Static loc:AppStrings.OpenTcx}"
                     Command="{Binding OpenTcxCommand}"
                     IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
