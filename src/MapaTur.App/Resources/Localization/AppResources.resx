@@ -26,6 +26,19 @@
   <data name="DownloadTrails" xml:space="preserve">
     <value>Download Trails (viewport)</value>
   </data>
+  <data name="DownloadClimbing" xml:space="preserve">
+    <value>Download Climbing (viewport)</value>
+  </data>
+  <data name="StatusDownloadingClimbing" xml:space="preserve">
+    <value>Downloading climbing areas from OSM Overpass…</value>
+  </data>
+  <data name="StatusClimbingLoadedFormat" xml:space="preserve">
+    <value>Loaded {0} climbing area(s) for this viewport.</value>
+    <comment>{0} is the climbing-area count.</comment>
+  </data>
+  <data name="StatusNoClimbingFound" xml:space="preserve">
+    <value>No climbing areas found in this area.</value>
+  </data>
   <data name="ClearRoute" xml:space="preserve">
     <value>Clear Route</value>
   </data>

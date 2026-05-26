@@ -3,6 +3,7 @@ using CommunityToolkit.Mvvm.Input;
 using Mapsui;
 using Mapsui.Projections;
 using MapaTur.App.Services;
+using MapaTur.Application.Climbing;
 using MapaTur.Application.Routing;
 using MapaTur.Application.Tracks;
 using MapaTur.Application.Trails;
@@ -29,9 +30,12 @@ public sealed partial class MapPageViewModel : ObservableObject
     private readonly ITrackLayerRenderer trackRenderer;
     private readonly ITrailLayerRenderer trailRenderer;
     private readonly IRouteLayerRenderer routeRenderer;
+    private readonly IClimbingLayerRenderer climbingRenderer;
     private readonly ImportTcxFileUseCase importTcxFileUseCase;
     private readonly IOverpassClient overpassClient;
     private readonly ITrailRepository trailRepository;
+    private readonly IClimbingOverpassClient climbingOverpassClient;
+    private readonly IClimbingRepository climbingRepository;
     private readonly PlanRouteUseCase planRouteUseCase;
     private readonly ExportRouteToGpxUseCase exportRouteToGpxUseCase;
     private readonly ILogger<MapPageViewModel> logger;
@@ -53,9 +57,12 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <param name="trackRenderer">Track polyline renderer.</param>
     /// <param name="trailRenderer">Trail polyline renderer.</param>
     /// <param name="routeRenderer">Planned-route polyline renderer.</param>
+    /// <param name="climbingRenderer">Climbing-area marker renderer.</param>
     /// <param name="importTcxFileUseCase">TCX import use case.</param>
-    /// <param name="overpassClient">Overpass HTTP client.</param>
+    /// <param name="overpassClient">Overpass HTTP client (trails).</param>
     /// <param name="trailRepository">Trail persistence repository.</param>
+    /// <param name="climbingOverpassClient">Overpass HTTP client (climbing).</param>
+    /// <param name="climbingRepository">Climbing-area persistence repository.</param>
     /// <param name="planRouteUseCase">Route planning use case.</param>
     /// <param name="exportRouteToGpxUseCase">GPX export use case.</param>
     /// <param name="logger">Logger.</param>
@@ -66,9 +73,12 @@ public sealed partial class MapPageViewModel : ObservableObject
         ITrackLayerRenderer trackRenderer,
         ITrailLayerRenderer trailRenderer,
         IRouteLayerRenderer routeRenderer,
+        IClimbingLayerRenderer climbingRenderer,
         ImportTcxFileUseCase importTcxFileUseCase,
         IOverpassClient overpassClient,
         ITrailRepository trailRepository,
+        IClimbingOverpassClient climbingOverpassClient,
+        IClimbingRepository climbingRepository,
         PlanRouteUseCase planRouteUseCase,
         ExportRouteToGpxUseCase exportRouteToGpxUseCase,
         ILogger<MapPageViewModel> logger)
@@ -79,9 +89,12 @@ public sealed partial class MapPageViewModel : ObservableObject
         ArgumentNullException.ThrowIfNull(trackRenderer);
         ArgumentNullException.ThrowIfNull(trailRenderer);
         ArgumentNullException.ThrowIfNull(routeRenderer);
+        ArgumentNullException.ThrowIfNull(climbingRenderer);
         ArgumentNullException.ThrowIfNull(importTcxFileUseCase);
         ArgumentNullException.ThrowIfNull(overpassClient);
         ArgumentNullException.ThrowIfNull(trailRepository);
+        ArgumentNullException.ThrowIfNull(climbingOverpassClient);
+        ArgumentNullException.ThrowIfNull(climbingRepository);
         ArgumentNullException.ThrowIfNull(planRouteUseCase);
         ArgumentNullException.ThrowIfNull(exportRouteToGpxUseCase);
         ArgumentNullException.ThrowIfNull(logger);
@@ -92,9 +105,12 @@ public sealed partial class MapPageViewModel : ObservableObject
         this.trackRenderer = trackRenderer;
         this.trailRenderer = trailRenderer;
         this.routeRenderer = routeRenderer;
+        this.climbingRenderer = climbingRenderer;
         this.importTcxFileUseCase = importTcxFileUseCase;
         this.overpassClient = overpassClient;
         this.trailRepository = trailRepository;
+        this.climbingOverpassClient = climbingOverpassClient;
+        this.climbingRepository = climbingRepository;
         this.planRouteUseCase = planRouteUseCase;
         this.exportRouteToGpxUseCase = exportRouteToGpxUseCase;
         this.logger = logger;
@@ -278,6 +294,61 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             StatusMessage = Localization.AppStrings.StatusOverpassTimeout;
             logger.LogWarning(ex, "Overpass request timed out");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// Downloads OSM climbing-tagged features for the currently visible viewport,
+    /// persists them locally, and renders markers on the map.
+    /// </summary>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    [RelayCommand]
+    public async Task DownloadClimbingForViewportAsync()
+    {
+        if (IsBusy)
+        {
+            return;
+        }
+
+        var bounds = ViewportBounds.FromMercatorExtent(GetCurrentExtent());
+        if (bounds is null)
+        {
+            StatusMessage = Localization.AppStrings.StatusViewportNotReady;
+            return;
+        }
+
+        try
+        {
+            IsBusy = true;
+            StatusMessage = Localization.AppStrings.StatusDownloadingClimbing;
+
+            var areas = await climbingOverpassClient.FetchClimbingAreasAsync(bounds.Value).ConfigureAwait(true);
+            await climbingRepository.UpsertAsync(areas).ConfigureAwait(true);
+            climbingRenderer.RenderClimbingAreas(Map, areas);
+
+            StatusMessage = areas.Count == 0
+                ? Localization.AppStrings.StatusNoClimbingFound
+                : string.Format(System.Globalization.CultureInfo.CurrentUICulture, Localization.AppStrings.StatusClimbingLoadedFormat, areas.Count);
+            logger.LogInformation("Downloaded {Count} climbing areas for bounds {Bounds}", areas.Count, bounds);
+        }
+        catch (HttpRequestException ex)
+        {
+            StatusMessage = $"Overpass request failed: {ex.Message}";
+            logger.LogError(ex, "Overpass climbing request failed");
+        }
+        catch (InvalidDataException ex)
+        {
+            StatusMessage = $"Could not parse Overpass response: {ex.Message}";
+            logger.LogError(ex, "Overpass climbing parse failure");
+        }
+        catch (TaskCanceledException ex)
+        {
+            StatusMessage = Localization.AppStrings.StatusOverpassTimeout;
+            logger.LogWarning(ex, "Overpass climbing request timed out");
         }
         finally
         {

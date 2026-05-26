@@ -33,6 +33,18 @@ public static class AppStrings
     /// <summary>"Download Trails" button label.</summary>
     public static string DownloadTrails => Get(nameof(DownloadTrails));
 
+    /// <summary>"Download Climbing" button label.</summary>
+    public static string DownloadClimbing => Get(nameof(DownloadClimbing));
+
+    /// <summary>Status shown while the climbing Overpass query is in flight.</summary>
+    public static string StatusDownloadingClimbing => Get(nameof(StatusDownloadingClimbing));
+
+    /// <summary>Format string for the "loaded N climbing areas" status.</summary>
+    public static string StatusClimbingLoadedFormat => Get(nameof(StatusClimbingLoadedFormat));
+
+    /// <summary>Status shown when no climbing areas are found in the queried area.</summary>
+    public static string StatusNoClimbingFound => Get(nameof(StatusNoClimbingFound));
+
     /// <summary>"Clear Route" button label.</summary>
     public static string ClearRoute => Get(nameof(ClearRoute));
 

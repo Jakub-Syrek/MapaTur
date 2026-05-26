@@ -26,6 +26,19 @@
   <data name="DownloadTrails" xml:space="preserve">
     <value>Pobierz szlaki (widok)</value>
   </data>
+  <data name="DownloadClimbing" xml:space="preserve">
+    <value>Pobierz wspinaczkę (widok)</value>
+  </data>
+  <data name="StatusDownloadingClimbing" xml:space="preserve">
+    <value>Pobieranie miejsc wspinaczkowych z OSM Overpass…</value>
+  </data>
+  <data name="StatusClimbingLoadedFormat" xml:space="preserve">
+    <value>Pobrano {0} miejsc(a) wspinaczkowych dla tego widoku.</value>
+    <comment>{0} to liczba miejsc wspinaczkowych.</comment>
+  </data>
+  <data name="StatusNoClimbingFound" xml:space="preserve">
+    <value>W tym obszarze nie znaleziono miejsc wspinaczkowych.</value>
+  </data>
   <data name="ClearRoute" xml:space="preserve">
     <value>Wyczyść trasę</value>
   </data>

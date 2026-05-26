@@ -28,7 +28,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="..\..\testdata\**\*" Link="testdata\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\testdata\tracks\**\*" Link="testdata\tracks\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\testdata\trails\**\*" Link="testdata\trails\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\testdata\climbing\**\*" Link="testdata\climbing\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

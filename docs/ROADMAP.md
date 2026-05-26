@@ -2,6 +2,26 @@
 
 Status legend: `[ ]` planned · `[~]` in progress · `[x]` done
 
+## M8 — Climbing POIs from OSM
+
+- [x] `ClimbingArea` aggregate + `ClimbingType` enum (sport, trad, multipitch,
+      boulder, crag, cliff, unspecified)
+- [x] `ClimbingTypeParser` normalising OSM `climbing:*` and `natural=cliff` tags
+- [x] `OverpassClimbingQueryBuilder` (sport=climbing / climbing=* / natural=cliff+climbing)
+      with `out tags center` so way features get representative coordinates
+- [x] `OverpassClimbingResponseParser` reading nodes/ways/relations, picking the
+      best-available grade (French → UIAA → YDS → generic), parsing length tag
+- [x] `OverpassClimbingHttpClient` mirroring the trails client (UA, accept JSON)
+- [x] `SqliteClimbingRepository` with bbox-indexed point storage
+- [x] `MapsuiClimbingLayerRenderer` drawing markers on a dedicated layer
+- [x] Localized "Wczytaj wspinaczkę" / "Download Climbing" button and status
+- [x] DI registration with separate HttpClient (independent 90 s timeout)
+- [ ] Tap on marker → details popup (route name, grade, length, bolted status)
+- [ ] Per-type marker colours (currently all red)
+
+**DoD:** user clicks Download Climbing, sees climbing areas as markers overlaid
+on trails and basemap in their current viewport.
+
 ## M7 — Hillshade base layer
 
 - [x] `MBTilesLayerKind` (Basemap / Hillshade) on `IOfflineMapLoader` so a single

@@ -1,10 +1,12 @@
 using MapaTur.App.Services;
 using MapaTur.App.ViewModels;
 using MapaTur.App.Views;
+using MapaTur.Application.Climbing;
 using MapaTur.Application.Maps;
 using MapaTur.Application.Routing;
 using MapaTur.Application.Tracks;
 using MapaTur.Application.Trails;
+using MapaTur.Infrastructure.Climbing;
 using MapaTur.Infrastructure.Maps.MBTiles;
 using MapaTur.Infrastructure.Routing;
 using MapaTur.Infrastructure.Tracks;
@@ -135,6 +137,7 @@ public static class MauiProgram
         services.AddSingleton<ITrackLayerRenderer, MapsuiTrackLayerRenderer>();
         services.AddSingleton<ITrailLayerRenderer, MapsuiTrailLayerRenderer>();
         services.AddSingleton<IRouteLayerRenderer, MapsuiRouteLayerRenderer>();
+        services.AddSingleton<IClimbingLayerRenderer, MapsuiClimbingLayerRenderer>();
         services.AddSingleton<ITcxParser, TcxParser>();
         services.AddTransient<ImportTcxFileUseCase>();
 
@@ -148,6 +151,13 @@ public static class MauiProgram
         services.AddHttpClient<IOverpassClient, OverpassHttpClient>(client =>
         {
             // Overpass main endpoint is rate-limited; 90s covers most regional queries.
+            client.Timeout = TimeSpan.FromSeconds(90);
+        });
+
+        services.AddSingleton<IClimbingRepository>(_ =>
+            new SqliteClimbingRepository(Path.Combine(FileSystem.AppDataDirectory, "mapatur-climbing.db")));
+        services.AddHttpClient<IClimbingOverpassClient, OverpassClimbingHttpClient>(client =>
+        {
             client.Timeout = TimeSpan.FromSeconds(90);
         });
 

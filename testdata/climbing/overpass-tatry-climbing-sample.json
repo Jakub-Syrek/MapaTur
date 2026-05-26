@@ -1,0 +1,67 @@
+{
+  "version": 0.6,
+  "generator": "Overpass API",
+  "elements": [
+    {
+      "type": "node",
+      "id": 9000001,
+      "lat": 49.196,
+      "lon": 20.075,
+      "tags": {
+        "sport": "climbing",
+        "climbing": "route",
+        "climbing:multipitch": "yes",
+        "climbing:bolted": "no",
+        "climbing:grade:UIAA": "V+",
+        "climbing:length": "300",
+        "name": "Mnich - Klasyczna"
+      }
+    },
+    {
+      "type": "node",
+      "id": 9000002,
+      "lat": 49.244,
+      "lon": 19.928,
+      "tags": {
+        "sport": "climbing",
+        "climbing": "route",
+        "climbing:sport": "yes",
+        "climbing:bolted": "yes",
+        "climbing:grade:french": "6a",
+        "climbing:length": "25",
+        "name": "Świnica Direct"
+      }
+    },
+    {
+      "type": "node",
+      "id": 9000003,
+      "lat": 49.232,
+      "lon": 19.982,
+      "tags": {
+        "sport": "climbing",
+        "climbing": "boulder",
+        "climbing:grade:french": "6c",
+        "name": "Kasprowy Boulder"
+      }
+    },
+    {
+      "type": "way",
+      "id": 9000004,
+      "center": { "lat": 49.215, "lon": 20.005 },
+      "tags": {
+        "natural": "cliff",
+        "climbing": "crag",
+        "name": "Granat Crag"
+      }
+    },
+    {
+      "type": "node",
+      "id": 9000005,
+      "lat": 49.250,
+      "lon": 20.010,
+      "tags": {
+        "amenity": "shelter"
+      }
+    }
+  ]
+}
