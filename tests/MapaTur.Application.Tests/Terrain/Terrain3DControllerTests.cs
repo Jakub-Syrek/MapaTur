@@ -1,5 +1,7 @@
 using System.Numerics;
+
 using FluentAssertions;
+
 using MapaTur.Application.Terrain;
 
 namespace MapaTur.Application.Tests.Terrain;
@@ -206,5 +208,53 @@ public sealed class Terrain3DControllerTests
         ctrl.ApplyPan(10f, 0f);
 
         camera.Target.X.Should().BeLessThan(0f);
+    }
+
+    [Fact]
+    public void ApplyVertical_PositivePixels_RaisesTargetZ()
+    {
+        var ctrl = BuildController(out var camera);
+        float before = camera.Target.Z;
+
+        ctrl.ApplyVertical(10f);
+
+        camera.Target.Z.Should().BeGreaterThan(before);
+    }
+
+    [Fact]
+    public void ApplyVertical_NegativePixels_LowersTargetZ()
+    {
+        var ctrl = BuildController(out var camera);
+        float before = camera.Target.Z;
+
+        ctrl.ApplyVertical(-10f);
+
+        camera.Target.Z.Should().BeLessThan(before);
+    }
+
+    [Fact]
+    public void ApplyVertical_StepMagnitudeScalesWithDistance()
+    {
+        var ctrlNear = BuildController(out var camNear);
+        camNear.Distance = 1000f;
+        ctrlNear.ApplyVertical(10f);
+
+        var ctrlFar = BuildController(out var camFar);
+        camFar.Distance = 4000f;
+        ctrlFar.ApplyVertical(10f);
+
+        camFar.Target.Z.Should().BeApproximately(camNear.Target.Z * 4f, 1e-3f);
+    }
+
+    [Fact]
+    public void ApplyVertical_OnlyAffectsZ_NotXOrY()
+    {
+        var ctrl = BuildController(out var camera);
+        camera.Target = new Vector3(1234f, 5678f, 0f);
+
+        ctrl.ApplyVertical(50f);
+
+        camera.Target.X.Should().Be(1234f);
+        camera.Target.Y.Should().Be(5678f);
     }
 }

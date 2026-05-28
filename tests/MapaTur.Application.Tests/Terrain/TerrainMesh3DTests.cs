@@ -1,5 +1,7 @@
 using System.Numerics;
+
 using FluentAssertions;
+
 using MapaTur.Application.Terrain;
 using MapaTur.Domain.Geography;
 using MapaTur.Domain.Terrain;

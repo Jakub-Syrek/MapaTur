@@ -1,4 +1,5 @@
 using FluentAssertions;
+
 using MapaTur.Application.Trails;
 using MapaTur.Domain.Geography;
 

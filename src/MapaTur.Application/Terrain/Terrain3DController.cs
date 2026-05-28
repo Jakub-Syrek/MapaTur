@@ -63,4 +63,16 @@ public sealed class Terrain3DController
         Vector3 forward = new(-cosA, -sinA, 0f);
         Camera.Target += ((right * dxPixels) + (forward * dyPixels)) * scale;
     }
+
+    /// <summary>
+    /// Raises (positive) or lowers (negative) the camera target along world-Z,
+    /// keeping the orbit otherwise intact. Same per-distance scaling as
+    /// <see cref="ApplyPan"/> so the step covers a sensible vertical distance
+    /// whether the camera is at 1 km or 100 km out.
+    /// </summary>
+    public void ApplyVertical(float dPixels)
+    {
+        float scale = PanSensitivity * Camera.Distance;
+        Camera.Target = new Vector3(Camera.Target.X, Camera.Target.Y, Camera.Target.Z + (dPixels * scale));
+    }
 }

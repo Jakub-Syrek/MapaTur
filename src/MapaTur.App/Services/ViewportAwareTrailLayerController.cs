@@ -32,6 +32,13 @@ public sealed class ViewportAwareTrailLayerController : IDisposable
     private CancellationTokenSource? activeQuery;
     private bool disposed;
 
+    /// <summary>
+    /// Optional client-side filter applied after the repository query. Toggling
+    /// trail-colour / region checkboxes in the view-model rotates this in.
+    /// When null, every queried trail is rendered.
+    /// </summary>
+    public Func<MapaTur.Domain.Trails.Trail, bool>? Filter { get; set; }
+
     public ViewportAwareTrailLayerController(
         Map map,
         ITrailRepository repository,
@@ -104,6 +111,13 @@ public sealed class ViewportAwareTrailLayerController : IDisposable
             if (token.IsCancellationRequested)
             {
                 return;
+            }
+
+            // Apply the user-driven colour / region filter, if any.
+            var filter = Filter;
+            if (filter is not null)
+            {
+                trails = trails.Where(filter).ToList();
             }
 
             // Mapsui mutations must run on the UI thread.

@@ -9,7 +9,7 @@
              x:DataType="vm:MapPageViewModel"
              Title="{x:Static loc:AppStrings.AppTitle}">
 
-    <Grid RowDefinitions="Auto,*,Auto" Padding="0">
+    <Grid RowDefinitions="Auto,Auto,*,Auto" Padding="0">
 
         <HorizontalStackLayout Grid.Row="0" Padding="12" Spacing="12" BackgroundColor="{AppThemeBinding Light=#F4F4F5, Dark=#1F1F23}">
             <Button Text="{x:Static loc:AppStrings.OpenMBTiles}"
@@ -63,13 +63,39 @@
                                VerticalOptions="Center" />
         </HorizontalStackLayout>
 
+        <!-- Trail filter row: 5 PTTK colour toggles + 4 Karpat region toggles. -->
+        <HorizontalStackLayout Grid.Row="1" Padding="12,4" Spacing="6"
+                               BackgroundColor="{AppThemeBinding Light=#FAFAFA, Dark=#27272A}">
+            <Label Text="Kolory:" VerticalOptions="Center" FontSize="11" />
+            <CheckBox IsChecked="{Binding TrailColourRedEnabled}" Color="#DC2626" />
+            <Label Text="Cz" VerticalOptions="Center" FontSize="11" />
+            <CheckBox IsChecked="{Binding TrailColourBlueEnabled}" Color="#2563EB" />
+            <Label Text="Nb" VerticalOptions="Center" FontSize="11" />
+            <CheckBox IsChecked="{Binding TrailColourGreenEnabled}" Color="#16A34A" />
+            <Label Text="Zi" VerticalOptions="Center" FontSize="11" />
+            <CheckBox IsChecked="{Binding TrailColourYellowEnabled}" Color="#EAB308" />
+            <Label Text="Żo" VerticalOptions="Center" FontSize="11" />
+            <CheckBox IsChecked="{Binding TrailColourBlackEnabled}" Color="#27272A" />
+            <Label Text="Cn" VerticalOptions="Center" FontSize="11" />
+            <BoxView WidthRequest="1" HeightRequest="22" Color="#52525B" Margin="6,0" />
+            <Label Text="Obszary:" VerticalOptions="Center" FontSize="11" />
+            <CheckBox IsChecked="{Binding RegionTatryEnabled}" />
+            <Label Text="Tatry" VerticalOptions="Center" FontSize="11" />
+            <CheckBox IsChecked="{Binding RegionBeskidyEnabled}" />
+            <Label Text="Beskidy" VerticalOptions="Center" FontSize="11" />
+            <CheckBox IsChecked="{Binding RegionPieninyEnabled}" />
+            <Label Text="Pieniny" VerticalOptions="Center" FontSize="11" />
+            <CheckBox IsChecked="{Binding RegionBieszczadyEnabled}" />
+            <Label Text="Bieszczady" VerticalOptions="Center" FontSize="11" />
+        </HorizontalStackLayout>
+
         <mapsui:MapControl x:Name="MapControl"
-                           Grid.Row="1"
+                           Grid.Row="2"
                            Map="{Binding Map}"
                            IsVisible="{Binding Is3DMode, Converter={StaticResource InverseBool}}"
                            SemanticProperties.Description="{x:Static loc:AppStrings.AccessibilityMapControl}" />
 
-        <views:Terrain3DView Grid.Row="1"
+        <views:Terrain3DView Grid.Row="2"
                              Mesh="{Binding TerrainMesh}"
                              Raster="{Binding TerrainRaster}"
                              Trails="{Binding Trails3DOverlay}"
@@ -77,7 +103,7 @@
                              ClimbingAreas="{Binding Climbing3DOverlay}"
                              IsVisible="{Binding Is3DMode}" />
 
-        <Label Grid.Row="2"
+        <Label Grid.Row="3"
                Padding="12,8"
                Text="{Binding StatusMessage}"
                BackgroundColor="{AppThemeBinding Light=#F4F4F5, Dark=#1F1F23}"

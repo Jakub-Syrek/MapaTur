@@ -352,6 +352,14 @@ public partial class Terrain3DView : ContentView
                 controller.ApplyPan(KeyPanPixelStep, 0f);
                 break;
 
+            // Vertical pan (raise / lower the camera target).
+            case Windows.System.VirtualKey.Q:
+                controller.ApplyVertical(KeyPanPixelStep);
+                break;
+            case Windows.System.VirtualKey.E:
+                controller.ApplyVertical(-KeyPanPixelStep);
+                break;
+
             // Zoom in / out with +/- (both numpad and main-row variants).
             case Windows.System.VirtualKey.Add:
             case (Windows.System.VirtualKey)187:  // VK_OEM_PLUS

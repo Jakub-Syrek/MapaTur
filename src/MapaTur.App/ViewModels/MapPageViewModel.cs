@@ -109,6 +109,64 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private IReadOnlyList<Trail>? trails3DOverlay;
 
+    // PTTK colour toggles for the trail filter. All true by default — the
+    // partial OnXxxChanged hooks below rebuild Trails3DOverlay + 2D layer.
+    [ObservableProperty] private bool trailColourRedEnabled = true;
+    [ObservableProperty] private bool trailColourBlueEnabled = true;
+    [ObservableProperty] private bool trailColourGreenEnabled = true;
+    [ObservableProperty] private bool trailColourYellowEnabled = true;
+    [ObservableProperty] private bool trailColourBlackEnabled = true;
+
+    // Karpat sub-region toggles. None enabled = no region constraint (everything
+    // that the colour filter accepts is shown).
+    [ObservableProperty] private bool regionTatryEnabled;
+    [ObservableProperty] private bool regionBeskidyEnabled;
+    [ObservableProperty] private bool regionPieninyEnabled;
+    [ObservableProperty] private bool regionBieszczadyEnabled;
+
+    // Last raw download from Overpass — kept so that filter toggles can rebuild
+    // the visible subset without re-hitting the network.
+    private IReadOnlyList<Trail>? rawTrails;
+
+    partial void OnTrailColourRedEnabledChanged(bool value) => OnTrailFilterChanged();
+    partial void OnTrailColourBlueEnabledChanged(bool value) => OnTrailFilterChanged();
+    partial void OnTrailColourGreenEnabledChanged(bool value) => OnTrailFilterChanged();
+    partial void OnTrailColourYellowEnabledChanged(bool value) => OnTrailFilterChanged();
+    partial void OnTrailColourBlackEnabledChanged(bool value) => OnTrailFilterChanged();
+    partial void OnRegionTatryEnabledChanged(bool value) => OnTrailFilterChanged();
+    partial void OnRegionBeskidyEnabledChanged(bool value) => OnTrailFilterChanged();
+    partial void OnRegionPieninyEnabledChanged(bool value) => OnTrailFilterChanged();
+    partial void OnRegionBieszczadyEnabledChanged(bool value) => OnTrailFilterChanged();
+
+    private void OnTrailFilterChanged()
+    {
+        if (rawTrails is null)
+        {
+            return;
+        }
+        var filter = BuildTrailFilter();
+        var filtered = rawTrails.Where(filter.IsVisible).ToList();
+        Trails3DOverlay = filtered;
+        trailRenderer.RenderTrails(Map, filtered);
+        viewportTrailController?.RequestRefresh();
+    }
+
+    /// <summary>Builds the current <see cref="TrailFilter"/> snapshot from the toggle state.</summary>
+    public TrailFilter BuildTrailFilter()
+    {
+        var f = new TrailFilter();
+        if (TrailColourRedEnabled) f.EnabledColours.Add(PttkColor.Red);
+        if (TrailColourBlueEnabled) f.EnabledColours.Add(PttkColor.Blue);
+        if (TrailColourGreenEnabled) f.EnabledColours.Add(PttkColor.Green);
+        if (TrailColourYellowEnabled) f.EnabledColours.Add(PttkColor.Yellow);
+        if (TrailColourBlackEnabled) f.EnabledColours.Add(PttkColor.Black);
+        if (RegionTatryEnabled) f.EnabledRegions.Add(KarpatRegions.Tatry);
+        if (RegionBeskidyEnabled) f.EnabledRegions.Add(KarpatRegions.Beskidy);
+        if (RegionPieninyEnabled) f.EnabledRegions.Add(KarpatRegions.Pieniny);
+        if (RegionBieszczadyEnabled) f.EnabledRegions.Add(KarpatRegions.Bieszczady);
+        return f;
+    }
+
     [ObservableProperty]
     private Domain.Routing.Route? route3DOverlay;
 
@@ -372,6 +430,9 @@ public sealed partial class MapPageViewModel : ObservableObject
 
             var trails = await overpassClient.FetchHikingTrailsAsync(bounds.Value).ConfigureAwait(true);
             await trailRepository.UpsertAsync(trails).ConfigureAwait(true);
+            rawTrails = trails;
+            var filter = BuildTrailFilter();
+            var filteredTrails = trails.Where(filter.IsVisible).ToList();
 
             // The viewport controller re-queries the repo with current-zoom epsilon and
             // renders the simplified subset; falling back to a direct render keeps the
@@ -382,9 +443,9 @@ public sealed partial class MapPageViewModel : ObservableObject
             }
             else
             {
-                trailRenderer.RenderTrails(Map, trails);
+                trailRenderer.RenderTrails(Map, filteredTrails);
             }
-            Trails3DOverlay = trails;
+            Trails3DOverlay = filteredTrails;
 
             StatusMessage = trails.Count == 0
                 ? Localization.AppStrings.StatusNoTrailsFound
@@ -681,7 +742,10 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             return;
         }
-        viewportTrailController = new ViewportAwareTrailLayerController(Map, trailRepository, trailRenderer, controllerLogger);
+        viewportTrailController = new ViewportAwareTrailLayerController(Map, trailRepository, trailRenderer, controllerLogger)
+        {
+            Filter = trail => BuildTrailFilter().IsVisible(trail),
+        };
     }
 
     public async Task AutoLoadOnStartupAsync()

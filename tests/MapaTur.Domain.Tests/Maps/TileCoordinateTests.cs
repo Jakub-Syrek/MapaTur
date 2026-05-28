@@ -1,4 +1,5 @@
 using FluentAssertions;
+
 using MapaTur.Domain.Maps;
 
 namespace MapaTur.Domain.Tests.Maps;
