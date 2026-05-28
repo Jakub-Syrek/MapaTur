@@ -1,7 +1,9 @@
 using FluentAssertions;
+
 using MapaTur.Domain.Geography;
 using MapaTur.Domain.Trails;
 using MapaTur.Infrastructure.Trails;
+
 using Microsoft.Data.Sqlite;
 
 namespace MapaTur.Infrastructure.Tests.Trails;

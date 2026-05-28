@@ -90,9 +90,11 @@ public partial class Terrain3DView : ContentView
     private readonly Terrain3DController controller;
     private readonly Terrain3DCanvasRenderer renderer = new();
     private readonly Terrain3DFrameScratch frameScratch = new();
-    // 64×64 bins ≈ 20×11 px tiles on a 1280×720 viewport — plenty fine for
-    // mountain-silhouette occlusion, cheap to maintain (16 KB scratch).
-    private readonly ScreenDepthMap depthMap = new(64, 64);
+    // 192×192 bins ≈ 7×4 px tiles on a 1280×720 viewport. The denser grid
+    // dramatically reduces the "peak depth contaminates a whole bin" problem
+    // where trails in adjacent valleys would land in a bin whose min depth
+    // came from a foreground ridge and get falsely culled. 144 KB scratch.
+    private readonly ScreenDepthMap depthMap = new(192, 192);
 
     private double lastOrbitTotalX;
     private double lastOrbitTotalY;

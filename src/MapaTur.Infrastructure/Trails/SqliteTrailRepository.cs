@@ -1,8 +1,10 @@
 using System.Globalization;
 using System.Text;
+
 using MapaTur.Application.Trails;
 using MapaTur.Domain.Geography;
 using MapaTur.Domain.Trails;
+
 using Microsoft.Data.Sqlite;
 
 namespace MapaTur.Infrastructure.Trails;

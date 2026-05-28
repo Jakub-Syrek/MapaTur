@@ -1,6 +1,8 @@
 using System.Xml;
 using System.Xml.Linq;
+
 using FluentAssertions;
+
 using MapaTur.Domain.Geography;
 using MapaTur.Domain.Routing;
 using MapaTur.Infrastructure.Routing;

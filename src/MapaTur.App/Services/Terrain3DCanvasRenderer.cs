@@ -24,6 +24,13 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
     private static readonly SKColor ClimbingOutlineColor = new(0x1F, 0x29, 0x37);
     private const float ClimbingMarkerRadiusPx = 5.5f;
 
+    // Trail / route / climbing vertices are only culled when their NDC depth
+    // exceeds the local mesh depth by more than this much. The minimum-per-bin
+    // depth map mixes nearby foreground peaks with background valleys at bin
+    // boundaries, so a loose tolerance keeps real valley trails visible while
+    // still hiding trails that are clearly *behind* a peak.
+    private const float OcclusionEpsilon = 0.03f;
+
     private TerrainMesh3D? cachedMesh;
     private SKPoint[] pointScratch = Array.Empty<SKPoint>();
     private SKColor[] cachedColors = Array.Empty<SKColor>();
@@ -232,7 +239,7 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
             var p = pts[i];
             // Both off-frustum (null) and behind-mesh vertices break the polyline so
             // the next visible vertex starts a fresh sub-path instead of cutting across.
-            if (p is null || (depthMap is not null && depthMap.IsBehind(p)))
+            if (p is null || (depthMap is not null && depthMap.IsBehind(p, OcclusionEpsilon)))
             {
                 penDown = false;
                 continue;
@@ -276,7 +283,7 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
             {
                 continue;
             }
-            if (depthMap is not null && (depthMap.IsBehind(a) || depthMap.IsBehind(b)))
+            if (depthMap is not null && (depthMap.IsBehind(a, OcclusionEpsilon) || depthMap.IsBehind(b, OcclusionEpsilon)))
             {
                 continue;
             }
@@ -311,7 +318,7 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
             {
                 continue;
             }
-            if (depthMap is not null && depthMap.IsBehind(screen))
+            if (depthMap is not null && depthMap.IsBehind(screen, OcclusionEpsilon))
             {
                 continue;
             }

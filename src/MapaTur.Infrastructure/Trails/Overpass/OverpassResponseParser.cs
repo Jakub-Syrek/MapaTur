@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+
 using MapaTur.Domain.Geography;
 using MapaTur.Domain.Trails;
 
