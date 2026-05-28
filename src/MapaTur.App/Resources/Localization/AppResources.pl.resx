@@ -112,4 +112,7 @@
   <data name="FilePickerDem" xml:space="preserve">
     <value>Wybierz plik DEM</value>
   </data>
+  <data name="LabelVerticalExaggeration" xml:space="preserve">
+    <value>Skala pionowa</value>
+  </data>
 </root>

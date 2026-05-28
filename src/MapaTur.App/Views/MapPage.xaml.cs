@@ -1,8 +1,10 @@
-using Mapsui;
-using Mapsui.Projections;
 using MapaTur.App.Services;
 using MapaTur.App.ViewModels;
 using MapaTur.Domain.Geography;
+
+using Mapsui;
+using Mapsui.Projections;
+
 using Microsoft.Extensions.Logging;
 
 namespace MapaTur.App.Views;

@@ -1,10 +1,12 @@
 using System.Numerics;
+
 using MapaTur.App.Services;
 using MapaTur.Application.Terrain;
 using MapaTur.Domain.Climbing;
 using MapaTur.Domain.Routing;
 using MapaTur.Domain.Terrain;
 using MapaTur.Domain.Trails;
+
 using SkiaSharp.Views.Maui;
 
 namespace MapaTur.App.Views;
@@ -249,6 +251,12 @@ public partial class Terrain3DView : ContentView
 #if WINDOWS
     private Microsoft.UI.Xaml.UIElement? wheelTarget;
 
+    // Keyboard-step constants tuned to feel close to one drag-pixel of the gesture
+    // recognisers (controller.OrbitSensitivity = 0.005 rad/px, PanSensitivity = 0.001 m/px/m).
+    private const float KeyOrbitPixelStep = 16f;
+    private const float KeyPanPixelStep = 24f;
+    private const float KeyZoomFactor = 1.1f;
+
     private void OnCanvasHandlerChanged(object? sender, EventArgs e)
     {
         DetachWheelHandler();
@@ -257,6 +265,15 @@ public partial class Terrain3DView : ContentView
         {
             wheelTarget = element;
             wheelTarget.PointerWheelChanged += OnPointerWheelChanged;
+
+            // Make the platform view focusable so keyboard events route here.
+            // A tap (or programmatic Focus) puts keyboard focus on the canvas.
+            if (element is Microsoft.UI.Xaml.Controls.Control control)
+            {
+                control.IsTabStop = true;
+            }
+            element.KeyDown += OnPlatformKeyDown;
+            element.PointerPressed += OnPlatformPointerPressed;
         }
     }
 
@@ -265,6 +282,8 @@ public partial class Terrain3DView : ContentView
         if (wheelTarget is not null)
         {
             wheelTarget.PointerWheelChanged -= OnPointerWheelChanged;
+            wheelTarget.KeyDown -= OnPlatformKeyDown;
+            wheelTarget.PointerPressed -= OnPlatformPointerPressed;
             wheelTarget = null;
         }
     }
@@ -282,6 +301,72 @@ public partial class Terrain3DView : ContentView
         controller.ApplyZoom(scale);
         Canvas.InvalidateSurface();
         e.Handled = true;
+    }
+
+    private void OnPlatformPointerPressed(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        // Clicking the canvas grabs keyboard focus so subsequent KeyDown events route here.
+        if (sender is Microsoft.UI.Xaml.Controls.Control c)
+        {
+            c.Focus(Microsoft.UI.Xaml.FocusState.Pointer);
+        }
+    }
+
+    private void OnPlatformKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    {
+        bool handled = true;
+        switch (e.Key)
+        {
+            // Orbit — arrow keys swing azimuth/pitch by a constant pixel-equivalent step.
+            case Windows.System.VirtualKey.Left:
+                controller.ApplyOrbit(-KeyOrbitPixelStep, 0f);
+                break;
+            case Windows.System.VirtualKey.Right:
+                controller.ApplyOrbit(KeyOrbitPixelStep, 0f);
+                break;
+            case Windows.System.VirtualKey.Up:
+                controller.ApplyOrbit(0f, KeyOrbitPixelStep);
+                break;
+            case Windows.System.VirtualKey.Down:
+                controller.ApplyOrbit(0f, -KeyOrbitPixelStep);
+                break;
+
+            // Pan with WASD on the ground plane. Pan deltas are inverted vs gesture
+            // (gesture invert is "world tracks fingers"; for keys we want "view moves
+            // toward key direction"), so W/D/S/A push the camera target accordingly.
+            case Windows.System.VirtualKey.W:
+                controller.ApplyPan(0f, -KeyPanPixelStep);
+                break;
+            case Windows.System.VirtualKey.S:
+                controller.ApplyPan(0f, KeyPanPixelStep);
+                break;
+            case Windows.System.VirtualKey.A:
+                controller.ApplyPan(-KeyPanPixelStep, 0f);
+                break;
+            case Windows.System.VirtualKey.D:
+                controller.ApplyPan(KeyPanPixelStep, 0f);
+                break;
+
+            // Zoom in / out with +/- (both numpad and main-row variants).
+            case Windows.System.VirtualKey.Add:
+            case (Windows.System.VirtualKey)187:  // VK_OEM_PLUS
+                controller.ApplyZoom(KeyZoomFactor);
+                break;
+            case Windows.System.VirtualKey.Subtract:
+            case (Windows.System.VirtualKey)189:  // VK_OEM_MINUS
+                controller.ApplyZoom(1f / KeyZoomFactor);
+                break;
+
+            default:
+                handled = false;
+                break;
+        }
+
+        if (handled)
+        {
+            Canvas.InvalidateSurface();
+            e.Handled = true;
+        }
     }
 #endif
 }

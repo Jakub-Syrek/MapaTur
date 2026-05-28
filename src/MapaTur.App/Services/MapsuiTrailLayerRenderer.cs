@@ -1,8 +1,11 @@
+using MapaTur.Domain.Trails;
+
 using Mapsui.Layers;
 using Mapsui.Nts;
 using Mapsui.Projections;
-using MapaTur.Domain.Trails;
+
 using NetTopologySuite.Geometries;
+
 using Color = Mapsui.Styles.Color;
 using Map = Mapsui.Map;
 using Pen = Mapsui.Styles.Pen;

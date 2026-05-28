@@ -117,5 +117,8 @@ public static class AppStrings
     /// <summary>Title of the DEM file picker dialog.</summary>
     public static string FilePickerDem => Get(nameof(FilePickerDem));
 
+    /// <summary>Label for the vertical-exaggeration slider in 3D mode.</summary>
+    public static string LabelVerticalExaggeration => Get(nameof(LabelVerticalExaggeration));
+
     private static string Get(string key) => Manager.GetString(key) ?? key;
 }

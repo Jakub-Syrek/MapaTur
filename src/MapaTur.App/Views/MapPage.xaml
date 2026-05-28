@@ -44,6 +44,20 @@
                     Command="{Binding Toggle3DCommand}"
                     IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
                     SemanticProperties.Hint="{x:Static loc:AppStrings.Toggle3D}" />
+            <!-- Vertical-exaggeration slider for 3D mode. Range 1..5 with snap at 0.5. -->
+            <HorizontalStackLayout Spacing="6" VerticalOptions="Center" IsVisible="{Binding Is3DMode}">
+                <Label Text="{x:Static loc:AppStrings.LabelVerticalExaggeration}"
+                       VerticalOptions="Center" />
+                <Slider Minimum="1"
+                        Maximum="5"
+                        Value="{Binding VerticalExaggeration, Mode=TwoWay}"
+                        WidthRequest="140"
+                        VerticalOptions="Center"
+                        SemanticProperties.Hint="{x:Static loc:AppStrings.LabelVerticalExaggeration}" />
+                <Label Text="{Binding VerticalExaggeration, StringFormat='{0:F1}×'}"
+                       VerticalOptions="Center"
+                       WidthRequest="42" />
+            </HorizontalStackLayout>
             <ActivityIndicator IsRunning="{Binding IsBusy}"
                                IsVisible="{Binding IsBusy}"
                                VerticalOptions="Center" />

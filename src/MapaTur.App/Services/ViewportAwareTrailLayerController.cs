@@ -1,6 +1,9 @@
-using Mapsui;
 using MapaTur.Application.Trails;
+
+using Mapsui;
+
 using Microsoft.Extensions.Logging;
+
 using Map = Mapsui.Map;
 
 namespace MapaTur.App.Services;

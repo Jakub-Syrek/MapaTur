@@ -1,7 +1,6 @@
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-using Mapsui;
-using Mapsui.Projections;
+
 using MapaTur.App.Services;
 using MapaTur.Application.Climbing;
 using MapaTur.Application.Routing;
@@ -12,7 +11,12 @@ using MapaTur.Domain.Geography;
 using MapaTur.Domain.Terrain;
 using MapaTur.Domain.Trails;
 using MapaTur.Infrastructure.Terrain;
+
+using Mapsui;
+using Mapsui.Projections;
+
 using Microsoft.Extensions.Logging;
+
 using Map = Mapsui.Map;
 
 namespace MapaTur.App.ViewModels;
@@ -32,6 +36,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     private readonly IFileSaverService fileSaver;
     private readonly IOfflineMapLoader mapLoader;
     private readonly IMapAutoLoader autoLoader;
+    private readonly I3DSettingsStore settingsStore;
     private ViewportAwareTrailLayerController? viewportTrailController;
     private readonly ITrackLayerRenderer trackRenderer;
     private readonly ITrailLayerRenderer trailRenderer;
@@ -62,6 +67,44 @@ public sealed partial class MapPageViewModel : ObservableObject
 
     [ObservableProperty]
     private DemRaster? terrainRaster;
+
+    /// <summary>
+    /// Multiplier applied to elevation when building the 3D mesh. 1.0 = true scale,
+    /// higher values exaggerate vertical relief so soft hills read better on screen.
+    /// Changing this rebuilds the mesh from the current raster.
+    /// </summary>
+    [ObservableProperty]
+    private double verticalExaggeration = 2.0;
+
+    private bool meshRebuildInFlight;
+
+    partial void OnVerticalExaggerationChanged(double value)
+    {
+        // Persist every change so a relaunch lands on the same setting.
+        settingsStore.VerticalExaggeration = value;
+
+        if (TerrainRaster is not { } raster || meshRebuildInFlight)
+        {
+            return;
+        }
+
+        meshRebuildInFlight = true;
+        // Fire-and-forget rebuild — the slider drives many small changes; a single
+        // rebuild that lands one frame later is plenty smooth at 360x180 meshes.
+        _ = Task.Run(() =>
+        {
+            var options = new MapaTur.Application.Terrain.TerrainMeshOptions
+            {
+                VerticalExaggeration = (float)Math.Clamp(value, 1.0, 5.0),
+            };
+            var rebuilt = TerrainMesh3D.Build(raster, options);
+            MainThread.BeginInvokeOnMainThread(() =>
+            {
+                TerrainMesh = rebuilt;
+                meshRebuildInFlight = false;
+            });
+        });
+    }
 
     [ObservableProperty]
     private IReadOnlyList<Trail>? trails3DOverlay;
@@ -95,6 +138,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <param name="fileSaver">File saver service for export destinations.</param>
     /// <param name="mapLoader">Tile archive loader.</param>
     /// <param name="autoLoader">Discovers pre-bundled / installed map data on disk for one-shot auto-load on first appearance.</param>
+    /// <param name="settingsStore">Persistent backing store for 3D-mode user settings (vertical exaggeration, etc.).</param>
     /// <param name="trackRenderer">Track polyline renderer.</param>
     /// <param name="trailRenderer">Trail polyline renderer.</param>
     /// <param name="routeRenderer">Planned-route polyline renderer.</param>
@@ -112,6 +156,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         IFileSaverService fileSaver,
         IOfflineMapLoader mapLoader,
         IMapAutoLoader autoLoader,
+        I3DSettingsStore settingsStore,
         ITrackLayerRenderer trackRenderer,
         ITrailLayerRenderer trailRenderer,
         IRouteLayerRenderer routeRenderer,
@@ -129,6 +174,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         ArgumentNullException.ThrowIfNull(fileSaver);
         ArgumentNullException.ThrowIfNull(mapLoader);
         ArgumentNullException.ThrowIfNull(autoLoader);
+        ArgumentNullException.ThrowIfNull(settingsStore);
         ArgumentNullException.ThrowIfNull(trackRenderer);
         ArgumentNullException.ThrowIfNull(trailRenderer);
         ArgumentNullException.ThrowIfNull(routeRenderer);
@@ -146,6 +192,15 @@ public sealed partial class MapPageViewModel : ObservableObject
         this.fileSaver = fileSaver;
         this.mapLoader = mapLoader;
         this.autoLoader = autoLoader;
+        this.settingsStore = settingsStore;
+
+        // Restore the saved vertical exaggeration before the partial OnXxxChanged hook
+        // can fire on the default value. Clamp to [1, 5] to defend against tampered
+        // preference values.
+        if (settingsStore.VerticalExaggeration is { } saved)
+        {
+            verticalExaggeration = Math.Clamp(saved, 1.0, 5.0);
+        }
         this.trackRenderer = trackRenderer;
         this.trailRenderer = trailRenderer;
         this.routeRenderer = routeRenderer;
@@ -514,7 +569,11 @@ public sealed partial class MapPageViewModel : ObservableObject
     {
         var raster = await Task.Run(() => DemRasterReader.Read(path)).ConfigureAwait(true);
         TerrainRaster = raster;
-        TerrainMesh = await Task.Run(() => TerrainMesh3D.Build(raster)).ConfigureAwait(true);
+        var initialOptions = new MapaTur.Application.Terrain.TerrainMeshOptions
+        {
+            VerticalExaggeration = (float)Math.Clamp(VerticalExaggeration, 1.0, 5.0),
+        };
+        TerrainMesh = await Task.Run(() => TerrainMesh3D.Build(raster, initialOptions)).ConfigureAwait(true);
         logger.LogInformation("Loaded DEM {Path} ({Cols}x{Rows})", path, raster.Columns, raster.Rows);
         StatusMessage = $"{Localization.AppStrings.StatusDemLoaded}: {Path.GetFileName(path)}";
     }

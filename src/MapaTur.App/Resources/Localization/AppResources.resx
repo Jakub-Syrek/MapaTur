@@ -112,4 +112,7 @@
   <data name="FilePickerDem" xml:space="preserve">
     <value>Select DEM file</value>
   </data>
+  <data name="LabelVerticalExaggeration" xml:space="preserve">
+    <value>Vertical exaggeration</value>
+  </data>
 </root>
