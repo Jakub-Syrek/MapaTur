@@ -59,10 +59,7 @@ public static class OverpassResponseParser
             var trails = new List<Trail>(relations.Count);
             foreach (var relation in relations)
             {
-                if (TryBuildTrail(relation, ways, out var trail))
-                {
-                    trails.Add(trail);
-                }
+                BuildTrailsForRelation(relation, ways, trails);
             }
 
             return trails;
@@ -97,7 +94,12 @@ public static class OverpassResponseParser
         return points;
     }
 
-    private static bool TryBuildTrail(JsonElement relation, IReadOnlyDictionary<long, IReadOnlyList<GeoPoint>> ways, out Trail trail)
+    // OSM points share the same node when ways meet at an endpoint, so an exact
+    // float compare is usually enough. The tolerance handles tiny precision drift
+    // from the JSON round-trip — 1e-7 deg ≈ 1 cm on the ground.
+    private const double EndpointMatchTolerance = 1e-7;
+
+    private static void BuildTrailsForRelation(JsonElement relation, IReadOnlyDictionary<long, IReadOnlyList<GeoPoint>> ways, List<Trail> output)
     {
         long id = relation.GetProperty("id").GetInt64();
 
@@ -115,29 +117,89 @@ public static class OverpassResponseParser
             }
         }
 
-        var geometry = new List<GeoPoint>();
-        if (relation.TryGetProperty("members", out var members) && members.ValueKind == JsonValueKind.Array)
+        if (!relation.TryGetProperty("members", out var members) || members.ValueKind != JsonValueKind.Array)
         {
-            foreach (var member in members.EnumerateArray())
+            return;
+        }
+
+        // Walk the relation's ways in order, stitching consecutive ways whose
+        // endpoints match. Whenever two adjacent ways DON'T connect — a real
+        // discontinuity in the OSM data — flush the current segment as its own
+        // trail and start fresh. Without this split the renderer drew a long
+        // straight "jumper" between the two disconnected pieces, which is what
+        // showed up as suspect red lines across half the country.
+        var currentSegment = new List<GeoPoint>();
+        var marking = OsmcSymbolParser.Parse(osmcSymbol);
+        int segmentIndex = 0;
+
+        foreach (var member in members.EnumerateArray())
+        {
+            if (!(member.TryGetProperty("type", out var memberType)
+                  && memberType.GetString() == "way"
+                  && member.TryGetProperty("ref", out var refElement)
+                  && ways.TryGetValue(refElement.GetInt64(), out var wayGeometry)))
             {
-                if (member.TryGetProperty("type", out var memberType)
-                    && memberType.GetString() == "way"
-                    && member.TryGetProperty("ref", out var refElement)
-                    && ways.TryGetValue(refElement.GetInt64(), out var wayGeometry))
+                continue;
+            }
+            if (wayGeometry.Count == 0)
+            {
+                continue;
+            }
+
+            if (currentSegment.Count == 0)
+            {
+                currentSegment.AddRange(wayGeometry);
+                continue;
+            }
+
+            var lastInSegment = currentSegment[^1];
+            var firstOfWay = wayGeometry[0];
+            var lastOfWay = wayGeometry[^1];
+
+            if (EndpointsMatch(lastInSegment, firstOfWay))
+            {
+                // Way picks up where the segment left off — drop the duplicate junction.
+                for (int i = 1; i < wayGeometry.Count; i++)
                 {
-                    geometry.AddRange(wayGeometry);
+                    currentSegment.Add(wayGeometry[i]);
                 }
+            }
+            else if (EndpointsMatch(lastInSegment, lastOfWay))
+            {
+                // Way runs the opposite direction; reverse it onto the segment.
+                for (int i = wayGeometry.Count - 2; i >= 0; i--)
+                {
+                    currentSegment.Add(wayGeometry[i]);
+                }
+            }
+            else
+            {
+                // Genuine discontinuity. Flush what we have and start a new segment.
+                FlushSegment(currentSegment, id, segmentIndex++, name, marking, output);
+                currentSegment = new List<GeoPoint>(wayGeometry);
             }
         }
 
-        if (geometry.Count < 2)
+        FlushSegment(currentSegment, id, segmentIndex, name, marking, output);
+    }
+
+    private static void FlushSegment(List<GeoPoint> segment, long relationId, int segmentIndex, string name, TrailMarking marking, List<Trail> output)
+    {
+        if (segment.Count < 2)
         {
-            trail = null!;
-            return false;
+            return;
         }
 
-        var markings = new List<TrailMarking> { OsmcSymbolParser.Parse(osmcSymbol) };
-        trail = new Trail(id, name, markings, geometry);
-        return true;
+        // Synthesize a unique id when a relation contributed multiple segments so the
+        // repository's primary-key upsert doesn't collide.
+        long id = segmentIndex == 0 ? relationId : (relationId * 1000L) + segmentIndex;
+        var markings = new List<TrailMarking> { marking };
+        output.Add(new Trail(id, name, markings, segment));
+    }
+
+    private static bool EndpointsMatch(GeoPoint a, GeoPoint b)
+    {
+        return Math.Abs(a.Latitude - b.Latitude) < EndpointMatchTolerance
+            && Math.Abs(a.Longitude - b.Longitude) < EndpointMatchTolerance;
     }
 }
