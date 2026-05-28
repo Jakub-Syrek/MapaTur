@@ -92,14 +92,11 @@ jobs:
         with:
           global-json-file: global.json
 
-      - name: Install MAUI workload (Windows only)
-        # The MapaTur.App csproj normally declares Windows + Android + iOS +
-        # MacCatalyst TFMs, but the CI Windows runner only validates Windows.
-        # Installing just maui-windows keeps the workload set minimal; the
-        # restore + build steps below override <TargetFrameworks> so the other
-        # TFMs (which would otherwise pull missing Mono-win-x64 runtime packs
-        # and trip NU1102) are never evaluated.
-        run: dotnet workload install maui-windows
+      - name: Install MAUI workloads
+        # On Windows the App's <TargetFrameworks> resolves to Android + Windows
+        # (iOS / MacCatalyst are gated on macOS in the csproj). Both workloads
+        # are needed at restore time even though the build only targets Windows.
+        run: dotnet workload install maui-windows maui-android
 
       - name: Restore MAUI app
         # App's <TargetFrameworks> auto-conditions iOS / MacCatalyst on macOS,
