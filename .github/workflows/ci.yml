@@ -98,13 +98,11 @@ jobs:
         # are needed at restore time even though the build only targets Windows.
         run: dotnet workload install maui-windows maui-android
 
-      - name: Restore MAUI app
-        # App's <TargetFrameworks> auto-conditions iOS / MacCatalyst on macOS,
-        # so on the Windows runner the set is just Android + Windows -- both
-        # covered by the maui-windows + (transitively pulled) android workload.
-        # --runtime win-x64 brings down the Microsoft.NETCore.App.Runtime pack
-        # the Windows TFM needs at build time (otherwise NETSDK1112 fires).
-        run: dotnet restore src/MapaTur.App/MapaTur.App.csproj --runtime win-x64
-
-      - name: Build MAUI app (Windows TFM)
-        run: dotnet build src/MapaTur.App/MapaTur.App.csproj --no-restore -c Release -f net10.0-windows10.0.19041.0 --runtime win-x64
+      - name: Publish MAUI app (Windows TFM only)
+        # `dotnet publish` is what you want when you need to scope a RID to a
+        # *specific* TFM: restore + build + apphost wiring all happen against
+        # net10.0-windows10.0.19041.0, so the Android TFM is never asked for
+        # a Mono-win-x64 runtime pack (NU1102). UseAppHost=false skips the
+        # native .exe stamping CI doesn't need, which avoids NETSDK1112's
+        # demand for the win-x64 runtime pack on the build leg.
+        run: dotnet publish src/MapaTur.App/MapaTur.App.csproj -c Release -f net10.0-windows10.0.19041.0 -p:UseAppHost=false -p:WindowsPackageType=None
