@@ -93,7 +93,12 @@ jobs:
           global-json-file: global.json
 
       - name: Install MAUI workload
-        run: dotnet workload install maui-windows maui-android
+        # `maui` is the meta-workload bundling every per-platform subset
+        # (windows + android + ios + maccatalyst). The MapaTur.App csproj declares
+        # all four TFMs in <TargetFrameworks>, so a restore step fails with
+        # NETSDK1147 unless every workload is present, even when the subsequent
+        # build only targets one TFM.
+        run: dotnet workload install maui
 
       - name: Restore MAUI app
         run: dotnet restore src/MapaTur.App/MapaTur.App.csproj
