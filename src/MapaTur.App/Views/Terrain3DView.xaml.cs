@@ -1,6 +1,7 @@
 using System.Numerics;
 using MapaTur.App.Services;
 using MapaTur.Application.Terrain;
+using MapaTur.Domain.Climbing;
 using MapaTur.Domain.Routing;
 using MapaTur.Domain.Terrain;
 using MapaTur.Domain.Trails;
@@ -68,6 +69,19 @@ public partial class Terrain3DView : ContentView
         set => SetValue(RouteProperty, value);
     }
 
+    /// <summary>Bindable climbing areas rendered as red circular markers above the mesh.</summary>
+    public static readonly BindableProperty ClimbingAreasProperty = BindableProperty.Create(
+        nameof(ClimbingAreas),
+        typeof(IReadOnlyList<ClimbingArea>),
+        typeof(Terrain3DView),
+        propertyChanged: OnOverlayDataChanged);
+
+    public IReadOnlyList<ClimbingArea>? ClimbingAreas
+    {
+        get => (IReadOnlyList<ClimbingArea>?)GetValue(ClimbingAreasProperty);
+        set => SetValue(ClimbingAreasProperty, value);
+    }
+
     /// <summary>Camera state mutated by gestures and used by the renderer.</summary>
     public Camera3D Camera { get; } = new Camera3D();
 
@@ -131,7 +145,7 @@ public partial class Terrain3DView : ContentView
         }
     }
 
-    private void OnPaintSurface(object? sender, SKPaintSurfaceEventArgs e)
+    private void OnPaintSurface(object? sender, SKPaintGLSurfaceEventArgs e)
     {
         var canvas = e.Surface.Canvas;
         if (Mesh is null)
@@ -154,7 +168,14 @@ public partial class Terrain3DView : ContentView
                 Route, Raster, Mesh, Camera, e.Info.Width, e.Info.Height);
         }
 
-        renderer.Render(canvas, e.Info.Width, e.Info.Height, Mesh, Camera, frameScratch, projectedTrails, projectedRoute);
+        IReadOnlyList<ProjectedClimbingArea>? projectedClimbing = null;
+        if (ClimbingAreas is { Count: > 0 } areas && Raster is not null)
+        {
+            projectedClimbing = Climbing3DProjection.Project(
+                areas, Raster, Mesh, Camera, e.Info.Width, e.Info.Height);
+        }
+
+        renderer.Render(canvas, e.Info.Width, e.Info.Height, Mesh, Camera, frameScratch, projectedTrails, projectedRoute, projectedClimbing);
     }
 
     private void OnOrbitPan(object? sender, PanUpdatedEventArgs e)

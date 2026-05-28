@@ -20,14 +20,28 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
     private static readonly SKColor SkyTopColor = new(0x1A, 0x35, 0x55);
     private static readonly SKColor SkyBottomColor = new(0x6C, 0x8E, 0xB0);
     private static readonly SKColor RouteColor = new(0x7C, 0x3A, 0xED); // violet, matches 2D planner
+    private static readonly SKColor ClimbingFillColor = new(0xE1, 0x1D, 0x48); // red, matches 2D climbing layer
+    private static readonly SKColor ClimbingOutlineColor = new(0x1F, 0x29, 0x37);
+    private const float ClimbingMarkerRadiusPx = 5.5f;
 
     private TerrainMesh3D? cachedMesh;
     private SKPoint[] pointScratch = Array.Empty<SKPoint>();
     private SKColor[] cachedColors = Array.Empty<SKColor>();
 
+    // Two ping-pong index buffers sized exactly to the current frame's visible
+    // triangle count. SkiaSharp 3.119 has no Span overload for SKVertices.CreateCopy,
+    // so the array MUST be exact-length (trailing slots would form spurious triangles).
+    // Ping-pong lets the previous frame's array be GC'd while Skia is still consuming
+    // it instead of fighting for the same buffer.
+    private ushort[] indexBufferA = Array.Empty<ushort>();
+    private ushort[] indexBufferB = Array.Empty<ushort>();
+    private bool useBufferA = true;
+
     private SKPaint? meshPaint;
     private SKPaint? trailPaint;
     private SKPaint? routePaint;
+    private SKPaint? climbingFillPaint;
+    private SKPaint? climbingOutlinePaint;
     private SKPaint? skyPaint;
     private SKShader? skyShader;
     private int cachedSkyWidth;
@@ -49,7 +63,8 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         Camera3D camera,
         Terrain3DFrameScratch scratch,
         IReadOnlyList<ProjectedTrail>? trails = null,
-        ProjectedRoute? route = null)
+        ProjectedRoute? route = null,
+        IReadOnlyList<ProjectedClimbingArea>? climbingAreas = null)
     {
         ArgumentNullException.ThrowIfNull(canvas);
         ArgumentNullException.ThrowIfNull(mesh);
@@ -77,6 +92,10 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         {
             DrawRoute(canvas, route.Value);
         }
+        if (climbingAreas is not null)
+        {
+            DrawClimbingAreas(canvas, climbingAreas);
+        }
     }
 
     private void DrawMesh(SKCanvas canvas, TerrainMesh3D mesh, ProjectedTerrainFrame frame)
@@ -95,9 +114,19 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         // Positions and colors buffers are reused at full mesh size — indices reference
         // entries in [0, vertexCount) so any trailing slots are inert. Indices MUST be
         // exact length though: SKVertices walks every entry to form a triangle, so a
-        // stale tail would render spurious geometry. Allocate just this one array per frame.
-        ushort[] visibleIndices = new ushort[frame.VisibleIndexCount];
-        Array.Copy(frame.VisibleIndices, visibleIndices, frame.VisibleIndexCount);
+        // stale tail would render spurious geometry. Ping-pong between two slots so the
+        // previous frame's array (still referenced by an in-flight SKVertices) can be
+        // GC'd or reused without conflict.
+        int needed = frame.VisibleIndexCount;
+        ushort[] current = useBufferA ? indexBufferA : indexBufferB;
+        if (current.Length != needed)
+        {
+            current = new ushort[needed];
+            if (useBufferA) indexBufferA = current; else indexBufferB = current;
+        }
+        Array.Copy(frame.VisibleIndices, current, needed);
+        useBufferA = !useBufferA;
+        ushort[] visibleIndices = current;
 
         using var vertices = SKVertices.CreateCopy(
             SKVertexMode.Triangles,
@@ -235,6 +264,39 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         }
     }
 
+    private void DrawClimbingAreas(SKCanvas canvas, IReadOnlyList<ProjectedClimbingArea> areas)
+    {
+        if (areas.Count == 0)
+        {
+            return;
+        }
+
+        climbingFillPaint ??= new SKPaint
+        {
+            IsAntialias = true,
+            Style = SKPaintStyle.Fill,
+            Color = ClimbingFillColor,
+        };
+        climbingOutlinePaint ??= new SKPaint
+        {
+            IsAntialias = true,
+            Style = SKPaintStyle.Stroke,
+            StrokeWidth = 1.5f,
+            Color = ClimbingOutlineColor,
+        };
+
+        foreach (var marker in areas)
+        {
+            var screen = marker.ScreenPosition;
+            if (screen is null)
+            {
+                continue;
+            }
+            canvas.DrawCircle(screen.Value.X, screen.Value.Y, ClimbingMarkerRadiusPx, climbingFillPaint);
+            canvas.DrawCircle(screen.Value.X, screen.Value.Y, ClimbingMarkerRadiusPx, climbingOutlinePaint);
+        }
+    }
+
     private static SKColor TrailColor(Trail trail)
     {
         return SKColor.TryParse(OsmcSymbolParser.ToHex(trail.PrimaryColor), out var color)
@@ -275,6 +337,8 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         meshPaint?.Dispose();
         trailPaint?.Dispose();
         routePaint?.Dispose();
+        climbingFillPaint?.Dispose();
+        climbingOutlinePaint?.Dispose();
         skyPaint?.Dispose();
         skyShader?.Dispose();
         foreach (var p in trailPathCache.Values)
@@ -285,6 +349,8 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         meshPaint = null;
         trailPaint = null;
         routePaint = null;
+        climbingFillPaint = null;
+        climbingOutlinePaint = null;
         skyPaint = null;
         skyShader = null;
     }

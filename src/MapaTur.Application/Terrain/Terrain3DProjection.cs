@@ -136,28 +136,60 @@ public static class Terrain3DProjection
                 continue;
             }
 
-            // Negate so Array.Sort ascending puts furthest (largest absolute depth) first.
-            depths[visibleCount] = -((v0.Z + v1.Z + v2.Z) * (1f / 3f));
+            // Store positive averaged NDC depth so we can both bucket-sort and re-bucket
+            // in the emission pass without extra memory.
+            depths[visibleCount] = (v0.Z + v1.Z + v2.Z) * (1f / 3f);
             triangleIndices[visibleCount] = t;
             visibleCount++;
         }
 
-        // Sort triangleIndices by negated depth, ascending → back-to-front. Single
-        // Array.Sort over a pair of arrays beats List<(int,float)> + lambda for both
-        // allocations (none) and throughput.
-        Array.Sort(depths, triangleIndices, 0, visibleCount);
+        // Bucket-sort by NDC depth instead of Array.Sort: O(n) two passes versus the
+        // ~17 comparisons per element introsort would do on ~128k triangles. The bucket
+        // width is ~1/BucketCount in NDC depth (≈1e-4 with 4096 buckets) which is much
+        // tighter than any screen-space depth artefact we'd notice.
+        const int BucketCount = 4096;
+        Span<int> bucketHeads = stackalloc int[BucketCount];
+        bucketHeads.Clear();
 
-        ushort[] visibleIndices = scratch.VisibleIndices;
-        int outIdx = 0;
         for (int k = 0; k < visibleCount; k++)
         {
+            int b = QuantizeDepth(depths[k], BucketCount);
+            bucketHeads[b]++;
+        }
+
+        // Convert per-bucket counts into write offsets, scanning back-to-front so the
+        // furthest triangles (highest depth) land at the start of the emitted index
+        // stream — same painter's-algorithm output order as the old Array.Sort path.
+        int running = 0;
+        for (int b = BucketCount - 1; b >= 0; b--)
+        {
+            int count = bucketHeads[b];
+            bucketHeads[b] = running;
+            running += count;
+        }
+
+        ushort[] visibleIndices = scratch.VisibleIndices;
+        for (int k = 0; k < visibleCount; k++)
+        {
+            int b = QuantizeDepth(depths[k], BucketCount);
+            int slot = bucketHeads[b]++;
             int t = triangleIndices[k];
-            int baseIdx = t * 3;
-            visibleIndices[outIdx++] = sourceIndices[baseIdx];
-            visibleIndices[outIdx++] = sourceIndices[baseIdx + 1];
-            visibleIndices[outIdx++] = sourceIndices[baseIdx + 2];
+            int baseSrc = t * 3;
+            int baseDst = slot * 3;
+            visibleIndices[baseDst] = sourceIndices[baseSrc];
+            visibleIndices[baseDst + 1] = sourceIndices[baseSrc + 1];
+            visibleIndices[baseDst + 2] = sourceIndices[baseSrc + 2];
         }
 
         return new ProjectedTerrainFrame(screen, visibleIndices, vertexCount, visibleCount * 3);
+    }
+
+    private static int QuantizeDepth(float depth, int bucketCount)
+    {
+        // depth is in [0,1] for in-frustum triangles, but float jitter can land just outside.
+        if (depth <= 0f) return 0;
+        if (depth >= 1f) return bucketCount - 1;
+        int b = (int)(depth * bucketCount);
+        return b >= bucketCount ? bucketCount - 1 : b;
     }
 }

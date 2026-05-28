@@ -1,31 +1,30 @@
 using MapaTur.Application.Climbing;
 using MapaTur.Domain.Climbing;
 using MapaTur.Domain.Geography;
+using MapaTur.Infrastructure.Overpass;
 
 namespace MapaTur.Infrastructure.Climbing;
 
 /// <summary>
-/// HTTP client that asks an Overpass endpoint for climbing-tagged features.
-/// Shares the same endpoint and User-Agent posture as the trail client.
+/// HTTP client that asks Overpass endpoints for climbing-tagged features. Shares the
+/// multi-endpoint failover posture of <see cref="OverpassEndpoints.DefaultFallbackList"/>
+/// with the trail client.
 /// </summary>
 public sealed class OverpassClimbingHttpClient : IClimbingOverpassClient
 {
-    /// <summary>Default endpoint used when none is provided.</summary>
-    public const string DefaultEndpoint = "https://overpass-api.de/api/interpreter";
-
     private readonly HttpClient httpClient;
-    private readonly Uri endpoint;
+    private readonly IReadOnlyList<Uri> endpoints;
 
     /// <summary>
     /// Initializes the client.
     /// </summary>
     /// <param name="httpClient">HTTP client.</param>
-    /// <param name="endpoint">Overpass endpoint URL. Defaults to the main public endpoint.</param>
-    public OverpassClimbingHttpClient(HttpClient httpClient, Uri? endpoint = null)
+    /// <param name="endpoints">Ordered list of Overpass endpoints. Defaults to <see cref="OverpassEndpoints.DefaultFallbackList"/>.</param>
+    public OverpassClimbingHttpClient(HttpClient httpClient, IReadOnlyList<Uri>? endpoints = null)
     {
         ArgumentNullException.ThrowIfNull(httpClient);
         this.httpClient = httpClient;
-        this.endpoint = endpoint ?? new Uri(DefaultEndpoint);
+        this.endpoints = endpoints ?? OverpassEndpoints.DefaultFallbackList;
 
         if (!this.httpClient.DefaultRequestHeaders.UserAgent.Any())
         {
@@ -38,20 +37,8 @@ public sealed class OverpassClimbingHttpClient : IClimbingOverpassClient
     public async Task<IReadOnlyList<ClimbingArea>> FetchClimbingAreasAsync(MapBounds bounds, CancellationToken cancellationToken = default)
     {
         string query = OverpassClimbingQueryBuilder.BuildClimbingQuery(bounds);
-
-        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
-        {
-            Content = new FormUrlEncodedContent(new KeyValuePair<string, string>[]
-            {
-                new("data", query),
-            }),
-        };
-        request.Headers.Accept.ParseAdd("application/json");
-
-        using var response = await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
-
-        byte[] payload = await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+        byte[] payload = await OverpassRequestExecutor.PostWithFailoverAsync(
+            httpClient, endpoints, query, cancellationToken).ConfigureAwait(false);
         return OverpassClimbingResponseParser.Parse(payload);
     }
 }

@@ -1,7 +1,9 @@
 using Mapsui;
 using Mapsui.Projections;
+using MapaTur.App.Services;
 using MapaTur.App.ViewModels;
 using MapaTur.Domain.Geography;
+using Microsoft.Extensions.Logging;
 
 namespace MapaTur.App.Views;
 
@@ -12,18 +14,22 @@ namespace MapaTur.App.Views;
 public partial class MapPage : ContentPage
 {
     private readonly MapPageViewModel viewModel;
+    private readonly ILogger<ViewportAwareTrailLayerController> trailControllerLogger;
     private bool initialCenterApplied;
 
     /// <summary>
     /// Initializes the page with its view model.
     /// </summary>
     /// <param name="viewModel">View model injected by the DI container.</param>
-    public MapPage(MapPageViewModel viewModel)
+    /// <param name="trailControllerLogger">Logger for the viewport-aware trail controller.</param>
+    public MapPage(MapPageViewModel viewModel, ILogger<ViewportAwareTrailLayerController> trailControllerLogger)
     {
         ArgumentNullException.ThrowIfNull(viewModel);
+        ArgumentNullException.ThrowIfNull(trailControllerLogger);
 
         InitializeComponent();
         this.viewModel = viewModel;
+        this.trailControllerLogger = trailControllerLogger;
         BindingContext = viewModel;
         MapControl.Map.Tapped += OnMapTapped;
     }
@@ -55,10 +61,12 @@ public partial class MapPage : ContentPage
 
         // Defer one frame so the MapControl has measured its size; otherwise the
         // navigator's viewport width/height are zero and the center call is a no-op.
-        Dispatcher.Dispatch(() =>
+        Dispatcher.Dispatch(async () =>
         {
             viewModel.CenterOnDefaultRegion();
+            viewModel.ActivateViewportAwareTrailLayer(trailControllerLogger);
             initialCenterApplied = true;
+            await viewModel.AutoLoadOnStartupAsync().ConfigureAwait(true);
         });
     }
 }

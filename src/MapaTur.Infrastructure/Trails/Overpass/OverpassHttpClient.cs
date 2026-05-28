@@ -1,31 +1,31 @@
 using MapaTur.Application.Trails;
 using MapaTur.Domain.Geography;
 using MapaTur.Domain.Trails;
+using MapaTur.Infrastructure.Overpass;
 
 namespace MapaTur.Infrastructure.Trails.Overpass;
 
 /// <summary>
-/// HTTP client that talks to a public Overpass API endpoint. The endpoint URL is
-/// configurable so the same client can target main, mirror, or a private instance.
+/// HTTP client that talks to public Overpass API endpoints. Tries multiple endpoints
+/// in order so the main endpoint's frequent 504 Gateway Timeouts under load do not
+/// block the user — the next mirror in <see cref="OverpassEndpoints.DefaultFallbackList"/>
+/// is tried instead.
 /// </summary>
 public sealed class OverpassHttpClient : IOverpassClient
 {
-    /// <summary>Default endpoint used when none is provided.</summary>
-    public const string DefaultEndpoint = "https://overpass-api.de/api/interpreter";
-
     private readonly HttpClient httpClient;
-    private readonly Uri endpoint;
+    private readonly IReadOnlyList<Uri> endpoints;
 
     /// <summary>
     /// Initializes the client.
     /// </summary>
     /// <param name="httpClient">HTTP client (typically created via IHttpClientFactory).</param>
-    /// <param name="endpoint">Overpass endpoint URL. Defaults to the main public endpoint.</param>
-    public OverpassHttpClient(HttpClient httpClient, Uri? endpoint = null)
+    /// <param name="endpoints">Ordered list of Overpass endpoints. Defaults to <see cref="OverpassEndpoints.DefaultFallbackList"/>.</param>
+    public OverpassHttpClient(HttpClient httpClient, IReadOnlyList<Uri>? endpoints = null)
     {
         ArgumentNullException.ThrowIfNull(httpClient);
         this.httpClient = httpClient;
-        this.endpoint = endpoint ?? new Uri(DefaultEndpoint);
+        this.endpoints = endpoints ?? OverpassEndpoints.DefaultFallbackList;
 
         // The public Overpass mirrors reject requests without a User-Agent to deter
         // anonymous scraping bots. Set one once on the shared client.
@@ -39,20 +39,8 @@ public sealed class OverpassHttpClient : IOverpassClient
     public async Task<IReadOnlyList<Trail>> FetchHikingTrailsAsync(MapBounds bounds, CancellationToken cancellationToken = default)
     {
         string query = OverpassQueryBuilder.BuildHikingTrailsQuery(bounds);
-
-        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
-        {
-            Content = new FormUrlEncodedContent(new KeyValuePair<string, string>[]
-            {
-                new("data", query),
-            }),
-        };
-        request.Headers.Accept.ParseAdd("application/json");
-
-        using var response = await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
-
-        byte[] payload = await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+        byte[] payload = await OverpassRequestExecutor.PostWithFailoverAsync(
+            httpClient, endpoints, query, cancellationToken).ConfigureAwait(false);
         return OverpassResponseParser.Parse(payload);
     }
 }

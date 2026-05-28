@@ -1,3 +1,4 @@
+using MapaTur.Domain.Geography;
 using Map = Mapsui.Map;
 
 namespace MapaTur.App.Services;
@@ -28,5 +29,6 @@ public interface IOfflineMapLoader
     /// <param name="map">The map to mutate.</param>
     /// <param name="archivePath">Absolute path to the .mbtiles file.</param>
     /// <param name="kind">Layer role. Defaults to <see cref="MBTilesLayerKind.Basemap"/>.</param>
-    void LoadMBTilesArchive(Map map, string archivePath, MBTilesLayerKind kind = MBTilesLayerKind.Basemap);
+    /// <returns>The archive's geographic extent in WGS-84, or null when the archive carries no extent metadata.</returns>
+    MapBounds? LoadMBTilesArchive(Map map, string archivePath, MBTilesLayerKind kind = MBTilesLayerKind.Basemap);
 }

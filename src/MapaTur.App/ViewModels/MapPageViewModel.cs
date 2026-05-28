@@ -31,6 +31,8 @@ public sealed partial class MapPageViewModel : ObservableObject
     private readonly IFilePickerService filePicker;
     private readonly IFileSaverService fileSaver;
     private readonly IOfflineMapLoader mapLoader;
+    private readonly IMapAutoLoader autoLoader;
+    private ViewportAwareTrailLayerController? viewportTrailController;
     private readonly ITrackLayerRenderer trackRenderer;
     private readonly ITrailLayerRenderer trailRenderer;
     private readonly IRouteLayerRenderer routeRenderer;
@@ -67,12 +69,32 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private Domain.Routing.Route? route3DOverlay;
 
+    [ObservableProperty]
+    private IReadOnlyList<MapaTur.Domain.Climbing.ClimbingArea>? climbing3DOverlay;
+
+    // Union of every loaded basemap's extent — used to clip Overpass downloads to
+    // the area we actually have map coverage for, even when multiple regional
+    // archives are stacked.
+    private MapBounds? basemapBounds;
+    private MapBounds? hillshadeBounds;
+    private bool autoLoadAttempted;
+
+    private void ExtendBasemapBounds(MapBounds? loaded)
+    {
+        if (loaded is not { } extent)
+        {
+            return;
+        }
+        basemapBounds = basemapBounds is { } existing ? existing.Union(extent) : extent;
+    }
+
     /// <summary>
     /// Initializes a new instance of the view model.
     /// </summary>
     /// <param name="filePicker">File picker service used to obtain MBTiles/TCX paths.</param>
     /// <param name="fileSaver">File saver service for export destinations.</param>
     /// <param name="mapLoader">Tile archive loader.</param>
+    /// <param name="autoLoader">Discovers pre-bundled / installed map data on disk for one-shot auto-load on first appearance.</param>
     /// <param name="trackRenderer">Track polyline renderer.</param>
     /// <param name="trailRenderer">Trail polyline renderer.</param>
     /// <param name="routeRenderer">Planned-route polyline renderer.</param>
@@ -89,6 +111,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         IFilePickerService filePicker,
         IFileSaverService fileSaver,
         IOfflineMapLoader mapLoader,
+        IMapAutoLoader autoLoader,
         ITrackLayerRenderer trackRenderer,
         ITrailLayerRenderer trailRenderer,
         IRouteLayerRenderer routeRenderer,
@@ -105,6 +128,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         ArgumentNullException.ThrowIfNull(filePicker);
         ArgumentNullException.ThrowIfNull(fileSaver);
         ArgumentNullException.ThrowIfNull(mapLoader);
+        ArgumentNullException.ThrowIfNull(autoLoader);
         ArgumentNullException.ThrowIfNull(trackRenderer);
         ArgumentNullException.ThrowIfNull(trailRenderer);
         ArgumentNullException.ThrowIfNull(routeRenderer);
@@ -121,6 +145,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         this.filePicker = filePicker;
         this.fileSaver = fileSaver;
         this.mapLoader = mapLoader;
+        this.autoLoader = autoLoader;
         this.trackRenderer = trackRenderer;
         this.trailRenderer = trailRenderer;
         this.routeRenderer = routeRenderer;
@@ -168,7 +193,7 @@ public sealed partial class MapPageViewModel : ObservableObject
                 return;
             }
 
-            mapLoader.LoadMBTilesArchive(Map, path);
+            ExtendBasemapBounds(mapLoader.LoadMBTilesArchive(Map, path));
             StatusMessage = $"Loaded: {Path.GetFileName(path)}";
             logger.LogInformation("Loaded MBTiles archive {Path}", path);
         }
@@ -204,7 +229,7 @@ public sealed partial class MapPageViewModel : ObservableObject
                 return;
             }
 
-            mapLoader.LoadMBTilesArchive(Map, path, MBTilesLayerKind.Hillshade);
+            hillshadeBounds = mapLoader.LoadMBTilesArchive(Map, path, MBTilesLayerKind.Hillshade);
             StatusMessage = $"{Localization.AppStrings.StatusHillshadeLoaded}: {Path.GetFileName(path)}";
             logger.LogInformation("Loaded hillshade MBTiles archive {Path}", path);
         }
@@ -278,7 +303,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             return;
         }
 
-        var bounds = ViewportBounds.FromMercatorExtent(GetCurrentExtent());
+        var bounds = ComputeDownloadBounds();
         if (bounds is null)
         {
             StatusMessage = Localization.AppStrings.StatusViewportNotReady;
@@ -292,7 +317,18 @@ public sealed partial class MapPageViewModel : ObservableObject
 
             var trails = await overpassClient.FetchHikingTrailsAsync(bounds.Value).ConfigureAwait(true);
             await trailRepository.UpsertAsync(trails).ConfigureAwait(true);
-            trailRenderer.RenderTrails(Map, trails);
+
+            // The viewport controller re-queries the repo with current-zoom epsilon and
+            // renders the simplified subset; falling back to a direct render keeps the
+            // old behaviour if the controller hasn't been activated yet (e.g. tests).
+            if (viewportTrailController is not null)
+            {
+                viewportTrailController.RequestRefresh();
+            }
+            else
+            {
+                trailRenderer.RenderTrails(Map, trails);
+            }
             Trails3DOverlay = trails;
 
             StatusMessage = trails.Count == 0
@@ -334,7 +370,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             return;
         }
 
-        var bounds = ViewportBounds.FromMercatorExtent(GetCurrentExtent());
+        var bounds = ComputeDownloadBounds();
         if (bounds is null)
         {
             StatusMessage = Localization.AppStrings.StatusViewportNotReady;
@@ -349,6 +385,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             var areas = await climbingOverpassClient.FetchClimbingAreasAsync(bounds.Value).ConfigureAwait(true);
             await climbingRepository.UpsertAsync(areas).ConfigureAwait(true);
             climbingRenderer.RenderClimbingAreas(Map, areas);
+            Climbing3DOverlay = areas;
 
             StatusMessage = areas.Count == 0
                 ? Localization.AppStrings.StatusNoClimbingFound
@@ -565,6 +602,107 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             IsBusy = false;
         }
+    }
+
+    /// <summary>
+    /// Probes the configured map data directories and, on the first call, opens
+    /// whatever it finds: basemap MBTiles (or hillshade as fallback), and DEM.
+    /// Subsequent calls are no-ops so the user's manual choices aren't overwritten.
+    /// </summary>
+    /// <summary>
+    /// Attaches a viewport-aware controller to the map so trail rendering tracks
+    /// pan/zoom: the trail layer is rebuilt from the repo every time the viewport
+    /// settles, pulling only intersecting trails at the appropriate Douglas–Peucker
+    /// epsilon for the current zoom. Idempotent.
+    /// </summary>
+    public void ActivateViewportAwareTrailLayer(ILogger<ViewportAwareTrailLayerController> controllerLogger)
+    {
+        ArgumentNullException.ThrowIfNull(controllerLogger);
+        if (viewportTrailController is not null)
+        {
+            return;
+        }
+        viewportTrailController = new ViewportAwareTrailLayerController(Map, trailRepository, trailRenderer, controllerLogger);
+    }
+
+    public async Task AutoLoadOnStartupAsync()
+    {
+        if (autoLoadAttempted)
+        {
+            return;
+        }
+        autoLoadAttempted = true;
+
+        try
+        {
+            var discovery = autoLoader.Discover();
+            logger.LogInformation(
+                "Auto-load discovery: basemaps=[{Basemaps}], hillshade={Hillshade}, dem={Dem}",
+                string.Join(", ", discovery.BasemapMBTilesPaths),
+                discovery.HillshadeMBTilesPath ?? "(none)",
+                discovery.DemPath ?? "(none)");
+            var loaded = new List<string>(capacity: 3);
+
+            if (discovery.BasemapMBTilesPaths.Count > 0)
+            {
+                foreach (string basemapPath in discovery.BasemapMBTilesPaths)
+                {
+                    ExtendBasemapBounds(mapLoader.LoadMBTilesArchive(Map, basemapPath, MBTilesLayerKind.Basemap));
+                    loaded.Add(Path.GetFileName(basemapPath));
+                    logger.LogInformation("Auto-loaded basemap {Path}", basemapPath);
+                }
+            }
+            else if (discovery.HillshadeMBTilesPath is { } hillshadePath)
+            {
+                // Hillshade is a fallback: only auto-load it when no basemap was found.
+                hillshadeBounds = mapLoader.LoadMBTilesArchive(Map, hillshadePath, MBTilesLayerKind.Hillshade);
+                loaded.Add(Path.GetFileName(hillshadePath));
+                logger.LogInformation("Auto-loaded hillshade (basemap fallback) {Path}", hillshadePath);
+            }
+
+            if (discovery.DemPath is { } demPath)
+            {
+                await LoadDemFromPathAsync(demPath).ConfigureAwait(true);
+                loaded.Add(Path.GetFileName(demPath));
+                logger.LogInformation("Auto-loaded DEM {Path}", demPath);
+            }
+
+            if (loaded.Count > 0)
+            {
+                StatusMessage = $"Auto-loaded: {string.Join(", ", loaded)}";
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Auto-load failed");
+            // Auto-load is best-effort; manual pickers remain available.
+        }
+    }
+
+    /// <summary>
+    /// Returns the bbox to use for an Overpass download: the visible viewport
+    /// intersected with any loaded basemap and DEM bounds. Returns null if the
+    /// viewport isn't ready or the intersection is empty (the user is looking
+    /// at an area entirely outside the loaded map data).
+    /// </summary>
+    private MapBounds? ComputeDownloadBounds()
+    {
+        var viewport = ViewportBounds.FromMercatorExtent(GetCurrentExtent());
+        if (viewport is null)
+        {
+            return null;
+        }
+
+        MapBounds? clipped = viewport;
+        if (basemapBounds is { } basemap)
+        {
+            clipped = clipped?.Intersect(basemap);
+        }
+        if (TerrainRaster?.Bounds is { } demBounds)
+        {
+            clipped = clipped?.Intersect(demBounds);
+        }
+        return clipped;
     }
 
     private MRect? GetCurrentExtent()
