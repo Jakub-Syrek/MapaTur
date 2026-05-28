@@ -92,19 +92,17 @@ jobs:
         with:
           global-json-file: global.json
 
-      - name: Install MAUI workload
-        # `maui` is the meta-workload bundling every per-platform subset
-        # (windows + android + ios + maccatalyst). The MapaTur.App csproj declares
-        # all four TFMs in <TargetFrameworks>, so a restore step fails with
-        # NETSDK1147 unless every workload is present, even when the subsequent
-        # build only targets one TFM.
-        run: dotnet workload install maui
+      - name: Install MAUI workload (Windows only)
+        # The MapaTur.App csproj normally declares Windows + Android + iOS +
+        # MacCatalyst TFMs, but the CI Windows runner only validates Windows.
+        # Installing just maui-windows keeps the workload set minimal; the
+        # restore + build steps below override <TargetFrameworks> so the other
+        # TFMs (which would otherwise pull missing Mono-win-x64 runtime packs
+        # and trip NU1102) are never evaluated.
+        run: dotnet workload install maui-windows
 
-      - name: Restore MAUI app (Windows RID)
-        # Restoring with --runtime win-x64 makes NuGet pull the win-x64 runtime
-        # pack needed at build time; otherwise the SDK throws NETSDK1112 the
-        # moment the App project is built for the Windows TFM.
-        run: dotnet restore src/MapaTur.App/MapaTur.App.csproj --runtime win-x64
+      - name: Restore MAUI app (Windows TFM only)
+        run: dotnet restore src/MapaTur.App/MapaTur.App.csproj -p:TargetFrameworks=net10.0-windows10.0.19041.0
 
-      - name: Build MAUI app (Windows target)
-        run: dotnet build src/MapaTur.App/MapaTur.App.csproj --no-restore -c Release -f net10.0-windows10.0.19041.0 --runtime win-x64
+      - name: Build MAUI app (Windows TFM only)
+        run: dotnet build src/MapaTur.App/MapaTur.App.csproj --no-restore -c Release -p:TargetFrameworks=net10.0-windows10.0.19041.0
