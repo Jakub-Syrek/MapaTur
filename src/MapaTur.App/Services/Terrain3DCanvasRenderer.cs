@@ -21,7 +21,6 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
     private static readonly SKColor SkyTopColor = new(0x1A, 0x35, 0x55);
     private static readonly SKColor SkyBottomColor = new(0x6C, 0x8E, 0xB0);
     private static readonly SKColor RouteColor = new(0x7C, 0x3A, 0xED); // violet, matches 2D planner
-    private static readonly SKColor ClimbingFillColor = new(0xE1, 0x1D, 0x48); // red, matches 2D climbing layer
     private static readonly SKColor ClimbingOutlineColor = new(0x1F, 0x29, 0x37);
     private const float ClimbingMarkerRadiusPx = 5.5f;
 
@@ -63,6 +62,7 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         TerrainMesh3D mesh,
         Camera3D camera,
         Terrain3DFrameScratch scratch,
+        ScreenDepthMap? depthMap = null,
         IReadOnlyList<ProjectedTrail>? trails = null,
         ProjectedRoute? route = null,
         IReadOnlyList<ProjectedClimbingArea>? climbingAreas = null)
@@ -85,17 +85,30 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
             DrawMesh(canvas, mesh, frame);
         }
 
+        // Build the screen-space depth grid from the projected mesh vertices so trails,
+        // routes and climbing markers can be culled when they sit behind a peak.
+        if (depthMap is not null)
+        {
+            depthMap.Configure(viewportWidth, viewportHeight);
+            depthMap.Reset();
+            for (int i = 0; i < frame.VertexCount; i++)
+            {
+                var v = frame.ScreenVertices[i];
+                depthMap.Write(v.X, v.Y, v.Z);
+            }
+        }
+
         if (trails is not null)
         {
-            DrawTrails(canvas, trails);
+            DrawTrails(canvas, trails, depthMap);
         }
         if (route is not null)
         {
-            DrawRoute(canvas, route.Value);
+            DrawRoute(canvas, route.Value, depthMap);
         }
         if (climbingAreas is not null)
         {
-            DrawClimbingAreas(canvas, climbingAreas);
+            DrawClimbingAreas(canvas, climbingAreas, depthMap);
         }
     }
 
@@ -164,7 +177,7 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         cachedMesh = mesh;
     }
 
-    private void DrawTrails(SKCanvas canvas, IReadOnlyList<ProjectedTrail> trails)
+    private void DrawTrails(SKCanvas canvas, IReadOnlyList<ProjectedTrail> trails, ScreenDepthMap? depthMap)
     {
         if (trails.Count == 0)
         {
@@ -196,7 +209,7 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
                 path = new SKPath();
                 trailPathCache[color] = path;
             }
-            AppendPolylineToPath(path, projected.ScreenPoints);
+            AppendPolylineToPath(path, projected.ScreenPoints, depthMap);
         }
 
         // One draw call per colour group — typically ≤7 for the PTTK palette.
@@ -211,13 +224,15 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         }
     }
 
-    private static void AppendPolylineToPath(SKPath path, IReadOnlyList<System.Numerics.Vector3?> pts)
+    private static void AppendPolylineToPath(SKPath path, IReadOnlyList<System.Numerics.Vector3?> pts, ScreenDepthMap? depthMap)
     {
         bool penDown = false;
         for (int i = 0; i < pts.Count; i++)
         {
             var p = pts[i];
-            if (p is null)
+            // Both off-frustum (null) and behind-mesh vertices break the polyline so
+            // the next visible vertex starts a fresh sub-path instead of cutting across.
+            if (p is null || (depthMap is not null && depthMap.IsBehind(p)))
             {
                 penDown = false;
                 continue;
@@ -235,7 +250,7 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         }
     }
 
-    private void DrawRoute(SKCanvas canvas, ProjectedRoute route)
+    private void DrawRoute(SKCanvas canvas, ProjectedRoute route, ScreenDepthMap? depthMap)
     {
         var pts = route.ScreenPoints;
         if (pts.Count < 2)
@@ -261,11 +276,15 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
             {
                 continue;
             }
+            if (depthMap is not null && (depthMap.IsBehind(a) || depthMap.IsBehind(b)))
+            {
+                continue;
+            }
             canvas.DrawLine(a.Value.X, a.Value.Y, b.Value.X, b.Value.Y, routePaint);
         }
     }
 
-    private void DrawClimbingAreas(SKCanvas canvas, IReadOnlyList<ProjectedClimbingArea> areas)
+    private void DrawClimbingAreas(SKCanvas canvas, IReadOnlyList<ProjectedClimbingArea> areas, ScreenDepthMap? depthMap)
     {
         if (areas.Count == 0)
         {
@@ -276,7 +295,6 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         {
             IsAntialias = true,
             Style = SKPaintStyle.Fill,
-            Color = ClimbingFillColor,
         };
         climbingOutlinePaint ??= new SKPaint
         {
@@ -293,9 +311,22 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
             {
                 continue;
             }
+            if (depthMap is not null && depthMap.IsBehind(screen))
+            {
+                continue;
+            }
+            climbingFillPaint.Color = ParseClimbingColor(marker.Source.Type);
             canvas.DrawCircle(screen.Value.X, screen.Value.Y, ClimbingMarkerRadiusPx, climbingFillPaint);
             canvas.DrawCircle(screen.Value.X, screen.Value.Y, ClimbingMarkerRadiusPx, climbingOutlinePaint);
         }
+    }
+
+    private static SKColor ParseClimbingColor(MapaTur.Domain.Climbing.ClimbingType type)
+    {
+        string hex = MapaTur.Domain.Climbing.ClimbingTypeColors.ToHex(type);
+        return SKColor.TryParse("#" + hex, out var color)
+            ? color
+            : new SKColor(0xE1, 0x1D, 0x48);
     }
 
     private static SKColor TrailColor(Trail trail)

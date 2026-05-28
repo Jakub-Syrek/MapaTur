@@ -90,6 +90,9 @@ public partial class Terrain3DView : ContentView
     private readonly Terrain3DController controller;
     private readonly Terrain3DCanvasRenderer renderer = new();
     private readonly Terrain3DFrameScratch frameScratch = new();
+    // 64×64 bins ≈ 20×11 px tiles on a 1280×720 viewport — plenty fine for
+    // mountain-silhouette occlusion, cheap to maintain (16 KB scratch).
+    private readonly ScreenDepthMap depthMap = new(64, 64);
 
     private double lastOrbitTotalX;
     private double lastOrbitTotalY;
@@ -177,7 +180,7 @@ public partial class Terrain3DView : ContentView
                 areas, Raster, Mesh, Camera, e.Info.Width, e.Info.Height);
         }
 
-        renderer.Render(canvas, e.Info.Width, e.Info.Height, Mesh, Camera, frameScratch, projectedTrails, projectedRoute, projectedClimbing);
+        renderer.Render(canvas, e.Info.Width, e.Info.Height, Mesh, Camera, frameScratch, depthMap, projectedTrails, projectedRoute, projectedClimbing);
     }
 
     private void OnOrbitPan(object? sender, PanUpdatedEventArgs e)
