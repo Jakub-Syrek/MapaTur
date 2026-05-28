@@ -1,4 +1,5 @@
 using System.Numerics;
+
 using MapaTur.Domain.Routing;
 
 namespace MapaTur.Application.Terrain;
