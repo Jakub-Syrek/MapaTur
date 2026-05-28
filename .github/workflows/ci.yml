@@ -101,12 +101,13 @@ jobs:
         # and trip NU1102) are never evaluated.
         run: dotnet workload install maui-windows
 
-      - name: Restore MAUI app (Windows TFM + RID)
-        # TargetFrameworks=… strips the csproj down to the Windows TFM so we
-        # don't pull missing Mono-win-x64 / iOS runtime packs (NU1102).
-        # --runtime win-x64 makes NuGet grab the Microsoft.NETCore.App.Runtime
-        # pack the build step then needs (otherwise NETSDK1112 fires).
-        run: dotnet restore src/MapaTur.App/MapaTur.App.csproj -p:TargetFrameworks=net10.0-windows10.0.19041.0 --runtime win-x64
+      - name: Restore MAUI app
+        # App's <TargetFrameworks> auto-conditions iOS / MacCatalyst on macOS,
+        # so on the Windows runner the set is just Android + Windows -- both
+        # covered by the maui-windows + (transitively pulled) android workload.
+        # --runtime win-x64 brings down the Microsoft.NETCore.App.Runtime pack
+        # the Windows TFM needs at build time (otherwise NETSDK1112 fires).
+        run: dotnet restore src/MapaTur.App/MapaTur.App.csproj --runtime win-x64
 
-      - name: Build MAUI app (Windows TFM + RID)
-        run: dotnet build src/MapaTur.App/MapaTur.App.csproj --no-restore -c Release -p:TargetFrameworks=net10.0-windows10.0.19041.0 --runtime win-x64
+      - name: Build MAUI app (Windows TFM)
+        run: dotnet build src/MapaTur.App/MapaTur.App.csproj --no-restore -c Release -f net10.0-windows10.0.19041.0 --runtime win-x64
