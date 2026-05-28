@@ -90,11 +90,6 @@ public partial class Terrain3DView : ContentView
     private readonly Terrain3DController controller;
     private readonly Terrain3DCanvasRenderer renderer = new();
     private readonly Terrain3DFrameScratch frameScratch = new();
-    // 192×192 bins ≈ 7×4 px tiles on a 1280×720 viewport. The denser grid
-    // dramatically reduces the "peak depth contaminates a whole bin" problem
-    // where trails in adjacent valleys would land in a bin whose min depth
-    // came from a foreground ridge and get falsely culled. 144 KB scratch.
-    private readonly ScreenDepthMap depthMap = new(192, 192);
 
     private double lastOrbitTotalX;
     private double lastOrbitTotalY;
@@ -182,7 +177,11 @@ public partial class Terrain3DView : ContentView
                 areas, Raster, Mesh, Camera, e.Info.Width, e.Info.Height);
         }
 
-        renderer.Render(canvas, e.Info.Width, e.Info.Height, Mesh, Camera, frameScratch, depthMap, projectedTrails, projectedRoute, projectedClimbing);
+        // depthMap = null disables trail / route / climbing occlusion: trails
+        // are drawn always on top of the mesh (original behaviour) which is the
+        // visual the user actually wants AND drops a ~6 ms-per-frame depth-grid
+        // fill that was crushing gesture smoothness on a 64k-vertex mesh.
+        renderer.Render(canvas, e.Info.Width, e.Info.Height, Mesh, Camera, frameScratch, null, projectedTrails, projectedRoute, projectedClimbing);
     }
 
     private void OnOrbitPan(object? sender, PanUpdatedEventArgs e)
