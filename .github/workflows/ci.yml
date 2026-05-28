@@ -100,8 +100,11 @@ jobs:
         # build only targets one TFM.
         run: dotnet workload install maui
 
-      - name: Restore MAUI app
-        run: dotnet restore src/MapaTur.App/MapaTur.App.csproj
+      - name: Restore MAUI app (Windows RID)
+        # Restoring with --runtime win-x64 makes NuGet pull the win-x64 runtime
+        # pack needed at build time; otherwise the SDK throws NETSDK1112 the
+        # moment the App project is built for the Windows TFM.
+        run: dotnet restore src/MapaTur.App/MapaTur.App.csproj --runtime win-x64
 
       - name: Build MAUI app (Windows target)
-        run: dotnet build src/MapaTur.App/MapaTur.App.csproj --no-restore -c Release -f net10.0-windows10.0.19041.0
+        run: dotnet build src/MapaTur.App/MapaTur.App.csproj --no-restore -c Release -f net10.0-windows10.0.19041.0 --runtime win-x64
