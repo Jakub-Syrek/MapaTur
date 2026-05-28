@@ -4,6 +4,7 @@
              xmlns:mapsui="clr-namespace:Mapsui.UI.Maui;assembly=Mapsui.UI.Maui"
              xmlns:vm="clr-namespace:MapaTur.App.ViewModels"
              xmlns:loc="clr-namespace:MapaTur.App.Localization"
+             xmlns:views="clr-namespace:MapaTur.App.Views"
              x:Class="MapaTur.App.Views.MapPage"
              x:DataType="vm:MapPageViewModel"
              Title="{x:Static loc:AppStrings.AppTitle}">
@@ -35,6 +36,10 @@
                     Command="{Binding ExportRouteCommand}"
                     IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
                     SemanticProperties.Hint="{x:Static loc:AppStrings.ExportGpx}" />
+            <Button Text="{x:Static loc:AppStrings.Toggle3D}"
+                    Command="{Binding Toggle3DCommand}"
+                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
+                    SemanticProperties.Hint="{x:Static loc:AppStrings.Toggle3D}" />
             <ActivityIndicator IsRunning="{Binding IsBusy}"
                                IsVisible="{Binding IsBusy}"
                                VerticalOptions="Center" />
@@ -43,7 +48,15 @@
         <mapsui:MapControl x:Name="MapControl"
                            Grid.Row="1"
                            Map="{Binding Map}"
+                           IsVisible="{Binding Is3DMode, Converter={StaticResource InverseBool}}"
                            SemanticProperties.Description="{x:Static loc:AppStrings.AccessibilityMapControl}" />
+
+        <views:Terrain3DView Grid.Row="1"
+                             Mesh="{Binding TerrainMesh}"
+                             Raster="{Binding TerrainRaster}"
+                             Trails="{Binding Trails3DOverlay}"
+                             Route="{Binding Route3DOverlay}"
+                             IsVisible="{Binding Is3DMode}" />
 
         <Label Grid.Row="2"
                Padding="12,8"

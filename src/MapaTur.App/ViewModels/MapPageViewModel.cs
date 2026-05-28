@@ -5,9 +5,13 @@ using Mapsui.Projections;
 using MapaTur.App.Services;
 using MapaTur.Application.Climbing;
 using MapaTur.Application.Routing;
+using MapaTur.Application.Terrain;
 using MapaTur.Application.Tracks;
 using MapaTur.Application.Trails;
 using MapaTur.Domain.Geography;
+using MapaTur.Domain.Terrain;
+using MapaTur.Domain.Trails;
+using MapaTur.Infrastructure.Terrain;
 using Microsoft.Extensions.Logging;
 using Map = Mapsui.Map;
 
@@ -47,6 +51,21 @@ public sealed partial class MapPageViewModel : ObservableObject
 
     [ObservableProperty]
     private bool isBusy;
+
+    [ObservableProperty]
+    private bool is3DMode;
+
+    [ObservableProperty]
+    private TerrainMesh3D? terrainMesh;
+
+    [ObservableProperty]
+    private DemRaster? terrainRaster;
+
+    [ObservableProperty]
+    private IReadOnlyList<Trail>? trails3DOverlay;
+
+    [ObservableProperty]
+    private Domain.Routing.Route? route3DOverlay;
 
     /// <summary>
     /// Initializes a new instance of the view model.
@@ -274,6 +293,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             var trails = await overpassClient.FetchHikingTrailsAsync(bounds.Value).ConfigureAwait(true);
             await trailRepository.UpsertAsync(trails).ConfigureAwait(true);
             trailRenderer.RenderTrails(Map, trails);
+            Trails3DOverlay = trails;
 
             StatusMessage = trails.Count == 0
                 ? Localization.AppStrings.StatusNoTrailsFound
@@ -374,6 +394,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             // Third tap restarts the workflow.
             waypoints.Clear();
             LastPlannedRoute = null;
+            Route3DOverlay = null;
             routeRenderer.Clear(Map);
         }
 
@@ -389,12 +410,85 @@ public sealed partial class MapPageViewModel : ObservableObject
         await PlanRouteForWaypointsAsync().ConfigureAwait(true);
     }
 
+    /// <summary>
+    /// Prompts the user for a .dem file and loads it as the active 3D terrain mesh.
+    /// </summary>
+    [RelayCommand]
+    public async Task OpenDemAsync()
+    {
+        try
+        {
+            string? path = await filePicker.PickFileAsync(Localization.AppStrings.FilePickerDem);
+            if (path is null)
+            {
+                return;
+            }
+
+            await LoadDemFromPathAsync(path).ConfigureAwait(true);
+        }
+        catch (FileNotFoundException ex)
+        {
+            StatusMessage = Localization.AppStrings.StatusFileNotFound;
+            logger.LogWarning(ex, "DEM file not found");
+        }
+        catch (InvalidDataException ex)
+        {
+            StatusMessage = $"Could not parse DEM: {ex.Message}";
+            logger.LogError(ex, "DEM parse failure");
+        }
+        catch (Exception ex)
+        {
+            int? hresult = ex.HResult != 0 ? ex.HResult : null;
+            string hresultText = hresult is not null ? $" (0x{hresult:X8})" : string.Empty;
+            string detail = string.IsNullOrEmpty(ex.Message) ? "(no message)" : ex.Message;
+            StatusMessage = $"Could not load DEM: {ex.GetType().Name}{hresultText}: {detail}";
+            logger.LogError(ex, "Failed to load DEM");
+        }
+    }
+
+    /// <summary>
+    /// Toggles between flat 2D and 3D terrain mode. If 3D is enabled and no mesh has
+    /// been loaded yet, the user is prompted to pick a .dem file.
+    /// </summary>
+    [RelayCommand]
+    public async Task Toggle3DAsync()
+    {
+        if (Is3DMode)
+        {
+            Is3DMode = false;
+            StatusMessage = Localization.AppStrings.Status2DMode;
+            return;
+        }
+
+        if (TerrainMesh is null)
+        {
+            await OpenDemAsync().ConfigureAwait(true);
+            if (TerrainMesh is null)
+            {
+                return;
+            }
+        }
+
+        Is3DMode = true;
+        StatusMessage = Localization.AppStrings.Status3DMode;
+    }
+
+    private async Task LoadDemFromPathAsync(string path)
+    {
+        var raster = await Task.Run(() => DemRasterReader.Read(path)).ConfigureAwait(true);
+        TerrainRaster = raster;
+        TerrainMesh = await Task.Run(() => TerrainMesh3D.Build(raster)).ConfigureAwait(true);
+        logger.LogInformation("Loaded DEM {Path} ({Cols}x{Rows})", path, raster.Columns, raster.Rows);
+        StatusMessage = $"{Localization.AppStrings.StatusDemLoaded}: {Path.GetFileName(path)}";
+    }
+
     /// <summary>Clears any planned route and waypoints.</summary>
     [RelayCommand]
     public void ClearRoute()
     {
         waypoints.Clear();
         LastPlannedRoute = null;
+        Route3DOverlay = null;
         routeRenderer.Clear(Map);
         StatusMessage = Localization.AppStrings.StatusRouteCleared;
     }
@@ -451,6 +545,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             }
 
             LastPlannedRoute = route;
+            Route3DOverlay = route;
             routeRenderer.RenderRoute(Map, route);
 
             double distanceKilometers = route.TotalDistanceMeters / 1000.0;

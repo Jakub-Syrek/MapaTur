@@ -94,4 +94,22 @@
   <data name="AccessibilityMapControl" xml:space="preserve">
     <value>Interactive map. Tap to set route waypoints.</value>
   </data>
+  <data name="OpenDem" xml:space="preserve">
+    <value>Open DEM</value>
+  </data>
+  <data name="Toggle3D" xml:space="preserve">
+    <value>3D Mode</value>
+  </data>
+  <data name="Status3DMode" xml:space="preserve">
+    <value>3D mode enabled. Drag to orbit, pinch to zoom, two-finger drag to pan.</value>
+  </data>
+  <data name="Status2DMode" xml:space="preserve">
+    <value>2D map view restored.</value>
+  </data>
+  <data name="StatusDemLoaded" xml:space="preserve">
+    <value>DEM loaded</value>
+  </data>
+  <data name="FilePickerDem" xml:space="preserve">
+    <value>Select DEM file</value>
+  </data>
 </root>
