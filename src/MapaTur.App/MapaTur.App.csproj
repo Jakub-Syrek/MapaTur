@@ -2,7 +2,11 @@
 
 	<PropertyGroup>
 		<TargetFrameworks>net10.0-android</TargetFrameworks>
-		<TargetFrameworks Condition="!$([MSBuild]::IsOSPlatform('linux'))">$(TargetFrameworks);net10.0-ios;net10.0-maccatalyst</TargetFrameworks>
+		<!-- iOS + MacCatalyst TFMs are only usable when the Apple SDK is present, so
+		     gate them on macOS. Windows CI used to pull these in (via the broader
+		     "non-linux" check) which then required the Mono runtime pack and tripped
+		     NU1102 because that pack isn't published for net10.0 on nuget.org. -->
+		<TargetFrameworks Condition="$([MSBuild]::IsOSPlatform('osx'))">$(TargetFrameworks);net10.0-ios;net10.0-maccatalyst</TargetFrameworks>
 		<TargetFrameworks Condition="$([MSBuild]::IsOSPlatform('windows'))">$(TargetFrameworks);net10.0-windows10.0.19041.0</TargetFrameworks>
 
 		<!-- Note for MacCatalyst:
