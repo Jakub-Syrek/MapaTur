@@ -298,6 +298,7 @@ public partial class Terrain3DView : ContentView
 
 #if WINDOWS
     private Microsoft.UI.Xaml.UIElement? wheelTarget;
+    private Microsoft.UI.Xaml.Input.KeyEventHandler? keyDownHandler;
 
     // Keyboard-step constants tuned to feel close to one drag-pixel of the gesture
     // recognisers (controller.OrbitSensitivity = 0.005 rad/px, PanSensitivity = 0.001 m/px/m).
@@ -320,7 +321,13 @@ public partial class Terrain3DView : ContentView
             {
                 control.IsTabStop = true;
             }
-            element.KeyDown += OnPlatformKeyDown;
+
+            // Subscribe via AddHandler with handledEventsToo:true rather than "+= KeyDown".
+            // Character keys (WASD) bubble up from the focused child already marked Handled,
+            // so a plain CLR subscription only ever sees the arrow keys; AddHandler with
+            // handledEventsToo receives the event regardless and lets WASD orbit work too.
+            keyDownHandler ??= OnPlatformKeyDown;
+            element.AddHandler(Microsoft.UI.Xaml.UIElement.KeyDownEvent, keyDownHandler, handledEventsToo: true);
             element.PointerPressed += OnPlatformPointerPressed;
         }
     }
@@ -330,7 +337,10 @@ public partial class Terrain3DView : ContentView
         if (wheelTarget is not null)
         {
             wheelTarget.PointerWheelChanged -= OnPointerWheelChanged;
-            wheelTarget.KeyDown -= OnPlatformKeyDown;
+            if (keyDownHandler is not null)
+            {
+                wheelTarget.RemoveHandler(Microsoft.UI.Xaml.UIElement.KeyDownEvent, keyDownHandler);
+            }
             wheelTarget.PointerPressed -= OnPlatformPointerPressed;
             wheelTarget = null;
         }
