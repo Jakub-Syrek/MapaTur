@@ -495,3 +495,6 @@ testdata/maps/tatry-hillshade-real.mbtiles
 # fixtures) keeps tracking normally.
 /maps/
 /dem/
+
+# Local screenshot scratch folder
+/screens/
