@@ -36,6 +36,9 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
     private const float PeakLabelSizePx = 12.5f;
     // Named summits get their name on a line above the elevation, in a slightly larger bold face.
     private const float PeakNameSizePx = 14f;
+    // Minimum on-screen spacing between peak markers; closer ones are dropped so labels don't overlap.
+    private const float MinPeakSeparationPx = 52f;
+    private readonly List<SKPoint> drawnPeakAnchors = new();
 
     // Trail / route / climbing vertices are only culled when their NDC depth
     // exceeds the local mesh depth by more than this much. The minimum-per-bin
@@ -545,6 +548,11 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         };
         peakPath ??= new SKPath();
 
+        // De-clutter: peaks arrive highest-first, so skip any whose marker would land within
+        // MinPeakSeparationPx of an already-drawn one (their labels would otherwise overlap into mush,
+        // e.g. the tightly-packed Orla Perć summits). The most prominent summit in a cluster wins.
+        drawnPeakAnchors.Clear();
+
         foreach (var peak in peaks)
         {
             var screen = peak.ScreenPosition;
@@ -559,6 +567,23 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
 
             float x = screen.Value.X;
             float y = screen.Value.Y;
+
+            bool collides = false;
+            foreach (SKPoint anchor in drawnPeakAnchors)
+            {
+                float dx = anchor.X - x;
+                float dy = anchor.Y - y;
+                if ((dx * dx) + (dy * dy) < MinPeakSeparationPx * MinPeakSeparationPx)
+                {
+                    collides = true;
+                    break;
+                }
+            }
+            if (collides)
+            {
+                continue;
+            }
+            drawnPeakAnchors.Add(new SKPoint(x, y));
 
             // Mountain glyph: base sits on the projected summit point, apex points up.
             peakPath.Reset();
