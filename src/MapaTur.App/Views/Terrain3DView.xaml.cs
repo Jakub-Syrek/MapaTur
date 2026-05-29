@@ -119,6 +119,26 @@ public partial class Terrain3DView : ContentView
         set => SetValue(PeaksProperty, value);
     }
 
+    /// <summary>Bindable path to an ortho-photo image draped over the terrain (GPU path only). Null = hypsometric tint.</summary>
+    public static readonly BindableProperty OrthoTexturePathProperty = BindableProperty.Create(
+        nameof(OrthoTexturePath),
+        typeof(string),
+        typeof(Terrain3DView),
+        propertyChanged: OnOrthoTexturePathChanged);
+
+    public string? OrthoTexturePath
+    {
+        get => (string?)GetValue(OrthoTexturePathProperty);
+        set => SetValue(OrthoTexturePathProperty, value);
+    }
+
+    private static void OnOrthoTexturePathChanged(BindableObject bindable, object oldValue, object newValue)
+    {
+        var view = (Terrain3DView)bindable;
+        view.orthoPathDirty = true;
+        view.Canvas.InvalidateSurface();
+    }
+
     /// <summary>Camera state mutated by gestures and used by the renderer.</summary>
     public Camera3D Camera { get; } = new Camera3D();
 
@@ -161,6 +181,10 @@ public partial class Terrain3DView : ContentView
     private double lastTranslateTotalX;
     private double lastTranslateTotalY;
     private double lastPinchScale = 1.0;
+
+    // Set when OrthoTexturePath changes; the GPU render path decodes the image and hands it to the GL
+    // renderer once (off the per-frame path). Lives outside #if WINDOWS because the bindable setter does.
+    private bool orthoPathDirty;
 
     public Terrain3DView()
     {
@@ -644,6 +668,14 @@ public partial class Terrain3DView : ContentView
         try
         {
             glRenderer ??= new Platforms.Windows.Terrain3DGlRenderer();
+
+            // Push a changed ortho image to the GL renderer once (it uploads on the GL thread next Render).
+            if (orthoPathDirty)
+            {
+                orthoPathDirty = false;
+                ApplyOrthoTexture(glRenderer, OrthoTexturePath);
+            }
+
             // GL draws the terrain AND the depth-tested trail/route lines (so the terrain occludes them).
             glRenderer.Render(width, height, tiles, Camera, framebuffer, Trails, Raster, Route);
             // Hand GL state back to Skia so any later 2D drawing on this surface behaves.
@@ -657,6 +689,47 @@ public partial class Terrain3DView : ContentView
             glRenderer?.Dispose();
             glRenderer = null;
             return false;
+        }
+    }
+
+    // Decodes the ortho image to tightly-packed top-row-first RGBA8 (row 0 = north, matching the mesh UVs)
+    // and hands it to the GL renderer. A null/missing/undecodable path clears the texture (back to the
+    // hypsometric tint). Decode failure is non-fatal — the terrain still renders.
+    private static void ApplyOrthoTexture(Platforms.Windows.Terrain3DGlRenderer renderer, string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !System.IO.File.Exists(path))
+        {
+            renderer.SetOrthoTexture(null, 0, 0);
+            return;
+        }
+
+        try
+        {
+            using var stream = System.IO.File.OpenRead(path);
+            using var codec = SkiaSharp.SKCodec.Create(stream);
+            if (codec is null)
+            {
+                renderer.SetOrthoTexture(null, 0, 0);
+                return;
+            }
+
+            var info = new SkiaSharp.SKImageInfo(
+                codec.Info.Width,
+                codec.Info.Height,
+                SkiaSharp.SKColorType.Rgba8888,
+                SkiaSharp.SKAlphaType.Unpremul);
+            using var bitmap = new SkiaSharp.SKBitmap(info);
+            if (codec.GetPixels(info, bitmap.GetPixels()) != SkiaSharp.SKCodecResult.Success)
+            {
+                renderer.SetOrthoTexture(null, 0, 0);
+                return;
+            }
+
+            renderer.SetOrthoTexture(bitmap.Bytes, info.Width, info.Height);
+        }
+        catch (Exception)
+        {
+            renderer.SetOrthoTexture(null, 0, 0);
         }
     }
 #endif

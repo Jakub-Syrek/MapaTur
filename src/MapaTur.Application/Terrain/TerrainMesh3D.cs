@@ -27,6 +27,9 @@ public sealed class TerrainMesh3D
     /// <summary>Per-vertex unshaded hypsometric ARGB colours. The GPU renderer combines these with <see cref="Normals"/> to shade per-pixel.</summary>
     public uint[] BaseColors { get; }
 
+    /// <summary>Per-vertex texture coordinates (2 floats u,v per vertex) mapping an ortho image across the full raster: (0,0)=NW, (1,1)=SE.</summary>
+    public float[] TexCoords { get; }
+
     /// <summary>Triangle index buffer (3 ushorts per triangle).</summary>
     public ushort[] Indices { get; }
 
@@ -53,6 +56,7 @@ public sealed class TerrainMesh3D
         Vector3[] normals,
         uint[] colors,
         uint[] baseColors,
+        float[] texCoords,
         ushort[] indices,
         Vector3 center,
         float horizontalExtent,
@@ -65,6 +69,7 @@ public sealed class TerrainMesh3D
         Normals = normals;
         Colors = colors;
         BaseColors = baseColors;
+        TexCoords = texCoords;
         Indices = indices;
         Center = center;
         HorizontalExtent = horizontalExtent;
@@ -226,7 +231,13 @@ public sealed class TerrainMesh3D
         var normals = new Vector3[vertexCount];
         var colors = new uint[vertexCount];
         var baseColors = new uint[vertexCount];
+        var texCoords = new float[vertexCount * 2];
         var indices = new ushort[(tileCols - 1) * (tileRows - 1) * 2 * 3];
+
+        // Normalisers map each vertex's GLOBAL grid index to [0,1] across the full raster, so an ortho image
+        // drapes seamlessly across every tile. Guard the 1-column/1-row degenerate case.
+        float uDenom = cols > 1 ? cols - 1 : 1;
+        float vDenom = rows > 1 ? rows - 1 : 1;
 
         // Vertex positions in the full-raster world frame. Row 0 = north edge = +Y; last row = -Y.
         for (int r = rowStart; r <= rowEnd; r++)
@@ -267,6 +278,8 @@ public sealed class TerrainMesh3D
                 Vector3 normal = Vector3.Normalize(new Vector3(-dzdx, -dzdy, 1f));
                 int li = (localRow * tileCols) + (c - colStart);
                 normals[li] = normal;
+                texCoords[li * 2] = c / uDenom;
+                texCoords[(li * 2) + 1] = r / vDenom;
 
                 uint baseColor = HypsometricColor(raster[c, r]);
                 baseColors[li] = baseColor;
@@ -303,6 +316,7 @@ public sealed class TerrainMesh3D
             normals,
             colors,
             baseColors,
+            texCoords,
             indices,
             Vector3.Zero,
             frame.HorizontalExtent,

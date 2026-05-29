@@ -30,25 +30,32 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "layout(location=0) in vec3 aPos;\n" +
         "layout(location=1) in vec4 aColor;\n" +
         "layout(location=2) in vec3 aNormal;\n" +
+        "layout(location=3) in vec2 aTex;\n" +
         "uniform mat4 uMvp;\n" +
         "out vec4 vColor;\n" +
         "out vec3 vNormal;\n" +
-        "void main(){ vColor = aColor; vNormal = aNormal; gl_Position = uMvp * vec4(aPos, 1.0); }\n";
+        "out vec2 vTex;\n" +
+        "void main(){ vColor = aColor; vNormal = aNormal; vTex = aTex; gl_Position = uMvp * vec4(aPos, 1.0); }\n";
 
     // Per-pixel Lambert lighting: shade = ambient + (1-ambient)*max(0, dot(N, L)), matching the CPU bake in
-    // TerrainMesh3D.BuildBlock but evaluated per fragment from the interpolated normal.
+    // TerrainMesh3D.BuildBlock but evaluated per fragment from the interpolated normal. When an ortho image
+    // is bound (uUseOrtho=1) the surface colour is sampled from it; otherwise the hypsometric base tint.
     private const string TerrainFragmentShaderSource =
         "#version 300 es\n" +
         "precision mediump float;\n" +
         "in vec4 vColor;\n" +
         "in vec3 vNormal;\n" +
+        "in vec2 vTex;\n" +
         "uniform vec3 uLightDir;\n" +
         "uniform float uAmbient;\n" +
+        "uniform sampler2D uOrtho;\n" +
+        "uniform int uUseOrtho;\n" +
         "out vec4 fragColor;\n" +
         "void main(){\n" +
         "  float lambert = max(0.0, dot(normalize(vNormal), uLightDir));\n" +
         "  float shade = uAmbient + ((1.0 - uAmbient) * lambert);\n" +
-        "  fragColor = vec4(vColor.rgb * shade, 1.0);\n" +
+        "  vec3 base = (uUseOrtho == 1) ? texture(uOrtho, vTex).rgb : vColor.rgb;\n" +
+        "  fragColor = vec4(base * shade, 1.0);\n" +
         "}\n";
 
     // Flat fragment shader for the line/ribbon program (trails/route): no lighting, just the vertex colour.
@@ -107,6 +114,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         public uint PositionVbo;
         public uint ColorVbo;
         public uint NormalVbo;
+        public uint TexVbo;
         public uint Ebo;
         public int IndexCount;
     }
@@ -130,6 +138,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int mvpLocation = -1;
     private int lightDirLocation = -1;
     private int ambientLocation = -1;
+    private int orthoSamplerLocation = -1;
+    private int useOrthoLocation = -1;
+
+    // Optional ortho-photo texture draped over the terrain. The view hands us decoded RGBA bytes; we upload
+    // them lazily on the GL thread. Bytes are kept so the texture can be re-created after a context loss.
+    private uint orthoTexture;
+    private byte[]? orthoBytes;
+    private int orthoTexWidth;
+    private int orthoTexHeight;
+    private bool orthoDirty;
     private uint lineProgram;
     private int lineMvpLocation = -1;
     private int lineViewportLocation = -1;
@@ -160,6 +178,28 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private Route? lastRoute;
     private DemRaster? lastRouteRaster;
     private TerrainMesh3D? lastRouteMesh;
+
+    /// <summary>
+    /// Sets (or clears, when <paramref name="rgba"/> is null) the ortho-photo texture draped over the terrain.
+    /// <paramref name="rgba"/> is tightly-packed top-row-first RGBA8 (row 0 = north, matching the mesh UVs).
+    /// The actual GL upload happens on the next <see cref="Render"/> call, on the GL thread.
+    /// </summary>
+    public void SetOrthoTexture(byte[]? rgba, int width, int height)
+    {
+        if (rgba is not null && width > 0 && height > 0)
+        {
+            orthoBytes = rgba;
+            orthoTexWidth = width;
+            orthoTexHeight = height;
+        }
+        else
+        {
+            orthoBytes = null;
+            orthoTexWidth = 0;
+            orthoTexHeight = 0;
+        }
+        orthoDirty = true;
+    }
 
     /// <summary>Draws the terrain and the depth-tested trail/route overlays. Throws on GL/shader failure so the caller can fall back to Skia.</summary>
     public void Render(
@@ -195,6 +235,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             mvpLocation = -1;
             lightDirLocation = -1;
             ambientLocation = -1;
+            orthoSamplerLocation = -1;
+            useOrthoLocation = -1;
+            // The ortho texture ID belonged to the dead context; keep the bytes and re-upload them.
+            orthoTexture = 0;
+            if (orthoBytes is not null)
+            {
+                orthoDirty = true;
+            }
             // The MSAA renderbuffers/FBO belonged to the dead context; drop the cached IDs and re-probe.
             msaaFbo = 0;
             msaaColorRb = 0;
@@ -213,6 +261,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             UploadTiles(gl, tiles);
             lastTiles = tiles;
         }
+
+        EnsureOrthoTexture(gl);
 
         int vpWidth = Math.Max(1, width);
         int vpHeight = Math.Max(1, height);
@@ -263,6 +313,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         Vector3 light = lightFrame.LightDirection;
         gl.Uniform3(lightDirLocation, light.X, light.Y, light.Z);
         gl.Uniform1(ambientLocation, lightFrame.AmbientFactor);
+
+        // Drape the ortho image when one is uploaded; otherwise the shader uses the hypsometric tint.
+        bool useOrtho = orthoTexture != 0;
+        gl.Uniform1(useOrthoLocation, useOrtho ? 1 : 0);
+        if (useOrtho)
+        {
+            gl.ActiveTexture(TextureUnit.Texture0);
+            gl.BindTexture(TextureTarget.Texture2D, orthoTexture);
+            gl.Uniform1(orthoSamplerLocation, 0);
+        }
 
         foreach (TileBuffers tile in tileBuffers.Values)
         {
@@ -363,6 +423,48 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         return true;
     }
 
+    /// <summary>Uploads / refreshes / deletes the ortho GL texture when <see cref="orthoDirty"/> is set.</summary>
+    private void EnsureOrthoTexture(GL g)
+    {
+        if (!orthoDirty)
+        {
+            return;
+        }
+        orthoDirty = false;
+
+        if (orthoBytes is null)
+        {
+            if (orthoTexture != 0)
+            {
+                g.DeleteTexture(orthoTexture);
+                orthoTexture = 0;
+            }
+            return;
+        }
+
+        if (orthoTexture == 0)
+        {
+            orthoTexture = g.GenTexture();
+        }
+
+        g.BindTexture(TextureTarget.Texture2D, orthoTexture);
+        g.TexImage2D<byte>(
+            TextureTarget.Texture2D,
+            0,
+            (int)InternalFormat.Rgba8,
+            (uint)orthoTexWidth,
+            (uint)orthoTexHeight,
+            0,
+            PixelFormat.Rgba,
+            PixelType.UnsignedByte,
+            orthoBytes);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+        g.BindTexture(TextureTarget.Texture2D, 0);
+    }
+
     private void EnsureProgram(GL g)
     {
         if (programReady)
@@ -387,6 +489,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         mvpLocation = g.GetUniformLocation(program, "uMvp");
         lightDirLocation = g.GetUniformLocation(program, "uLightDir");
         ambientLocation = g.GetUniformLocation(program, "uAmbient");
+        orthoSamplerLocation = g.GetUniformLocation(program, "uOrtho");
+        useOrthoLocation = g.GetUniformLocation(program, "uUseOrtho");
 
         // Line ribbon program (reuses the same fragment shader).
         uint lvs = CompileShader(g, ShaderType.VertexShader, LineVertexShaderSource);
@@ -492,6 +596,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             g.EnableVertexAttribArray(2);
             g.VertexAttribPointer(2, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
 
+            float[] texCoords = tile.TexCoords;
+            buffers.TexVbo = g.GenBuffer();
+            g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.TexVbo);
+            g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(texCoords.Length * sizeof(float)), texCoords, BufferUsageARB.StaticDraw);
+            g.EnableVertexAttribArray(3);
+            g.VertexAttribPointer(3, 2, VertexAttribPointerType.Float, false, 2 * sizeof(float), (void*)0);
+
             buffers.Ebo = g.GenBuffer();
             g.BindBuffer(BufferTargetARB.ElementArrayBuffer, buffers.Ebo);
             g.BufferData<ushort>(BufferTargetARB.ElementArrayBuffer, (nuint)(indices.Length * sizeof(ushort)), indices, BufferUsageARB.StaticDraw);
@@ -508,6 +619,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             g.DeleteBuffer(b.PositionVbo);
             g.DeleteBuffer(b.ColorVbo);
             g.DeleteBuffer(b.NormalVbo);
+            g.DeleteBuffer(b.TexVbo);
             g.DeleteBuffer(b.Ebo);
             g.DeleteVertexArray(b.Vao);
         }
@@ -731,6 +843,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         msaaFbo = 0;
         msaaColorRb = 0;
         msaaDepthRb = 0;
+        if (orthoTexture != 0)
+        {
+            gl.DeleteTexture(orthoTexture);
+            orthoTexture = 0;
+        }
         if (programReady)
         {
             gl.DeleteProgram(program);

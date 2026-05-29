@@ -259,6 +259,10 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private IReadOnlyList<MapaTur.Domain.Pois.MountainPoi>? pois3DOverlay;
 
+    /// <summary>Path to an ortho-photo image draped over the 3D terrain (GPU path), or null for the hypsometric tint.</summary>
+    [ObservableProperty]
+    private string? orthoTexturePath;
+
     /// <summary>
     /// DEM-derived summits drawn as labelled markers in the 3D view so it isn't bare terrain +
     /// trails. Computed offline from the loaded raster (no network) and refreshed each DEM load.
@@ -960,11 +964,12 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             var discovery = autoLoader.Discover();
             logger.LogInformation(
-                "Auto-load discovery: basemaps=[{Basemaps}], hillshade={Hillshade}, dem={Dem}, trails={Trails}",
+                "Auto-load discovery: basemaps=[{Basemaps}], hillshade={Hillshade}, dem={Dem}, trails={Trails}, ortho={Ortho}",
                 string.Join(", ", discovery.BasemapMBTilesPaths),
                 discovery.HillshadeMBTilesPath ?? "(none)",
                 discovery.DemPath ?? "(none)",
-                discovery.TrailsDataPath ?? "(none)");
+                discovery.TrailsDataPath ?? "(none)",
+                discovery.OrthoTexturePath ?? "(none)");
             var loaded = new List<string>(capacity: 3);
 
             if (discovery.BasemapMBTilesPaths.Count > 0)
@@ -1014,6 +1019,14 @@ public sealed partial class MapPageViewModel : ObservableObject
                 await ApplyTrailsAsync(trails).ConfigureAwait(true);
                 loaded.Add(Path.GetFileName(trailsPath));
                 logger.LogInformation("Auto-loaded {Count} pre-bundled trails from {Path}", trails.Count, trailsPath);
+            }
+
+            if (discovery.OrthoTexturePath is { } orthoPath)
+            {
+                // The 3D view decodes + uploads this to the GPU; nothing to parse here, just surface the path.
+                OrthoTexturePath = orthoPath;
+                loaded.Add(Path.GetFileName(orthoPath));
+                logger.LogInformation("Auto-loaded ortho texture {Path}", orthoPath);
             }
 
             if (loaded.Count > 0)

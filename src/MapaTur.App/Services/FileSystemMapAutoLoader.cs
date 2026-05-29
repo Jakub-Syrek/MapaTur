@@ -38,6 +38,7 @@ public sealed class FileSystemMapAutoLoader : IMapAutoLoader
         string? hillshade = null;
         string? dem = null;
         string? trailsData = null;
+        string? orthoTexture = null;
 
         foreach (string root in searchRoots)
         {
@@ -96,9 +97,21 @@ public sealed class FileSystemMapAutoLoader : IMapAutoLoader
                     }
                 }
             }
+
+            if (orthoTexture is null)
+            {
+                foreach (string path in EnumerateFilesSafe(root, "*.png").Concat(EnumerateFilesSafe(root, "*.jpg")))
+                {
+                    if (Path.GetFileName(path).Contains("ortho", StringComparison.OrdinalIgnoreCase))
+                    {
+                        orthoTexture = path;
+                        break;
+                    }
+                }
+            }
         }
 
-        return new MapAutoLoadDiscovery(basemaps, hillshade, dem, trailsData);
+        return new MapAutoLoadDiscovery(basemaps, hillshade, dem, trailsData, orthoTexture);
     }
 
     private static IEnumerable<string> EnumerateFilesSafe(string root, string pattern)

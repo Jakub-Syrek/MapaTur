@@ -8,11 +8,13 @@ namespace MapaTur.App.Services;
 /// <param name="HillshadeMBTilesPath">First .mbtiles archive whose filename suggests it is a hillshade layer, or null.</param>
 /// <param name="DemPath">First .dem file found, or null.</param>
 /// <param name="TrailsDataPath">First pre-fetched trails file (a saved Overpass JSON response, filename containing "trail"), or null. Lets the app load the whole regional trail set from disk instead of hitting Overpass live.</param>
+/// <param name="OrthoTexturePath">First ortho-photo image (.png/.jpg whose filename contains "ortho"), or null. Draped over the 3D terrain by the GPU renderer instead of the hypsometric tint.</param>
 public readonly record struct MapAutoLoadDiscovery(
     IReadOnlyList<string> BasemapMBTilesPaths,
     string? HillshadeMBTilesPath,
     string? DemPath,
-    string? TrailsDataPath = null);
+    string? TrailsDataPath = null,
+    string? OrthoTexturePath = null);
 
 /// <summary>
 /// Discovers map data files (MBTiles archives, DEM rasters) on disk so the app can

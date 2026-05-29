@@ -66,6 +66,25 @@ public sealed class TerrainMesh3DTests
     }
 
     [Fact]
+    public void Build_TexCoordsMapCornersAcrossFullRaster()
+    {
+        // 2x2 raster → 4 vertices in row-major order: NW, NE, SW, SE. UV spans [0,1]² with the
+        // north-west corner at (0,0) and the south-east corner at (1,1), so an ortho image drapes
+        // edge-to-edge over the terrain.
+        var raster = BuildFlatRaster(2, 2);
+
+        TerrainMesh3D mesh = TerrainMesh3D.Build(raster);
+
+        mesh.TexCoords.Length.Should().Be(4 * 2, "two floats (u,v) per vertex");
+        // NW vertex (index 0).
+        mesh.TexCoords[0].Should().Be(0f);
+        mesh.TexCoords[1].Should().Be(0f);
+        // SE vertex (index 3).
+        mesh.TexCoords[6].Should().Be(1f);
+        mesh.TexCoords[7].Should().Be(1f);
+    }
+
+    [Fact]
     public void Build_ExposesLightDirectionAndAmbientFromOptions()
     {
         var raster = BuildFlatRaster(2, 2);

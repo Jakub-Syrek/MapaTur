@@ -108,6 +108,7 @@
                              ClimbingAreas="{Binding Climbing3DOverlay}"
                              Pois="{Binding Pois3DOverlay}"
                              Peaks="{Binding Peaks3DOverlay}"
+                             OrthoTexturePath="{Binding OrthoTexturePath}"
                              IsVisible="{Binding Is3DMode}" />
 
         <Label Grid.Row="3"
