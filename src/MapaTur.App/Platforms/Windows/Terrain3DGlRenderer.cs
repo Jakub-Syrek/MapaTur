@@ -460,6 +460,23 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             return;
         }
 
+        // Guard against an image larger than the GPU allows — uploading beyond GL_MAX_TEXTURE_SIZE yields a
+        // garbage/black texture. If it doesn't fit, skip the ortho (terrain falls back to the hypsometric tint)
+        // rather than render corruption.
+        Span<int> maxTexSize = stackalloc int[1] { 2048 };
+        g.GetInteger(GLEnum.MaxTextureSize, maxTexSize);
+        if (orthoTexWidth > maxTexSize[0] || orthoTexHeight > maxTexSize[0])
+        {
+            Log.Information("[GL3D] ortho {W}x{H} exceeds GL_MAX_TEXTURE_SIZE {Max}; skipping (hypsometric fallback)",
+                orthoTexWidth, orthoTexHeight, maxTexSize[0]);
+            if (orthoTexture != 0)
+            {
+                g.DeleteTexture(orthoTexture);
+                orthoTexture = 0;
+            }
+            return;
+        }
+
         if (orthoTexture == 0)
         {
             orthoTexture = g.GenTexture();

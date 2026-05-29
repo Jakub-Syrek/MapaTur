@@ -722,6 +722,13 @@ public partial class Terrain3DView : ContentView
     private Platforms.Windows.Terrain3DGlRenderer? glRenderer;
     private bool glDisabled;
 
+    // Decoded ortho pixels cached by path so re-entering 3D (which rebuilds the renderer) re-uploads from
+    // memory instead of decoding the large PNG from disk every time.
+    private string? cachedOrthoPath;
+    private byte[]? cachedOrthoBytes;
+    private int cachedOrthoWidth;
+    private int cachedOrthoHeight;
+
     private bool TryRenderTerrainGl(IReadOnlyList<TerrainMesh3D> tiles, int width, int height, uint framebuffer)
     {
         if (glDisabled)
@@ -759,11 +766,20 @@ public partial class Terrain3DView : ContentView
     // Decodes the ortho image to tightly-packed top-row-first RGBA8 (row 0 = north, matching the mesh UVs)
     // and hands it to the GL renderer. A null/missing/undecodable path clears the texture (back to the
     // hypsometric tint). Decode failure is non-fatal — the terrain still renders.
-    private static void ApplyOrthoTexture(Platforms.Windows.Terrain3DGlRenderer renderer, string? path)
+    private void ApplyOrthoTexture(Platforms.Windows.Terrain3DGlRenderer renderer, string? path)
     {
         if (string.IsNullOrWhiteSpace(path) || !System.IO.File.Exists(path))
         {
+            cachedOrthoPath = null;
+            cachedOrthoBytes = null;
             renderer.SetOrthoTexture(null, 0, 0);
+            return;
+        }
+
+        // Reuse the decoded pixels when the path is unchanged (e.g. re-entering 3D), skipping a costly decode.
+        if (path == cachedOrthoPath && cachedOrthoBytes is not null)
+        {
+            renderer.SetOrthoTexture(cachedOrthoBytes, cachedOrthoWidth, cachedOrthoHeight);
             return;
         }
 
@@ -789,7 +805,11 @@ public partial class Terrain3DView : ContentView
                 return;
             }
 
-            renderer.SetOrthoTexture(bitmap.Bytes, info.Width, info.Height);
+            cachedOrthoPath = path;
+            cachedOrthoBytes = bitmap.Bytes;
+            cachedOrthoWidth = info.Width;
+            cachedOrthoHeight = info.Height;
+            renderer.SetOrthoTexture(cachedOrthoBytes, cachedOrthoWidth, cachedOrthoHeight);
         }
         catch (Exception)
         {
