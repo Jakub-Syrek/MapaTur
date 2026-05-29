@@ -67,6 +67,19 @@ public partial class Terrain3DView : ContentView
         set => SetValue(TrailsProperty, value);
     }
 
+    /// <summary>Bindable roads overlay (unmarked Trail polylines) drawn as grey ribbons under the trails.</summary>
+    public static readonly BindableProperty RoadsProperty = BindableProperty.Create(
+        nameof(Roads),
+        typeof(IReadOnlyList<Trail>),
+        typeof(Terrain3DView),
+        propertyChanged: OnOverlayDataChanged);
+
+    public IReadOnlyList<Trail>? Roads
+    {
+        get => (IReadOnlyList<Trail>?)GetValue(RoadsProperty);
+        set => SetValue(RoadsProperty, value);
+    }
+
     /// <summary>Bindable planned route rendered as a distinct violet polyline on top of trails.</summary>
     public static readonly BindableProperty RouteProperty = BindableProperty.Create(
         nameof(Route),
@@ -716,7 +729,7 @@ public partial class Terrain3DView : ContentView
             }
 
             // GL draws the terrain AND the depth-tested trail/route lines (so the terrain occludes them).
-            glRenderer.Render(width, height, tiles, Camera, framebuffer, Trails, Raster, Route);
+            glRenderer.Render(width, height, tiles, Camera, framebuffer, Trails, Raster, Route, Roads);
             // Hand GL state back to Skia so any later 2D drawing on this surface behaves.
             Canvas.GRContext?.ResetContext();
             return true;

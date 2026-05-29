@@ -97,6 +97,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
     private const float TrailHalfWidthPx = 1.6f;
     private const float RouteHalfWidthPx = 2.6f;
+    private const float RoadHalfWidthPx = 1.8f;
+
+    // Road ribbon colour: light grey, matching the 2D road layer and distinct from the PTTK trail palette.
+    private const byte RoadR = 0xE5;
+    private const byte RoadG = 0xE7;
+    private const byte RoadB = 0xEB;
 
     // Sky clear colour (matches the Skia renderer's lower gradient stop).
     private const float SkyR = 0x6C / 255f;
@@ -107,6 +113,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // in front of them via the depth test.
     private const float TrailLiftMeters = 6f;
     private const float RouteLiftMeters = 9f;
+    private const float RoadLiftMeters = 4f;
 
     private sealed class TileBuffers
     {
@@ -179,6 +186,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private DemRaster? lastRouteRaster;
     private TerrainMesh3D? lastRouteMesh;
 
+    private LineBuffers? roadLines;
+    private IReadOnlyList<Trail>? lastRoads;
+    private DemRaster? lastRoadRaster;
+    private TerrainMesh3D? lastRoadMesh;
+
     /// <summary>
     /// Sets (or clears, when <paramref name="rgba"/> is null) the ortho-photo texture draped over the terrain.
     /// <paramref name="rgba"/> is tightly-packed top-row-first RGBA8 (row 0 = north, matching the mesh UVs).
@@ -210,7 +222,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         uint framebuffer,
         IReadOnlyList<Trail>? trails,
         DemRaster? raster,
-        Route? route)
+        Route? route,
+        IReadOnlyList<Trail>? roads = null)
     {
         gl ??= AngleGl.Get();
 
@@ -231,6 +244,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             lastRoute = null;
             lastRouteRaster = null;
             lastRouteMesh = null;
+            roadLines = null;
+            lastRoads = null;
+            lastRoadRaster = null;
+            lastRoadMesh = null;
             programReady = false;
             mvpLocation = -1;
             lightDirLocation = -1;
@@ -336,6 +353,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.UniformMatrix4(lineMvpLocation, 1, false, m);
         gl.Uniform2(lineViewportLocation, (float)Math.Max(1, width), (float)Math.Max(1, height));
         TerrainMesh3D frame = tiles[0];
+        DrawRoadLines(gl, roads, raster, frame);
         DrawTrailLines(gl, trails, raster, frame);
         DrawRouteLine(gl, route, raster, frame);
 
@@ -672,6 +690,37 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         DrawLine(g, trailLines, TrailHalfWidthPx);
     }
 
+    private void DrawRoadLines(GL g, IReadOnlyList<Trail>? roads, DemRaster? raster, TerrainMesh3D mesh)
+    {
+        if (roads is null || roads.Count == 0 || raster is null)
+        {
+            return;
+        }
+
+        if (roadLines is null
+            || !ReferenceEquals(lastRoads, roads)
+            || !ReferenceEquals(lastRoadRaster, raster)
+            || !ReferenceEquals(lastRoadMesh, mesh))
+        {
+            DeleteLine(g, ref roadLines);
+            // Roads are unmarked Trail polylines; reuse the trail world projection, draw them all one grey.
+            IReadOnlyList<TrailWorldLine> world = Trail3DWorldProjection.ToWorld(roads, raster, mesh, RoadLiftMeters);
+
+            var ribbon = new RibbonBuilder();
+            foreach (TrailWorldLine line in world)
+            {
+                ribbon.Append(line.World, RoadR, RoadG, RoadB);
+            }
+
+            roadLines = UploadLine(g, ribbon);
+            lastRoads = roads;
+            lastRoadRaster = raster;
+            lastRoadMesh = mesh;
+        }
+
+        DrawLine(g, roadLines, RoadHalfWidthPx);
+    }
+
     private void DrawRouteLine(GL g, Route? route, DemRaster? raster, TerrainMesh3D mesh)
     {
         if (route is null || raster is null)
@@ -852,6 +901,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         ReleaseTiles(gl);
         DeleteLine(gl, ref trailLines);
         DeleteLine(gl, ref routeLines);
+        DeleteLine(gl, ref roadLines);
         gl.DeleteFramebuffer(msaaFbo);
         gl.DeleteRenderbuffer(msaaColorRb);
         gl.DeleteRenderbuffer(msaaDepthRb);

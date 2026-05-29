@@ -5,6 +5,7 @@ using MapaTur.App.Services;
 using MapaTur.Application.Climbing;
 using MapaTur.Application.Maps;
 using MapaTur.Application.Pois;
+using MapaTur.Application.Roads;
 using MapaTur.Application.Routing;
 using MapaTur.Application.Terrain;
 using MapaTur.Application.Tracks;
@@ -53,6 +54,8 @@ public sealed partial class MapPageViewModel : ObservableObject
     private readonly IClimbingRepository climbingRepository;
     private readonly IPoiOverpassClient poiOverpassClient;
     private readonly IPoiLayerRenderer poiRenderer;
+    private readonly IRoadOverpassClient roadOverpassClient;
+    private readonly IRoadLayerRenderer roadRenderer;
     private readonly PlanRouteUseCase planRouteUseCase;
     private readonly ExportRouteToGpxUseCase exportRouteToGpxUseCase;
     private readonly ILogger<MapPageViewModel> logger;
@@ -141,6 +144,39 @@ public sealed partial class MapPageViewModel : ObservableObject
 
     [ObservableProperty]
     private IReadOnlyList<Trail>? trails3DOverlay;
+
+    /// <summary>Roads overlay for the 3D view (unmarked Trail polylines), or null when roads are hidden.</summary>
+    [ObservableProperty]
+    private IReadOnlyList<Trail>? roads3DOverlay;
+
+    // Last-downloaded roads (full + simplified-for-3D), kept so the show/hide toggle re-applies without a refetch.
+    private IReadOnlyList<Trail>? rawRoads;
+    private IReadOnlyList<Trail>? rawRoads3D;
+
+    /// <summary>Master show/hide for roads on the 2D map and 3D view.</summary>
+    [ObservableProperty]
+    private bool showRoads = true;
+
+    partial void OnShowRoadsChanged(bool value) => ApplyRoads();
+
+    /// <summary>Re-applies road visibility to the 2D map and 3D overlay from the last download.</summary>
+    private void ApplyRoads()
+    {
+        if (rawRoads is null)
+        {
+            return;
+        }
+        if (ShowRoads)
+        {
+            roadRenderer.RenderRoads(Map, rawRoads);
+            Roads3DOverlay = rawRoads3D;
+        }
+        else
+        {
+            roadRenderer.Clear(Map);
+            Roads3DOverlay = null;
+        }
+    }
 
     /// <summary>Master show/hide for all trails; when off, no trail renders regardless of the colour/region filter.</summary>
     [ObservableProperty] private bool showTrails = true;
@@ -355,6 +391,8 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <param name="climbingRepository">Climbing-area persistence repository.</param>
     /// <param name="poiOverpassClient">Overpass HTTP client (mountain POIs).</param>
     /// <param name="poiRenderer">Mountain-POI marker renderer.</param>
+    /// <param name="roadOverpassClient">Overpass HTTP client (roads).</param>
+    /// <param name="roadRenderer">Road polyline renderer.</param>
     /// <param name="planRouteUseCase">Route planning use case.</param>
     /// <param name="exportRouteToGpxUseCase">GPX export use case.</param>
     /// <param name="logger">Logger.</param>
@@ -376,6 +414,8 @@ public sealed partial class MapPageViewModel : ObservableObject
         IClimbingRepository climbingRepository,
         IPoiOverpassClient poiOverpassClient,
         IPoiLayerRenderer poiRenderer,
+        IRoadOverpassClient roadOverpassClient,
+        IRoadLayerRenderer roadRenderer,
         PlanRouteUseCase planRouteUseCase,
         ExportRouteToGpxUseCase exportRouteToGpxUseCase,
         ILogger<MapPageViewModel> logger)
@@ -397,6 +437,8 @@ public sealed partial class MapPageViewModel : ObservableObject
         ArgumentNullException.ThrowIfNull(climbingRepository);
         ArgumentNullException.ThrowIfNull(poiOverpassClient);
         ArgumentNullException.ThrowIfNull(poiRenderer);
+        ArgumentNullException.ThrowIfNull(roadOverpassClient);
+        ArgumentNullException.ThrowIfNull(roadRenderer);
         ArgumentNullException.ThrowIfNull(planRouteUseCase);
         ArgumentNullException.ThrowIfNull(exportRouteToGpxUseCase);
         ArgumentNullException.ThrowIfNull(logger);
@@ -426,6 +468,8 @@ public sealed partial class MapPageViewModel : ObservableObject
         this.climbingRepository = climbingRepository;
         this.poiOverpassClient = poiOverpassClient;
         this.poiRenderer = poiRenderer;
+        this.roadOverpassClient = roadOverpassClient;
+        this.roadRenderer = roadRenderer;
         this.planRouteUseCase = planRouteUseCase;
         this.exportRouteToGpxUseCase = exportRouteToGpxUseCase;
         this.logger = logger;
@@ -765,6 +809,63 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             StatusMessage = Localization.AppStrings.StatusOverpassTimeout;
             logger.LogWarning(ex, "Overpass POI request timed out");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// Downloads OSM roads (highway ways) for the currently visible viewport, renders them as grey
+    /// polylines on the 2D map, and feeds the 3D overlay.
+    /// </summary>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    [RelayCommand]
+    public async Task DownloadRoadsForViewportAsync()
+    {
+        if (IsBusy)
+        {
+            return;
+        }
+
+        var bounds = ComputeDownloadBounds();
+        if (bounds is null)
+        {
+            StatusMessage = Localization.AppStrings.StatusViewportNotReady;
+            return;
+        }
+
+        try
+        {
+            IsBusy = true;
+            StatusMessage = Localization.AppStrings.StatusDownloadingRoads;
+
+            var roads = await roadOverpassClient.FetchRoadsAsync(bounds.Value).ConfigureAwait(true);
+            rawRoads = roads;
+            // Simplify once for the 3D overlay (same coarse epsilon as trails) so toggling is a cheap re-apply.
+            rawRoads3D = SimplifyForOverlay3D(roads);
+            ApplyRoads();
+
+            StatusMessage = roads.Count == 0
+                ? Localization.AppStrings.StatusNoRoadsFound
+                : string.Format(System.Globalization.CultureInfo.CurrentUICulture, Localization.AppStrings.StatusRoadsLoadedFormat, roads.Count);
+            logger.LogInformation("Downloaded {Count} roads for bounds {Bounds}", roads.Count, bounds);
+        }
+        catch (HttpRequestException ex)
+        {
+            StatusMessage = $"Overpass request failed: {ex.Message}";
+            logger.LogError(ex, "Overpass road request failed");
+        }
+        catch (InvalidDataException ex)
+        {
+            StatusMessage = $"Could not parse Overpass response: {ex.Message}";
+            logger.LogError(ex, "Overpass road parse failure");
+        }
+        catch (TaskCanceledException ex)
+        {
+            StatusMessage = Localization.AppStrings.StatusOverpassTimeout;
+            logger.LogWarning(ex, "Overpass road request timed out");
         }
         finally
         {

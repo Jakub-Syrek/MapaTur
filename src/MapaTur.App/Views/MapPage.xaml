@@ -36,6 +36,10 @@
                     Command="{Binding DownloadPoisForViewportCommand}"
                     IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
                     SemanticProperties.Hint="{x:Static loc:AppStrings.DownloadPois}" />
+            <Button Text="{x:Static loc:AppStrings.DownloadRoads}"
+                    Command="{Binding DownloadRoadsForViewportCommand}"
+                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
+                    SemanticProperties.Hint="{x:Static loc:AppStrings.DownloadRoads}" />
             <Button Text="{x:Static loc:AppStrings.ClearRoute}"
                     Command="{Binding ClearRouteCommand}"
                     IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
@@ -72,6 +76,8 @@
                                BackgroundColor="{AppThemeBinding Light=#FAFAFA, Dark=#27272A}">
             <CheckBox IsChecked="{Binding ShowTrails}" />
             <Label Text="Szlaki" VerticalOptions="Center" FontSize="11" />
+            <CheckBox IsChecked="{Binding ShowRoads}" />
+            <Label Text="Drogi" VerticalOptions="Center" FontSize="11" />
             <BoxView WidthRequest="1" HeightRequest="22" Color="#52525B" Margin="6,0" />
             <Label Text="Kolory:" VerticalOptions="Center" FontSize="11" />
             <CheckBox IsChecked="{Binding TrailColourRedEnabled}" Color="#DC2626" />
@@ -119,6 +125,7 @@
                              Tiles="{Binding TerrainTiles}"
                              Raster="{Binding TerrainRaster}"
                              Trails="{Binding Trails3DOverlay}"
+                             Roads="{Binding Roads3DOverlay}"
                              Route="{Binding Route3DOverlay}"
                              ClimbingAreas="{Binding Climbing3DOverlay}"
                              Pois="{Binding Pois3DOverlay}"

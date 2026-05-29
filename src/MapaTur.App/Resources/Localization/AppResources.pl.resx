@@ -52,6 +52,19 @@
   <data name="StatusNoPoisFound" xml:space="preserve">
     <value>W tym obszarze nie znaleziono POI.</value>
   </data>
+  <data name="DownloadRoads" xml:space="preserve">
+    <value>Pobierz drogi (widok)</value>
+  </data>
+  <data name="StatusDownloadingRoads" xml:space="preserve">
+    <value>Pobieranie dróg z OSM Overpass…</value>
+  </data>
+  <data name="StatusRoadsLoadedFormat" xml:space="preserve">
+    <value>Pobrano {0} dróg dla tego widoku.</value>
+    <comment>{0} to liczba dróg.</comment>
+  </data>
+  <data name="StatusNoRoadsFound" xml:space="preserve">
+    <value>W tym obszarze nie znaleziono dróg.</value>
+  </data>
   <data name="ClearRoute" xml:space="preserve">
     <value>Wyczyść trasę</value>
   </data>

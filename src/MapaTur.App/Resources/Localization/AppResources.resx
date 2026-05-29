@@ -52,6 +52,19 @@
   <data name="StatusNoPoisFound" xml:space="preserve">
     <value>No POIs found in this area.</value>
   </data>
+  <data name="DownloadRoads" xml:space="preserve">
+    <value>Download Roads (viewport)</value>
+  </data>
+  <data name="StatusDownloadingRoads" xml:space="preserve">
+    <value>Downloading roads from OSM Overpass…</value>
+  </data>
+  <data name="StatusRoadsLoadedFormat" xml:space="preserve">
+    <value>Loaded {0} road(s) for this viewport.</value>
+    <comment>{0} is the road count.</comment>
+  </data>
+  <data name="StatusNoRoadsFound" xml:space="preserve">
+    <value>No roads found in this area.</value>
+  </data>
   <data name="ClearRoute" xml:space="preserve">
     <value>Clear Route</value>
   </data>

@@ -4,12 +4,14 @@ using MapaTur.App.Views;
 using MapaTur.Application.Climbing;
 using MapaTur.Application.Maps;
 using MapaTur.Application.Pois;
+using MapaTur.Application.Roads;
 using MapaTur.Application.Routing;
 using MapaTur.Application.Tracks;
 using MapaTur.Application.Trails;
 using MapaTur.Infrastructure.Climbing;
 using MapaTur.Infrastructure.Maps.MBTiles;
 using MapaTur.Infrastructure.Pois;
+using MapaTur.Infrastructure.Roads;
 using MapaTur.Infrastructure.Routing;
 using MapaTur.Infrastructure.Tracks;
 using MapaTur.Infrastructure.Trails;
@@ -146,6 +148,7 @@ public static class MauiProgram
         services.AddSingleton<IRouteLayerRenderer, MapsuiRouteLayerRenderer>();
         services.AddSingleton<IClimbingLayerRenderer, MapsuiClimbingLayerRenderer>();
         services.AddSingleton<IPoiLayerRenderer, MapsuiPoiLayerRenderer>();
+        services.AddSingleton<IRoadLayerRenderer, MapsuiRoadLayerRenderer>();
         services.AddSingleton<ITcxParser, TcxParser>();
         services.AddTransient<ImportTcxFileUseCase>();
 
@@ -172,6 +175,11 @@ public static class MauiProgram
         });
 
         services.AddHttpClient<IPoiOverpassClient, OverpassPoiHttpClient>(client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(90);
+        });
+
+        services.AddHttpClient<IRoadOverpassClient, OverpassRoadHttpClient>(client =>
         {
             client.Timeout = TimeSpan.FromSeconds(90);
         });

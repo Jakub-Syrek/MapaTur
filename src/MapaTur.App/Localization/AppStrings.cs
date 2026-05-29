@@ -57,6 +57,18 @@ public static class AppStrings
     /// <summary>Status shown when no POIs are found in the queried area.</summary>
     public static string StatusNoPoisFound => Get(nameof(StatusNoPoisFound));
 
+    /// <summary>"Download Roads" button label.</summary>
+    public static string DownloadRoads => Get(nameof(DownloadRoads));
+
+    /// <summary>Status shown while the roads Overpass query is in flight.</summary>
+    public static string StatusDownloadingRoads => Get(nameof(StatusDownloadingRoads));
+
+    /// <summary>Format string for the "loaded N roads" status.</summary>
+    public static string StatusRoadsLoadedFormat => Get(nameof(StatusRoadsLoadedFormat));
+
+    /// <summary>Status shown when no roads are found in the queried area.</summary>
+    public static string StatusNoRoadsFound => Get(nameof(StatusNoRoadsFound));
+
     /// <summary>"Clear Route" button label.</summary>
     public static string ClearRoute => Get(nameof(ClearRoute));
 
