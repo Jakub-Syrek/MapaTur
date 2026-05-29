@@ -11,18 +11,26 @@ Application; renderer GPU i widok w warstwie App.
 cieniowanie **Lamberta** (wypiekane per-wierzchołek), regulowane **przewyższenie pionowe**. Gęsty teren
 dzielony na **kafle** ≤65 536 wierzchołków (limit 16-bit indeksów `SKVertices`/VBO), ze wspólnymi szwami.
 
-## Renderowanie — silnik GPU (Windows)
-Teren rysuje **prawdziwy renderer OpenGL ES 3.0** (`Terrain3DGlRenderer`) na kontekście, który `SKGLView`
-udostępnia w `PaintSurface`:
-- **Bufor głębi** (24-bit) rozwiązuje okluzję — brak algorytmu malarza, brak artefaktów przy obrocie.
-- **GPU** transformuje wierzchołki (shader + MVP) — zero projekcji CPU, zero sortowania, zero kulowania;
-  pełna rozdzielczość renderuje się z każdego kąta.
-- Per-kafel **VBO/VAO** uploadowane raz i cache'owane; per-klatkę zmienia się tylko uniform MVP.
-- Rysuje do **framebuffera Skii** (z `e.BackendRenderTarget`), przejmuje pełny **stan GL** co klatkę,
-  wykrywa **utratę kontekstu** przy resize (`glIsProgram`) i odbudowuje zasoby, po czym oddaje stan Skii
+## Własny renderer oparty o OpenGL ES 3.0 (ANGLE / Direct3D 11)
+Teren nie jest rysowany gotowym silnikiem 3D — to **autorski renderer** (`Terrain3DGlRenderer`), który
+wydaje surowe polecenia **OpenGL ES 3.0** na kontekście współdzielonym ze SkiaSharp.
+
+- **ANGLE.** Windows nie ma natywnego OpenGL, więc SkiaSharp dostarcza **ANGLE** (*Almost Native Graphics
+  Layer Engine*) — warstwę tłumaczącą **OpenGL ES → Direct3D 11** w locie. Kod „mówi" w GLES, a rysuje
+  D3D11 na GPU. Ten sam potok działa też natywnie na Android/iOS (prawdziwe GLES).
+- **Kontekst.** `SKGLView` tworzy kontekst EGL/ANGLE i udostępnia go w `PaintSurface`; renderer pobiera
+  funkcje GL przez `eglGetProcAddress` (fallback `libGLESv2.dll`), opakowane bindingami **Silk.NET.OpenGLES**
+  — bez osobnego okna/swap-chaina, rysujemy na buforze, który prezentuje Skia.
+- **Bufor głębi 24-bit** rozwiązuje okluzję sprzętowo — brak algorytmu malarza, brak sortowania trójkątów
+  na CPU, poprawny obraz z każdego kąta przy pełnej rozdzielczości DEM.
+- **GPU transformuje wierzchołki** (program GLSL ES 3.00 + uniform MVP); per-kafel **VBO/VAO** uploadowane
+  raz i cache'owane, per-klatkę zmienia się tylko MVP. Drugi program rysuje szlaki jako wstążki.
+- **Współistnienie ze Skią:** rysuje do **framebuffera Skii** (z `e.BackendRenderTarget` — resize daje nowe,
+  niezerowe FBO), **przejmuje pełny stan GL co klatkę** (Skia zostawia np. `GL_STENCIL_TEST`), wykrywa
+  **utratę kontekstu** przy resize (`glIsProgram`) i odbudowuje zasoby, po czym oddaje stan Skii
   (`GRContext.ResetContext`). Szczegóły pułapek: pamięć `skgl-raw-gl-interop`.
 - **Fallback:** każdy błąd GL/shaderów przełącza widok na renderer Skii (`Terrain3DCanvasRenderer`,
-  painter's algorithm) — widok nigdy nie gaśnie. Działa też jako ścieżka dla platform innych niż Windows.
+  painter's algorithm) — widok nigdy nie gaśnie. Ta sama ścieżka obsługuje platformy bez ANGLE.
 
 ## Nakładki
 - **Szlaki i trasa** rysowane w GL jako **linie z testem głębi** (teren je przysłania — nie prześwitują

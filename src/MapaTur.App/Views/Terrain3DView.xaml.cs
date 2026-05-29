@@ -320,6 +320,13 @@ public partial class Terrain3DView : ContentView
 
     private void OnOrbitPan(object? sender, PanUpdatedEventArgs e)
     {
+        // On Windows the mouse is driven by the raw pointer handlers (OnPlatformPointer*); the touch
+        // PanGestureRecognizer would otherwise fight them. Touch platforms keep using this gesture.
+        if (DeviceInfo.Current.Platform == DevicePlatform.WinUI)
+        {
+            return;
+        }
+
         switch (e.StatusType)
         {
             case GestureStatus.Started:
@@ -342,6 +349,11 @@ public partial class Terrain3DView : ContentView
 
     private void OnTranslatePan(object? sender, PanUpdatedEventArgs e)
     {
+        if (DeviceInfo.Current.Platform == DevicePlatform.WinUI)
+        {
+            return;
+        }
+
         switch (e.StatusType)
         {
             case GestureStatus.Started:
@@ -390,6 +402,11 @@ public partial class Terrain3DView : ContentView
     private Microsoft.UI.Xaml.UIElement? wheelTarget;
     private Microsoft.UI.Xaml.Input.KeyEventHandler? keyDownHandler;
 
+    // Mouse drag on Windows: MAUI's PanGestureRecognizer is touch/pen only, so we drive orbit/pan from raw
+    // pointer events. Left button = orbit, right button = pan. 0 = not dragging.
+    private int mouseDragButton;
+    private Windows.Foundation.Point lastPointerPosition;
+
     // Keyboard-step constants tuned to feel close to one drag-pixel of the gesture
     // recognisers (controller.OrbitSensitivity = 0.005 rad/px, PanSensitivity = 0.001 m/px/m).
     private const float KeyOrbitPixelStep = 16f;
@@ -419,6 +436,9 @@ public partial class Terrain3DView : ContentView
             keyDownHandler ??= OnPlatformKeyDown;
             element.AddHandler(Microsoft.UI.Xaml.UIElement.KeyDownEvent, keyDownHandler, handledEventsToo: true);
             element.PointerPressed += OnPlatformPointerPressed;
+            element.PointerMoved += OnPlatformPointerMoved;
+            element.PointerReleased += OnPlatformPointerReleased;
+            element.PointerCaptureLost += OnPlatformPointerReleased;
         }
     }
 
@@ -432,6 +452,9 @@ public partial class Terrain3DView : ContentView
                 wheelTarget.RemoveHandler(Microsoft.UI.Xaml.UIElement.KeyDownEvent, keyDownHandler);
             }
             wheelTarget.PointerPressed -= OnPlatformPointerPressed;
+            wheelTarget.PointerMoved -= OnPlatformPointerMoved;
+            wheelTarget.PointerReleased -= OnPlatformPointerReleased;
+            wheelTarget.PointerCaptureLost -= OnPlatformPointerReleased;
             wheelTarget = null;
         }
     }
@@ -453,11 +476,62 @@ public partial class Terrain3DView : ContentView
 
     private void OnPlatformPointerPressed(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
     {
+        var element = (Microsoft.UI.Xaml.UIElement)sender;
+
         // Clicking the canvas grabs keyboard focus so subsequent KeyDown events route here.
-        if (sender is Microsoft.UI.Xaml.Controls.Control c)
+        if (element is Microsoft.UI.Xaml.Controls.Control c)
         {
             c.Focus(Microsoft.UI.Xaml.FocusState.Pointer);
         }
+
+        var props = e.GetCurrentPoint(element).Properties;
+        mouseDragButton = props.IsLeftButtonPressed ? 1 : props.IsRightButtonPressed ? 2 : 0;
+        if (mouseDragButton != 0)
+        {
+            lastPointerPosition = e.GetCurrentPoint(element).Position;
+            element.CapturePointer(e.Pointer);
+            e.Handled = true;
+        }
+    }
+
+    private void OnPlatformPointerMoved(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (mouseDragButton == 0)
+        {
+            return;
+        }
+
+        var element = (Microsoft.UI.Xaml.UIElement)sender;
+        var point = e.GetCurrentPoint(element);
+        if (!point.Properties.IsLeftButtonPressed && !point.Properties.IsRightButtonPressed)
+        {
+            mouseDragButton = 0;
+            return;
+        }
+
+        float dx = (float)(point.Position.X - lastPointerPosition.X);
+        float dy = (float)(point.Position.Y - lastPointerPosition.Y);
+        lastPointerPosition = point.Position;
+
+        if (mouseDragButton == 1)
+        {
+            // Left-drag orbits: drag up tilts the camera higher (negative dy).
+            controller.ApplyOrbit(dx, -dy);
+        }
+        else
+        {
+            // Right-drag pans the focus; invert so the world tracks the cursor.
+            controller.ApplyPan(-dx, -dy);
+        }
+
+        Canvas.InvalidateSurface();
+        e.Handled = true;
+    }
+
+    private void OnPlatformPointerReleased(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        mouseDragButton = 0;
+        ((Microsoft.UI.Xaml.UIElement)sender).ReleasePointerCapture(e.Pointer);
     }
 
     private void OnPlatformKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
