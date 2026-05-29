@@ -182,9 +182,10 @@ public partial class Terrain3DView : ContentView
 
     private void OnTiltDownClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyOrbit(0f, -ButtonOrbitStep));
 
-    private void OnPanUpClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyPan(0f, -ButtonPanStep));
+    // Pan ▲ moves the focus forward (into the scene), ▼ pulls it back toward the camera.
+    private void OnPanUpClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyPan(0f, ButtonPanStep));
 
-    private void OnPanDownClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyPan(0f, ButtonPanStep));
+    private void OnPanDownClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyPan(0f, -ButtonPanStep));
 
     private void OnPanLeftClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyPan(-ButtonPanStep, 0f));
 
@@ -445,14 +446,13 @@ public partial class Terrain3DView : ContentView
         switch (e.Key)
         {
             // Pan with the arrow keys on the ground plane — "move the camera through space".
-            // Pan deltas are inverted vs the drag gesture (gesture invert is "world tracks
-            // fingers"; for keys we want "view moves toward the key direction"), so the arrows
-            // push the camera target up/down/left/right accordingly.
+            // ↑ moves the focus forward (into the scene), ↓ pulls it back, ← / → strafe left / right,
+            // matching the on-screen Przesuń pad.
             case Windows.System.VirtualKey.Up:
-                controller.ApplyPan(0f, -KeyPanPixelStep);
+                controller.ApplyPan(0f, KeyPanPixelStep);
                 break;
             case Windows.System.VirtualKey.Down:
-                controller.ApplyPan(0f, KeyPanPixelStep);
+                controller.ApplyPan(0f, -KeyPanPixelStep);
                 break;
             case Windows.System.VirtualKey.Left:
                 controller.ApplyPan(-KeyPanPixelStep, 0f);
