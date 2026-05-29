@@ -32,6 +32,10 @@
                     Command="{Binding DownloadClimbingForViewportCommand}"
                     IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
                     SemanticProperties.Hint="{x:Static loc:AppStrings.DownloadClimbing}" />
+            <Button Text="{x:Static loc:AppStrings.DownloadPois}"
+                    Command="{Binding DownloadPoisForViewportCommand}"
+                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
+                    SemanticProperties.Hint="{x:Static loc:AppStrings.DownloadPois}" />
             <Button Text="{x:Static loc:AppStrings.ClearRoute}"
                     Command="{Binding ClearRouteCommand}"
                     IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
@@ -102,6 +106,7 @@
                              Trails="{Binding Trails3DOverlay}"
                              Route="{Binding Route3DOverlay}"
                              ClimbingAreas="{Binding Climbing3DOverlay}"
+                             Pois="{Binding Pois3DOverlay}"
                              Peaks="{Binding Peaks3DOverlay}"
                              IsVisible="{Binding Is3DMode}" />
 

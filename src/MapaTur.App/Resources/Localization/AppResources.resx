@@ -39,6 +39,19 @@
   <data name="StatusNoClimbingFound" xml:space="preserve">
     <value>No climbing areas found in this area.</value>
   </data>
+  <data name="DownloadPois" xml:space="preserve">
+    <value>Download POIs (viewport)</value>
+  </data>
+  <data name="StatusDownloadingPois" xml:space="preserve">
+    <value>Downloading mountain POIs from OSM Overpass…</value>
+  </data>
+  <data name="StatusPoisLoadedFormat" xml:space="preserve">
+    <value>Loaded {0} POI(s) for this viewport.</value>
+    <comment>{0} is the POI count.</comment>
+  </data>
+  <data name="StatusNoPoisFound" xml:space="preserve">
+    <value>No POIs found in this area.</value>
+  </data>
   <data name="ClearRoute" xml:space="preserve">
     <value>Clear Route</value>
   </data>

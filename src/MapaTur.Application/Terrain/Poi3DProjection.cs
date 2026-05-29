@@ -13,6 +13,52 @@ namespace MapaTur.Application.Terrain;
 public static class Poi3DProjection
 {
     /// <summary>
+    /// Projects every POI in <paramref name="pois"/> whose lon/lat falls inside the raster's bounding box
+    /// onto the 3D viewport. POIs entirely outside the DEM are dropped — they have no defined elevation
+    /// and would render at the wrong position anyway. Mirrors <see cref="Climbing3DProjection.Project"/>.
+    /// </summary>
+    /// <param name="pois">POIs to project.</param>
+    /// <param name="raster">Source DEM used to look up ground elevation.</param>
+    /// <param name="mesh">Mesh whose world-space convention defines the coordinate system.</param>
+    /// <param name="camera">Camera providing view + projection matrices.</param>
+    /// <param name="screenWidth">Viewport width in pixels.</param>
+    /// <param name="screenHeight">Viewport height in pixels.</param>
+    /// <param name="markerLiftMeters">Vertical offset above the DEM surface so the marker sits clear of the ground.</param>
+    public static IReadOnlyList<ProjectedPoi> Project(
+        IReadOnlyList<MountainPoi> pois,
+        DemRaster raster,
+        TerrainMesh3D mesh,
+        Camera3D camera,
+        float screenWidth,
+        float screenHeight,
+        float markerLiftMeters = 25f)
+    {
+        ArgumentNullException.ThrowIfNull(pois);
+        ArgumentNullException.ThrowIfNull(raster);
+        ArgumentNullException.ThrowIfNull(mesh);
+        ArgumentNullException.ThrowIfNull(camera);
+
+        if (pois.Count == 0)
+        {
+            return Array.Empty<ProjectedPoi>();
+        }
+
+        Matrix4x4 viewProjection = (screenWidth > 0f && screenHeight > 0f)
+            ? camera.BuildViewProjection(screenWidth / screenHeight)
+            : Matrix4x4.Identity;
+
+        IReadOnlyList<MarkerWorldPoint<MountainPoi>> world = ToWorld(pois, raster, mesh, markerLiftMeters);
+        var result = new List<ProjectedPoi>(world.Count);
+        foreach (MarkerWorldPoint<MountainPoi> marker in world)
+        {
+            Vector3? screen = camera.ProjectToScreen(marker.World, viewProjection, screenWidth, screenHeight);
+            result.Add(new ProjectedPoi(marker.Source, screen));
+        }
+
+        return result;
+    }
+
+    /// <summary>
     /// Lifts every POI whose lon/lat falls inside the raster to its DEM elevation + <paramref name="markerLiftMeters"/>
     /// and converts it to world space. POIs outside the DEM are dropped.
     /// </summary>

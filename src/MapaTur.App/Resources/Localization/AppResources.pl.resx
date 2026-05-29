@@ -39,6 +39,19 @@
   <data name="StatusNoClimbingFound" xml:space="preserve">
     <value>W tym obszarze nie znaleziono miejsc wspinaczkowych.</value>
   </data>
+  <data name="DownloadPois" xml:space="preserve">
+    <value>Pobierz POI (widok)</value>
+  </data>
+  <data name="StatusDownloadingPois" xml:space="preserve">
+    <value>Pobieranie górskich POI z OSM Overpass…</value>
+  </data>
+  <data name="StatusPoisLoadedFormat" xml:space="preserve">
+    <value>Pobrano {0} POI dla tego widoku.</value>
+    <comment>{0} to liczba POI.</comment>
+  </data>
+  <data name="StatusNoPoisFound" xml:space="preserve">
+    <value>W tym obszarze nie znaleziono POI.</value>
+  </data>
   <data name="ClearRoute" xml:space="preserve">
     <value>Wyczyść trasę</value>
   </data>

@@ -26,6 +26,10 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
     private static readonly SKColor ClimbingOutlineColor = new(0x1F, 0x29, 0x37);
     private const float ClimbingMarkerRadiusPx = 5.5f;
 
+    // POI markers share the climbing outline but draw a touch larger so huts/shelters read as
+    // distinct, higher-priority landmarks against the crag dots.
+    private const float PoiMarkerRadiusPx = 6.5f;
+
     // Peak markers: a warm-gold mountain glyph with a dark outline, plus an elevation label
     // drawn over a dark halo so it stays legible against both bright snow and dark forest.
     private static readonly SKColor PeakMarkerColor = new(0xFF, 0xD7, 0x4A);
@@ -80,6 +84,8 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
     private SKPaint? routePaint;
     private SKPaint? climbingFillPaint;
     private SKPaint? climbingOutlinePaint;
+    private SKPaint? poiFillPaint;
+    private SKPaint? poiOutlinePaint;
     private SKPaint? peakFillPaint;
     private SKPaint? peakOutlinePaint;
     private SKPaint? peakLabelFillPaint;
@@ -113,6 +119,7 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         IReadOnlyList<ProjectedTrail>? trails = null,
         ProjectedRoute? route = null,
         IReadOnlyList<ProjectedClimbingArea>? climbingAreas = null,
+        IReadOnlyList<ProjectedPoi>? pois = null,
         IReadOnlyList<ProjectedPeak>? peaks = null)
     {
         ArgumentNullException.ThrowIfNull(canvas);
@@ -184,6 +191,10 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         if (climbingAreas is not null)
         {
             DrawClimbingAreas(canvas, climbingAreas, depthMap);
+        }
+        if (pois is not null)
+        {
+            DrawPois(canvas, pois, depthMap);
         }
         if (peaks is not null)
         {
@@ -346,6 +357,7 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         IReadOnlyList<ProjectedTrail>? trails,
         ProjectedRoute? route,
         IReadOnlyList<ProjectedClimbingArea>? climbingAreas,
+        IReadOnlyList<ProjectedPoi>? pois,
         IReadOnlyList<ProjectedPeak>? peaks)
     {
         ArgumentNullException.ThrowIfNull(canvas);
@@ -361,6 +373,10 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         if (climbingAreas is not null)
         {
             DrawClimbingAreas(canvas, climbingAreas, null);
+        }
+        if (pois is not null)
+        {
+            DrawPois(canvas, pois, null);
         }
         if (peaks is not null)
         {
@@ -512,6 +528,43 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         }
     }
 
+    private void DrawPois(SKCanvas canvas, IReadOnlyList<ProjectedPoi> pois, ScreenDepthMap? depthMap)
+    {
+        if (pois.Count == 0)
+        {
+            return;
+        }
+
+        poiFillPaint ??= new SKPaint
+        {
+            IsAntialias = true,
+            Style = SKPaintStyle.Fill,
+        };
+        poiOutlinePaint ??= new SKPaint
+        {
+            IsAntialias = true,
+            Style = SKPaintStyle.Stroke,
+            StrokeWidth = 1.5f,
+            Color = ClimbingOutlineColor,
+        };
+
+        foreach (var marker in pois)
+        {
+            var screen = marker.ScreenPosition;
+            if (screen is null)
+            {
+                continue;
+            }
+            if (depthMap is not null && depthMap.IsBehind(screen, OcclusionEpsilon))
+            {
+                continue;
+            }
+            poiFillPaint.Color = ParsePoiColor(marker.Source.Kind);
+            canvas.DrawCircle(screen.Value.X, screen.Value.Y, PoiMarkerRadiusPx, poiFillPaint);
+            canvas.DrawCircle(screen.Value.X, screen.Value.Y, PoiMarkerRadiusPx, poiOutlinePaint);
+        }
+    }
+
     private void DrawPeaks(SKCanvas canvas, IReadOnlyList<ProjectedPeak> peaks, ScreenDepthMap? depthMap)
     {
         if (peaks.Count == 0)
@@ -621,6 +674,14 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
             : new SKColor(0xE1, 0x1D, 0x48);
     }
 
+    private static SKColor ParsePoiColor(MapaTur.Domain.Pois.PoiKind kind)
+    {
+        string hex = MapaTur.Domain.Pois.PoiKindColors.ToHex(kind);
+        return SKColor.TryParse("#" + hex, out var color)
+            ? color
+            : new SKColor(0xDC, 0x26, 0x26);
+    }
+
     private static SKColor TrailColor(Trail trail)
     {
         return SKColor.TryParse(OsmcSymbolParser.ToHex(trail.PrimaryColor), out var color)
@@ -663,6 +724,8 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         routePaint?.Dispose();
         climbingFillPaint?.Dispose();
         climbingOutlinePaint?.Dispose();
+        poiFillPaint?.Dispose();
+        poiOutlinePaint?.Dispose();
         peakFillPaint?.Dispose();
         peakOutlinePaint?.Dispose();
         peakLabelFillPaint?.Dispose();
@@ -682,6 +745,8 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         routePaint = null;
         climbingFillPaint = null;
         climbingOutlinePaint = null;
+        poiFillPaint = null;
+        poiOutlinePaint = null;
         peakFillPaint = null;
         peakOutlinePaint = null;
         peakLabelFillPaint = null;

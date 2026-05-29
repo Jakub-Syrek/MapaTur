@@ -3,6 +3,7 @@ using System.Numerics;
 using MapaTur.App.Services;
 using MapaTur.Application.Terrain;
 using MapaTur.Domain.Climbing;
+using MapaTur.Domain.Pois;
 using MapaTur.Domain.Routing;
 using MapaTur.Domain.Terrain;
 using MapaTur.Domain.Trails;
@@ -92,6 +93,19 @@ public partial class Terrain3DView : ContentView
         set => SetValue(ClimbingAreasProperty, value);
     }
 
+    /// <summary>Bindable mountain POIs rendered as colour-coded circular markers above the mesh.</summary>
+    public static readonly BindableProperty PoisProperty = BindableProperty.Create(
+        nameof(Pois),
+        typeof(IReadOnlyList<MountainPoi>),
+        typeof(Terrain3DView),
+        propertyChanged: OnOverlayDataChanged);
+
+    public IReadOnlyList<MountainPoi>? Pois
+    {
+        get => (IReadOnlyList<MountainPoi>?)GetValue(PoisProperty);
+        set => SetValue(PoisProperty, value);
+    }
+
     /// <summary>Bindable summits rendered as gold mountain glyphs with elevation labels above the mesh.</summary>
     public static readonly BindableProperty PeaksProperty = BindableProperty.Create(
         nameof(Peaks),
@@ -124,12 +138,18 @@ public partial class Terrain3DView : ContentView
     // and each frame fills a reused results buffer. One generic projector serves both — they differ
     // only in their world-build (climbing samples the DEM; summits carry their own elevation).
     private const float ClimbingMarkerLiftMeters = 30f;
+    private const float PoiMarkerLiftMeters = 25f;
     private const float PeakMarkerLiftMeters = 40f;
 
     private readonly Marker3DOverlayProjector<ClimbingArea, ProjectedClimbingArea> climbingProjector =
         new(
             (areas, raster, mesh, lift) => Climbing3DProjection.ToWorld(areas, raster!, mesh, lift),
             (source, screen) => new ProjectedClimbingArea(source, screen));
+
+    private readonly Marker3DOverlayProjector<MountainPoi, ProjectedPoi> poiProjector =
+        new(
+            (pois, raster, mesh, lift) => Poi3DProjection.ToWorld(pois, raster!, mesh, lift),
+            (source, screen) => new ProjectedPoi(source, screen));
 
     private readonly Marker3DOverlayProjector<TerrainPeak, ProjectedPeak> peakProjector =
         new(
@@ -287,6 +307,13 @@ public partial class Terrain3DView : ContentView
                 areas, Raster, frame, Camera, e.Info.Width, e.Info.Height, ClimbingMarkerLiftMeters);
         }
 
+        IReadOnlyList<ProjectedPoi>? projectedPois = null;
+        if (Pois is { Count: > 0 } pois && Raster is not null)
+        {
+            projectedPois = poiProjector.Project(
+                pois, Raster, frame, Camera, e.Info.Width, e.Info.Height, PoiMarkerLiftMeters);
+        }
+
         // Peaks carry their own DEM elevation, so projection needs no raster lookup.
         IReadOnlyList<ProjectedPeak>? projectedPeaks = null;
         if (Peaks is { Count: > 0 } peaks)
@@ -308,14 +335,14 @@ public partial class Terrain3DView : ContentView
         if (UseGlRenderer && TryRenderTerrainGl(tiles, e.Info.Width, e.Info.Height, glFramebuffer))
         {
             // GL already drew the (depth-occluded) trails + route; Skia only adds the markers/labels on top.
-            renderer.DrawOverlays(canvas, null, null, projectedClimbing, projectedPeaks);
+            renderer.DrawOverlays(canvas, null, null, projectedClimbing, projectedPois, projectedPeaks);
             return;
         }
 #endif
 
         // depthMap = null disables trail / route / climbing occlusion: trails are drawn always on top
         // of the mesh (the visual the user wants) and it drops a per-frame depth-grid fill.
-        renderer.RenderTiles(canvas, e.Info.Width, e.Info.Height, tiles, Camera, frameScratch, null, projectedTrails, projectedRoute, projectedClimbing, projectedPeaks);
+        renderer.RenderTiles(canvas, e.Info.Width, e.Info.Height, tiles, Camera, frameScratch, null, projectedTrails, projectedRoute, projectedClimbing, projectedPois, projectedPeaks);
     }
 
     private void OnOrbitPan(object? sender, PanUpdatedEventArgs e)

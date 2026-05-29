@@ -45,6 +45,18 @@ public static class AppStrings
     /// <summary>Status shown when no climbing areas are found in the queried area.</summary>
     public static string StatusNoClimbingFound => Get(nameof(StatusNoClimbingFound));
 
+    /// <summary>"Download POIs" button label.</summary>
+    public static string DownloadPois => Get(nameof(DownloadPois));
+
+    /// <summary>Status shown while the POI Overpass query is in flight.</summary>
+    public static string StatusDownloadingPois => Get(nameof(StatusDownloadingPois));
+
+    /// <summary>Format string for the "loaded N POIs" status.</summary>
+    public static string StatusPoisLoadedFormat => Get(nameof(StatusPoisLoadedFormat));
+
+    /// <summary>Status shown when no POIs are found in the queried area.</summary>
+    public static string StatusNoPoisFound => Get(nameof(StatusNoPoisFound));
+
     /// <summary>"Clear Route" button label.</summary>
     public static string ClearRoute => Get(nameof(ClearRoute));
 

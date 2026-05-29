@@ -4,6 +4,7 @@ using CommunityToolkit.Mvvm.Input;
 using MapaTur.App.Services;
 using MapaTur.Application.Climbing;
 using MapaTur.Application.Maps;
+using MapaTur.Application.Pois;
 using MapaTur.Application.Routing;
 using MapaTur.Application.Terrain;
 using MapaTur.Application.Tracks;
@@ -50,6 +51,8 @@ public sealed partial class MapPageViewModel : ObservableObject
     private readonly ITrailRepository trailRepository;
     private readonly IClimbingOverpassClient climbingOverpassClient;
     private readonly IClimbingRepository climbingRepository;
+    private readonly IPoiOverpassClient poiOverpassClient;
+    private readonly IPoiLayerRenderer poiRenderer;
     private readonly PlanRouteUseCase planRouteUseCase;
     private readonly ExportRouteToGpxUseCase exportRouteToGpxUseCase;
     private readonly ILogger<MapPageViewModel> logger;
@@ -253,6 +256,9 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private IReadOnlyList<MapaTur.Domain.Climbing.ClimbingArea>? climbing3DOverlay;
 
+    [ObservableProperty]
+    private IReadOnlyList<MapaTur.Domain.Pois.MountainPoi>? pois3DOverlay;
+
     /// <summary>
     /// DEM-derived summits drawn as labelled markers in the 3D view so it isn't bare terrain +
     /// trails. Computed offline from the loaded raster (no network) and refreshed each DEM load.
@@ -293,6 +299,8 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <param name="trailRepository">Trail persistence repository.</param>
     /// <param name="climbingOverpassClient">Overpass HTTP client (climbing).</param>
     /// <param name="climbingRepository">Climbing-area persistence repository.</param>
+    /// <param name="poiOverpassClient">Overpass HTTP client (mountain POIs).</param>
+    /// <param name="poiRenderer">Mountain-POI marker renderer.</param>
     /// <param name="planRouteUseCase">Route planning use case.</param>
     /// <param name="exportRouteToGpxUseCase">GPX export use case.</param>
     /// <param name="logger">Logger.</param>
@@ -312,6 +320,8 @@ public sealed partial class MapPageViewModel : ObservableObject
         ITrailRepository trailRepository,
         IClimbingOverpassClient climbingOverpassClient,
         IClimbingRepository climbingRepository,
+        IPoiOverpassClient poiOverpassClient,
+        IPoiLayerRenderer poiRenderer,
         PlanRouteUseCase planRouteUseCase,
         ExportRouteToGpxUseCase exportRouteToGpxUseCase,
         ILogger<MapPageViewModel> logger)
@@ -331,6 +341,8 @@ public sealed partial class MapPageViewModel : ObservableObject
         ArgumentNullException.ThrowIfNull(trailRepository);
         ArgumentNullException.ThrowIfNull(climbingOverpassClient);
         ArgumentNullException.ThrowIfNull(climbingRepository);
+        ArgumentNullException.ThrowIfNull(poiOverpassClient);
+        ArgumentNullException.ThrowIfNull(poiRenderer);
         ArgumentNullException.ThrowIfNull(planRouteUseCase);
         ArgumentNullException.ThrowIfNull(exportRouteToGpxUseCase);
         ArgumentNullException.ThrowIfNull(logger);
@@ -358,6 +370,8 @@ public sealed partial class MapPageViewModel : ObservableObject
         this.trailRepository = trailRepository;
         this.climbingOverpassClient = climbingOverpassClient;
         this.climbingRepository = climbingRepository;
+        this.poiOverpassClient = poiOverpassClient;
+        this.poiRenderer = poiRenderer;
         this.planRouteUseCase = planRouteUseCase;
         this.exportRouteToGpxUseCase = exportRouteToGpxUseCase;
         this.logger = logger;
@@ -642,6 +656,61 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             StatusMessage = Localization.AppStrings.StatusOverpassTimeout;
             logger.LogWarning(ex, "Overpass climbing request timed out");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// Downloads OSM mountain POIs (huts, shelters, chalets, viewpoints) for the currently
+    /// visible viewport, renders them as colour-coded markers, and feeds the 3D overlay.
+    /// </summary>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    [RelayCommand]
+    public async Task DownloadPoisForViewportAsync()
+    {
+        if (IsBusy)
+        {
+            return;
+        }
+
+        var bounds = ComputeDownloadBounds();
+        if (bounds is null)
+        {
+            StatusMessage = Localization.AppStrings.StatusViewportNotReady;
+            return;
+        }
+
+        try
+        {
+            IsBusy = true;
+            StatusMessage = Localization.AppStrings.StatusDownloadingPois;
+
+            var pois = await poiOverpassClient.FetchPoisAsync(bounds.Value).ConfigureAwait(true);
+            poiRenderer.RenderPois(Map, pois);
+            Pois3DOverlay = pois;
+
+            StatusMessage = pois.Count == 0
+                ? Localization.AppStrings.StatusNoPoisFound
+                : string.Format(System.Globalization.CultureInfo.CurrentUICulture, Localization.AppStrings.StatusPoisLoadedFormat, pois.Count);
+            logger.LogInformation("Downloaded {Count} POIs for bounds {Bounds}", pois.Count, bounds);
+        }
+        catch (HttpRequestException ex)
+        {
+            StatusMessage = $"Overpass request failed: {ex.Message}";
+            logger.LogError(ex, "Overpass POI request failed");
+        }
+        catch (InvalidDataException ex)
+        {
+            StatusMessage = $"Could not parse Overpass response: {ex.Message}";
+            logger.LogError(ex, "Overpass POI parse failure");
+        }
+        catch (TaskCanceledException ex)
+        {
+            StatusMessage = Localization.AppStrings.StatusOverpassTimeout;
+            logger.LogWarning(ex, "Overpass POI request timed out");
         }
         finally
         {
