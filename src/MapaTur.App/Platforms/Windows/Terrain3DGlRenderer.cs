@@ -36,6 +36,38 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "out vec4 fragColor;\n" +
         "void main(){ fragColor = vec4(vColor.rgb, 1.0); }\n";
 
+    // Line ribbon shader: expands each segment to a quad of constant SCREEN-pixel width (ANGLE/D3D11
+    // can't do wide GL lines), so trails/route stay a few px thick at any zoom. Still depth-tested.
+    private const string LineVertexShaderSource =
+        "#version 300 es\n" +
+        "layout(location=0) in vec3 aPos;\n" +
+        "layout(location=1) in vec4 aColor;\n" +
+        "layout(location=2) in vec3 aOther;\n" +
+        "layout(location=3) in float aSide;\n" +
+        "uniform mat4 uMvp;\n" +
+        "uniform vec2 uViewport;\n" +
+        "uniform float uHalfPx;\n" +
+        "out vec4 vColor;\n" +
+        "void main(){\n" +
+        "  vColor = aColor;\n" +
+        "  vec4 clipA = uMvp * vec4(aPos, 1.0);\n" +
+        "  vec4 clipB = uMvp * vec4(aOther, 1.0);\n" +
+        "  if (clipA.w <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }\n" +
+        "  vec2 ndcA = clipA.xy / clipA.w;\n" +
+        "  vec2 ndcB = clipB.w > 0.0 ? clipB.xy / clipB.w : ndcA;\n" +
+        "  vec2 sA = ndcA * uViewport * 0.5;\n" +
+        "  vec2 sB = ndcB * uViewport * 0.5;\n" +
+        "  vec2 dir = sB - sA;\n" +
+        "  float len = length(dir);\n" +
+        "  vec2 nrm = len > 0.0001 ? vec2(-dir.y, dir.x) / len : vec2(0.0, 0.0);\n" +
+        "  vec2 offNdc = (nrm * uHalfPx * aSide) / (uViewport * 0.5);\n" +
+        "  gl_Position = clipA;\n" +
+        "  gl_Position.xy += offNdc * clipA.w;\n" +
+        "}\n";
+
+    private const float TrailHalfWidthPx = 1.6f;
+    private const float RouteHalfWidthPx = 2.6f;
+
     // Sky clear colour (matches the Skia renderer's lower gradient stop).
     private const float SkyR = 0x6C / 255f;
     private const float SkyG = 0x8E / 255f;
@@ -63,6 +95,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         public uint Vao;
         public uint PositionVbo;
         public uint ColorVbo;
+        public uint OtherVbo;
+        public uint SideVbo;
         public uint Ebo;
         public int IndexCount;
     }
@@ -70,6 +104,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private GL? gl;
     private uint program;
     private int mvpLocation = -1;
+    private uint lineProgram;
+    private int lineMvpLocation = -1;
+    private int lineViewportLocation = -1;
+    private int lineHalfPxLocation = -1;
     private bool programReady;
 
     private readonly Dictionary<TerrainMesh3D, TileBuffers> tileBuffers = new();
@@ -173,7 +211,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.DrawElements(PrimitiveType.Triangles, (uint)tile.IndexCount, DrawElementsType.UnsignedShort, (void*)0);
         }
 
-        // Trails + route as depth-tested GL lines (occluded by the terrain). Same program / MVP / depth state.
+        // Trails + route as depth-tested screen-space ribbons (occluded by the terrain). Switch to the line
+        // program; it shares the depth state and the same MVP, plus the viewport for the pixel expansion.
+        gl.UseProgram(lineProgram);
+        gl.UniformMatrix4(lineMvpLocation, 1, false, m);
+        gl.Uniform2(lineViewportLocation, (float)Math.Max(1, width), (float)Math.Max(1, height));
         TerrainMesh3D frame = tiles[0];
         DrawTrailLines(gl, trails, raster, frame);
         DrawRouteLine(gl, route, raster, frame);
@@ -202,10 +244,32 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
         g.DetachShader(program, vs);
         g.DetachShader(program, fs);
+        mvpLocation = g.GetUniformLocation(program, "uMvp");
+
+        // Line ribbon program (reuses the same fragment shader).
+        uint lvs = CompileShader(g, ShaderType.VertexShader, LineVertexShaderSource);
+        uint lfs = CompileShader(g, ShaderType.FragmentShader, FragmentShaderSource);
+        lineProgram = g.CreateProgram();
+        g.AttachShader(lineProgram, lvs);
+        g.AttachShader(lineProgram, lfs);
+        g.LinkProgram(lineProgram);
+        g.GetProgram(lineProgram, ProgramPropertyARB.LinkStatus, out int lineLinked);
+        if (lineLinked == 0)
+        {
+            string log = g.GetProgramInfoLog(lineProgram);
+            throw new InvalidOperationException("Line shader link failed: " + log);
+        }
+        g.DetachShader(lineProgram, lvs);
+        g.DetachShader(lineProgram, lfs);
+        lineMvpLocation = g.GetUniformLocation(lineProgram, "uMvp");
+        lineViewportLocation = g.GetUniformLocation(lineProgram, "uViewport");
+        lineHalfPxLocation = g.GetUniformLocation(lineProgram, "uHalfPx");
+
         g.DeleteShader(vs);
         g.DeleteShader(fs);
+        g.DeleteShader(lvs);
+        g.DeleteShader(lfs);
 
-        mvpLocation = g.GetUniformLocation(program, "uMvp");
         programReady = true;
     }
 
@@ -305,22 +369,20 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             DeleteLine(g, ref trailLines);
             IReadOnlyList<TrailWorldLine> world = Trail3DWorldProjection.ToWorld(trails, raster, mesh, TrailLiftMeters);
 
-            var positions = new List<float>();
-            var colors = new List<byte>();
-            var indices = new List<uint>();
+            var ribbon = new RibbonBuilder();
             foreach (TrailWorldLine line in world)
             {
                 (byte r, byte gg, byte b) = PttkRgb(line.Source.PrimaryColor);
-                AppendLine(line.World, r, gg, b, positions, colors, indices);
+                ribbon.Append(line.World, r, gg, b);
             }
 
-            trailLines = UploadLine(g, positions, colors, indices);
+            trailLines = UploadLine(g, ribbon);
             lastTrails = trails;
             lastTrailRaster = raster;
             lastTrailMesh = mesh;
         }
 
-        DrawLine(g, trailLines);
+        DrawLine(g, trailLines, TrailHalfWidthPx);
     }
 
     private void DrawRouteLine(GL g, Route? route, DemRaster? raster, TerrainMesh3D mesh)
@@ -338,91 +400,129 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             DeleteLine(g, ref routeLines);
             RouteWorldLine world = Route3DWorldProjection.ToWorld(route, raster, mesh, RouteLiftMeters);
 
-            var positions = new List<float>();
-            var colors = new List<byte>();
-            var indices = new List<uint>();
-            AppendLine(world.World, 0x7C, 0x3A, 0xED, positions, colors, indices); // violet, matches 2D planner
+            var ribbon = new RibbonBuilder();
+            ribbon.Append(world.World, 0x7C, 0x3A, 0xED); // violet, matches 2D planner
 
-            routeLines = UploadLine(g, positions, colors, indices);
+            routeLines = UploadLine(g, ribbon);
             lastRoute = route;
             lastRouteRaster = raster;
             lastRouteMesh = mesh;
         }
 
-        DrawLine(g, routeLines);
+        DrawLine(g, routeLines, RouteHalfWidthPx);
     }
 
-    // Appends one polyline's vertices + GL_LINES index pairs, skipping any segment touching an out-of-DEM
-    // (NaN) vertex so the line breaks at the terrain edge instead of spanning the gap.
-    private static void AppendLine(IReadOnlyList<Vector3> world, byte r, byte g, byte b, List<float> positions, List<byte> colors, List<uint> indices)
+    // Builds screen-space ribbon geometry: each polyline segment becomes a 4-vertex quad (2 triangles).
+    // Each vertex carries its own position, the segment's OTHER endpoint and a ±1 side; the line shader
+    // offsets it perpendicular to the on-screen segment by the pixel half-width. Segments touching an
+    // out-of-DEM (NaN) vertex are skipped so the ribbon breaks at the terrain edge.
+    private sealed class RibbonBuilder
     {
-        uint baseIndex = (uint)(positions.Count / 3);
-        for (int i = 0; i < world.Count; i++)
-        {
-            Vector3 v = world[i];
-            positions.Add(v.X);
-            positions.Add(v.Y);
-            positions.Add(v.Z);
-            colors.Add(r);
-            colors.Add(g);
-            colors.Add(b);
-            colors.Add(255);
-        }
+        public readonly List<float> Positions = new();
+        public readonly List<byte> Colors = new();
+        public readonly List<float> Others = new();
+        public readonly List<float> Sides = new();
+        public readonly List<uint> Indices = new();
 
-        for (int i = 0; i < world.Count - 1; i++)
+        public void Append(IReadOnlyList<Vector3> world, byte r, byte g, byte b)
         {
-            if (!float.IsNaN(world[i].X) && !float.IsNaN(world[i + 1].X))
+            for (int i = 0; i < world.Count - 1; i++)
             {
-                indices.Add(baseIndex + (uint)i);
-                indices.Add(baseIndex + (uint)i + 1);
+                Vector3 a = world[i];
+                Vector3 c = world[i + 1];
+                if (float.IsNaN(a.X) || float.IsNaN(c.X))
+                {
+                    continue;
+                }
+
+                uint v = (uint)(Positions.Count / 3);
+                AddVertex(a, c, +1f, r, g, b);
+                AddVertex(a, c, -1f, r, g, b);
+                AddVertex(c, a, -1f, r, g, b);
+                AddVertex(c, a, +1f, r, g, b);
+                Indices.Add(v + 0);
+                Indices.Add(v + 1);
+                Indices.Add(v + 2);
+                Indices.Add(v + 2);
+                Indices.Add(v + 1);
+                Indices.Add(v + 3);
             }
         }
+
+        private void AddVertex(Vector3 pos, Vector3 other, float side, byte r, byte g, byte b)
+        {
+            Positions.Add(pos.X);
+            Positions.Add(pos.Y);
+            Positions.Add(pos.Z);
+            Others.Add(other.X);
+            Others.Add(other.Y);
+            Others.Add(other.Z);
+            Sides.Add(side);
+            Colors.Add(r);
+            Colors.Add(g);
+            Colors.Add(b);
+            Colors.Add(255);
+        }
     }
 
-    private LineBuffers? UploadLine(GL g, List<float> positions, List<byte> colors, List<uint> indices)
+    private LineBuffers? UploadLine(GL g, RibbonBuilder ribbon)
     {
-        if (indices.Count == 0)
+        if (ribbon.Indices.Count == 0)
         {
             return null;
         }
 
-        var buffers = new LineBuffers { IndexCount = indices.Count };
+        var buffers = new LineBuffers { IndexCount = ribbon.Indices.Count };
         buffers.Vao = g.GenVertexArray();
         g.BindVertexArray(buffers.Vao);
 
-        float[] positionArray = positions.ToArray();
+        float[] positions = ribbon.Positions.ToArray();
         buffers.PositionVbo = g.GenBuffer();
         g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.PositionVbo);
-        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(positionArray.Length * sizeof(float)), positionArray, BufferUsageARB.StaticDraw);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(positions.Length * sizeof(float)), positions, BufferUsageARB.StaticDraw);
         g.EnableVertexAttribArray(0);
         g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
 
-        byte[] colorArray = colors.ToArray();
+        byte[] colors = ribbon.Colors.ToArray();
         buffers.ColorVbo = g.GenBuffer();
         g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.ColorVbo);
-        g.BufferData<byte>(BufferTargetARB.ArrayBuffer, (nuint)colorArray.Length, colorArray, BufferUsageARB.StaticDraw);
+        g.BufferData<byte>(BufferTargetARB.ArrayBuffer, (nuint)colors.Length, colors, BufferUsageARB.StaticDraw);
         g.EnableVertexAttribArray(1);
         g.VertexAttribPointer(1, 4, VertexAttribPointerType.UnsignedByte, true, 4, (void*)0);
 
-        uint[] indexArray = indices.ToArray();
+        float[] others = ribbon.Others.ToArray();
+        buffers.OtherVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.OtherVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(others.Length * sizeof(float)), others, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(2);
+        g.VertexAttribPointer(2, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
+
+        float[] sides = ribbon.Sides.ToArray();
+        buffers.SideVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.SideVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(sides.Length * sizeof(float)), sides, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(3);
+        g.VertexAttribPointer(3, 1, VertexAttribPointerType.Float, false, sizeof(float), (void*)0);
+
+        uint[] indices = ribbon.Indices.ToArray();
         buffers.Ebo = g.GenBuffer();
         g.BindBuffer(BufferTargetARB.ElementArrayBuffer, buffers.Ebo);
-        g.BufferData<uint>(BufferTargetARB.ElementArrayBuffer, (nuint)(indexArray.Length * sizeof(uint)), indexArray, BufferUsageARB.StaticDraw);
+        g.BufferData<uint>(BufferTargetARB.ElementArrayBuffer, (nuint)(indices.Length * sizeof(uint)), indices, BufferUsageARB.StaticDraw);
 
         g.BindVertexArray(0);
         return buffers;
     }
 
-    private void DrawLine(GL g, LineBuffers? line)
+    private void DrawLine(GL g, LineBuffers? line, float halfWidthPx)
     {
         if (line is null)
         {
             return;
         }
 
-        g.LineWidth(2f); // ANGLE/D3D11 may clamp to 1px; correct occlusion matters more than thickness here
+        g.Uniform1(lineHalfPxLocation, halfWidthPx);
         g.BindVertexArray(line.Vao);
-        g.DrawElements(PrimitiveType.Lines, (uint)line.IndexCount, DrawElementsType.UnsignedInt, (void*)0);
+        g.DrawElements(PrimitiveType.Triangles, (uint)line.IndexCount, DrawElementsType.UnsignedInt, (void*)0);
     }
 
     private static void DeleteLine(GL g, ref LineBuffers? line)
@@ -434,6 +534,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         g.DeleteBuffer(line.PositionVbo);
         g.DeleteBuffer(line.ColorVbo);
+        g.DeleteBuffer(line.OtherVbo);
+        g.DeleteBuffer(line.SideVbo);
         g.DeleteBuffer(line.Ebo);
         g.DeleteVertexArray(line.Vao);
         line = null;
@@ -466,6 +568,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         if (programReady)
         {
             gl.DeleteProgram(program);
+            gl.DeleteProgram(lineProgram);
             programReady = false;
         }
     }
