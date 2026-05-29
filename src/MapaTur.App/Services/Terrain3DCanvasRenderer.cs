@@ -557,6 +557,7 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
             Color = PeakLabelHaloColor,
         };
         peakFont ??= new SKFont { Size = PeakLabelSizePx };
+        peakPath ??= new SKPath();
 
         foreach (var marker in pois)
         {
@@ -572,18 +573,74 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
             float x = screen.Value.X;
             float y = screen.Value.Y;
             poiFillPaint.Color = ParsePoiColor(marker.Source.Kind);
-            canvas.DrawCircle(x, y, PoiMarkerRadiusPx, poiFillPaint);
-            canvas.DrawCircle(x, y, PoiMarkerRadiusPx, poiOutlinePaint);
+
+            // Viewpoints get a little lookout-tower glyph so they read as "go here for the view"; every
+            // other kind is a coloured dot. glyphTopY is where the label sits above.
+            float glyphTopY;
+            if (marker.Source.Kind == MapaTur.Domain.Pois.PoiKind.Viewpoint)
+            {
+                glyphTopY = DrawViewpointTower(canvas, x, y);
+            }
+            else
+            {
+                canvas.DrawCircle(x, y, PoiMarkerRadiusPx, poiFillPaint);
+                canvas.DrawCircle(x, y, PoiMarkerRadiusPx, poiOutlinePaint);
+                glyphTopY = y - PoiMarkerRadiusPx;
+            }
 
             // Always label the marker so the user can tell what it is — the POI's name when tagged,
             // otherwise its category. Halo first, then fill, for contrast against any backdrop.
             string label = !string.IsNullOrEmpty(marker.Source.Name)
                 ? marker.Source.Name
                 : PoiKindLabel(marker.Source.Kind);
-            float labelY = y - PoiMarkerRadiusPx - 4f;
+            float labelY = glyphTopY - 4f;
             canvas.DrawText(label, x, labelY, SKTextAlign.Center, peakFont, peakLabelHaloPaint);
             canvas.DrawText(label, x, labelY, SKTextAlign.Center, peakFont, peakLabelFillPaint);
         }
+    }
+
+    // Draws a small observation-tower glyph (splayed legs + rung, a cabin and a peaked roof) with its base
+    // on the projected point. Uses the already-coloured poiFillPaint + poiOutlinePaint. Returns the glyph's
+    // top Y so the caller can place the label above it.
+    private float DrawViewpointTower(SKCanvas canvas, float x, float y)
+    {
+        const float baseHalf = 5f;
+        const float legTopHalf = 3f;
+        const float cabinHalf = 4f;
+        float legTopY = y - 11f;
+        float cabinTopY = y - 16f;
+        float roofApexY = y - 19f;
+
+        // Legs + a mid rung (stroke only).
+        peakPath!.Reset();
+        peakPath.MoveTo(x - baseHalf, y);
+        peakPath.LineTo(x - legTopHalf, legTopY);
+        peakPath.MoveTo(x + baseHalf, y);
+        peakPath.LineTo(x + legTopHalf, legTopY);
+        peakPath.MoveTo(x - 4.2f, y - 5.5f);
+        peakPath.LineTo(x + 4.2f, y - 5.5f);
+        canvas.DrawPath(peakPath, poiOutlinePaint!);
+
+        // Cabin box (fill + outline).
+        peakPath.Reset();
+        peakPath.MoveTo(x - cabinHalf, legTopY);
+        peakPath.LineTo(x - cabinHalf, cabinTopY);
+        peakPath.LineTo(x + cabinHalf, cabinTopY);
+        peakPath.LineTo(x + cabinHalf, legTopY);
+        peakPath.Close();
+        canvas.DrawPath(peakPath, poiFillPaint!);
+        canvas.DrawPath(peakPath, poiOutlinePaint!);
+
+        // Peaked roof (fill + outline).
+        peakPath.Reset();
+        peakPath.MoveTo(x - (cabinHalf + 1f), cabinTopY);
+        peakPath.LineTo(x, roofApexY);
+        peakPath.LineTo(x + (cabinHalf + 1f), cabinTopY);
+        peakPath.Close();
+        canvas.DrawPath(peakPath, poiFillPaint!);
+        canvas.DrawPath(peakPath, poiOutlinePaint!);
+
+        return roofApexY;
     }
 
     private static string PoiKindLabel(MapaTur.Domain.Pois.PoiKind kind) => kind switch

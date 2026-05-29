@@ -621,7 +621,8 @@ public partial class Terrain3DView : ContentView
                 controller.ApplyPan(KeyPanPixelStep, 0f);
                 break;
 
-            // Orbit with WASD — swing azimuth/pitch by a constant pixel-equivalent step.
+            // A / D orbit (swing azimuth); W / S move forward / backward on the ground plane (dolly through
+            // the scene), matching the FPS convention the user asked for.
             case Windows.System.VirtualKey.A:
                 controller.ApplyOrbit(-KeyOrbitPixelStep, 0f);
                 break;
@@ -629,10 +630,10 @@ public partial class Terrain3DView : ContentView
                 controller.ApplyOrbit(KeyOrbitPixelStep, 0f);
                 break;
             case Windows.System.VirtualKey.W:
-                controller.ApplyOrbit(0f, KeyOrbitPixelStep);
+                controller.ApplyPan(0f, KeyPanPixelStep);
                 break;
             case Windows.System.VirtualKey.S:
-                controller.ApplyOrbit(0f, -KeyOrbitPixelStep);
+                controller.ApplyPan(0f, -KeyPanPixelStep);
                 break;
 
             // Vertical pan (raise / lower the camera target).

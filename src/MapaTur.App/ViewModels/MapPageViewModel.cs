@@ -259,28 +259,48 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private IReadOnlyList<MapaTur.Domain.Pois.MountainPoi>? pois3DOverlay;
 
-    // Last-downloaded POIs, kept so the show/hide toggle can re-apply without re-querying Overpass.
+    // Last-downloaded POIs, kept so the per-type filter can re-apply without re-querying Overpass.
     private IReadOnlyList<MapaTur.Domain.Pois.MountainPoi>? rawPois;
 
-    /// <summary>Whether mountain POIs are shown on the 2D map and 3D view. Toggled from the toolbar.</summary>
+    // Per-kind POI visibility toggles (default all on). Unchecking all hides POIs entirely.
     [ObservableProperty]
-    private bool showPois = true;
+    private bool showHuts = true;
+    [ObservableProperty]
+    private bool showWildernessHuts = true;
+    [ObservableProperty]
+    private bool showChalets = true;
+    [ObservableProperty]
+    private bool showShelters = true;
+    [ObservableProperty]
+    private bool showViewpoints = true;
 
-    partial void OnShowPoisChanged(bool value)
+    partial void OnShowHutsChanged(bool value) => ApplyPoiFilter();
+    partial void OnShowWildernessHutsChanged(bool value) => ApplyPoiFilter();
+    partial void OnShowChaletsChanged(bool value) => ApplyPoiFilter();
+    partial void OnShowSheltersChanged(bool value) => ApplyPoiFilter();
+    partial void OnShowViewpointsChanged(bool value) => ApplyPoiFilter();
+
+    /// <summary>Returns true when a POI of the given kind is currently enabled in the type filter.</summary>
+    private bool IsPoiKindVisible(MapaTur.Domain.Pois.PoiKind kind) => kind switch
     {
-        if (value)
+        MapaTur.Domain.Pois.PoiKind.Hut => ShowHuts,
+        MapaTur.Domain.Pois.PoiKind.WildernessHut => ShowWildernessHuts,
+        MapaTur.Domain.Pois.PoiKind.Chalet => ShowChalets,
+        MapaTur.Domain.Pois.PoiKind.Shelter => ShowShelters,
+        MapaTur.Domain.Pois.PoiKind.Viewpoint => ShowViewpoints,
+        _ => true,
+    };
+
+    /// <summary>Re-applies the per-kind filter to the last-downloaded POIs across the 2D map and 3D view.</summary>
+    private void ApplyPoiFilter()
+    {
+        if (rawPois is null)
         {
-            if (rawPois is not null)
-            {
-                poiRenderer.RenderPois(Map, rawPois);
-                Pois3DOverlay = rawPois;
-            }
+            return;
         }
-        else
-        {
-            poiRenderer.Clear(Map);
-            Pois3DOverlay = null;
-        }
+        var filtered = rawPois.Where(poi => IsPoiKindVisible(poi.Kind)).ToList();
+        poiRenderer.RenderPois(Map, filtered);
+        Pois3DOverlay = filtered;
     }
 
     /// <summary>Path to an ortho-photo image draped over the 3D terrain (GPU path), or null for the hypsometric tint.</summary>
@@ -718,11 +738,7 @@ public sealed partial class MapPageViewModel : ObservableObject
 
             var pois = await poiOverpassClient.FetchPoisAsync(bounds.Value).ConfigureAwait(true);
             rawPois = pois;
-            if (ShowPois)
-            {
-                poiRenderer.RenderPois(Map, pois);
-                Pois3DOverlay = pois;
-            }
+            ApplyPoiFilter();
 
             StatusMessage = pois.Count == 0
                 ? Localization.AppStrings.StatusNoPoisFound

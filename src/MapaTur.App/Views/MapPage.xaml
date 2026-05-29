@@ -36,11 +36,6 @@
                     Command="{Binding DownloadPoisForViewportCommand}"
                     IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
                     SemanticProperties.Hint="{x:Static loc:AppStrings.DownloadPois}" />
-            <HorizontalStackLayout Spacing="2" VerticalOptions="Center">
-                <CheckBox IsChecked="{Binding ShowPois}"
-                          SemanticProperties.Hint="{x:Static loc:AppStrings.ShowPois}" />
-                <Label Text="{x:Static loc:AppStrings.ShowPois}" VerticalOptions="Center" />
-            </HorizontalStackLayout>
             <Button Text="{x:Static loc:AppStrings.ClearRoute}"
                     Command="{Binding ClearRouteCommand}"
                     IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
@@ -96,6 +91,18 @@
             <Label Text="Pieniny" VerticalOptions="Center" FontSize="11" />
             <CheckBox IsChecked="{Binding RegionBieszczadyEnabled}" />
             <Label Text="Bieszczady" VerticalOptions="Center" FontSize="11" />
+            <BoxView WidthRequest="1" HeightRequest="22" Color="#52525B" Margin="6,0" />
+            <Label Text="POI:" VerticalOptions="Center" FontSize="11" />
+            <CheckBox IsChecked="{Binding ShowHuts}" />
+            <Label Text="Schroniska" VerticalOptions="Center" FontSize="11" />
+            <CheckBox IsChecked="{Binding ShowWildernessHuts}" />
+            <Label Text="Bacówki" VerticalOptions="Center" FontSize="11" />
+            <CheckBox IsChecked="{Binding ShowChalets}" />
+            <Label Text="Chaty" VerticalOptions="Center" FontSize="11" />
+            <CheckBox IsChecked="{Binding ShowShelters}" />
+            <Label Text="Wiaty" VerticalOptions="Center" FontSize="11" />
+            <CheckBox IsChecked="{Binding ShowViewpoints}" />
+            <Label Text="Widoki" VerticalOptions="Center" FontSize="11" />
         </HorizontalStackLayout>
 
         <mapsui:MapControl x:Name="MapControl"
