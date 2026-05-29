@@ -547,6 +547,16 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
             StrokeWidth = 1.5f,
             Color = ClimbingOutlineColor,
         };
+        // Reuse the peak label paints/font (created lazily here too, since POIs draw before peaks).
+        peakLabelFillPaint ??= new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill, Color = SKColors.White };
+        peakLabelHaloPaint ??= new SKPaint
+        {
+            IsAntialias = true,
+            Style = SKPaintStyle.Stroke,
+            StrokeWidth = 3f,
+            Color = PeakLabelHaloColor,
+        };
+        peakFont ??= new SKFont { Size = PeakLabelSizePx };
 
         foreach (var marker in pois)
         {
@@ -559,11 +569,32 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
             {
                 continue;
             }
+            float x = screen.Value.X;
+            float y = screen.Value.Y;
             poiFillPaint.Color = ParsePoiColor(marker.Source.Kind);
-            canvas.DrawCircle(screen.Value.X, screen.Value.Y, PoiMarkerRadiusPx, poiFillPaint);
-            canvas.DrawCircle(screen.Value.X, screen.Value.Y, PoiMarkerRadiusPx, poiOutlinePaint);
+            canvas.DrawCircle(x, y, PoiMarkerRadiusPx, poiFillPaint);
+            canvas.DrawCircle(x, y, PoiMarkerRadiusPx, poiOutlinePaint);
+
+            // Always label the marker so the user can tell what it is — the POI's name when tagged,
+            // otherwise its category. Halo first, then fill, for contrast against any backdrop.
+            string label = !string.IsNullOrEmpty(marker.Source.Name)
+                ? marker.Source.Name
+                : PoiKindLabel(marker.Source.Kind);
+            float labelY = y - PoiMarkerRadiusPx - 4f;
+            canvas.DrawText(label, x, labelY, SKTextAlign.Center, peakFont, peakLabelHaloPaint);
+            canvas.DrawText(label, x, labelY, SKTextAlign.Center, peakFont, peakLabelFillPaint);
         }
     }
+
+    private static string PoiKindLabel(MapaTur.Domain.Pois.PoiKind kind) => kind switch
+    {
+        MapaTur.Domain.Pois.PoiKind.Hut => "Hut",
+        MapaTur.Domain.Pois.PoiKind.WildernessHut => "Shelter hut",
+        MapaTur.Domain.Pois.PoiKind.Chalet => "Chalet",
+        MapaTur.Domain.Pois.PoiKind.Shelter => "Shelter",
+        MapaTur.Domain.Pois.PoiKind.Viewpoint => "Viewpoint",
+        _ => "POI",
+    };
 
     private void DrawPeaks(SKCanvas canvas, IReadOnlyList<ProjectedPeak> peaks, ScreenDepthMap? depthMap)
     {

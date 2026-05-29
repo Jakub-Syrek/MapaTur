@@ -55,7 +55,9 @@ public sealed class Terrain3DController
     public void ApplyLookAround(float dxPixels, float dyPixels)
     {
         Vector3 position = Camera.Position;
-        Camera.AzimuthRadians += dxPixels * OrbitSensitivity;
+        // Looking around turns the head: dragging right should swing the view right, the opposite azimuth
+        // sign to ApplyOrbit (which circles the camera the other way). dy keeps its sign — dragging up looks up.
+        Camera.AzimuthRadians -= dxPixels * OrbitSensitivity;
         Camera.PitchRadians = Math.Clamp(Camera.PitchRadians + (dyPixels * OrbitSensitivity), MinPitchRadians, MaxPitch);
         Camera.Target = position - OrbitOffset();
     }

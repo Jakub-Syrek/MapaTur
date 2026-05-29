@@ -57,6 +57,9 @@ public static class AppStrings
     /// <summary>Status shown when no POIs are found in the queried area.</summary>
     public static string StatusNoPoisFound => Get(nameof(StatusNoPoisFound));
 
+    /// <summary>"Show POIs" toggle label.</summary>
+    public static string ShowPois => Get(nameof(ShowPois));
+
     /// <summary>"Clear Route" button label.</summary>
     public static string ClearRoute => Get(nameof(ClearRoute));
 

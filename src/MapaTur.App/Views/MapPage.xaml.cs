@@ -54,7 +54,12 @@ public partial class MapPage : ContentPage
         {
             // Defer so this runs after any mesh-change FrameMesh() the binding may dispatch,
             // otherwise the auto-frame would clobber the focus we just synced from the 2D map.
-            Dispatcher.Dispatch(SyncCameraToMap);
+            Dispatcher.Dispatch(() =>
+            {
+                SyncCameraToMap();
+                // Grab keyboard focus so the arrow keys / WASD work immediately without a click first.
+                TerrainView.FocusForKeyboard();
+            });
         }
         else
         {

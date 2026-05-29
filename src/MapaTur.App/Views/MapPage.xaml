@@ -36,6 +36,11 @@
                     Command="{Binding DownloadPoisForViewportCommand}"
                     IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
                     SemanticProperties.Hint="{x:Static loc:AppStrings.DownloadPois}" />
+            <HorizontalStackLayout Spacing="2" VerticalOptions="Center">
+                <CheckBox IsChecked="{Binding ShowPois}"
+                          SemanticProperties.Hint="{x:Static loc:AppStrings.ShowPois}" />
+                <Label Text="{x:Static loc:AppStrings.ShowPois}" VerticalOptions="Center" />
+            </HorizontalStackLayout>
             <Button Text="{x:Static loc:AppStrings.ClearRoute}"
                     Command="{Binding ClearRouteCommand}"
                     IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"

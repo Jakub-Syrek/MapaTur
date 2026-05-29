@@ -52,6 +52,9 @@
   <data name="StatusNoPoisFound" xml:space="preserve">
     <value>No POIs found in this area.</value>
   </data>
+  <data name="ShowPois" xml:space="preserve">
+    <value>Show POIs</value>
+  </data>
   <data name="ClearRoute" xml:space="preserve">
     <value>Clear Route</value>
   </data>

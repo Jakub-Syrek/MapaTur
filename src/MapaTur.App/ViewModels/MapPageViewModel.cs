@@ -259,6 +259,30 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private IReadOnlyList<MapaTur.Domain.Pois.MountainPoi>? pois3DOverlay;
 
+    // Last-downloaded POIs, kept so the show/hide toggle can re-apply without re-querying Overpass.
+    private IReadOnlyList<MapaTur.Domain.Pois.MountainPoi>? rawPois;
+
+    /// <summary>Whether mountain POIs are shown on the 2D map and 3D view. Toggled from the toolbar.</summary>
+    [ObservableProperty]
+    private bool showPois = true;
+
+    partial void OnShowPoisChanged(bool value)
+    {
+        if (value)
+        {
+            if (rawPois is not null)
+            {
+                poiRenderer.RenderPois(Map, rawPois);
+                Pois3DOverlay = rawPois;
+            }
+        }
+        else
+        {
+            poiRenderer.Clear(Map);
+            Pois3DOverlay = null;
+        }
+    }
+
     /// <summary>Path to an ortho-photo image draped over the 3D terrain (GPU path), or null for the hypsometric tint.</summary>
     [ObservableProperty]
     private string? orthoTexturePath;
@@ -693,8 +717,12 @@ public sealed partial class MapPageViewModel : ObservableObject
             StatusMessage = Localization.AppStrings.StatusDownloadingPois;
 
             var pois = await poiOverpassClient.FetchPoisAsync(bounds.Value).ConfigureAwait(true);
-            poiRenderer.RenderPois(Map, pois);
-            Pois3DOverlay = pois;
+            rawPois = pois;
+            if (ShowPois)
+            {
+                poiRenderer.RenderPois(Map, pois);
+                Pois3DOverlay = pois;
+            }
 
             StatusMessage = pois.Count == 0
                 ? Localization.AppStrings.StatusNoPoisFound
@@ -1032,6 +1060,13 @@ public sealed partial class MapPageViewModel : ObservableObject
             if (loaded.Count > 0)
             {
                 StatusMessage = $"Auto-loaded: {string.Join(", ", loaded)}";
+            }
+
+            // Start in 3D when a terrain mesh is available — the app's headline view. Falls back to the
+            // flat map when no DEM was found (3D would otherwise be an empty scene).
+            if (TerrainTiles is not null)
+            {
+                Is3DMode = true;
             }
         }
         catch (Exception ex)

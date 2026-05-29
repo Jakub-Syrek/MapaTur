@@ -449,6 +449,20 @@ public partial class Terrain3DView : ContentView
         Canvas.InvalidateSurface();
     }
 
+    /// <summary>
+    /// Puts keyboard focus on the 3D canvas so the arrow keys (pan) and WASD (orbit) work without the user
+    /// first having to click it. Called by the host page when 3D mode is entered. No-op off Windows.
+    /// </summary>
+    public void FocusForKeyboard()
+    {
+#if WINDOWS
+        if (wheelTarget is Microsoft.UI.Xaml.Controls.Control control)
+        {
+            control.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
+        }
+#endif
+    }
+
 #if WINDOWS
     private Microsoft.UI.Xaml.UIElement? wheelTarget;
     private Microsoft.UI.Xaml.Input.KeyEventHandler? keyDownHandler;
