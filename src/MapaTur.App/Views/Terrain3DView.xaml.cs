@@ -104,6 +104,14 @@ public partial class Terrain3DView : ContentView
     private readonly Terrain3DCanvasRenderer renderer = new();
     private readonly Terrain3DFrameScratch frameScratch = new();
 
+    // Camera-independent trail world points, cached so a gesture (which changes only the camera)
+    // doesn't re-run ~38k DEM bilinear samples + geo→world cosines per frame. Rebuilt only when the
+    // trails, raster or mesh reference changes; per frame we run the cheap screen transform alone.
+    private IReadOnlyList<TrailWorldLine>? trailWorldCache;
+    private IReadOnlyList<Trail>? trailWorldCacheTrails;
+    private DemRaster? trailWorldCacheRaster;
+    private TerrainMesh3D? trailWorldCacheMesh;
+
     private double lastOrbitTotalX;
     private double lastOrbitTotalY;
     private double lastTranslateTotalX;
@@ -186,8 +194,20 @@ public partial class Terrain3DView : ContentView
         IReadOnlyList<ProjectedTrail>? projectedTrails = null;
         if (Trails is { Count: > 0 } trails && Raster is not null)
         {
-            projectedTrails = Trail3DProjection.Project(
-                trails, Raster, Mesh, Camera, e.Info.Width, e.Info.Height);
+            // Rebuild the camera-independent world points only when the inputs change; during a
+            // gesture only the camera moves, so we reuse the cache and pay just the screen transform.
+            if (!ReferenceEquals(trailWorldCacheTrails, trails)
+                || !ReferenceEquals(trailWorldCacheRaster, Raster)
+                || !ReferenceEquals(trailWorldCacheMesh, Mesh))
+            {
+                trailWorldCache = Trail3DWorldProjection.ToWorld(trails, Raster, Mesh);
+                trailWorldCacheTrails = trails;
+                trailWorldCacheRaster = Raster;
+                trailWorldCacheMesh = Mesh;
+            }
+
+            projectedTrails = Trail3DWorldProjection.ToScreen(
+                trailWorldCache!, Camera, e.Info.Width, e.Info.Height);
         }
 
         ProjectedRoute? projectedRoute = null;
