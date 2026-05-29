@@ -494,6 +494,18 @@ public partial class Terrain3DView : ContentView
     {
         DetachWheelHandler();
 
+        // A new handler means a new platform view and a fresh GL context, so every GPU object the renderer
+        // cached (program, VAOs, FBOs, textures) belongs to the dead context. Toggling 2D⇄3D recycles the
+        // SKGLView handler this way; the IsProgram context-loss check inside the renderer doesn't always catch
+        // it, leaving only the sky clear ("blue screen"). Drop the renderer so the next paint rebuilds clean.
+        // Don't Dispose() here — that issues GL deletes with no context current; the old context's objects are
+        // freed when it dies. Just release our reference and re-enable GL in case a failure had disabled it.
+        glRenderer = null;
+        glDisabled = false;
+        // The fresh renderer has no ortho texture yet (it's pushed imperatively, not per frame), so re-flag it
+        // for re-upload; trails/route/roads/peaks re-upload on their own since they're projected each frame.
+        orthoPathDirty = true;
+
         if (Canvas.Handler?.PlatformView is Microsoft.UI.Xaml.UIElement element)
         {
             wheelTarget = element;
