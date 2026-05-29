@@ -537,8 +537,11 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
             canvas.DrawPath(peakPath, peakFillPaint);
             canvas.DrawPath(peakPath, peakOutlinePaint);
 
-            // Elevation label above the apex; halo first, then fill, for contrast.
-            string label = $"{Math.Round(peak.Source.ElevationMeters)} m";
+            // Elevation label above the apex; halo first, then fill, for contrast. Prefer the
+            // authoritative (gazetteer) height when present — the DEM-sampled seat elevation
+            // under-reports sharp summits.
+            double labelElevation = peak.Source.LabelElevationMeters ?? peak.Source.ElevationMeters;
+            string label = $"{Math.Round(labelElevation)} m";
             float labelY = y - PeakMarkerHeightPx - 4f;
             canvas.DrawText(label, x, labelY, SKTextAlign.Center, peakFont, peakLabelHaloPaint);
             canvas.DrawText(label, x, labelY, SKTextAlign.Center, peakFont, peakLabelFillPaint);
