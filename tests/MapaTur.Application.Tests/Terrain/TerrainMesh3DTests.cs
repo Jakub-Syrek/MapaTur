@@ -214,6 +214,72 @@ public sealed class TerrainMesh3DTests
     }
 
     [Fact]
+    public void WorldToGeo_AtOrigin_ReturnsBboxCenter()
+    {
+        var raster = BuildFlatRaster(2, 2);
+        TerrainMesh3D mesh = TerrainMesh3D.Build(raster);
+        var centerLat = (raster.North + raster.South) / 2.0;
+        var centerLon = (raster.East + raster.West) / 2.0;
+
+        GeoPoint geo = mesh.WorldToGeo(Vector3.Zero);
+
+        geo.Latitude.Should().BeApproximately(centerLat, 1e-6);
+        geo.Longitude.Should().BeApproximately(centerLon, 1e-6);
+    }
+
+    [Fact]
+    public void WorldToGeo_PositiveX_IsEastOfCenter()
+    {
+        var raster = BuildFlatRaster(2, 2);
+        TerrainMesh3D mesh = TerrainMesh3D.Build(raster);
+        var centerLon = (raster.East + raster.West) / 2.0;
+
+        GeoPoint geo = mesh.WorldToGeo(new Vector3(5000f, 0f, 0f));
+
+        geo.Longitude.Should().BeGreaterThan(centerLon);
+    }
+
+    [Fact]
+    public void WorldToGeo_PositiveY_IsNorthOfCenter()
+    {
+        var raster = BuildFlatRaster(2, 2);
+        TerrainMesh3D mesh = TerrainMesh3D.Build(raster);
+        var centerLat = (raster.North + raster.South) / 2.0;
+
+        GeoPoint geo = mesh.WorldToGeo(new Vector3(0f, 5000f, 0f));
+
+        geo.Latitude.Should().BeGreaterThan(centerLat);
+    }
+
+    [Fact]
+    public void WorldToGeo_RoundTripsWithGeoToWorld()
+    {
+        var raster = BuildFlatRaster(2, 2);
+        TerrainMesh3D mesh = TerrainMesh3D.Build(raster);
+        // An off-centre point well inside the raster bbox (spans 49..50, 19..20).
+        var original = new GeoPoint(49.7, 19.3);
+
+        Vector3 world = mesh.GeoToWorld(original, elevationMeters: 0f);
+        GeoPoint roundTripped = mesh.WorldToGeo(world);
+
+        roundTripped.Latitude.Should().BeApproximately(original.Latitude, 1e-4);
+        roundTripped.Longitude.Should().BeApproximately(original.Longitude, 1e-4);
+    }
+
+    [Fact]
+    public void WorldToGeo_IgnoresElevationComponent()
+    {
+        var raster = BuildFlatRaster(2, 2);
+        TerrainMesh3D mesh = TerrainMesh3D.Build(raster);
+
+        GeoPoint atZeroZ = mesh.WorldToGeo(new Vector3(1000f, 2000f, 0f));
+        GeoPoint atHighZ = mesh.WorldToGeo(new Vector3(1000f, 2000f, 9999f));
+
+        atHighZ.Latitude.Should().BeApproximately(atZeroZ.Latitude, 1e-9);
+        atHighZ.Longitude.Should().BeApproximately(atZeroZ.Longitude, 1e-9);
+    }
+
+    [Fact]
     public void HypsometricColor_HighElevationIsLight()
     {
         uint high = TerrainMesh3D.HypsometricColor(2500.0);

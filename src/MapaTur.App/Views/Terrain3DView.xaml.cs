@@ -116,6 +116,20 @@ public partial class Terrain3DView : ContentView
         Canvas.InvalidateSurface();
     }
 
+    /// <summary>
+    /// Points the camera at a world-space target from a given distance, preserving the current
+    /// orbit angle (azimuth/pitch). Used to keep the 3D view framed on the same place the 2D map
+    /// was centred on when switching into 3D. Distance is clamped to the controller's zoom range.
+    /// </summary>
+    /// <param name="target">World-space focal point (X east, Y north, Z up).</param>
+    /// <param name="distance">Desired camera distance in metres; clamped to the valid zoom range.</param>
+    public void FocusOnWorld(Vector3 target, float distance)
+    {
+        Camera.Target = target;
+        Camera.Distance = Math.Clamp(distance, controller.MinDistance, controller.MaxDistance);
+        Canvas.InvalidateSurface();
+    }
+
     /// <summary>Positions the camera so the entire <see cref="Mesh"/> fits in view.</summary>
     public void FrameMesh()
     {

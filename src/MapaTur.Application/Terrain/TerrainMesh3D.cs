@@ -75,6 +75,22 @@ public sealed class TerrainMesh3D
     }
 
     /// <summary>
+    /// Inverse of <see cref="GeoToWorld"/>: maps a world-space point (X east, Y north, in metres)
+    /// back to its geographic position. The Z/elevation component is ignored — only the planar
+    /// XY position determines longitude/latitude. Used to translate a 3D camera focus point into a
+    /// 2D map centre so switching between 3D and 2D keeps the same place framed.
+    /// </summary>
+    public GeoPoint WorldToGeo(Vector3 worldPoint)
+    {
+        double centerLat = (Bounds.NorthEast.Latitude + Bounds.SouthWest.Latitude) / 2.0;
+        double centerLon = (Bounds.NorthEast.Longitude + Bounds.SouthWest.Longitude) / 2.0;
+        double metersPerLonDegree = MetersPerLatDegree * Math.Cos(centerLat * Math.PI / 180.0);
+        double longitude = centerLon + (worldPoint.X / metersPerLonDegree);
+        double latitude = centerLat + (worldPoint.Y / MetersPerLatDegree);
+        return new GeoPoint(latitude, longitude);
+    }
+
+    /// <summary>
     /// Builds a terrain mesh from a DEM raster.
     /// </summary>
     /// <param name="raster">Source DEM.</param>

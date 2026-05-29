@@ -95,7 +95,8 @@
                            IsVisible="{Binding Is3DMode, Converter={StaticResource InverseBool}}"
                            SemanticProperties.Description="{x:Static loc:AppStrings.AccessibilityMapControl}" />
 
-        <views:Terrain3DView Grid.Row="2"
+        <views:Terrain3DView x:Name="TerrainView"
+                             Grid.Row="2"
                              Mesh="{Binding TerrainMesh}"
                              Raster="{Binding TerrainRaster}"
                              Trails="{Binding Trails3DOverlay}"

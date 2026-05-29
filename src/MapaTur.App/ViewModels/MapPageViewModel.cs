@@ -294,6 +294,50 @@ public sealed partial class MapPageViewModel : ObservableObject
         Map.Navigator.CenterOnAndZoomTo(new MPoint(centerX, centerY), DefaultResolution);
     }
 
+    /// <summary>
+    /// Reads the current 2D map focus so the 3D camera can be pointed at the same place when
+    /// switching into 3D. Returns false until the viewport has been laid out (dimensions &gt; 0).
+    /// </summary>
+    /// <param name="center">Geographic centre of the current viewport.</param>
+    /// <param name="resolution">Current map resolution (mercator metres per pixel).</param>
+    /// <param name="viewportHeightPixels">Viewport height in pixels (for the distance↔resolution map).</param>
+    public bool TryGetMapFocus(out GeoPoint center, out double resolution, out double viewportHeightPixels)
+    {
+        var viewport = Map.Navigator.Viewport;
+        if (viewport.Width <= 0 || viewport.Height <= 0 || viewport.Resolution <= 0)
+        {
+            center = default;
+            resolution = 0;
+            viewportHeightPixels = 0;
+            return false;
+        }
+
+        var (longitude, latitude) = SphericalMercator.ToLonLat(viewport.CenterX, viewport.CenterY);
+        center = new GeoPoint(latitude, longitude);
+        resolution = viewport.Resolution;
+        viewportHeightPixels = viewport.Height;
+        return true;
+    }
+
+    /// <summary>
+    /// Centres the 2D map on a geographic point at the given resolution. Used to make the flat map
+    /// frame the same spot the 3D camera was looking at — "chcę tę górę widzieć na mapie".
+    /// </summary>
+    /// <param name="center">Geographic point to centre on.</param>
+    /// <param name="resolution">Target resolution; ignored (centre only) when not positive/finite.</param>
+    public void CenterMapOn(GeoPoint center, double resolution)
+    {
+        var (x, y) = SphericalMercator.FromLonLat(center.Longitude, center.Latitude);
+        if (double.IsFinite(resolution) && resolution > 0)
+        {
+            Map.Navigator.CenterOnAndZoomTo(new MPoint(x, y), resolution);
+        }
+        else
+        {
+            Map.Navigator.CenterOn(new MPoint(x, y));
+        }
+    }
+
     /// <summary>Mapsui map model bound to the MapControl.</summary>
     public Map Map { get; }
 
