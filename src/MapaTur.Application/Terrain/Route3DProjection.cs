@@ -1,5 +1,3 @@
-using System.Numerics;
-
 using MapaTur.Domain.Routing;
 using MapaTur.Domain.Terrain;
 
@@ -10,6 +8,12 @@ namespace MapaTur.Application.Terrain;
 /// is lifted to the underlying DEM elevation (plus a small bias so the line sits
 /// above the terrain) and run through the camera's view+projection pipeline.
 /// </summary>
+/// <remarks>
+/// This is the eager, single-call wrapper around <see cref="Route3DWorldProjection"/>: it runs the
+/// camera-independent world stage and the per-frame screen stage back-to-back. Hosts that re-render
+/// every frame during a gesture should instead cache <see cref="Route3DWorldProjection.ToWorld"/>
+/// once and call <see cref="Route3DWorldProjection.ToScreen"/> per frame.
+/// </remarks>
 public static class Route3DProjection
 {
     /// <summary>
@@ -31,26 +35,8 @@ public static class Route3DProjection
         float screenHeight,
         float routeLiftMeters = 8f)
     {
-        ArgumentNullException.ThrowIfNull(route);
-        ArgumentNullException.ThrowIfNull(raster);
-        ArgumentNullException.ThrowIfNull(mesh);
-        ArgumentNullException.ThrowIfNull(camera);
-
-        Matrix4x4 viewProjection = (screenWidth > 0f && screenHeight > 0f)
-            ? camera.BuildViewProjection(screenWidth / screenHeight)
-            : Matrix4x4.Identity;
-
-        var polyline = route.ToPolyline();
-        var points = new Vector3?[polyline.Count];
-        for (int i = 0; i < polyline.Count; i++)
-        {
-            var geo = polyline[i];
-            float groundElevation = (float)raster.SampleBilinear(geo.Longitude, geo.Latitude);
-            float liftedElevation = groundElevation + routeLiftMeters;
-            Vector3 world = mesh.GeoToWorld(geo, liftedElevation);
-            points[i] = camera.ProjectToScreen(world, viewProjection, screenWidth, screenHeight);
-        }
-
-        return new ProjectedRoute(route, points);
+        // camera null is validated by ToScreen; route/raster/mesh by ToWorld.
+        var world = Route3DWorldProjection.ToWorld(route, raster, mesh, routeLiftMeters);
+        return Route3DWorldProjection.ToScreen(world, camera, screenWidth, screenHeight);
     }
 }

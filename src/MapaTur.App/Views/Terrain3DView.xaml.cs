@@ -104,13 +104,12 @@ public partial class Terrain3DView : ContentView
     private readonly Terrain3DCanvasRenderer renderer = new();
     private readonly Terrain3DFrameScratch frameScratch = new();
 
-    // Camera-independent trail world points, cached so a gesture (which changes only the camera)
-    // doesn't re-run ~38k DEM bilinear samples + geo→world cosines per frame. Rebuilt only when the
-    // trails, raster or mesh reference changes; per frame we run the cheap screen transform alone.
-    private IReadOnlyList<TrailWorldLine>? trailWorldCache;
-    private IReadOnlyList<Trail>? trailWorldCacheTrails;
-    private DemRaster? trailWorldCacheRaster;
-    private TerrainMesh3D? trailWorldCacheMesh;
+    // Stateful overlay projectors own the camera-independent world cache plus reusable screen buffers,
+    // so a gesture (which changes only the camera) doesn't re-run ~38k DEM bilinear samples + geo→world
+    // cosines per frame, nor allocate per-frame point arrays. They rebuild only when the trails/route,
+    // raster or mesh reference changes; per frame they pay just the screen transform into cached buffers.
+    private readonly Trail3DOverlayProjector trailProjector = new();
+    private readonly Route3DOverlayProjector routeProjector = new();
 
     private double lastOrbitTotalX;
     private double lastOrbitTotalY;
@@ -194,26 +193,16 @@ public partial class Terrain3DView : ContentView
         IReadOnlyList<ProjectedTrail>? projectedTrails = null;
         if (Trails is { Count: > 0 } trails && Raster is not null)
         {
-            // Rebuild the camera-independent world points only when the inputs change; during a
-            // gesture only the camera moves, so we reuse the cache and pay just the screen transform.
-            if (!ReferenceEquals(trailWorldCacheTrails, trails)
-                || !ReferenceEquals(trailWorldCacheRaster, Raster)
-                || !ReferenceEquals(trailWorldCacheMesh, Mesh))
-            {
-                trailWorldCache = Trail3DWorldProjection.ToWorld(trails, Raster, Mesh);
-                trailWorldCacheTrails = trails;
-                trailWorldCacheRaster = Raster;
-                trailWorldCacheMesh = Mesh;
-            }
-
-            projectedTrails = Trail3DWorldProjection.ToScreen(
-                trailWorldCache!, Camera, e.Info.Width, e.Info.Height);
+            // The projector reuses its world cache + screen buffers when the inputs are unchanged, so a
+            // gesture pays only the per-frame screen transform with zero allocation.
+            projectedTrails = trailProjector.Project(
+                trails, Raster, Mesh, Camera, e.Info.Width, e.Info.Height);
         }
 
         ProjectedRoute? projectedRoute = null;
         if (Route is not null && Raster is not null)
         {
-            projectedRoute = Route3DProjection.Project(
+            projectedRoute = routeProjector.Project(
                 Route, Raster, Mesh, Camera, e.Info.Width, e.Info.Height);
         }
 
