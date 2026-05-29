@@ -456,10 +456,8 @@ public partial class Terrain3DView : ContentView
     public void FocusForKeyboard()
     {
 #if WINDOWS
-        if (wheelTarget is Microsoft.UI.Xaml.Controls.Control control)
-        {
-            control.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
-        }
+        // Focus() lives on UIElement; the platform view is a SwapChainPanel (not a Control).
+        wheelTarget?.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
 #endif
     }
 
@@ -487,12 +485,10 @@ public partial class Terrain3DView : ContentView
             wheelTarget = element;
             wheelTarget.PointerWheelChanged += OnPointerWheelChanged;
 
-            // Make the platform view focusable so keyboard events route here.
-            // A tap (or programmatic Focus) puts keyboard focus on the canvas.
-            if (element is Microsoft.UI.Xaml.Controls.Control control)
-            {
-                control.IsTabStop = true;
-            }
+            // Make the platform view focusable so keyboard events route here. The SKGLView platform view is a
+            // SwapChainPanel (a UIElement, NOT a Control), so IsTabStop/Focus must be set on UIElement —
+            // the old `is Control` cast silently failed and no key ever reached us.
+            element.IsTabStop = true;
 
             // Subscribe via AddHandler with handledEventsToo:true rather than "+= KeyDown".
             // Character keys (WASD) bubble up from the focused child already marked Handled,
@@ -544,10 +540,8 @@ public partial class Terrain3DView : ContentView
         var element = (Microsoft.UI.Xaml.UIElement)sender;
 
         // Clicking the canvas grabs keyboard focus so subsequent KeyDown events route here.
-        if (element is Microsoft.UI.Xaml.Controls.Control c)
-        {
-            c.Focus(Microsoft.UI.Xaml.FocusState.Pointer);
-        }
+        // Focus() is on UIElement (the platform view is a SwapChainPanel, not a Control).
+        element.Focus(Microsoft.UI.Xaml.FocusState.Pointer);
 
         var props = e.GetCurrentPoint(element).Properties;
         mouseDragButton = props.IsLeftButtonPressed ? 1 : props.IsRightButtonPressed ? 2 : 0;
