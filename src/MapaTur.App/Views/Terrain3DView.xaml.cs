@@ -463,6 +463,7 @@ public partial class Terrain3DView : ContentView
 
 #if WINDOWS
     private Microsoft.UI.Xaml.UIElement? wheelTarget;
+    private Microsoft.UI.Xaml.UIElement? keyboardRoot;
     private Microsoft.UI.Xaml.Input.KeyEventHandler? keyDownHandler;
 
     // Mouse drag on Windows: MAUI's PanGestureRecognizer is touch/pen only, so we drive orbit/pan from raw
@@ -496,6 +497,14 @@ public partial class Terrain3DView : ContentView
             // handledEventsToo receives the event regardless and lets WASD orbit work too.
             keyDownHandler ??= OnPlatformKeyDown;
             element.AddHandler(Microsoft.UI.Xaml.UIElement.KeyDownEvent, keyDownHandler, handledEventsToo: true);
+
+            // Focusing a SwapChainPanel to capture keys proved unreliable, so also listen at the window
+            // root (XamlRoot.Content), which always receives KeyDown. The handler is gated on this view's
+            // IsVisible so it only drives the camera while 3D mode is on. handledEventsToo:true so it fires
+            // even though focus-navigation marks the arrow keys handled.
+            keyboardRoot = element.XamlRoot?.Content as Microsoft.UI.Xaml.UIElement;
+            keyboardRoot?.AddHandler(Microsoft.UI.Xaml.UIElement.KeyDownEvent, keyDownHandler, handledEventsToo: true);
+
             element.PointerPressed += OnPlatformPointerPressed;
             element.PointerMoved += OnPlatformPointerMoved;
             element.PointerReleased += OnPlatformPointerReleased;
@@ -517,6 +526,12 @@ public partial class Terrain3DView : ContentView
             wheelTarget.PointerReleased -= OnPlatformPointerReleased;
             wheelTarget.PointerCaptureLost -= OnPlatformPointerReleased;
             wheelTarget = null;
+        }
+
+        if (keyboardRoot is not null && keyDownHandler is not null)
+        {
+            keyboardRoot.RemoveHandler(Microsoft.UI.Xaml.UIElement.KeyDownEvent, keyDownHandler);
+            keyboardRoot = null;
         }
     }
 
@@ -542,6 +557,15 @@ public partial class Terrain3DView : ContentView
         // Clicking the canvas grabs keyboard focus so subsequent KeyDown events route here.
         // Focus() is on UIElement (the platform view is a SwapChainPanel, not a Control).
         element.Focus(Microsoft.UI.Xaml.FocusState.Pointer);
+
+        // If the window-root key handler wasn't attached at handler-change time (XamlRoot not ready yet),
+        // attach it now that the view is definitely live — guarantees keyboard works after any interaction.
+        if (keyboardRoot is null && keyDownHandler is not null
+            && element.XamlRoot?.Content is Microsoft.UI.Xaml.UIElement root)
+        {
+            keyboardRoot = root;
+            keyboardRoot.AddHandler(Microsoft.UI.Xaml.UIElement.KeyDownEvent, keyDownHandler, handledEventsToo: true);
+        }
 
         var props = e.GetCurrentPoint(element).Properties;
         mouseDragButton = props.IsLeftButtonPressed ? 1 : props.IsRightButtonPressed ? 2 : 0;
@@ -596,6 +620,12 @@ public partial class Terrain3DView : ContentView
 
     private void OnPlatformKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
     {
+        // The handler also listens at the window root, so ignore keys unless 3D mode is actually showing.
+        if (!IsVisible)
+        {
+            return;
+        }
+
         bool handled = true;
         switch (e.Key)
         {
