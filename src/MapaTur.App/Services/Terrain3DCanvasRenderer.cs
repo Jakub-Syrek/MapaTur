@@ -24,6 +24,15 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
     private static readonly SKColor ClimbingOutlineColor = new(0x1F, 0x29, 0x37);
     private const float ClimbingMarkerRadiusPx = 5.5f;
 
+    // Peak markers: a warm-gold mountain glyph with a dark outline, plus an elevation label
+    // drawn over a dark halo so it stays legible against both bright snow and dark forest.
+    private static readonly SKColor PeakMarkerColor = new(0xFF, 0xD7, 0x4A);
+    private static readonly SKColor PeakOutlineColor = new(0x3A, 0x2E, 0x10);
+    private static readonly SKColor PeakLabelHaloColor = new(0x10, 0x14, 0x20);
+    private const float PeakMarkerHalfWidthPx = 6f;
+    private const float PeakMarkerHeightPx = 12f;
+    private const float PeakLabelSizePx = 12.5f;
+
     // Trail / route / climbing vertices are only culled when their NDC depth
     // exceeds the local mesh depth by more than this much. The minimum-per-bin
     // depth map mixes nearby foreground peaks with background valleys at bin
@@ -49,6 +58,12 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
     private SKPaint? routePaint;
     private SKPaint? climbingFillPaint;
     private SKPaint? climbingOutlinePaint;
+    private SKPaint? peakFillPaint;
+    private SKPaint? peakOutlinePaint;
+    private SKPaint? peakLabelFillPaint;
+    private SKPaint? peakLabelHaloPaint;
+    private SKFont? peakFont;
+    private SKPath? peakPath;
     private SKPaint? skyPaint;
     private SKShader? skyShader;
     private int cachedSkyWidth;
@@ -72,7 +87,8 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         ScreenDepthMap? depthMap = null,
         IReadOnlyList<ProjectedTrail>? trails = null,
         ProjectedRoute? route = null,
-        IReadOnlyList<ProjectedClimbingArea>? climbingAreas = null)
+        IReadOnlyList<ProjectedClimbingArea>? climbingAreas = null,
+        IReadOnlyList<ProjectedPeak>? peaks = null)
     {
         ArgumentNullException.ThrowIfNull(canvas);
         ArgumentNullException.ThrowIfNull(mesh);
@@ -116,6 +132,10 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         if (climbingAreas is not null)
         {
             DrawClimbingAreas(canvas, climbingAreas, depthMap);
+        }
+        if (peaks is not null)
+        {
+            DrawPeaks(canvas, peaks, depthMap);
         }
     }
 
@@ -328,6 +348,65 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         }
     }
 
+    private void DrawPeaks(SKCanvas canvas, IReadOnlyList<ProjectedPeak> peaks, ScreenDepthMap? depthMap)
+    {
+        if (peaks.Count == 0)
+        {
+            return;
+        }
+
+        peakFillPaint ??= new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill, Color = PeakMarkerColor };
+        peakOutlinePaint ??= new SKPaint
+        {
+            IsAntialias = true,
+            Style = SKPaintStyle.Stroke,
+            StrokeWidth = 1.5f,
+            StrokeJoin = SKStrokeJoin.Round,
+            Color = PeakOutlineColor,
+        };
+        peakLabelFillPaint ??= new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill, Color = SKColors.White };
+        peakLabelHaloPaint ??= new SKPaint
+        {
+            IsAntialias = true,
+            Style = SKPaintStyle.Stroke,
+            StrokeWidth = 3f,
+            Color = PeakLabelHaloColor,
+        };
+        peakFont ??= new SKFont { Size = PeakLabelSizePx };
+        peakPath ??= new SKPath();
+
+        foreach (var peak in peaks)
+        {
+            var screen = peak.ScreenPosition;
+            if (screen is null)
+            {
+                continue;
+            }
+            if (depthMap is not null && depthMap.IsBehind(screen, OcclusionEpsilon))
+            {
+                continue;
+            }
+
+            float x = screen.Value.X;
+            float y = screen.Value.Y;
+
+            // Mountain glyph: base sits on the projected summit point, apex points up.
+            peakPath.Reset();
+            peakPath.MoveTo(x - PeakMarkerHalfWidthPx, y);
+            peakPath.LineTo(x, y - PeakMarkerHeightPx);
+            peakPath.LineTo(x + PeakMarkerHalfWidthPx, y);
+            peakPath.Close();
+            canvas.DrawPath(peakPath, peakFillPaint);
+            canvas.DrawPath(peakPath, peakOutlinePaint);
+
+            // Elevation label above the apex; halo first, then fill, for contrast.
+            string label = $"{Math.Round(peak.Source.ElevationMeters)} m";
+            float labelY = y - PeakMarkerHeightPx - 4f;
+            canvas.DrawText(label, x, labelY, SKTextAlign.Center, peakFont, peakLabelHaloPaint);
+            canvas.DrawText(label, x, labelY, SKTextAlign.Center, peakFont, peakLabelFillPaint);
+        }
+    }
+
     private static SKColor ParseClimbingColor(MapaTur.Domain.Climbing.ClimbingType type)
     {
         string hex = MapaTur.Domain.Climbing.ClimbingTypeColors.ToHex(type);
@@ -378,6 +457,12 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         routePaint?.Dispose();
         climbingFillPaint?.Dispose();
         climbingOutlinePaint?.Dispose();
+        peakFillPaint?.Dispose();
+        peakOutlinePaint?.Dispose();
+        peakLabelFillPaint?.Dispose();
+        peakLabelHaloPaint?.Dispose();
+        peakFont?.Dispose();
+        peakPath?.Dispose();
         skyPaint?.Dispose();
         skyShader?.Dispose();
         foreach (var p in trailPathCache.Values)
@@ -390,6 +475,12 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         routePaint = null;
         climbingFillPaint = null;
         climbingOutlinePaint = null;
+        peakFillPaint = null;
+        peakOutlinePaint = null;
+        peakLabelFillPaint = null;
+        peakLabelHaloPaint = null;
+        peakFont = null;
+        peakPath = null;
         skyPaint = null;
         skyShader = null;
     }

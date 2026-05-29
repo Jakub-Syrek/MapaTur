@@ -84,6 +84,19 @@ public partial class Terrain3DView : ContentView
         set => SetValue(ClimbingAreasProperty, value);
     }
 
+    /// <summary>Bindable summits rendered as gold mountain glyphs with elevation labels above the mesh.</summary>
+    public static readonly BindableProperty PeaksProperty = BindableProperty.Create(
+        nameof(Peaks),
+        typeof(IReadOnlyList<TerrainPeak>),
+        typeof(Terrain3DView),
+        propertyChanged: OnOverlayDataChanged);
+
+    public IReadOnlyList<TerrainPeak>? Peaks
+    {
+        get => (IReadOnlyList<TerrainPeak>?)GetValue(PeaksProperty);
+        set => SetValue(PeaksProperty, value);
+    }
+
     /// <summary>Camera state mutated by gestures and used by the renderer.</summary>
     public Camera3D Camera { get; } = new Camera3D();
 
@@ -191,11 +204,19 @@ public partial class Terrain3DView : ContentView
                 areas, Raster, Mesh, Camera, e.Info.Width, e.Info.Height);
         }
 
+        // Peaks carry their own DEM elevation, so projection needs no raster lookup.
+        IReadOnlyList<ProjectedPeak>? projectedPeaks = null;
+        if (Peaks is { Count: > 0 } peaks)
+        {
+            projectedPeaks = Peak3DProjection.Project(
+                peaks, Mesh, Camera, e.Info.Width, e.Info.Height);
+        }
+
         // depthMap = null disables trail / route / climbing occlusion: trails
         // are drawn always on top of the mesh (original behaviour) which is the
         // visual the user actually wants AND drops a ~6 ms-per-frame depth-grid
         // fill that was crushing gesture smoothness on a 64k-vertex mesh.
-        renderer.Render(canvas, e.Info.Width, e.Info.Height, Mesh, Camera, frameScratch, null, projectedTrails, projectedRoute, projectedClimbing);
+        renderer.Render(canvas, e.Info.Width, e.Info.Height, Mesh, Camera, frameScratch, null, projectedTrails, projectedRoute, projectedClimbing, projectedPeaks);
     }
 
     private void OnOrbitPan(object? sender, PanUpdatedEventArgs e)

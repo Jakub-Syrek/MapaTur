@@ -175,6 +175,13 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private IReadOnlyList<MapaTur.Domain.Climbing.ClimbingArea>? climbing3DOverlay;
 
+    /// <summary>
+    /// DEM-derived summits drawn as labelled markers in the 3D view so it isn't bare terrain +
+    /// trails. Computed offline from the loaded raster (no network) and refreshed each DEM load.
+    /// </summary>
+    [ObservableProperty]
+    private IReadOnlyList<TerrainPeak>? peaks3DOverlay;
+
     // Union of every loaded basemap's extent — used to clip Overpass downloads to
     // the area we actually have map coverage for, even when multiple regional
     // archives are stacked.
@@ -685,6 +692,8 @@ public sealed partial class MapPageViewModel : ObservableObject
             VerticalExaggeration = (float)Math.Clamp(VerticalExaggeration, 1.0, 5.0),
         };
         TerrainMesh = await Task.Run(() => TerrainMesh3D.Build(raster, initialOptions)).ConfigureAwait(true);
+        // Detect summits off the UI thread so the 3D view shows labelled peaks, not just terrain.
+        Peaks3DOverlay = await Task.Run(() => PeakDetector.Detect(raster)).ConfigureAwait(true);
         logger.LogInformation("Loaded DEM {Path} ({Cols}x{Rows})", path, raster.Columns, raster.Rows);
         StatusMessage = $"{Localization.AppStrings.StatusDemLoaded}: {Path.GetFileName(path)}";
     }

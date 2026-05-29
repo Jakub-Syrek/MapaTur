@@ -102,6 +102,7 @@
                              Trails="{Binding Trails3DOverlay}"
                              Route="{Binding Route3DOverlay}"
                              ClimbingAreas="{Binding Climbing3DOverlay}"
+                             Peaks="{Binding Peaks3DOverlay}"
                              IsVisible="{Binding Is3DMode}" />
 
         <Label Grid.Row="3"
