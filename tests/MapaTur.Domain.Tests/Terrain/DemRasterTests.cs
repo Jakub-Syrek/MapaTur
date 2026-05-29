@@ -108,4 +108,25 @@ public sealed class DemRasterTests
         min.Should().BeApproximately(500.0, 1e-9);
         max.Should().BeApproximately(2500.0, 1e-9);
     }
+
+    [Fact]
+    public void SampleBilinear_ExcludesNoDataCornerFromBlend()
+    {
+        // SE corner is no-data. At the centre the four corners weigh equally, so the
+        // result must be the mean of the three VALID corners (200), not a blend that
+        // drags in the -9999 sentinel (which would yield a wildly negative elevation).
+        var samples = new float[] { 100f, 200f, 300f, -9999f };
+        var raster = new DemRaster(2, 2, TestBounds(), samples, noDataValue: -9999f);
+
+        raster.SampleBilinear(19.5, 49.5).Should().BeApproximately(200.0, 1e-6);
+    }
+
+    [Fact]
+    public void SampleBilinear_ReturnsNoDataWhenAllCornersAreNoData()
+    {
+        var samples = new float[] { -9999f, -9999f, -9999f, -9999f };
+        var raster = new DemRaster(2, 2, TestBounds(), samples, noDataValue: -9999f);
+
+        raster.SampleBilinear(19.5, 49.5).Should().BeApproximately(-9999.0, 1e-6);
+    }
 }

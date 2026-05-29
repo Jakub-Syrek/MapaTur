@@ -109,9 +109,23 @@ public sealed class DemRaster
         double v10 = this[c0, r1];
         double v11 = this[c1, r1];
 
-        double top = (v00 * (1.0 - dc)) + (v01 * dc);
-        double bottom = (v10 * (1.0 - dc)) + (v11 * dc);
-        return (top * (1.0 - dr)) + (bottom * dr);
+        // Drop no-data corners from the blend and renormalise over the valid ones, so a
+        // missing sample at the edge of a partial-coverage DEM doesn't poison the result
+        // with the sentinel (a raw blend would yield a wildly negative elevation). When
+        // every corner is no-data there is nothing to interpolate, so surface NoDataValue.
+        double w00 = (1.0 - dc) * (1.0 - dr);
+        double w01 = dc * (1.0 - dr);
+        double w10 = (1.0 - dc) * dr;
+        double w11 = dc * dr;
+
+        double weightedSum = 0.0;
+        double weightTotal = 0.0;
+        if (v00 != NoDataValue) { weightedSum += v00 * w00; weightTotal += w00; }
+        if (v01 != NoDataValue) { weightedSum += v01 * w01; weightTotal += w01; }
+        if (v10 != NoDataValue) { weightedSum += v10 * w10; weightTotal += w10; }
+        if (v11 != NoDataValue) { weightedSum += v11 * w11; weightTotal += w11; }
+
+        return weightTotal > 0.0 ? weightedSum / weightTotal : NoDataValue;
     }
 
     /// <summary>

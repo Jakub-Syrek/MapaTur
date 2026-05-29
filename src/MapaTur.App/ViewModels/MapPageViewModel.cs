@@ -78,21 +78,37 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private double verticalExaggeration = 2.0;
 
-    private bool meshRebuildInFlight;
+    private readonly MeshRebuildCoalescer meshRebuildCoalescer = new();
 
     partial void OnVerticalExaggerationChanged(double value)
     {
         // Persist every change so a relaunch lands on the same setting.
         settingsStore.VerticalExaggeration = value;
 
-        if (TerrainRaster is not { } raster || meshRebuildInFlight)
+        if (TerrainRaster is null)
         {
             return;
         }
 
-        meshRebuildInFlight = true;
-        // Fire-and-forget rebuild — the slider drives many small changes; a single
-        // rebuild that lands one frame later is plenty smooth at 360x180 meshes.
+        // Coalesce rapid slider changes into one in-flight rebuild, but always honour the
+        // LAST value the user settled on — RequestRebuild returns null while a build is in
+        // flight and stashes the trailing value for StartMeshRebuild's completion to replay.
+        if (meshRebuildCoalescer.RequestRebuild(value) is { } toBuild)
+        {
+            StartMeshRebuild(toBuild);
+        }
+    }
+
+    private void StartMeshRebuild(double value)
+    {
+        if (TerrainRaster is not { } raster)
+        {
+            return;
+        }
+
+        // Fire-and-forget rebuild — the slider drives many small changes; a single rebuild that
+        // lands one frame later is plenty smooth at 360x180 meshes. On completion, replay the
+        // trailing value if the user moved the slider again while this build was running.
         _ = Task.Run(() =>
         {
             var options = new MapaTur.Application.Terrain.TerrainMeshOptions
@@ -103,7 +119,10 @@ public sealed partial class MapPageViewModel : ObservableObject
             MainThread.BeginInvokeOnMainThread(() =>
             {
                 TerrainMesh = rebuilt;
-                meshRebuildInFlight = false;
+                if (meshRebuildCoalescer.CompleteRebuild() is { } trailing)
+                {
+                    StartMeshRebuild(trailing);
+                }
             });
         });
     }
@@ -186,7 +205,6 @@ public sealed partial class MapPageViewModel : ObservableObject
     // the area we actually have map coverage for, even when multiple regional
     // archives are stacked.
     private MapBounds? basemapBounds;
-    private MapBounds? hillshadeBounds;
     private bool autoLoadAttempted;
 
     private void ExtendBasemapBounds(MapBounds? loaded)
@@ -399,7 +417,9 @@ public sealed partial class MapPageViewModel : ObservableObject
                 return;
             }
 
-            hillshadeBounds = mapLoader.LoadMBTilesArchive(Map, path, MBTilesLayerKind.Hillshade);
+            // Hillshade sits beneath the basemap purely as a visual under-layer; its extent never
+            // constrains Overpass downloads, so the returned bounds are intentionally discarded.
+            mapLoader.LoadMBTilesArchive(Map, path, MBTilesLayerKind.Hillshade);
             StatusMessage = $"{Localization.AppStrings.StatusHillshadeLoaded}: {Path.GetFileName(path)}";
             logger.LogInformation("Loaded hillshade MBTiles archive {Path}", path);
         }
@@ -851,8 +871,9 @@ public sealed partial class MapPageViewModel : ObservableObject
             }
             else if (discovery.HillshadeMBTilesPath is { } hillshadePath)
             {
-                // Hillshade is a fallback: only auto-load it when no basemap was found.
-                hillshadeBounds = mapLoader.LoadMBTilesArchive(Map, hillshadePath, MBTilesLayerKind.Hillshade);
+                // Hillshade is a fallback: only auto-load it when no basemap was found. Its extent is
+                // never used to clip downloads, so the returned bounds are intentionally discarded.
+                mapLoader.LoadMBTilesArchive(Map, hillshadePath, MBTilesLayerKind.Hillshade);
                 loaded.Add(Path.GetFileName(hillshadePath));
                 logger.LogInformation("Auto-loaded hillshade (basemap fallback) {Path}", hillshadePath);
             }

@@ -111,6 +111,23 @@ public partial class Terrain3DView : ContentView
     private readonly Trail3DOverlayProjector trailProjector = new();
     private readonly Route3DOverlayProjector routeProjector = new();
 
+    // Marker overlays (climbing areas, summits) get the same stateful, zero-per-frame-allocation
+    // treatment as trails/routes: the world cache rebuilds only when the items/raster/mesh change,
+    // and each frame fills a reused results buffer. One generic projector serves both — they differ
+    // only in their world-build (climbing samples the DEM; summits carry their own elevation).
+    private const float ClimbingMarkerLiftMeters = 30f;
+    private const float PeakMarkerLiftMeters = 40f;
+
+    private readonly Marker3DOverlayProjector<ClimbingArea, ProjectedClimbingArea> climbingProjector =
+        new(
+            (areas, raster, mesh, lift) => Climbing3DProjection.ToWorld(areas, raster!, mesh, lift),
+            (source, screen) => new ProjectedClimbingArea(source, screen));
+
+    private readonly Marker3DOverlayProjector<TerrainPeak, ProjectedPeak> peakProjector =
+        new(
+            (peaks, _, mesh, lift) => Peak3DProjection.ToWorld(peaks, mesh, lift),
+            (source, screen) => new ProjectedPeak(source, screen));
+
     private double lastOrbitTotalX;
     private double lastOrbitTotalY;
     private double lastTranslateTotalX;
@@ -247,16 +264,16 @@ public partial class Terrain3DView : ContentView
         IReadOnlyList<ProjectedClimbingArea>? projectedClimbing = null;
         if (ClimbingAreas is { Count: > 0 } areas && Raster is not null)
         {
-            projectedClimbing = Climbing3DProjection.Project(
-                areas, Raster, Mesh, Camera, e.Info.Width, e.Info.Height);
+            projectedClimbing = climbingProjector.Project(
+                areas, Raster, Mesh, Camera, e.Info.Width, e.Info.Height, ClimbingMarkerLiftMeters);
         }
 
         // Peaks carry their own DEM elevation, so projection needs no raster lookup.
         IReadOnlyList<ProjectedPeak>? projectedPeaks = null;
         if (Peaks is { Count: > 0 } peaks)
         {
-            projectedPeaks = Peak3DProjection.Project(
-                peaks, Mesh, Camera, e.Info.Width, e.Info.Height);
+            projectedPeaks = peakProjector.Project(
+                peaks, null, Mesh, Camera, e.Info.Width, e.Info.Height, PeakMarkerLiftMeters);
         }
 
         // depthMap = null disables trail / route / climbing occlusion: trails

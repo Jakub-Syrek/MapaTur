@@ -47,12 +47,42 @@ public static class Climbing3DProjection
             ? camera.BuildViewProjection(screenWidth / screenHeight)
             : Matrix4x4.Identity;
 
+        IReadOnlyList<MarkerWorldPoint<ClimbingArea>> world = ToWorld(areas, raster, mesh, markerLiftMeters);
+        var result = new List<ProjectedClimbingArea>(world.Count);
+        foreach (MarkerWorldPoint<ClimbingArea> marker in world)
+        {
+            Vector3? screen = camera.ProjectToScreen(marker.World, viewProjection, screenWidth, screenHeight);
+            result.Add(new ProjectedClimbingArea(marker.Source, screen));
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Camera-independent stage: lifts every in-bbox climbing area to its DEM elevation and converts it
+    /// into mesh world space. Areas whose lon/lat falls outside the raster are dropped (no defined
+    /// elevation). Compute once and reuse across frames — see <see cref="Marker3DOverlayProjector{TSource, TProjected}"/>.
+    /// </summary>
+    /// <param name="areas">Climbing areas to convert.</param>
+    /// <param name="raster">Source DEM used to look up ground elevation.</param>
+    /// <param name="mesh">Mesh whose world-space convention defines the coordinate system.</param>
+    /// <param name="markerLiftMeters">Vertical offset above the DEM surface so the marker sits clear of the ground.</param>
+    public static IReadOnlyList<MarkerWorldPoint<ClimbingArea>> ToWorld(
+        IReadOnlyList<ClimbingArea> areas,
+        DemRaster raster,
+        TerrainMesh3D mesh,
+        float markerLiftMeters = 30f)
+    {
+        ArgumentNullException.ThrowIfNull(areas);
+        ArgumentNullException.ThrowIfNull(raster);
+        ArgumentNullException.ThrowIfNull(mesh);
+
         double demWest = raster.West;
         double demEast = raster.East;
         double demSouth = raster.South;
         double demNorth = raster.North;
 
-        var result = new List<ProjectedClimbingArea>(areas.Count);
+        var result = new List<MarkerWorldPoint<ClimbingArea>>(areas.Count);
         foreach (var area in areas)
         {
             double lon = area.Position.Longitude;
@@ -65,9 +95,7 @@ public static class Climbing3DProjection
             float groundElevation = (float)raster.SampleBilinear(lon, lat);
             float liftedElevation = groundElevation + markerLiftMeters;
             Vector3 world = mesh.GeoToWorld(area.Position, liftedElevation);
-            Vector3? screen = camera.ProjectToScreen(world, viewProjection, screenWidth, screenHeight);
-
-            result.Add(new ProjectedClimbingArea(area, screen));
+            result.Add(new MarkerWorldPoint<ClimbingArea>(area, world));
         }
 
         return result;

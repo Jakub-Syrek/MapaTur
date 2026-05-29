@@ -40,13 +40,39 @@ public static class Peak3DProjection
             ? camera.BuildViewProjection(screenWidth / screenHeight)
             : Matrix4x4.Identity;
 
-        var result = new List<ProjectedPeak>(peaks.Count);
+        IReadOnlyList<MarkerWorldPoint<TerrainPeak>> world = ToWorld(peaks, mesh, markerLiftMeters);
+        var result = new List<ProjectedPeak>(world.Count);
+        foreach (MarkerWorldPoint<TerrainPeak> marker in world)
+        {
+            Vector3? screen = camera.ProjectToScreen(marker.World, viewProjection, screenWidth, screenHeight);
+            result.Add(new ProjectedPeak(marker.Source, screen));
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Camera-independent stage: lifts every summit to its own elevation (no raster lookup) and converts
+    /// it into mesh world space. Compute once and reuse across frames — see
+    /// <see cref="Marker3DOverlayProjector{TSource, TProjected}"/>.
+    /// </summary>
+    /// <param name="peaks">Summits to convert.</param>
+    /// <param name="mesh">Mesh whose world-space convention defines the coordinate system.</param>
+    /// <param name="markerLiftMeters">Vertical offset above the summit so the marker/label sits clear of the ground.</param>
+    public static IReadOnlyList<MarkerWorldPoint<TerrainPeak>> ToWorld(
+        IReadOnlyList<TerrainPeak> peaks,
+        TerrainMesh3D mesh,
+        float markerLiftMeters = 40f)
+    {
+        ArgumentNullException.ThrowIfNull(peaks);
+        ArgumentNullException.ThrowIfNull(mesh);
+
+        var result = new List<MarkerWorldPoint<TerrainPeak>>(peaks.Count);
         foreach (var peak in peaks)
         {
             float liftedElevation = (float)peak.ElevationMeters + markerLiftMeters;
             Vector3 world = mesh.GeoToWorld(peak.Location, liftedElevation);
-            Vector3? screen = camera.ProjectToScreen(world, viewProjection, screenWidth, screenHeight);
-            result.Add(new ProjectedPeak(peak, screen));
+            result.Add(new MarkerWorldPoint<TerrainPeak>(peak, world));
         }
 
         return result;
