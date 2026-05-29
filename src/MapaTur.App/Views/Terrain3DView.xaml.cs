@@ -136,6 +136,44 @@ public partial class Terrain3DView : ContentView
         Canvas.InvalidateSurface();
     }
 
+    // Per-click steps for the on-screen control pads, sized so one tap produces a clearly
+    // visible move. Pixel-equivalents feed the same controller methods the gestures use
+    // (OrbitSensitivity 0.005 rad/px → 28 px ≈ 8°).
+    private const float ButtonOrbitStep = 28f;
+    private const float ButtonPanStep = 48f;
+    private const float ButtonVerticalStep = 48f;
+    private const float ButtonZoomFactor = 1.2f;
+
+    private void StepCamera(Action mutate)
+    {
+        mutate();
+        Canvas.InvalidateSurface();
+    }
+
+    private void OnRotateLeftClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyOrbit(-ButtonOrbitStep, 0f));
+
+    private void OnRotateRightClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyOrbit(ButtonOrbitStep, 0f));
+
+    private void OnTiltUpClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyOrbit(0f, ButtonOrbitStep));
+
+    private void OnTiltDownClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyOrbit(0f, -ButtonOrbitStep));
+
+    private void OnPanUpClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyPan(0f, -ButtonPanStep));
+
+    private void OnPanDownClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyPan(0f, ButtonPanStep));
+
+    private void OnPanLeftClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyPan(-ButtonPanStep, 0f));
+
+    private void OnPanRightClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyPan(ButtonPanStep, 0f));
+
+    private void OnZoomInClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyZoom(ButtonZoomFactor));
+
+    private void OnZoomOutClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyZoom(1f / ButtonZoomFactor));
+
+    private void OnRaiseClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyVertical(ButtonVerticalStep));
+
+    private void OnLowerClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyVertical(-ButtonVerticalStep));
+
     /// <summary>
     /// Points the camera at a world-space target from a given distance, preserving the current
     /// orbit angle (azimuth/pitch). Used to keep the 3D view framed on the same place the 2D map
