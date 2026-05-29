@@ -37,13 +37,14 @@ OUTPUT_PATH = os.path.join(REPO_ROOT, "dem", "tatry-ortho.png")
 # MUST match the DEM/trail bbox so the texture registers with the terrain mesh.
 WEST, SOUTH, EAST, NORTH = 19.50, 49.10, 20.40, 49.40
 
-# Total output resolution (~6000 px/deg). 3:1 to match the 0.9°×0.3° bbox aspect.
-TOTAL_WIDTH = 5400
-TOTAL_HEIGHT = 1800
+# Total output resolution, 3:1 to match the 0.9°×0.3° bbox aspect. Kept ≤8192 px/axis to stay under the
+# GL_MAX_TEXTURE_SIZE floor on ANGLE/D3D11 (~8m/px — sharp foreground without an oversized GPU texture).
+TOTAL_WIDTH = 8100
+TOTAL_HEIGHT = 2700
 
-# GetMap tile grid. Each tile stays well under common WMS size caps (~2048 px).
-GRID_COLS = 3
-GRID_ROWS = 1
+# GetMap tile grid. Each tile (1620×1350) stays well under common WMS size caps (~2048 px).
+GRID_COLS = 5
+GRID_ROWS = 2
 
 USER_AGENT = "MapaTur/0.1 (+https://github.com/Jakub-Syrek/MapaTur)"
 # Geoportal is load-balanced and can 404 on all nodes for tens of seconds, so retry generously with backoff.
