@@ -245,6 +245,14 @@ public partial class Terrain3DView : ContentView
             return;
         }
 
+        // Fit the clip planes to the scene each frame (distance changes with zoom). A scene radius
+        // padded past the mesh half-extent covers the diagonal corners + vertical relief. This keeps
+        // NDC depth precision high (stable painter's sort, no rotate tearing) and stops close geometry
+        // from clipping through the near plane when zoomed in.
+        var (near, far) = CameraClipPlanes.Fit(Camera.Distance, Mesh.HorizontalExtent * 1.25f);
+        Camera.NearPlane = near;
+        Camera.FarPlane = far;
+
         IReadOnlyList<ProjectedTrail>? projectedTrails = null;
         if (Trails is { Count: > 0 } trails && Raster is not null)
         {

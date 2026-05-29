@@ -145,6 +145,8 @@ public static class Terrain3DProjection
         int[] triangleIndices = scratch.TriangleIndices;
 
         int visibleCount = 0;
+        float minDepth = float.PositiveInfinity;
+        float maxDepth = float.NegativeInfinity;
         for (int t = 0; t < triangleCount; t++)
         {
             int baseIdx = t * 3;
@@ -174,22 +176,30 @@ public static class Terrain3DProjection
 
             // Store positive averaged NDC depth so we can both bucket-sort and re-bucket
             // in the emission pass without extra memory.
-            depths[visibleCount] = (v0.Z + v1.Z + v2.Z) * (1f / 3f);
+            float depth = (v0.Z + v1.Z + v2.Z) * (1f / 3f);
+            depths[visibleCount] = depth;
             triangleIndices[visibleCount] = t;
             visibleCount++;
+            if (depth < minDepth) minDepth = depth;
+            if (depth > maxDepth) maxDepth = depth;
         }
 
         // Bucket-sort by NDC depth instead of Array.Sort: O(n) two passes versus the
-        // ~17 comparisons per element introsort would do on ~128k triangles. The bucket
-        // width is ~1/BucketCount in NDC depth (≈1e-4 with 4096 buckets) which is much
-        // tighter than any screen-space depth artefact we'd notice.
+        // ~17 comparisons per element introsort would do on ~128k triangles. Quantise
+        // over the ACTUAL [min,max] depth span of this frame rather than [0,1]: an
+        // extreme near/far ratio crams all visible terrain into a sliver of NDC depth
+        // (often [0.9,1.0]), so a fixed [0,1] mapping wastes most buckets and collapses
+        // many triangles into one — they then emit in index order, not depth order, which
+        // tears on rotate. Spanning the real range gives the full 4096-bucket resolution.
         const int BucketCount = 4096;
+        float depthSpan = maxDepth - minDepth;
+        float depthScale = depthSpan > 0f ? (BucketCount - 1) / depthSpan : 0f;
         Span<int> bucketHeads = stackalloc int[BucketCount];
         bucketHeads.Clear();
 
         for (int k = 0; k < visibleCount; k++)
         {
-            int b = QuantizeDepth(depths[k], BucketCount);
+            int b = QuantizeDepth(depths[k], minDepth, depthScale, BucketCount);
             bucketHeads[b]++;
         }
 
@@ -207,7 +217,7 @@ public static class Terrain3DProjection
         ushort[] visibleIndices = scratch.VisibleIndices;
         for (int k = 0; k < visibleCount; k++)
         {
-            int b = QuantizeDepth(depths[k], BucketCount);
+            int b = QuantizeDepth(depths[k], minDepth, depthScale, BucketCount);
             int slot = bucketHeads[b]++;
             int t = triangleIndices[k];
             int baseSrc = t * 3;
@@ -220,12 +230,13 @@ public static class Terrain3DProjection
         return new ProjectedTerrainFrame(screen, visibleIndices, vertexCount, visibleCount * 3);
     }
 
-    private static int QuantizeDepth(float depth, int bucketCount)
+    private static int QuantizeDepth(float depth, float minDepth, float depthScale, int bucketCount)
     {
-        // depth is in [0,1] for in-frustum triangles, but float jitter can land just outside.
-        if (depth <= 0f) return 0;
-        if (depth >= 1f) return bucketCount - 1;
-        int b = (int)(depth * bucketCount);
+        // Map [minDepth, maxDepth] → [0, bucketCount-1]. depthScale is 0 when every visible
+        // triangle shares one depth (flat patch seen head-on) — they all land in bucket 0,
+        // which is fine because their draw order is then irrelevant.
+        int b = (int)((depth - minDepth) * depthScale);
+        if (b < 0) return 0;
         return b >= bucketCount ? bucketCount - 1 : b;
     }
 }

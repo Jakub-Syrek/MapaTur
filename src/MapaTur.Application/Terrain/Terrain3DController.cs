@@ -13,6 +13,13 @@ public sealed class Terrain3DController
     /// <summary>Camera the controller mutates in place.</summary>
     public Camera3D Camera { get; }
 
+    /// <summary>
+    /// Lower bound on <see cref="Camera3D.PitchRadians"/> reachable through input (~10°). Keeps the
+    /// camera looking down at the terrain: at a horizon-grazing or below-ground angle the
+    /// painter's-algorithm sort and back-face cull both break down and the surface tears.
+    /// </summary>
+    public float MinPitchRadians { get; set; } = MathF.PI / 18f;
+
     /// <summary>Radians of orbit per input-pixel.</summary>
     public float OrbitSensitivity { get; set; } = 0.005f;
 
@@ -36,7 +43,7 @@ public sealed class Terrain3DController
     {
         Camera.AzimuthRadians += dxPixels * OrbitSensitivity;
         float newPitch = Camera.PitchRadians + (dyPixels * OrbitSensitivity);
-        Camera.PitchRadians = Math.Clamp(newPitch, -MaxPitch, MaxPitch);
+        Camera.PitchRadians = Math.Clamp(newPitch, MinPitchRadians, MaxPitch);
     }
 
     /// <summary>Pinch-zoom: <paramref name="scale"/> &gt; 1 brings the camera closer (divides distance).</summary>

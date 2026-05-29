@@ -89,6 +89,43 @@ public sealed class Terrain3DProjectionTests
     }
 
     [Fact]
+    public void Project_SortsBackToFront_EvenWhenDepthRangeIsCompressedByFarPlane()
+    {
+        // Production camera defaults: near 10, far 1_000_000. With such an extreme near/far
+        // ratio the whole visible mesh lands in a tiny NDC-z window. Quantising that window
+        // over [0,1] wastes ~90% of the depth buckets, so many triangles collapse into one
+        // bucket and emit in index order rather than depth order — which tears on rotate.
+        // Viewed from the -X side (azimuth = π), per-row index order runs near→far, i.e. the
+        // exact OPPOSITE of the back-to-front order the painter's algorithm needs, so a
+        // collapsed bucket sort produces visible mis-ordering. Quantising over the ACTUAL
+        // depth range keeps the order correct regardless of the near/far ratio.
+        var mesh = TerrainMesh3D.Build(BuildRaster(12, 12, 1000f));
+        var camera = new Camera3D
+        {
+            Target = Vector3.Zero,
+            Distance = 60_000f,
+            AzimuthRadians = MathF.PI, // view from the opposite side: index order != depth order
+            PitchRadians = MathF.PI / 3f,
+            NearPlane = 10f,
+            FarPlane = 1_000_000f,
+        };
+
+        ProjectedTerrainFrame frame = Terrain3DProjection.Project(mesh, camera, 800f, 600f);
+
+        float previousDepth = float.PositiveInfinity;
+        for (int t = 0; t < frame.VisibleIndices.Length; t += 3)
+        {
+            float z0 = frame.ScreenVertices[frame.VisibleIndices[t]].Z;
+            float z1 = frame.ScreenVertices[frame.VisibleIndices[t + 1]].Z;
+            float z2 = frame.ScreenVertices[frame.VisibleIndices[t + 2]].Z;
+            float centroid = (z0 + z1 + z2) / 3f;
+            centroid.Should().BeLessThanOrEqualTo(previousDepth + 1e-6f,
+                $"triangle {t / 3} centroid depth {centroid} must not exceed previous {previousDepth} (back-to-front)");
+            previousDepth = centroid;
+        }
+    }
+
+    [Fact]
     public void Project_BackFacingTrianglesAreCulled()
     {
         var mesh = TerrainMesh3D.Build(BuildRaster(2, 2, 1000f));

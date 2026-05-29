@@ -95,6 +95,27 @@ public sealed class Terrain3DControllerTests
     }
 
     [Fact]
+    public void ApplyOrbit_LargeNegativeDy_ClampsPitchToPositiveMinimum()
+    {
+        var ctrl = BuildController(out var camera);
+
+        ctrl.ApplyOrbit(0f, -100_000f);
+
+        // Input can't tilt the camera to a horizon-grazing or below-ground view, where the
+        // painter's algorithm + back-face cull break down. Pitch floors at a positive minimum.
+        ctrl.MinPitchRadians.Should().BeGreaterThan(0f);
+        camera.PitchRadians.Should().BeApproximately(ctrl.MinPitchRadians, 1e-5f);
+    }
+
+    [Fact]
+    public void MinPitchRadians_DefaultsToAboutTenDegrees()
+    {
+        var ctrl = BuildController(out _);
+
+        ctrl.MinPitchRadians.Should().BeApproximately(MathF.PI / 18f, 1e-5f);
+    }
+
+    [Fact]
     public void ApplyZoom_ScaleGreaterThanOne_DividesDistance()
     {
         var ctrl = BuildController(out var camera);
