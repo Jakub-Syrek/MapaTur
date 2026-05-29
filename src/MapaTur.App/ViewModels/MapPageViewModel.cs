@@ -693,7 +693,10 @@ public sealed partial class MapPageViewModel : ObservableObject
         };
         TerrainMesh = await Task.Run(() => TerrainMesh3D.Build(raster, initialOptions)).ConfigureAwait(true);
         // Detect summits off the UI thread so the 3D view shows labelled peaks, not just terrain.
-        Peaks3DOverlay = await Task.Run(() => PeakDetector.Detect(raster)).ConfigureAwait(true);
+        // Match each against the curated Tatra gazetteer so prominent peaks get a name above the
+        // elevation; unmatched maxima keep their elevation-only label.
+        Peaks3DOverlay = await Task.Run(() =>
+            PeakNamer.AssignNames(PeakDetector.Detect(raster), TatraSummits.All)).ConfigureAwait(true);
         logger.LogInformation("Loaded DEM {Path} ({Cols}x{Rows})", path, raster.Columns, raster.Rows);
         StatusMessage = $"{Localization.AppStrings.StatusDemLoaded}: {Path.GetFileName(path)}";
     }

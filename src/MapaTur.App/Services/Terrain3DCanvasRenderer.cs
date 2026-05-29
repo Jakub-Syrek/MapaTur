@@ -32,6 +32,8 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
     private const float PeakMarkerHalfWidthPx = 6f;
     private const float PeakMarkerHeightPx = 12f;
     private const float PeakLabelSizePx = 12.5f;
+    // Named summits get their name on a line above the elevation, in a slightly larger bold face.
+    private const float PeakNameSizePx = 14f;
 
     // Trail / route / climbing vertices are only culled when their NDC depth
     // exceeds the local mesh depth by more than this much. The minimum-per-bin
@@ -63,6 +65,7 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
     private SKPaint? peakLabelFillPaint;
     private SKPaint? peakLabelHaloPaint;
     private SKFont? peakFont;
+    private SKFont? peakNameFont;
     private SKPath? peakPath;
     private SKPaint? skyPaint;
     private SKShader? skyShader;
@@ -373,6 +376,15 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
             Color = PeakLabelHaloColor,
         };
         peakFont ??= new SKFont { Size = PeakLabelSizePx };
+        peakNameFont ??= new SKFont
+        {
+            Size = PeakNameSizePx,
+            Typeface = SKTypeface.FromFamilyName(
+                null,
+                SKFontStyleWeight.Bold,
+                SKFontStyleWidth.Normal,
+                SKFontStyleSlant.Upright),
+        };
         peakPath ??= new SKPath();
 
         foreach (var peak in peaks)
@@ -404,6 +416,14 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
             float labelY = y - PeakMarkerHeightPx - 4f;
             canvas.DrawText(label, x, labelY, SKTextAlign.Center, peakFont, peakLabelHaloPaint);
             canvas.DrawText(label, x, labelY, SKTextAlign.Center, peakFont, peakLabelFillPaint);
+
+            // Named summits get their name on the line above the elevation.
+            if (!string.IsNullOrEmpty(peak.Source.Name))
+            {
+                float nameY = labelY - PeakLabelSizePx - 3f;
+                canvas.DrawText(peak.Source.Name, x, nameY, SKTextAlign.Center, peakNameFont, peakLabelHaloPaint);
+                canvas.DrawText(peak.Source.Name, x, nameY, SKTextAlign.Center, peakNameFont, peakLabelFillPaint);
+            }
         }
     }
 
@@ -462,6 +482,7 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         peakLabelFillPaint?.Dispose();
         peakLabelHaloPaint?.Dispose();
         peakFont?.Dispose();
+        peakNameFont?.Dispose();
         peakPath?.Dispose();
         skyPaint?.Dispose();
         skyShader?.Dispose();
