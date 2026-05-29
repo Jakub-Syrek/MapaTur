@@ -458,10 +458,25 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             PixelFormat.Rgba,
             PixelType.UnsignedByte,
             orthoBytes);
-        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+
+        // Trilinear (mipmapped) minification + anisotropic filtering — the ortho is draped over terrain
+        // seen at grazing angles, where plain bilinear shimmers and smears into blocky pixels. Mipmaps fix
+        // the minification aliasing; anisotropy keeps oblique slopes sharp.
+        g.GenerateMipmap(TextureTarget.Texture2D);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
         g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
         g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
         g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+
+        // EXT_texture_filter_anisotropic (supported by ANGLE/D3D11). Clamp our request to the driver max;
+        // if the extension is absent the GL error is ignored and we keep trilinear.
+        const GLEnum maxAnisotropyPName = (GLEnum)0x84FF; // GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
+        const GLEnum anisotropyPName = (GLEnum)0x84FE;    // GL_TEXTURE_MAX_ANISOTROPY_EXT
+        Span<float> maxAniso = stackalloc float[1] { 1f };
+        g.GetFloat(maxAnisotropyPName, maxAniso);
+        float aniso = Math.Clamp(16f, 1f, maxAniso[0] < 1f ? 1f : maxAniso[0]);
+        g.TexParameter(TextureTarget.Texture2D, (TextureParameterName)anisotropyPName, aniso);
+
         g.BindTexture(TextureTarget.Texture2D, 0);
     }
 
