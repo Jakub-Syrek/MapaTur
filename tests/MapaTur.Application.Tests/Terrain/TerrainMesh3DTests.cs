@@ -147,6 +147,93 @@ public sealed class TerrainMesh3DTests
     }
 
     [Fact]
+    public void BuildTiles_RasterWithinLimit_ReturnsSingleTileMatchingBuild()
+    {
+        var raster = BuildFlatRaster(8, 8, elevation: 1200f);
+
+        var tiles = TerrainMesh3D.BuildTiles(raster);
+        TerrainMesh3D single = TerrainMesh3D.Build(raster);
+
+        tiles.Should().HaveCount(1);
+        tiles[0].Vertices.Length.Should().Be(single.Vertices.Length);
+        tiles[0].Vertices[0].Should().Be(single.Vertices[0]);
+        tiles[0].Indices.Length.Should().Be(single.Indices.Length);
+    }
+
+    [Fact]
+    public void BuildTiles_RasterLargerThanUshortLimit_SplitsIntoTilesEachWithinLimit()
+    {
+        // 400×400 = 160 000 vertices — far past the 65 536 single-mesh cap that Build rejects.
+        var raster = BuildFlatRaster(400, 400);
+
+        var tiles = TerrainMesh3D.BuildTiles(raster);
+
+        tiles.Count.Should().BeGreaterThan(1);
+        foreach (var tile in tiles)
+        {
+            tile.Vertices.Length.Should().BeLessThanOrEqualTo(ushort.MaxValue + 1);
+            foreach (ushort index in tile.Indices)
+            {
+                // int compare — a full 65 536-vertex tile uses indices 0..65535, and (ushort)65536 wraps to 0.
+                ((int)index).Should().BeLessThan(tile.Vertices.Length);
+            }
+        }
+    }
+
+    [Fact]
+    public void BuildTiles_AdjacentTiles_ShareSeamVertexPositions()
+    {
+        // 300 columns > 255 → splits horizontally at column 255. Both tiles must place that seam
+        // column at the identical world position, or the surface shows a crack between them.
+        var raster = BuildFlatRaster(300, 4, elevation: 1500f);
+
+        var tiles = TerrainMesh3D.BuildTiles(raster);
+
+        tiles.Should().HaveCount(2);
+        // tile 0 covers columns [0..255] (tileCols = 256); its last column (local index 255 in row 0)
+        // is the seam. tile 1 covers [255..299]; its first column (local index 0 in row 0) is the seam.
+        Vector3 seamFromTile0 = tiles[0].Vertices[255];
+        Vector3 seamFromTile1 = tiles[1].Vertices[0];
+        seamFromTile1.Should().Be(seamFromTile0);
+    }
+
+    [Fact]
+    public void BuildTiles_EveryTileCarriesFullRasterBoundsAndExaggeration()
+    {
+        var raster = BuildFlatRaster(400, 300);
+        var opts = new TerrainMeshOptions { VerticalExaggeration = 2.5f };
+
+        var tiles = TerrainMesh3D.BuildTiles(raster, opts);
+
+        foreach (var tile in tiles)
+        {
+            tile.Bounds.Should().Be(raster.Bounds);
+            tile.VerticalExaggeration.Should().Be(2.5f);
+        }
+    }
+
+    [Fact]
+    public void BuildTiles_TileTrianglesSumToWholeGridWithNoDoubleCounting()
+    {
+        var raster = BuildFlatRaster(300, 300);
+
+        var tiles = TerrainMesh3D.BuildTiles(raster);
+
+        int totalTriangles = tiles.Sum(t => t.Indices.Length / 3);
+        totalTriangles.Should().Be((300 - 1) * (300 - 1) * 2);
+    }
+
+    [Fact]
+    public void BuildTiles_RejectsNonPositiveMaxTileSide()
+    {
+        var raster = BuildFlatRaster(4, 4);
+
+        Action act = () => TerrainMesh3D.BuildTiles(raster, maxTileSide: 0);
+
+        act.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    [Fact]
     public void Build_ExposesVerticalExaggerationFromOptions()
     {
         var raster = BuildFlatRaster(2, 2);

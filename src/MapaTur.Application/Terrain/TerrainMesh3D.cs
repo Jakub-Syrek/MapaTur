@@ -90,8 +90,12 @@ public sealed class TerrainMesh3D
         return new GeoPoint(latitude, longitude);
     }
 
+    /// <summary>Largest vertex count addressable by 16-bit (ushort) triangle indices.</summary>
+    private const int MaxVerticesPerMesh = ushort.MaxValue + 1;
+
     /// <summary>
-    /// Builds a terrain mesh from a DEM raster.
+    /// Builds a single terrain mesh from a DEM raster. The raster must fit within the 16-bit index
+    /// limit (≤ 65 536 vertices); larger rasters must use <see cref="BuildTiles"/>.
     /// </summary>
     /// <param name="raster">Source DEM.</param>
     /// <param name="options">Optional tuning; default options use NW sun at 2× vertical exaggeration.</param>
@@ -100,84 +104,171 @@ public sealed class TerrainMesh3D
         ArgumentNullException.ThrowIfNull(raster);
         options ??= new TerrainMeshOptions();
 
-        int cols = raster.Columns;
-        int rows = raster.Rows;
-        int vertexCount = cols * rows;
         // Indices are ushort, so the *largest index value* must fit, i.e. vertexCount ≤ 65536.
-        // The index buffer itself is allowed to be longer than that.
-        if (vertexCount > ushort.MaxValue + 1)
+        if ((long)raster.Columns * raster.Rows > MaxVerticesPerMesh)
         {
             throw new ArgumentException(
-                "DEM raster is too large for 16-bit triangle indices; subsample before meshing.",
+                "DEM raster is too large for 16-bit triangle indices; use BuildTiles for high-resolution rasters.",
                 nameof(raster));
         }
 
+        MeshFrame frame = ComputeFrame(raster);
+        return BuildBlock(raster, options, frame, 0, raster.Columns - 1, 0, raster.Rows - 1);
+    }
+
+    /// <summary>
+    /// Builds a high-resolution terrain as a set of mesh tiles, each within the 16-bit index limit, so a
+    /// DEM far larger than 65 536 cells can be rendered at full detail (one <c>SKVertices</c> per tile).
+    /// Every tile is expressed in the SAME world frame (origin = full-raster centre) and carries the full
+    /// raster's <see cref="Bounds"/> / <see cref="HorizontalExtent"/>, so overlays projecting against any
+    /// tile share one consistent coordinate system. Adjacent tiles share their seam row/column of
+    /// vertices (no cracks), and normals are computed from the full raster's neighbours so shading is
+    /// continuous across tile seams.
+    /// </summary>
+    /// <param name="raster">Source DEM (may exceed 65 536 cells).</param>
+    /// <param name="options">Optional tuning; default options use NW sun at 2× vertical exaggeration.</param>
+    /// <param name="maxTileSide">Maximum vertices per tile side minus one; a tile spans up to (maxTileSide + 1)² vertices. Default 255 → ≤ 256² = 65 536.</param>
+    public static IReadOnlyList<TerrainMesh3D> BuildTiles(DemRaster raster, TerrainMeshOptions? options = null, int maxTileSide = 255)
+    {
+        ArgumentNullException.ThrowIfNull(raster);
+        if (maxTileSide < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxTileSide), maxTileSide, "maxTileSide must be at least 1.");
+        }
+
+        if ((maxTileSide + 1L) * (maxTileSide + 1L) > MaxVerticesPerMesh)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxTileSide), maxTileSide, "A tile of this side would exceed the 16-bit vertex limit.");
+        }
+
+        options ??= new TerrainMeshOptions();
+        MeshFrame frame = ComputeFrame(raster);
+        int cols = raster.Columns;
+        int rows = raster.Rows;
+
+        var tiles = new List<TerrainMesh3D>();
+        // Step by maxTileSide and make ranges inclusive, so tile N's last row/column equals tile N+1's
+        // first — the seam vertices are bit-identical in both tiles, leaving no gap between them.
+        for (int r0 = 0; r0 < rows - 1; r0 += maxTileSide)
+        {
+            int r1 = Math.Min(r0 + maxTileSide, rows - 1);
+            for (int c0 = 0; c0 < cols - 1; c0 += maxTileSide)
+            {
+                int c1 = Math.Min(c0 + maxTileSide, cols - 1);
+                tiles.Add(BuildBlock(raster, options, frame, c0, c1, r0, r1));
+            }
+        }
+
+        return tiles;
+    }
+
+    /// <summary>Camera-independent world-frame parameters shared by every tile of a raster.</summary>
+    private readonly record struct MeshFrame(
+        double MetersPerLonDegree,
+        double HalfWidthMeters,
+        double HalfHeightMeters,
+        double CellWidthMeters,
+        double CellHeightMeters,
+        float HorizontalExtent);
+
+    private static MeshFrame ComputeFrame(DemRaster raster)
+    {
+        int cols = raster.Columns;
+        int rows = raster.Rows;
         double centerLat = (raster.North + raster.South) / 2.0;
         double metersPerLonDegree = MetersPerLatDegree * Math.Cos(centerLat * Math.PI / 180.0);
         double halfWidthMeters = (raster.East - raster.West) * 0.5 * metersPerLonDegree;
         double halfHeightMeters = (raster.North - raster.South) * 0.5 * MetersPerLatDegree;
+        double cellWidthMeters = (cols > 1) ? ((raster.East - raster.West) / (cols - 1)) * metersPerLonDegree : 1.0;
+        double cellHeightMeters = (rows > 1) ? ((raster.North - raster.South) / (rows - 1)) * MetersPerLatDegree : 1.0;
+        float horizontalExtent = (float)Math.Max(halfWidthMeters, halfHeightMeters);
+        return new MeshFrame(metersPerLonDegree, halfWidthMeters, halfHeightMeters, cellWidthMeters, cellHeightMeters, horizontalExtent);
+    }
+
+    /// <summary>
+    /// Builds one mesh covering the inclusive raster sub-window [colStart..colEnd] × [rowStart..rowEnd],
+    /// positioned in the full-raster world frame. Normals sample the full raster (clamped at its edges),
+    /// so a tile's interior-seam normals match the neighbouring tile's.
+    /// </summary>
+    private static TerrainMesh3D BuildBlock(
+        DemRaster raster,
+        TerrainMeshOptions options,
+        MeshFrame frame,
+        int colStart,
+        int colEnd,
+        int rowStart,
+        int rowEnd)
+    {
+        int cols = raster.Columns;
+        int rows = raster.Rows;
+        int tileCols = colEnd - colStart + 1;
+        int tileRows = rowEnd - rowStart + 1;
+        int vertexCount = tileCols * tileRows;
+        float exaggeration = options.VerticalExaggeration;
 
         var vertices = new Vector3[vertexCount];
         var normals = new Vector3[vertexCount];
         var colors = new uint[vertexCount];
-        var indices = new ushort[(cols - 1) * (rows - 1) * 2 * 3];
+        var indices = new ushort[(tileCols - 1) * (tileRows - 1) * 2 * 3];
 
-        double cellWidthMeters = (cols > 1) ? ((raster.East - raster.West) / (cols - 1)) * metersPerLonDegree : 1.0;
-        double cellHeightMeters = (rows > 1) ? ((raster.North - raster.South) / (rows - 1)) * MetersPerLatDegree : 1.0;
-
-        // Build vertex positions. Row 0 = north edge = +Y; last row = south edge = -Y.
-        for (int r = 0; r < rows; r++)
+        // Vertex positions in the full-raster world frame. Row 0 = north edge = +Y; last row = -Y.
+        for (int r = rowStart; r <= rowEnd; r++)
         {
-            double yMeters = halfHeightMeters - (cellHeightMeters * r);
-            for (int c = 0; c < cols; c++)
+            double yMeters = frame.HalfHeightMeters - (frame.CellHeightMeters * r);
+            int localRow = r - rowStart;
+            for (int c = colStart; c <= colEnd; c++)
             {
-                double xMeters = -halfWidthMeters + (cellWidthMeters * c);
-                float z = raster[c, r] * options.VerticalExaggeration;
-                vertices[(r * cols) + c] = new Vector3((float)xMeters, (float)yMeters, z);
+                double xMeters = -frame.HalfWidthMeters + (frame.CellWidthMeters * c);
+                float z = raster[c, r] * exaggeration;
+                vertices[(localRow * tileCols) + (c - colStart)] = new Vector3((float)xMeters, (float)yMeters, z);
             }
         }
 
-        // Per-vertex normals via central differences in elevation.
-        for (int r = 0; r < rows; r++)
+        // Per-vertex normals via central differences in elevation, sampling the full raster so tile-edge
+        // normals use real neighbour cells (continuous shading across seams) rather than clamped values.
+        for (int r = rowStart; r <= rowEnd; r++)
         {
             int rN = Math.Max(r - 1, 0);
             int rS = Math.Min(r + 1, rows - 1);
-            for (int c = 0; c < cols; c++)
+            int localRow = r - rowStart;
+            for (int c = colStart; c <= colEnd; c++)
             {
                 int cW = Math.Max(c - 1, 0);
                 int cE = Math.Min(c + 1, cols - 1);
 
-                float zE = raster[cE, r] * options.VerticalExaggeration;
-                float zW = raster[cW, r] * options.VerticalExaggeration;
-                float zN = raster[c, rN] * options.VerticalExaggeration;
-                float zS = raster[c, rS] * options.VerticalExaggeration;
+                float zE = raster[cE, r] * exaggeration;
+                float zW = raster[cW, r] * exaggeration;
+                float zN = raster[c, rN] * exaggeration;
+                float zS = raster[c, rS] * exaggeration;
 
-                float dx = (float)((cE - cW) * cellWidthMeters);
-                float dy = (float)((rS - rN) * cellHeightMeters);
+                float dx = (float)((cE - cW) * frame.CellWidthMeters);
+                float dy = (float)((rS - rN) * frame.CellHeightMeters);
                 float dzdx = dx > 0f ? (zE - zW) / dx : 0f;
                 // Row index grows southward, so dz/dy (north-positive) flips sign.
                 float dzdy = dy > 0f ? (zN - zS) / dy : 0f;
 
                 Vector3 normal = Vector3.Normalize(new Vector3(-dzdx, -dzdy, 1f));
-                normals[(r * cols) + c] = normal;
+                int li = (localRow * tileCols) + (c - colStart);
+                normals[li] = normal;
 
                 uint baseColor = HypsometricColor(raster[c, r]);
                 float lambert = Math.Max(0f, Vector3.Dot(normal, options.LightDirection));
                 float shade = options.AmbientFactor + ((1f - options.AmbientFactor) * lambert);
-                colors[(r * cols) + c] = ApplyShade(baseColor, shade);
+                colors[li] = ApplyShade(baseColor, shade);
             }
         }
 
-        // Two triangles per grid cell (clockwise as seen from +Z).
+        // Two triangles per grid cell (clockwise as seen from +Z), indices local to the tile.
         int idx = 0;
-        for (int r = 0; r < rows - 1; r++)
+        for (int lr = 0; lr < tileRows - 1; lr++)
         {
-            for (int c = 0; c < cols - 1; c++)
+            for (int lc = 0; lc < tileCols - 1; lc++)
             {
-                ushort i00 = (ushort)((r * cols) + c);
-                ushort i10 = (ushort)((r * cols) + c + 1);
-                ushort i01 = (ushort)(((r + 1) * cols) + c);
-                ushort i11 = (ushort)(((r + 1) * cols) + c + 1);
+                ushort i00 = (ushort)((lr * tileCols) + lc);
+                ushort i10 = (ushort)((lr * tileCols) + lc + 1);
+                ushort i01 = (ushort)(((lr + 1) * tileCols) + lc);
+                ushort i11 = (ushort)(((lr + 1) * tileCols) + lc + 1);
 
                 // Triangle 1: NW, NE, SW
                 indices[idx++] = i00;
@@ -190,15 +281,14 @@ public sealed class TerrainMesh3D
             }
         }
 
-        float horizontalExtent = (float)Math.Max(halfWidthMeters, halfHeightMeters);
         return new TerrainMesh3D(
             vertices,
             normals,
             colors,
             indices,
             Vector3.Zero,
-            horizontalExtent,
-            options.VerticalExaggeration,
+            frame.HorizontalExtent,
+            exaggeration,
             raster.Bounds);
     }
 

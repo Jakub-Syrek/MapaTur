@@ -14,23 +14,30 @@ namespace MapaTur.App.Views;
 /// <summary>
 /// 3D terrain preview rendered with SkiaSharp. Single-finger drag orbits the
 /// camera, two-finger drag pans the focal point in the ground plane, and pinch
-/// zooms in/out. Bind <see cref="Mesh"/>; the camera is owned by the view and
-/// auto-framed on mesh change.
+/// zooms in/out. Bind <see cref="Tiles"/>; the camera is owned by the view and
+/// auto-framed on tile change.
 /// </summary>
 public partial class Terrain3DView : ContentView
 {
-    /// <summary>Bindable mesh to render. Setting it auto-frames the camera.</summary>
-    public static readonly BindableProperty MeshProperty = BindableProperty.Create(
-        nameof(Mesh),
-        typeof(TerrainMesh3D),
+    /// <summary>
+    /// Bindable set of terrain mesh tiles to render (a high-resolution DEM is split into ≤65 536-vertex
+    /// tiles, each its own SKVertices). All tiles share one world frame; tile 0 defines the overlay
+    /// coordinate system. Setting it auto-frames the camera.
+    /// </summary>
+    public static readonly BindableProperty TilesProperty = BindableProperty.Create(
+        nameof(Tiles),
+        typeof(IReadOnlyList<TerrainMesh3D>),
         typeof(Terrain3DView),
-        propertyChanged: OnMeshChanged);
+        propertyChanged: OnTilesChanged);
 
-    public TerrainMesh3D? Mesh
+    public IReadOnlyList<TerrainMesh3D>? Tiles
     {
-        get => (TerrainMesh3D?)GetValue(MeshProperty);
-        set => SetValue(MeshProperty, value);
+        get => (IReadOnlyList<TerrainMesh3D>?)GetValue(TilesProperty);
+        set => SetValue(TilesProperty, value);
     }
+
+    /// <summary>The world frame for overlays + framing: the first tile (all tiles share the frame), or null.</summary>
+    private TerrainMesh3D? WorldFrame => Tiles is { Count: > 0 } tiles ? tiles[0] : null;
 
     /// <summary>Bindable DEM raster used to look up elevations along overlay trails.</summary>
     public static readonly BindableProperty RasterProperty = BindableProperty.Create(
@@ -205,22 +212,22 @@ public partial class Terrain3DView : ContentView
         Canvas.InvalidateSurface();
     }
 
-    /// <summary>Positions the camera so the entire <see cref="Mesh"/> fits in view.</summary>
+    /// <summary>Positions the camera so the entire terrain fits in view.</summary>
     public void FrameMesh()
     {
-        if (Mesh is null)
+        if (WorldFrame is not { } frame)
         {
             return;
         }
 
         Camera.Target = Vector3.Zero;
-        Camera.Distance = Math.Max(Mesh.HorizontalExtent * 2.5f, 5_000f);
+        Camera.Distance = Math.Max(frame.HorizontalExtent * 2.5f, 5_000f);
         Camera.AzimuthRadians = MathF.PI / 4f;
         Camera.PitchRadians = MathF.PI / 4f;
         Canvas.InvalidateSurface();
     }
 
-    private static void OnMeshChanged(BindableObject bindable, object oldValue, object newValue)
+    private static void OnTilesChanged(BindableObject bindable, object oldValue, object newValue)
     {
         if (bindable is Terrain3DView view)
         {
@@ -239,7 +246,7 @@ public partial class Terrain3DView : ContentView
     private void OnPaintSurface(object? sender, SKPaintGLSurfaceEventArgs e)
     {
         var canvas = e.Surface.Canvas;
-        if (Mesh is null)
+        if (Tiles is not { Count: > 0 } tiles || WorldFrame is not { } frame)
         {
             canvas.Clear();
             return;
@@ -249,31 +256,32 @@ public partial class Terrain3DView : ContentView
         // padded past the mesh half-extent covers the diagonal corners + vertical relief. This keeps
         // NDC depth precision high (stable painter's sort, no rotate tearing) and stops close geometry
         // from clipping through the near plane when zoomed in.
-        var (near, far) = CameraClipPlanes.Fit(Camera.Distance, Mesh.HorizontalExtent * 1.25f);
+        var (near, far) = CameraClipPlanes.Fit(Camera.Distance, frame.HorizontalExtent * 1.25f);
         Camera.NearPlane = near;
         Camera.FarPlane = far;
 
+        // Overlays project against the shared world frame (tile 0); all tiles share it.
         IReadOnlyList<ProjectedTrail>? projectedTrails = null;
-        if (Trails is { Count: > 0 } trails && Raster is not null)
+        if (Trails is { Count: > 0 } trailsList && Raster is not null)
         {
             // The projector reuses its world cache + screen buffers when the inputs are unchanged, so a
             // gesture pays only the per-frame screen transform with zero allocation.
             projectedTrails = trailProjector.Project(
-                trails, Raster, Mesh, Camera, e.Info.Width, e.Info.Height);
+                trailsList, Raster, frame, Camera, e.Info.Width, e.Info.Height);
         }
 
         ProjectedRoute? projectedRoute = null;
         if (Route is not null && Raster is not null)
         {
             projectedRoute = routeProjector.Project(
-                Route, Raster, Mesh, Camera, e.Info.Width, e.Info.Height);
+                Route, Raster, frame, Camera, e.Info.Width, e.Info.Height);
         }
 
         IReadOnlyList<ProjectedClimbingArea>? projectedClimbing = null;
         if (ClimbingAreas is { Count: > 0 } areas && Raster is not null)
         {
             projectedClimbing = climbingProjector.Project(
-                areas, Raster, Mesh, Camera, e.Info.Width, e.Info.Height, ClimbingMarkerLiftMeters);
+                areas, Raster, frame, Camera, e.Info.Width, e.Info.Height, ClimbingMarkerLiftMeters);
         }
 
         // Peaks carry their own DEM elevation, so projection needs no raster lookup.
@@ -281,14 +289,12 @@ public partial class Terrain3DView : ContentView
         if (Peaks is { Count: > 0 } peaks)
         {
             projectedPeaks = peakProjector.Project(
-                peaks, null, Mesh, Camera, e.Info.Width, e.Info.Height, PeakMarkerLiftMeters);
+                peaks, null, frame, Camera, e.Info.Width, e.Info.Height, PeakMarkerLiftMeters);
         }
 
-        // depthMap = null disables trail / route / climbing occlusion: trails
-        // are drawn always on top of the mesh (original behaviour) which is the
-        // visual the user actually wants AND drops a ~6 ms-per-frame depth-grid
-        // fill that was crushing gesture smoothness on a 64k-vertex mesh.
-        renderer.Render(canvas, e.Info.Width, e.Info.Height, Mesh, Camera, frameScratch, null, projectedTrails, projectedRoute, projectedClimbing, projectedPeaks);
+        // depthMap = null disables trail / route / climbing occlusion: trails are drawn always on top
+        // of the mesh (the visual the user wants) and it drops a per-frame depth-grid fill.
+        renderer.RenderTiles(canvas, e.Info.Width, e.Info.Height, tiles, Camera, frameScratch, null, projectedTrails, projectedRoute, projectedClimbing, projectedPeaks);
     }
 
     private void OnOrbitPan(object? sender, PanUpdatedEventArgs e)

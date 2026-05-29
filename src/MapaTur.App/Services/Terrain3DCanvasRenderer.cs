@@ -1,3 +1,5 @@
+using System.Numerics;
+
 using MapaTur.Application.Terrain;
 using MapaTur.Domain.Trails;
 
@@ -42,18 +44,33 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
     // still hiding trails that are clearly *behind* a peak.
     private const float OcclusionEpsilon = 0.03f;
 
-    private TerrainMesh3D? cachedMesh;
-    private SKPoint[] pointScratch = Array.Empty<SKPoint>();
-    private SKColor[] cachedColors = Array.Empty<SKColor>();
+    // Per-tile render state, keyed by tile reference. A high-resolution terrain is rendered as many
+    // mesh tiles (each ≤ 65 536 vertices, the ushort-index limit); each keeps its own colour array
+    // (built once, never changes), a reusable screen-point buffer, ping-pong index buffers and a
+    // cached centroid for back-to-front tile ordering. Tiles are stable across frames until a new DEM
+    // loads, at which point stale entries are pruned.
+    private sealed class TileRenderState
+    {
+        public SKColor[] Colors = Array.Empty<SKColor>();
+        public SKPoint[] Points = Array.Empty<SKPoint>();
 
-    // Two ping-pong index buffers sized exactly to the current frame's visible
-    // triangle count. SkiaSharp 3.119 has no Span overload for SKVertices.CreateCopy,
-    // so the array MUST be exact-length (trailing slots would form spurious triangles).
-    // Ping-pong lets the previous frame's array be GC'd while Skia is still consuming
-    // it instead of fighting for the same buffer.
-    private ushort[] indexBufferA = Array.Empty<ushort>();
-    private ushort[] indexBufferB = Array.Empty<ushort>();
-    private bool useBufferA = true;
+        // Ping-pong index buffers sized exactly to the frame's visible triangle count. SKVertices
+        // walks every index, so the array MUST be exact-length; ping-pong lets the previous frame's
+        // array stay readable by an in-flight SKVertices while we fill the other.
+        public ushort[] IndexA = Array.Empty<ushort>();
+        public ushort[] IndexB = Array.Empty<ushort>();
+        public bool UseA = true;
+        public System.Numerics.Vector3 Centroid;
+
+        // World-space axis-aligned bounding box, used to frustum-cull the tile so off-screen tiles
+        // (most of them when zoomed in) skip the expensive per-vertex projection entirely.
+        public System.Numerics.Vector3 Min;
+        public System.Numerics.Vector3 Max;
+    }
+
+    private readonly Dictionary<TerrainMesh3D, TileRenderState> tileStates = new();
+    private readonly List<int> tileDrawOrder = new();
+    private IReadOnlyList<TerrainMesh3D>? lastTiles;
 
     private SKPaint? meshPaint;
     private SKPaint? trailPaint;
@@ -77,14 +94,16 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
     private readonly Dictionary<SKColor, SKPath> trailPathCache = new();
 
     /// <summary>
-    /// Clears the canvas with a sky gradient and draws the projected terrain mesh
-    /// using the supplied scratch buffer for the projection step.
+    /// Clears the canvas with a sky gradient and draws a high-resolution terrain made of one or more
+    /// mesh tiles, then the overlays. Tiles are drawn back-to-front (by projected centroid depth) so the
+    /// painter's algorithm resolves occlusion between them; each tile's triangles are already depth-sorted
+    /// by <see cref="Terrain3DProjection"/>. The supplied scratch is reused across tiles.
     /// </summary>
-    public void Render(
+    public void RenderTiles(
         SKCanvas canvas,
         int viewportWidth,
         int viewportHeight,
-        TerrainMesh3D mesh,
+        IReadOnlyList<TerrainMesh3D> tiles,
         Camera3D camera,
         Terrain3DFrameScratch scratch,
         ScreenDepthMap? depthMap = null,
@@ -94,33 +113,60 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         IReadOnlyList<ProjectedPeak>? peaks = null)
     {
         ArgumentNullException.ThrowIfNull(canvas);
-        ArgumentNullException.ThrowIfNull(mesh);
+        ArgumentNullException.ThrowIfNull(tiles);
         ArgumentNullException.ThrowIfNull(camera);
         ArgumentNullException.ThrowIfNull(scratch);
 
         DrawSky(canvas, viewportWidth, viewportHeight);
 
-        if (viewportWidth <= 0 || viewportHeight <= 0)
+        if (viewportWidth <= 0 || viewportHeight <= 0 || tiles.Count == 0)
         {
             return;
         }
 
-        ProjectedTerrainFrame frame = Terrain3DProjection.Project(mesh, camera, viewportWidth, viewportHeight, scratch);
-        if (frame.VisibleIndexCount > 0)
+        // A new DEM produces an all-new tile set (fresh instances), so drop the previous set's cached
+        // colour/point/index buffers in one shot when the list reference changes.
+        if (!ReferenceEquals(lastTiles, tiles))
         {
-            DrawMesh(canvas, mesh, frame);
+            tileStates.Clear();
+            lastTiles = tiles;
         }
 
-        // Build the screen-space depth grid from the projected mesh vertices so trails,
-        // routes and climbing markers can be culled when they sit behind a peak.
         if (depthMap is not null)
         {
             depthMap.Configure(viewportWidth, viewportHeight);
             depthMap.Reset();
-            for (int i = 0; i < frame.VertexCount; i++)
+        }
+
+        Matrix4x4 viewProjection = camera.BuildViewProjection((float)viewportWidth / viewportHeight);
+        OrderTilesBackToFront(tiles, camera, viewProjection, viewportWidth, viewportHeight);
+
+        foreach (int tileIndex in tileDrawOrder)
+        {
+            TerrainMesh3D tile = tiles[tileIndex];
+
+            // Skip tiles entirely outside the view — when zoomed in this culls most of a
+            // high-resolution terrain, so only the visible tiles pay the per-vertex projection cost.
+            if (IsTileOffscreen(GetTileState(tile), viewProjection, viewportWidth, viewportHeight))
             {
-                var v = frame.ScreenVertices[i];
-                depthMap.Write(v.X, v.Y, v.Z);
+                continue;
+            }
+
+            ProjectedTerrainFrame frame = Terrain3DProjection.Project(tile, camera, viewportWidth, viewportHeight, scratch);
+            if (frame.VisibleIndexCount > 0)
+            {
+                DrawMeshTile(canvas, tile, frame);
+            }
+
+            // Accumulate every tile's projected vertices into the shared depth grid so overlay
+            // occlusion (when enabled) tests against the whole terrain, not just one tile.
+            if (depthMap is not null)
+            {
+                for (int i = 0; i < frame.VertexCount; i++)
+                {
+                    var v = frame.ScreenVertices[i];
+                    depthMap.Write(v.X, v.Y, v.Z);
+                }
             }
         }
 
@@ -142,69 +188,149 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         }
     }
 
-    private void DrawMesh(SKCanvas canvas, TerrainMesh3D mesh, ProjectedTerrainFrame frame)
+    /// <summary>
+    /// Fills <see cref="tileDrawOrder"/> with tile indices sorted far→near by projected centroid depth,
+    /// so the painter's algorithm draws distant tiles first. Tiles whose centroid is behind the camera
+    /// sort to the front of the list (drawn earliest), matching their likely-occluded role.
+    /// </summary>
+    private void OrderTilesBackToFront(IReadOnlyList<TerrainMesh3D> tiles, Camera3D camera, Matrix4x4 viewProjection, int width, int height)
     {
+        tileDrawOrder.Clear();
+        Span<float> depths = tiles.Count <= 256 ? stackalloc float[tiles.Count] : new float[tiles.Count];
+        for (int i = 0; i < tiles.Count; i++)
+        {
+            TileRenderState state = GetTileState(tiles[i]);
+            System.Numerics.Vector3? screen = camera.ProjectToScreen(state.Centroid, viewProjection, width, height);
+            depths[i] = screen?.Z ?? float.PositiveInfinity; // behind camera → treat as farthest
+            tileDrawOrder.Add(i);
+        }
+
+        // Sort indices by depth descending (farthest first). Small N (tens of tiles) so an insertion
+        // sort is plenty and allocation-free.
+        for (int i = 1; i < tileDrawOrder.Count; i++)
+        {
+            int idx = tileDrawOrder[i];
+            float d = depths[idx];
+            int j = i - 1;
+            while (j >= 0 && depths[tileDrawOrder[j]] < d)
+            {
+                tileDrawOrder[j + 1] = tileDrawOrder[j];
+                j--;
+            }
+            tileDrawOrder[j + 1] = idx;
+        }
+    }
+
+    private void DrawMeshTile(SKCanvas canvas, TerrainMesh3D tile, ProjectedTerrainFrame frame)
+    {
+        TileRenderState state = GetTileState(tile);
         int vertexCount = frame.VertexCount;
-        EnsureMeshBuffers(mesh, vertexCount);
 
         for (int i = 0; i < vertexCount; i++)
         {
             var v = frame.ScreenVertices[i];
-            pointScratch[i] = float.IsNaN(v.X) ? SKPoint.Empty : new SKPoint(v.X, v.Y);
+            state.Points[i] = float.IsNaN(v.X) ? SKPoint.Empty : new SKPoint(v.X, v.Y);
         }
 
-        SKColor[] colors = cachedColors;
-
-        // Positions and colors buffers are reused at full mesh size — indices reference
-        // entries in [0, vertexCount) so any trailing slots are inert. Indices MUST be
-        // exact length though: SKVertices walks every entry to form a triangle, so a
-        // stale tail would render spurious geometry. Ping-pong between two slots so the
-        // previous frame's array (still referenced by an in-flight SKVertices) can be
-        // GC'd or reused without conflict.
         int needed = frame.VisibleIndexCount;
-        ushort[] current = useBufferA ? indexBufferA : indexBufferB;
+        ushort[] current = state.UseA ? state.IndexA : state.IndexB;
         if (current.Length != needed)
         {
             current = new ushort[needed];
-            if (useBufferA) indexBufferA = current; else indexBufferB = current;
+            if (state.UseA) state.IndexA = current; else state.IndexB = current;
         }
         Array.Copy(frame.VisibleIndices, current, needed);
-        useBufferA = !useBufferA;
-        ushort[] visibleIndices = current;
+        state.UseA = !state.UseA;
 
         using var vertices = SKVertices.CreateCopy(
             SKVertexMode.Triangles,
-            pointScratch,
+            state.Points,
             null,
-            colors,
-            visibleIndices);
+            state.Colors,
+            current);
 
-        // For vertex-colour-only meshes we want the per-vertex colours to win.
-        // Skia blends paint colour × vertex colour via the supplied mode. Modulate
-        // with a white paint = identity (vertex colour unchanged), which is the
-        // standard recipe and robust across SkiaSharp versions.
+        // Vertex-colour-only mesh: Modulate × white paint = identity, so the per-vertex hypsometric
+        // colours render unchanged (default SrcOver + opaque-black paint would zero them).
         meshPaint ??= new SKPaint { IsAntialias = true, Color = SKColors.White };
         canvas.DrawVertices(vertices, SKBlendMode.Modulate, meshPaint);
     }
 
-    private void EnsureMeshBuffers(TerrainMesh3D mesh, int vertexCount)
+    /// <summary>
+    /// Gets (or builds) the cached render state for a tile: its converted colour array, screen-point
+    /// buffer and centroid. Built once per tile; pruned when a new DEM replaces the tile set.
+    /// </summary>
+    private TileRenderState GetTileState(TerrainMesh3D tile)
     {
-        // Mesh colors are computed once at mesh build time and never change.
-        // Point + color arrays must match in length (SKVertices requirement), so we
-        // size both to the mesh exactly and refresh only when a new DEM loads.
-        if (ReferenceEquals(cachedMesh, mesh) && cachedColors.Length == vertexCount)
+        if (tileStates.TryGetValue(tile, out var state) && state.Colors.Length == tile.Vertices.Length)
         {
-            return;
+            return state;
         }
 
-        var convertedColors = new SKColor[vertexCount];
+        int vertexCount = tile.Vertices.Length;
+        var colors = new SKColor[vertexCount];
+        var centroid = System.Numerics.Vector3.Zero;
+        var min = new System.Numerics.Vector3(float.PositiveInfinity);
+        var max = new System.Numerics.Vector3(float.NegativeInfinity);
         for (int i = 0; i < vertexCount; i++)
         {
-            convertedColors[i] = new SKColor(mesh.Colors[i]);
+            colors[i] = new SKColor(tile.Colors[i]);
+            System.Numerics.Vector3 v = tile.Vertices[i];
+            centroid += v;
+            min = System.Numerics.Vector3.Min(min, v);
+            max = System.Numerics.Vector3.Max(max, v);
         }
-        cachedColors = convertedColors;
-        pointScratch = new SKPoint[vertexCount];
-        cachedMesh = mesh;
+        if (vertexCount > 0)
+        {
+            centroid /= vertexCount;
+        }
+
+        state = new TileRenderState
+        {
+            Colors = colors,
+            Points = new SKPoint[vertexCount],
+            Centroid = centroid,
+            Min = min,
+            Max = max,
+        };
+        tileStates[tile] = state;
+        return state;
+    }
+
+    /// <summary>
+    /// Conservative frustum cull: projects the tile's 8 world AABB corners and culls only when every
+    /// corner is in front of the camera AND they all fall off the same screen edge. If any corner is
+    /// behind the camera the tile straddles the near plane, so it's kept (can't safely cull).
+    /// </summary>
+    private static bool IsTileOffscreen(TileRenderState state, Matrix4x4 viewProjection, int width, int height)
+    {
+        System.Numerics.Vector3 min = state.Min;
+        System.Numerics.Vector3 max = state.Max;
+        bool allLeft = true, allRight = true, allAbove = true, allBelow = true;
+
+        for (int corner = 0; corner < 8; corner++)
+        {
+            var world = new System.Numerics.Vector3(
+                (corner & 1) == 0 ? min.X : max.X,
+                (corner & 2) == 0 ? min.Y : max.Y,
+                (corner & 4) == 0 ? min.Z : max.Z);
+
+            Vector4 clip = Vector4.Transform(new Vector4(world, 1f), viewProjection);
+            if (clip.W <= 0f)
+            {
+                return false; // straddles the near plane — keep it
+            }
+
+            float invW = 1f / clip.W;
+            float sx = (((clip.X * invW) + 1f) * 0.5f) * width;
+            float sy = ((1f - (clip.Y * invW)) * 0.5f) * height;
+
+            if (sx >= 0f) allLeft = false;
+            if (sx <= width) allRight = false;
+            if (sy >= 0f) allAbove = false;
+            if (sy <= height) allBelow = false;
+        }
+
+        return allLeft || allRight || allAbove || allBelow;
     }
 
     private void DrawTrails(SKCanvas canvas, IReadOnlyList<ProjectedTrail> trails, ScreenDepthMap? depthMap)

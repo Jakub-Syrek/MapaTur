@@ -66,7 +66,7 @@ public partial class MapPage : ContentPage
     // Orbit angle (azimuth/pitch) is left untouched so the user's chosen viewing angle persists.
     private void SyncCameraToMap()
     {
-        if (viewModel.TerrainMesh is not { } mesh)
+        if (viewModel.TerrainFrame is not { } mesh)
         {
             return;
         }
@@ -92,7 +92,7 @@ public partial class MapPage : ContentPage
     // core fix for "patrzę na górę w 3d, daję 2d i mapa jest gdzieś obok".
     private void SyncMapToCamera()
     {
-        if (viewModel.TerrainMesh is not { } mesh)
+        if (viewModel.TerrainFrame is not { } mesh)
         {
             return;
         }

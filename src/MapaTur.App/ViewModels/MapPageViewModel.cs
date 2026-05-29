@@ -65,7 +65,14 @@ public sealed partial class MapPageViewModel : ObservableObject
     private bool is3DMode;
 
     [ObservableProperty]
-    private TerrainMesh3D? terrainMesh;
+    private IReadOnlyList<TerrainMesh3D>? terrainTiles;
+
+    /// <summary>
+    /// First terrain tile, used as the shared world frame for overlay projection and 2D↔3D camera
+    /// sync (every tile carries the full raster's bounds, so any tile defines the same GeoToWorld).
+    /// Null when no DEM is loaded.
+    /// </summary>
+    public TerrainMesh3D? TerrainFrame => TerrainTiles is { Count: > 0 } tiles ? tiles[0] : null;
 
     [ObservableProperty]
     private DemRaster? terrainRaster;
@@ -115,10 +122,11 @@ public sealed partial class MapPageViewModel : ObservableObject
             {
                 VerticalExaggeration = (float)Math.Clamp(value, 1.0, 5.0),
             };
-            var rebuilt = TerrainMesh3D.Build(raster, options);
+            var rebuilt = TerrainMesh3D.BuildTiles(raster, options);
             MainThread.BeginInvokeOnMainThread(() =>
             {
-                TerrainMesh = rebuilt;
+                TerrainTiles = rebuilt;
+                OnPropertyChanged(nameof(TerrainFrame));
                 if (meshRebuildCoalescer.CompleteRebuild() is { } trailing)
                 {
                     StartMeshRebuild(trailing);
@@ -690,10 +698,10 @@ public sealed partial class MapPageViewModel : ObservableObject
             return;
         }
 
-        if (TerrainMesh is null)
+        if (TerrainTiles is null)
         {
             await OpenDemAsync().ConfigureAwait(true);
-            if (TerrainMesh is null)
+            if (TerrainTiles is null)
             {
                 return;
             }
@@ -711,7 +719,8 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             VerticalExaggeration = (float)Math.Clamp(VerticalExaggeration, 1.0, 5.0),
         };
-        TerrainMesh = await Task.Run(() => TerrainMesh3D.Build(raster, initialOptions)).ConfigureAwait(true);
+        TerrainTiles = await Task.Run(() => TerrainMesh3D.BuildTiles(raster, initialOptions)).ConfigureAwait(true);
+        OnPropertyChanged(nameof(TerrainFrame));
         // Detect summits off the UI thread so the 3D view shows labelled peaks, not just terrain.
         // Match each against the curated Tatra gazetteer so prominent peaks get a name above the
         // elevation; unmatched maxima keep their elevation-only label.

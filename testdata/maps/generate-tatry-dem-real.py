@@ -1,8 +1,9 @@
 """Builds a real .dem binary for the Polish Tatras from Copernicus DEM GLO-30.
 
 Reuses the AWS Open Data Copernicus pipeline from generate-tatry-hillshade-real.py:
-download two 1deg x 1deg GeoTIFF tiles, mosaic, then bilinear-subsample to a grid
-that fits inside the 65 536-vertex ushort-index limit of TerrainMesh3D.
+download two 1deg x 1deg GeoTIFF tiles, mosaic, then bilinear-resample to a high-
+resolution grid. TerrainMesh3D.BuildTiles splits the raster into ≤65 536-vertex tiles,
+so the old single-mesh ushort-index cap no longer constrains the output resolution.
 
 Output .dem layout (matches DemRasterReader.cs):
   64-byte header:
@@ -43,11 +44,14 @@ OUTPUT_PATH = os.path.join(REPO_ROOT, "dem", "tatry.dem")
 # Tatry bbox — same as the hillshade pipeline.
 WEST, SOUTH, EAST, NORTH = 19.50, 49.10, 20.40, 49.40
 
-# Output grid resolution. cols * rows must stay <= 65536 (ushort index limit in
-# TerrainMesh3D). At 360x180 = 64 800 we squeeze in ~180 m horizontal cells over
-# the Tatry bbox -- about 4x denser than the synthetic 256x86 default.
-TARGET_COLS = 360
-TARGET_ROWS = 180
+# Output grid resolution. TerrainMesh3D.BuildTiles tiles the raster, so this is no longer
+# capped at 65 536 vertices. 1080x540 gives ~60 m horizontal cells over the Tatry bbox
+# (~65x33 km) -- about 3x sharper than the old 360x180 cap, while staying light enough that
+# the whole terrain still projects smoothly when zoomed out (tile frustum culling keeps the
+# zoomed-in case cheap regardless). Native Copernicus is ~30 m, so going much past ~2160x1080
+# only interpolates without adding real detail.
+TARGET_COLS = 1080
+TARGET_ROWS = 540
 
 NODATA_SENTINEL = -9999.0
 

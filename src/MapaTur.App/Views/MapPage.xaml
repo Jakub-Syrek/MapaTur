@@ -97,7 +97,7 @@
 
         <views:Terrain3DView x:Name="TerrainView"
                              Grid.Row="2"
-                             Mesh="{Binding TerrainMesh}"
+                             Tiles="{Binding TerrainTiles}"
                              Raster="{Binding TerrainRaster}"
                              Trails="{Binding Trails3DOverlay}"
                              Route="{Binding Route3DOverlay}"
