@@ -521,7 +521,8 @@ public partial class Terrain3DView : ContentView
         else
         {
             // Right-drag looks around in place — the camera stays put and turns its view direction.
-            controller.ApplyLookAround(dx, -dy);
+            // dy is NOT inverted here (unlike orbit): dragging up looks up.
+            controller.ApplyLookAround(dx, dy);
         }
 
         Canvas.InvalidateSurface();
