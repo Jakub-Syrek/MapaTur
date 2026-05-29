@@ -33,6 +33,56 @@ public sealed class TerrainMesh3DTests
         mesh.Indices.Length.Should().Be(6, "two triangles × three indices each");
     }
 
+    private static (byte R, byte G, byte B) Rgb(uint argb)
+        => ((byte)((argb >> 16) & 0xFF), (byte)((argb >> 8) & 0xFF), (byte)(argb & 0xFF));
+
+    [Fact]
+    public void Build_BaseColorsAreUnshadedHypsometric()
+    {
+        var raster = BuildFlatRaster(2, 2, elevation: 1000f);
+
+        TerrainMesh3D mesh = TerrainMesh3D.Build(raster);
+
+        mesh.BaseColors.Length.Should().Be(4);
+        mesh.BaseColors[0].Should().Be(TerrainMesh3D.HypsometricColor(1000f),
+            "the base colour is the pure elevation tint, with no Lambert shading baked in (the GPU shades per-pixel)");
+    }
+
+    [Fact]
+    public void Build_ColorsAreShadedDarkerThanBaseColors()
+    {
+        // A flat raster still shades below full brightness: lambert(dot(up, NW-sun)) < 1, so the
+        // baked per-vertex colour is darker than the unshaded base on every channel.
+        var raster = BuildFlatRaster(2, 2, elevation: 1000f);
+
+        TerrainMesh3D mesh = TerrainMesh3D.Build(raster);
+
+        var (br, bg, bb) = Rgb(mesh.BaseColors[0]);
+        var (sr, sg, sb) = Rgb(mesh.Colors[0]);
+        mesh.Colors[0].Should().NotBe(mesh.BaseColors[0]);
+        sr.Should().BeLessThanOrEqualTo(br);
+        sg.Should().BeLessThanOrEqualTo(bg);
+        sb.Should().BeLessThanOrEqualTo(bb);
+    }
+
+    [Fact]
+    public void Build_ExposesLightDirectionAndAmbientFromOptions()
+    {
+        var raster = BuildFlatRaster(2, 2);
+        var opts = new TerrainMeshOptions
+        {
+            LightDirection = Vector3.Normalize(new Vector3(1f, 0f, 1f)),
+            AmbientFactor = 0.5f,
+        };
+
+        TerrainMesh3D mesh = TerrainMesh3D.Build(raster, opts);
+
+        mesh.LightDirection.X.Should().BeApproximately(opts.LightDirection.X, 1e-5f);
+        mesh.LightDirection.Y.Should().BeApproximately(opts.LightDirection.Y, 1e-5f);
+        mesh.LightDirection.Z.Should().BeApproximately(opts.LightDirection.Z, 1e-5f);
+        mesh.AmbientFactor.Should().Be(0.5f);
+    }
+
     [Fact]
     public void Build_VertexAtNorthwestCorner_HasNegativeXPositiveY()
     {

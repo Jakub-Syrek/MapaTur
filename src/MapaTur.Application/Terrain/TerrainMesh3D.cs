@@ -21,8 +21,11 @@ public sealed class TerrainMesh3D
     /// <summary>Per-vertex unit normals.</summary>
     public Vector3[] Normals { get; }
 
-    /// <summary>Per-vertex ARGB colours (alpha in high byte).</summary>
+    /// <summary>Per-vertex ARGB colours with per-vertex (Gouraud) Lambert shading baked in. Used by the Skia fallback renderer.</summary>
     public uint[] Colors { get; }
+
+    /// <summary>Per-vertex unshaded hypsometric ARGB colours. The GPU renderer combines these with <see cref="Normals"/> to shade per-pixel.</summary>
+    public uint[] BaseColors { get; }
 
     /// <summary>Triangle index buffer (3 ushorts per triangle).</summary>
     public ushort[] Indices { get; }
@@ -39,24 +42,36 @@ public sealed class TerrainMesh3D
     /// <summary>Source raster's geographic bounds.</summary>
     public MapBounds Bounds { get; }
 
+    /// <summary>Unit direction toward the light used to bake <see cref="Colors"/>; the GPU shader reuses it so per-pixel shading matches the Skia fallback.</summary>
+    public Vector3 LightDirection { get; }
+
+    /// <summary>Ambient term used to bake <see cref="Colors"/>, in [0,1]; reused by the GPU shader.</summary>
+    public float AmbientFactor { get; }
+
     private TerrainMesh3D(
         Vector3[] vertices,
         Vector3[] normals,
         uint[] colors,
+        uint[] baseColors,
         ushort[] indices,
         Vector3 center,
         float horizontalExtent,
         float verticalExaggeration,
-        MapBounds bounds)
+        MapBounds bounds,
+        Vector3 lightDirection,
+        float ambientFactor)
     {
         Vertices = vertices;
         Normals = normals;
         Colors = colors;
+        BaseColors = baseColors;
         Indices = indices;
         Center = center;
         HorizontalExtent = horizontalExtent;
         VerticalExaggeration = verticalExaggeration;
         Bounds = bounds;
+        LightDirection = lightDirection;
+        AmbientFactor = ambientFactor;
     }
 
     /// <summary>
@@ -210,6 +225,7 @@ public sealed class TerrainMesh3D
         var vertices = new Vector3[vertexCount];
         var normals = new Vector3[vertexCount];
         var colors = new uint[vertexCount];
+        var baseColors = new uint[vertexCount];
         var indices = new ushort[(tileCols - 1) * (tileRows - 1) * 2 * 3];
 
         // Vertex positions in the full-raster world frame. Row 0 = north edge = +Y; last row = -Y.
@@ -253,6 +269,7 @@ public sealed class TerrainMesh3D
                 normals[li] = normal;
 
                 uint baseColor = HypsometricColor(raster[c, r]);
+                baseColors[li] = baseColor;
                 float lambert = Math.Max(0f, Vector3.Dot(normal, options.LightDirection));
                 float shade = options.AmbientFactor + ((1f - options.AmbientFactor) * lambert);
                 colors[li] = ApplyShade(baseColor, shade);
@@ -285,11 +302,14 @@ public sealed class TerrainMesh3D
             vertices,
             normals,
             colors,
+            baseColors,
             indices,
             Vector3.Zero,
             frame.HorizontalExtent,
             exaggeration,
-            raster.Bounds);
+            raster.Bounds,
+            options.LightDirection,
+            options.AmbientFactor);
     }
 
     /// <summary>

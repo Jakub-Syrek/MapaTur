@@ -21,14 +21,37 @@ namespace MapaTur.App.Platforms.Windows;
 /// </summary>
 internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 {
+    // Terrain vertex shader: carries the UNSHADED base colour and the world-space normal through to the
+    // fragment stage so lighting is computed per-pixel (smooth) instead of per-vertex (Gouraud) baked into
+    // the colour. The normal is left in world space — the sun is a fixed world-space direction (cartographic
+    // convention), so no normal matrix is needed and the shading matches the Skia fallback's baked light.
     private const string VertexShaderSource =
         "#version 300 es\n" +
         "layout(location=0) in vec3 aPos;\n" +
         "layout(location=1) in vec4 aColor;\n" +
+        "layout(location=2) in vec3 aNormal;\n" +
         "uniform mat4 uMvp;\n" +
         "out vec4 vColor;\n" +
-        "void main(){ vColor = aColor; gl_Position = uMvp * vec4(aPos, 1.0); }\n";
+        "out vec3 vNormal;\n" +
+        "void main(){ vColor = aColor; vNormal = aNormal; gl_Position = uMvp * vec4(aPos, 1.0); }\n";
 
+    // Per-pixel Lambert lighting: shade = ambient + (1-ambient)*max(0, dot(N, L)), matching the CPU bake in
+    // TerrainMesh3D.BuildBlock but evaluated per fragment from the interpolated normal.
+    private const string TerrainFragmentShaderSource =
+        "#version 300 es\n" +
+        "precision mediump float;\n" +
+        "in vec4 vColor;\n" +
+        "in vec3 vNormal;\n" +
+        "uniform vec3 uLightDir;\n" +
+        "uniform float uAmbient;\n" +
+        "out vec4 fragColor;\n" +
+        "void main(){\n" +
+        "  float lambert = max(0.0, dot(normalize(vNormal), uLightDir));\n" +
+        "  float shade = uAmbient + ((1.0 - uAmbient) * lambert);\n" +
+        "  fragColor = vec4(vColor.rgb * shade, 1.0);\n" +
+        "}\n";
+
+    // Flat fragment shader for the line/ribbon program (trails/route): no lighting, just the vertex colour.
     private const string FragmentShaderSource =
         "#version 300 es\n" +
         "precision mediump float;\n" +
@@ -83,6 +106,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         public uint Vao;
         public uint PositionVbo;
         public uint ColorVbo;
+        public uint NormalVbo;
         public uint Ebo;
         public int IndexCount;
     }
@@ -104,6 +128,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private GL? gl;
     private uint program;
     private int mvpLocation = -1;
+    private int lightDirLocation = -1;
+    private int ambientLocation = -1;
     private uint lineProgram;
     private int lineMvpLocation = -1;
     private int lineViewportLocation = -1;
@@ -160,6 +186,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             lastRouteMesh = null;
             programReady = false;
             mvpLocation = -1;
+            lightDirLocation = -1;
+            ambientLocation = -1;
         }
 
         EnsureProgram(gl);
@@ -205,6 +233,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         };
         gl.UniformMatrix4(mvpLocation, 1, false, m);
 
+        // Per-pixel lighting: feed the shader the same world-space sun + ambient the mesh baked with, so the
+        // GPU path shades identically to (but smoother than) the Skia fallback. All tiles share one light.
+        TerrainMesh3D lightFrame = tiles[0];
+        Vector3 light = lightFrame.LightDirection;
+        gl.Uniform3(lightDirLocation, light.X, light.Y, light.Z);
+        gl.Uniform1(ambientLocation, lightFrame.AmbientFactor);
+
         foreach (TileBuffers tile in tileBuffers.Values)
         {
             gl.BindVertexArray(tile.Vao);
@@ -231,7 +266,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         uint vs = CompileShader(g, ShaderType.VertexShader, VertexShaderSource);
-        uint fs = CompileShader(g, ShaderType.FragmentShader, FragmentShaderSource);
+        uint fs = CompileShader(g, ShaderType.FragmentShader, TerrainFragmentShaderSource);
         program = g.CreateProgram();
         g.AttachShader(program, vs);
         g.AttachShader(program, fs);
@@ -245,6 +280,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.DetachShader(program, vs);
         g.DetachShader(program, fs);
         mvpLocation = g.GetUniformLocation(program, "uMvp");
+        lightDirLocation = g.GetUniformLocation(program, "uLightDir");
+        ambientLocation = g.GetUniformLocation(program, "uAmbient");
 
         // Line ribbon program (reuses the same fragment shader).
         uint lvs = CompileShader(g, ShaderType.VertexShader, LineVertexShaderSource);
@@ -304,15 +341,26 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 positions[(i * 3) + 2] = v.Z;
             }
 
-            // Colours: explicit R,G,B,A bytes (the mesh stores 0xAARRGGBB; avoid endianness surprises).
+            // Colours: the UNSHADED base tint as explicit R,G,B,A bytes (the mesh stores 0xAARRGGBB; avoid
+            // endianness surprises). The fragment shader applies Lambert shading per pixel from the normal.
             var colors = new byte[vertexCount * 4];
             for (int i = 0; i < vertexCount; i++)
             {
-                uint argb = tile.Colors[i];
+                uint argb = tile.BaseColors[i];
                 colors[(i * 4) + 0] = (byte)((argb >> 16) & 0xFF);
                 colors[(i * 4) + 1] = (byte)((argb >> 8) & 0xFF);
                 colors[(i * 4) + 2] = (byte)(argb & 0xFF);
                 colors[(i * 4) + 3] = (byte)((argb >> 24) & 0xFF);
+            }
+
+            // Normals: tightly packed x,y,z floats in the mesh's world frame (X east, Y north, Z up).
+            var normals = new float[vertexCount * 3];
+            for (int i = 0; i < vertexCount; i++)
+            {
+                Vector3 n = tile.Normals[i];
+                normals[(i * 3) + 0] = n.X;
+                normals[(i * 3) + 1] = n.Y;
+                normals[(i * 3) + 2] = n.Z;
             }
 
             ushort[] indices = tile.Indices;
@@ -333,6 +381,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             g.EnableVertexAttribArray(1);
             g.VertexAttribPointer(1, 4, VertexAttribPointerType.UnsignedByte, true, 4, (void*)0);
 
+            buffers.NormalVbo = g.GenBuffer();
+            g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.NormalVbo);
+            g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(normals.Length * sizeof(float)), normals, BufferUsageARB.StaticDraw);
+            g.EnableVertexAttribArray(2);
+            g.VertexAttribPointer(2, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
+
             buffers.Ebo = g.GenBuffer();
             g.BindBuffer(BufferTargetARB.ElementArrayBuffer, buffers.Ebo);
             g.BufferData<ushort>(BufferTargetARB.ElementArrayBuffer, (nuint)(indices.Length * sizeof(ushort)), indices, BufferUsageARB.StaticDraw);
@@ -348,6 +402,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             g.DeleteBuffer(b.PositionVbo);
             g.DeleteBuffer(b.ColorVbo);
+            g.DeleteBuffer(b.NormalVbo);
             g.DeleteBuffer(b.Ebo);
             g.DeleteVertexArray(b.Vao);
         }
