@@ -24,6 +24,13 @@ public static class TatraSummits
         new NamedSummit("Mięguszowiecki Szczyt", new GeoPoint(49.187028, 20.059333), 2438),
         new NamedSummit("Świnica", new GeoPoint(49.219417, 20.009306), 2301),
         new NamedSummit("Kozi Wierch", new GeoPoint(49.218300, 20.028600), 2291),
+        // Orla Perć ridge (Świnica–Krzyżne) — the classic exposed scramble.
+        new NamedSummit("Kozie Czuby", new GeoPoint(49.218708, 20.027136), 2264),
+        new NamedSummit("Zadni Granat", new GeoPoint(49.224444, 20.032500), 2240),
+        new NamedSummit("Mały Kozi Wierch", new GeoPoint(49.219056, 20.019694), 2226),
+        new NamedSummit("Wielka Buczynowa Turnia", new GeoPoint(49.227500, 20.040833), 2184),
+        new NamedSummit("Zamarła Turnia", new GeoPoint(49.219417, 20.024472), 2179),
+        new NamedSummit("Kościelec", new GeoPoint(49.225278, 20.014444), 2155),
         new NamedSummit("Bystra", new GeoPoint(49.188639, 19.842583), 2248),
         new NamedSummit("Granaty", new GeoPoint(49.226944, 20.033306), 2225),
         new NamedSummit("Starorobociański Wierch", new GeoPoint(49.199361, 19.819944), 2176),
