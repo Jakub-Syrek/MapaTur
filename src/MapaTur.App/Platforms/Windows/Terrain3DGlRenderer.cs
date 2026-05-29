@@ -136,6 +136,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int lineHalfPxLocation = -1;
     private bool programReady;
 
+    // Off-screen multisampled target. SkiaSharp hands us a single-sampled FBO, so to anti-alias the terrain
+    // silhouette we render into our own MSAA colour+depth renderbuffers and blit-resolve into Skia's FBO.
+    // Degrades gracefully: if MSAA can't be set up (driver/format), we draw straight into Skia's FBO.
+    private const int RequestedSamples = 4;
+    private uint msaaFbo;
+    private uint msaaColorRb;
+    private uint msaaDepthRb;
+    private int msaaWidth;
+    private int msaaHeight;
+    private int msaaSamples; // 0 = not yet probed
+    private bool msaaUnsupported;
+
     private readonly Dictionary<TerrainMesh3D, TileBuffers> tileBuffers = new();
     private IReadOnlyList<TerrainMesh3D>? lastTiles;
 
@@ -162,11 +174,6 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     {
         gl ??= AngleGl.Get();
 
-        // Render into the SAME framebuffer SkiaSharp presents. After a window resize SkiaSharp allocates a
-        // new, non-zero FBO; drawing into the default framebuffer (0) would land off-screen — the symptom
-        // being only the sky clear showing after maximising.
-        gl.BindFramebuffer(FramebufferTarget.Framebuffer, framebuffer);
-
         // Resizing the window (e.g. maximise) makes SKGLView recreate the GL context, which invalidates
         // every GPU object ID we cached (shader program, VAOs, VBOs). Detect that — the old program ID is
         // no longer a program in the fresh context — and rebuild from scratch (without deleting the stale
@@ -188,6 +195,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             mvpLocation = -1;
             lightDirLocation = -1;
             ambientLocation = -1;
+            // The MSAA renderbuffers/FBO belonged to the dead context; drop the cached IDs and re-probe.
+            msaaFbo = 0;
+            msaaColorRb = 0;
+            msaaDepthRb = 0;
+            msaaWidth = 0;
+            msaaHeight = 0;
+            msaaSamples = 0;
+            msaaUnsupported = false;
         }
 
         EnsureProgram(gl);
@@ -198,6 +213,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             UploadTiles(gl, tiles);
             lastTiles = tiles;
         }
+
+        int vpWidth = Math.Max(1, width);
+        int vpHeight = Math.Max(1, height);
+
+        // Render into our multisampled FBO when available (anti-aliased terrain edges), else straight into the
+        // FBO SkiaSharp presents. Drawing into the default framebuffer (0) would land off-screen after a resize
+        // (SkiaSharp allocates a new non-zero FBO) — the symptom being only the sky clear showing.
+        bool useMsaa = EnsureMsaaTarget(gl, vpWidth, vpHeight);
+        gl.BindFramebuffer(FramebufferTarget.Framebuffer, useMsaa ? msaaFbo : framebuffer);
 
         // Take full ownership of the GL state we rely on. SkiaSharp shares this context and leaves its own
         // clip/raster state behind — notably it enables GL_STENCIL_TEST (and blend/scissor/colour-mask) for
@@ -214,7 +238,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.DepthFunc(DepthFunction.Less);
         gl.DepthRange(0.0f, 1.0f);
 
-        gl.Viewport(0, 0, (uint)Math.Max(1, width), (uint)Math.Max(1, height));
+        gl.Viewport(0, 0, (uint)vpWidth, (uint)vpHeight);
         gl.ClearColor(SkyR, SkyG, SkyB, 1f);
         gl.Clear((uint)(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit));
 
@@ -256,6 +280,87 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         DrawRouteLine(gl, route, raster, frame);
 
         gl.BindVertexArray(0);
+
+        if (useMsaa)
+        {
+            // Resolve the multisampled colour into Skia's single-sampled FBO, then leave it bound so Skia's
+            // own overlay pass (markers/labels) composes on top of the anti-aliased terrain.
+            gl.BindFramebuffer(FramebufferTarget.ReadFramebuffer, msaaFbo);
+            gl.BindFramebuffer(FramebufferTarget.DrawFramebuffer, framebuffer);
+            gl.BlitFramebuffer(
+                0, 0, vpWidth, vpHeight,
+                0, 0, vpWidth, vpHeight,
+                (uint)ClearBufferMask.ColorBufferBit,
+                BlitFramebufferFilter.Nearest);
+            gl.BindFramebuffer(FramebufferTarget.Framebuffer, framebuffer);
+        }
+    }
+
+    /// <summary>
+    /// Creates / resizes the off-screen multisampled colour+depth FBO. Returns false (and leaves nothing
+    /// bound to change) when MSAA isn't usable, so the caller renders directly into Skia's FBO instead.
+    /// </summary>
+    private bool EnsureMsaaTarget(GL g, int width, int height)
+    {
+        if (msaaUnsupported)
+        {
+            return false;
+        }
+
+        if (msaaSamples == 0)
+        {
+            Span<int> maxSamplesQuery = stackalloc int[1];
+            g.GetInteger(GLEnum.MaxSamples, maxSamplesQuery);
+            int maxSamples = maxSamplesQuery[0];
+            msaaSamples = Math.Clamp(RequestedSamples, 1, Math.Max(1, maxSamples));
+            if (msaaSamples < 2)
+            {
+                msaaUnsupported = true;
+                return false;
+            }
+        }
+
+        if (msaaFbo != 0 && msaaWidth == width && msaaHeight == height)
+        {
+            return true;
+        }
+
+        // (Re)allocate for the new size. Deleting 0 is a no-op, so this also handles first-time creation.
+        g.DeleteFramebuffer(msaaFbo);
+        g.DeleteRenderbuffer(msaaColorRb);
+        g.DeleteRenderbuffer(msaaDepthRb);
+
+        msaaColorRb = g.GenRenderbuffer();
+        g.BindRenderbuffer(RenderbufferTarget.Renderbuffer, msaaColorRb);
+        g.RenderbufferStorageMultisample(RenderbufferTarget.Renderbuffer, (uint)msaaSamples, InternalFormat.Rgba8, (uint)width, (uint)height);
+
+        msaaDepthRb = g.GenRenderbuffer();
+        g.BindRenderbuffer(RenderbufferTarget.Renderbuffer, msaaDepthRb);
+        g.RenderbufferStorageMultisample(RenderbufferTarget.Renderbuffer, (uint)msaaSamples, InternalFormat.DepthComponent24, (uint)width, (uint)height);
+
+        msaaFbo = g.GenFramebuffer();
+        g.BindFramebuffer(FramebufferTarget.Framebuffer, msaaFbo);
+        g.FramebufferRenderbuffer(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, RenderbufferTarget.Renderbuffer, msaaColorRb);
+        g.FramebufferRenderbuffer(FramebufferTarget.Framebuffer, FramebufferAttachment.DepthAttachment, RenderbufferTarget.Renderbuffer, msaaDepthRb);
+
+        GLEnum status = g.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
+        g.BindRenderbuffer(RenderbufferTarget.Renderbuffer, 0);
+        if (status != GLEnum.FramebufferComplete)
+        {
+            Log.Information("[GL3D] MSAA framebuffer incomplete ({Status}) — falling back to non-AA terrain", status);
+            g.DeleteFramebuffer(msaaFbo);
+            g.DeleteRenderbuffer(msaaColorRb);
+            g.DeleteRenderbuffer(msaaDepthRb);
+            msaaFbo = 0;
+            msaaColorRb = 0;
+            msaaDepthRb = 0;
+            msaaUnsupported = true;
+            return false;
+        }
+
+        msaaWidth = width;
+        msaaHeight = height;
+        return true;
     }
 
     private void EnsureProgram(GL g)
@@ -620,6 +725,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         ReleaseTiles(gl);
         DeleteLine(gl, ref trailLines);
         DeleteLine(gl, ref routeLines);
+        gl.DeleteFramebuffer(msaaFbo);
+        gl.DeleteRenderbuffer(msaaColorRb);
+        gl.DeleteRenderbuffer(msaaDepthRb);
+        msaaFbo = 0;
+        msaaColorRb = 0;
+        msaaDepthRb = 0;
         if (programReady)
         {
             gl.DeleteProgram(program);
