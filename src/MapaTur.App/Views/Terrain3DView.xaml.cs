@@ -376,34 +376,35 @@ public partial class Terrain3DView : ContentView
         bool handled = true;
         switch (e.Key)
         {
-            // Orbit — arrow keys swing azimuth/pitch by a constant pixel-equivalent step.
-            case Windows.System.VirtualKey.Left:
-                controller.ApplyOrbit(-KeyOrbitPixelStep, 0f);
-                break;
-            case Windows.System.VirtualKey.Right:
-                controller.ApplyOrbit(KeyOrbitPixelStep, 0f);
-                break;
+            // Pan with the arrow keys on the ground plane — "move the camera through space".
+            // Pan deltas are inverted vs the drag gesture (gesture invert is "world tracks
+            // fingers"; for keys we want "view moves toward the key direction"), so the arrows
+            // push the camera target up/down/left/right accordingly.
             case Windows.System.VirtualKey.Up:
-                controller.ApplyOrbit(0f, KeyOrbitPixelStep);
-                break;
-            case Windows.System.VirtualKey.Down:
-                controller.ApplyOrbit(0f, -KeyOrbitPixelStep);
-                break;
-
-            // Pan with WASD on the ground plane. Pan deltas are inverted vs gesture
-            // (gesture invert is "world tracks fingers"; for keys we want "view moves
-            // toward key direction"), so W/D/S/A push the camera target accordingly.
-            case Windows.System.VirtualKey.W:
                 controller.ApplyPan(0f, -KeyPanPixelStep);
                 break;
-            case Windows.System.VirtualKey.S:
+            case Windows.System.VirtualKey.Down:
                 controller.ApplyPan(0f, KeyPanPixelStep);
                 break;
-            case Windows.System.VirtualKey.A:
+            case Windows.System.VirtualKey.Left:
                 controller.ApplyPan(-KeyPanPixelStep, 0f);
                 break;
-            case Windows.System.VirtualKey.D:
+            case Windows.System.VirtualKey.Right:
                 controller.ApplyPan(KeyPanPixelStep, 0f);
+                break;
+
+            // Orbit with WASD — swing azimuth/pitch by a constant pixel-equivalent step.
+            case Windows.System.VirtualKey.A:
+                controller.ApplyOrbit(-KeyOrbitPixelStep, 0f);
+                break;
+            case Windows.System.VirtualKey.D:
+                controller.ApplyOrbit(KeyOrbitPixelStep, 0f);
+                break;
+            case Windows.System.VirtualKey.W:
+                controller.ApplyOrbit(0f, KeyOrbitPixelStep);
+                break;
+            case Windows.System.VirtualKey.S:
+                controller.ApplyOrbit(0f, -KeyOrbitPixelStep);
                 break;
 
             // Vertical pan (raise / lower the camera target).
