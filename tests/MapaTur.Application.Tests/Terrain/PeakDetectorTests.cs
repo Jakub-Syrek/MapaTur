@@ -122,6 +122,31 @@ public sealed class PeakDetectorTests
     }
 
     [Fact]
+    public void Detect_DominanceRadiusMeters_SuppressesNearbyLowerPeak_IndependentOfResolution()
+    {
+        // Two bumps ~2 km apart in a 1°×1° (~111 km) box. With a 5 km dominance radius the lower
+        // bump sits inside the higher one's window and must be suppressed — and this must hold at BOTH
+        // grid resolutions, because the radius is expressed in metres, not cells. (A cell-based radius
+        // would behave differently on the two grids — the bug behind the empty HD map.)
+        var coarse = RasterWithBumps(20, 20, baseline: 1000f, (9, 9, 1800f), (10, 9, 1700f));
+        var fine = RasterWithBumps(60, 60, baseline: 1000f, (29, 29, 1800f), (32, 29, 1700f));
+        var opts = new PeakDetectionOptions { DominanceRadiusMeters = 5000.0 };
+
+        PeakDetector.Detect(coarse, opts).Should().HaveCount(1, "5 km radius dominates the nearby lower bump");
+        PeakDetector.Detect(fine, opts).Should().HaveCount(1, "same metres-based radius → same result at higher resolution");
+    }
+
+    [Fact]
+    public void Detect_DominanceRadiusMeters_KeepsWellSeparatedPeaks()
+    {
+        // Two bumps far apart (~55 km, half the box) stay distinct under a 5 km radius.
+        var raster = RasterWithBumps(60, 60, baseline: 1000f, (15, 15, 1800f), (45, 45, 1700f));
+
+        PeakDetector.Detect(raster, new PeakDetectionOptions { DominanceRadiusMeters = 5000.0 })
+            .Should().HaveCount(2);
+    }
+
+    [Fact]
     public void Detect_NullRaster_Throws()
     {
         Action act = () => PeakDetector.Detect(null!, new PeakDetectionOptions());

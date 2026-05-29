@@ -9,8 +9,17 @@ public sealed record PeakDetectionOptions
     /// <summary>
     /// Half-size (in cells) of the square window a candidate must dominate to count as a peak.
     /// Larger radii yield fewer, better-separated summits. Minimum effective value is 1.
+    /// Ignored when <see cref="DominanceRadiusMeters"/> is positive.
     /// </summary>
     public int NeighborhoodRadius { get; init; } = 3;
+
+    /// <summary>
+    /// Dominance window half-size expressed in METRES rather than cells. When positive it overrides
+    /// <see cref="NeighborhoodRadius"/>, converting to a cell radius from the raster's actual cell size —
+    /// so summit spacing stays constant on the ground regardless of DEM resolution. (A fixed cell radius
+    /// shrinks the ground window as the DEM densifies, clustering all peaks onto the highest massif.)
+    /// </summary>
+    public double DominanceRadiusMeters { get; init; }
 
     /// <summary>Summits below this elevation (metres) are ignored. Default: no floor.</summary>
     public double MinElevationMeters { get; init; } = double.NegativeInfinity;
@@ -37,10 +46,12 @@ public static class PeakDetector
     {
         ArgumentNullException.ThrowIfNull(raster);
         options ??= new PeakDetectionOptions();
-        int radius = Math.Max(1, options.NeighborhoodRadius);
 
         int cols = raster.Columns;
         int rows = raster.Rows;
+        int radius = options.DominanceRadiusMeters > 0.0
+            ? CellRadiusForMeters(raster, options.DominanceRadiusMeters)
+            : Math.Max(1, options.NeighborhoodRadius);
         var found = new List<TerrainPeak>();
 
         // Only scan cells whose full window lies inside the grid: that makes "unique max in
@@ -99,6 +110,26 @@ public static class PeakDetector
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Converts a metres dominance radius into a cell radius using the raster's average cell size, so the
+    /// window covers roughly the same ground distance whatever the DEM resolution. Always at least 1.
+    /// </summary>
+    private static int CellRadiusForMeters(DemRaster raster, double meters)
+    {
+        const double MetersPerLatDegree = 111_320.0;
+        double centerLat = (raster.North + raster.South) / 2.0;
+        double metersPerLonDegree = MetersPerLatDegree * Math.Cos(centerLat * Math.PI / 180.0);
+        double cellLonMeters = (raster.East - raster.West) / (raster.Columns - 1) * metersPerLonDegree;
+        double cellLatMeters = (raster.North - raster.South) / (raster.Rows - 1) * MetersPerLatDegree;
+        double cellMeters = (cellLonMeters + cellLatMeters) / 2.0;
+        if (cellMeters <= 0.0)
+        {
+            return 1;
+        }
+
+        return Math.Max(1, (int)Math.Round(meters / cellMeters));
     }
 
     private static GeoPoint CellToGeo(DemRaster raster, int col, int row)

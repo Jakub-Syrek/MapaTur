@@ -724,8 +724,13 @@ public sealed partial class MapPageViewModel : ObservableObject
         // Detect summits off the UI thread so the 3D view shows labelled peaks, not just terrain.
         // Match each against the curated Tatra gazetteer so prominent peaks get a name above the
         // elevation; unmatched maxima keep their elevation-only label.
+        // Dominance radius in METRES (not cells) so summit spacing is constant on the ground whatever
+        // the DEM resolution — without this the high-res DEM clustered all the peaks onto the top massif
+        // and left most of the map bare. MergeWithGazetteer then guarantees every known named summit
+        // shows (seated on the terrain), with detected maxima filling the gaps.
+        var peakOptions = new PeakDetectionOptions { DominanceRadiusMeters = 550.0, MaxPeaks = 48 };
         Peaks3DOverlay = await Task.Run(() =>
-            PeakNamer.AssignNames(PeakDetector.Detect(raster), TatraSummits.All)).ConfigureAwait(true);
+            PeakNamer.MergeWithGazetteer(PeakDetector.Detect(raster, peakOptions), TatraSummits.All, raster)).ConfigureAwait(true);
         logger.LogInformation("Loaded DEM {Path} ({Cols}x{Rows})", path, raster.Columns, raster.Rows);
         StatusMessage = $"{Localization.AppStrings.StatusDemLoaded}: {Path.GetFileName(path)}";
     }
