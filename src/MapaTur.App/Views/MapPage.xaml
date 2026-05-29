@@ -70,6 +70,9 @@
         <!-- Trail filter row: 5 PTTK colour toggles + 4 Karpat region toggles. -->
         <HorizontalStackLayout Grid.Row="1" Padding="12,4" Spacing="6"
                                BackgroundColor="{AppThemeBinding Light=#FAFAFA, Dark=#27272A}">
+            <CheckBox IsChecked="{Binding ShowTrails}" />
+            <Label Text="Szlaki" VerticalOptions="Center" FontSize="11" />
+            <BoxView WidthRequest="1" HeightRequest="22" Color="#52525B" Margin="6,0" />
             <Label Text="Kolory:" VerticalOptions="Center" FontSize="11" />
             <CheckBox IsChecked="{Binding TrailColourRedEnabled}" Color="#DC2626" />
             <Label Text="Cz" VerticalOptions="Center" FontSize="11" />

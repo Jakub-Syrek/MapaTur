@@ -142,6 +142,11 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private IReadOnlyList<Trail>? trails3DOverlay;
 
+    /// <summary>Master show/hide for all trails; when off, no trail renders regardless of the colour/region filter.</summary>
+    [ObservableProperty] private bool showTrails = true;
+
+    partial void OnShowTrailsChanged(bool value) => OnTrailFilterChanged();
+
     // PTTK colour toggles for the trail filter. All true by default — the
     // partial OnXxxChanged hooks below rebuild Trails3DOverlay + 2D layer.
     [ObservableProperty] private bool trailColourRedEnabled = true;
@@ -182,9 +187,10 @@ public sealed partial class MapPageViewModel : ObservableObject
             return;
         }
         var filter = BuildTrailFilter();
-        var filtered = rawTrails.Where(filter.IsVisible).ToList();
+        // The master ShowTrails switch wins: when off, nothing is shown on either layer.
+        var filtered = ShowTrails ? rawTrails.Where(filter.IsVisible).ToList() : new List<Trail>();
         // Filter the pre-simplified set for the 3D overlay — cheap, no re-simplification per toggle.
-        Trails3DOverlay = rawTrails3D?.Where(filter.IsVisible).ToList();
+        Trails3DOverlay = ShowTrails ? rawTrails3D?.Where(filter.IsVisible).ToList() : null;
         trailRenderer.RenderTrails(Map, filtered);
         viewportTrailController?.RequestRefresh();
     }
@@ -992,7 +998,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         }
         viewportTrailController = new ViewportAwareTrailLayerController(Map, trailRepository, trailRenderer, controllerLogger)
         {
-            Filter = trail => BuildTrailFilter().IsVisible(trail),
+            Filter = trail => ShowTrails && BuildTrailFilter().IsVisible(trail),
         };
     }
 
