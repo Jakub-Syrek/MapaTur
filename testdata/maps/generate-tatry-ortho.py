@@ -19,6 +19,7 @@ from __future__ import annotations
 import io
 import os
 import sys
+import time
 
 import requests
 from PIL import Image
@@ -44,8 +45,15 @@ WMS_LAYER = "Raster"
 USER_AGENT = "MapaTur/0.1 (+https://github.com/Jakub-Syrek/MapaTur)"
 
 
+MAX_ATTEMPTS = 5
+
+
 def fetch_tile(min_lon: float, min_lat: float, max_lon: float, max_lat: float, width: int, height: int) -> Image.Image:
-    """One WMS 1.3.0 GetMap. For EPSG:4326 in 1.3.0 the BBOX axis order is lat,lon (miny,minx,maxy,maxx)."""
+    """One WMS 1.3.0 GetMap. For EPSG:4326 in 1.3.0 the BBOX axis order is lat,lon (miny,minx,maxy,maxx).
+
+    Retries transient failures: the GUGiK WMS is load-balanced across nodes and some return a spurious
+    404/5xx for a request a sibling node serves fine, so a couple of retries usually lands a healthy node.
+    """
     params = {
         "SERVICE": "WMS",
         "VERSION": "1.3.0",
@@ -58,11 +66,19 @@ def fetch_tile(min_lon: float, min_lat: float, max_lon: float, max_lat: float, w
         "HEIGHT": str(height),
         "FORMAT": "image/png",
     }
-    response = requests.get(WMS_URL, params=params, headers={"User-Agent": USER_AGENT}, timeout=180)
-    response.raise_for_status()
-    if "image" not in response.headers.get("Content-Type", ""):
-        raise RuntimeError(f"WMS returned non-image response: {response.text[:300]}")
-    return Image.open(io.BytesIO(response.content)).convert("RGB")
+    last_error: Exception | None = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            response = requests.get(WMS_URL, params=params, headers={"User-Agent": USER_AGENT}, timeout=180)
+            response.raise_for_status()
+            if "image" not in response.headers.get("Content-Type", ""):
+                raise RuntimeError(f"WMS returned non-image response: {response.text[:300]}")
+            return Image.open(io.BytesIO(response.content)).convert("RGB")
+        except (requests.RequestException, RuntimeError) as error:
+            last_error = error
+            print(f"    attempt {attempt}/{MAX_ATTEMPTS} failed: {error}")
+            time.sleep(2.0 * attempt)
+    raise RuntimeError(f"WMS tile failed after {MAX_ATTEMPTS} attempts") from last_error
 
 
 def main() -> int:
