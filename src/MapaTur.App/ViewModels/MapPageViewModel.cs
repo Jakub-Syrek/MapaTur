@@ -12,6 +12,7 @@ using MapaTur.Domain.Geography;
 using MapaTur.Domain.Terrain;
 using MapaTur.Domain.Trails;
 using MapaTur.Infrastructure.Terrain;
+using MapaTur.Infrastructure.Trails.Overpass;
 
 using Mapsui;
 using Mapsui.Projections;
@@ -200,6 +201,34 @@ public sealed partial class MapPageViewModel : ObservableObject
             result.Add(new Trail(trail.Id, trail.Name, trail.Markings, simplified));
         }
         return result;
+    }
+
+    /// <summary>
+    /// Adopts a freshly obtained trail set (from a live Overpass download or a pre-bundled file):
+    /// persists it, caches the raw + simplified-for-3D copies, and renders the filtered subset on
+    /// both the 2D map and the 3D overlay. Shared by the viewport download and startup auto-load.
+    /// </summary>
+    private async Task ApplyTrailsAsync(IReadOnlyList<Trail> trails)
+    {
+        await trailRepository.UpsertAsync(trails).ConfigureAwait(true);
+        rawTrails = trails;
+        // Simplify once now (off the per-toggle path) so filter changes are cheap re-filters.
+        rawTrails3D = SimplifyForOverlay3D(trails);
+        var filter = BuildTrailFilter();
+        var filteredTrails = trails.Where(filter.IsVisible).ToList();
+
+        // The viewport controller re-queries the repo with current-zoom epsilon and
+        // renders the simplified subset; falling back to a direct render keeps the
+        // old behaviour if the controller hasn't been activated yet (e.g. tests).
+        if (viewportTrailController is not null)
+        {
+            viewportTrailController.RequestRefresh();
+        }
+        else
+        {
+            trailRenderer.RenderTrails(Map, filteredTrails);
+        }
+        Trails3DOverlay = rawTrails3D.Where(filter.IsVisible).ToList();
     }
 
     /// <summary>Builds the current <see cref="TrailFilter"/> snapshot from the toggle state.</summary>
@@ -536,25 +565,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             StatusMessage = Localization.AppStrings.StatusDownloadingTrails;
 
             var trails = await overpassClient.FetchHikingTrailsAsync(bounds.Value).ConfigureAwait(true);
-            await trailRepository.UpsertAsync(trails).ConfigureAwait(true);
-            rawTrails = trails;
-            // Simplify once now (off the per-toggle path) so filter changes are cheap re-filters.
-            rawTrails3D = SimplifyForOverlay3D(trails);
-            var filter = BuildTrailFilter();
-            var filteredTrails = trails.Where(filter.IsVisible).ToList();
-
-            // The viewport controller re-queries the repo with current-zoom epsilon and
-            // renders the simplified subset; falling back to a direct render keeps the
-            // old behaviour if the controller hasn't been activated yet (e.g. tests).
-            if (viewportTrailController is not null)
-            {
-                viewportTrailController.RequestRefresh();
-            }
-            else
-            {
-                trailRenderer.RenderTrails(Map, filteredTrails);
-            }
-            Trails3DOverlay = rawTrails3D.Where(filter.IsVisible).ToList();
+            await ApplyTrailsAsync(trails).ConfigureAwait(true);
 
             StatusMessage = trails.Count == 0
                 ? Localization.AppStrings.StatusNoTrailsFound
@@ -880,10 +891,11 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             var discovery = autoLoader.Discover();
             logger.LogInformation(
-                "Auto-load discovery: basemaps=[{Basemaps}], hillshade={Hillshade}, dem={Dem}",
+                "Auto-load discovery: basemaps=[{Basemaps}], hillshade={Hillshade}, dem={Dem}, trails={Trails}",
                 string.Join(", ", discovery.BasemapMBTilesPaths),
                 discovery.HillshadeMBTilesPath ?? "(none)",
-                discovery.DemPath ?? "(none)");
+                discovery.DemPath ?? "(none)",
+                discovery.TrailsDataPath ?? "(none)");
             var loaded = new List<string>(capacity: 3);
 
             if (discovery.BasemapMBTilesPaths.Count > 0)
@@ -921,6 +933,18 @@ public sealed partial class MapPageViewModel : ObservableObject
                 await LoadDemFromPathAsync(demPath).ConfigureAwait(true);
                 loaded.Add(Path.GetFileName(demPath));
                 logger.LogInformation("Auto-loaded DEM {Path}", demPath);
+            }
+
+            if (discovery.TrailsDataPath is { } trailsPath)
+            {
+                // A pre-bundled Overpass response: load the whole regional trail set from disk so the
+                // app shows trails on first launch without a live download. Parse failures are caught
+                // by the outer best-effort handler — the manual download button stays available.
+                byte[] payload = await File.ReadAllBytesAsync(trailsPath).ConfigureAwait(true);
+                IReadOnlyList<Trail> trails = OverpassResponseParser.Parse(payload);
+                await ApplyTrailsAsync(trails).ConfigureAwait(true);
+                loaded.Add(Path.GetFileName(trailsPath));
+                logger.LogInformation("Auto-loaded {Count} pre-bundled trails from {Path}", trails.Count, trailsPath);
             }
 
             if (loaded.Count > 0)
