@@ -37,6 +37,7 @@ public sealed class FileSystemMapAutoLoader : IMapAutoLoader
         var basemaps = new List<string>();
         string? hillshade = null;
         string? dem = null;
+        string? trailsData = null;
 
         foreach (string root in searchRoots)
         {
@@ -83,9 +84,21 @@ public sealed class FileSystemMapAutoLoader : IMapAutoLoader
                 dem ??= path;
                 break;
             }
+
+            if (trailsData is null)
+            {
+                foreach (string path in EnumerateFilesSafe(root, "*.json"))
+                {
+                    if (Path.GetFileName(path).Contains("trail", StringComparison.OrdinalIgnoreCase))
+                    {
+                        trailsData = path;
+                        break;
+                    }
+                }
+            }
         }
 
-        return new MapAutoLoadDiscovery(basemaps, hillshade, dem);
+        return new MapAutoLoadDiscovery(basemaps, hillshade, dem, trailsData);
     }
 
     private static IEnumerable<string> EnumerateFilesSafe(string root, string pattern)

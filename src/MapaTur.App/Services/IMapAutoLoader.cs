@@ -7,10 +7,12 @@ namespace MapaTur.App.Services;
 /// <param name="BasemapMBTilesPaths">All non-hillshade .mbtiles archives found, in discovery order. They stack as separate layers so multiple regional maps (Tatry, Beskidy, Bieszczady, etc.) compose into one base.</param>
 /// <param name="HillshadeMBTilesPath">First .mbtiles archive whose filename suggests it is a hillshade layer, or null.</param>
 /// <param name="DemPath">First .dem file found, or null.</param>
+/// <param name="TrailsDataPath">First pre-fetched trails file (a saved Overpass JSON response, filename containing "trail"), or null. Lets the app load the whole regional trail set from disk instead of hitting Overpass live.</param>
 public readonly record struct MapAutoLoadDiscovery(
     IReadOnlyList<string> BasemapMBTilesPaths,
     string? HillshadeMBTilesPath,
-    string? DemPath);
+    string? DemPath,
+    string? TrailsDataPath = null);
 
 /// <summary>
 /// Discovers map data files (MBTiles archives, DEM rasters) on disk so the app can
