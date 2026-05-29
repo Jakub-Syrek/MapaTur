@@ -14,6 +14,10 @@
 [![Last commit](https://img.shields.io/github/last-commit/Jakub-Syrek/MapaTur)](https://github.com/Jakub-Syrek/MapaTur/commits)
 [![License](https://img.shields.io/badge/License-Proprietary-blue)](#license)
 
+![MapaTur 3D terrain — orthophoto-draped Tatras](docs/screenshots/3d-tatry.png)
+
+*Real-time 3D terrain: a high-resolution PL + SK orthophoto draped over the Copernicus DEM, with named summits, depth-occluded hiking trails and roads, and per-pixel lighting.*
+
 ## About
 
 MapaTur is a hiking-trip companion for the Tatra mountains that **runs entirely offline**. Drop in any
@@ -22,9 +26,10 @@ points on the map, and the app plans an **A\*-optimal route** along marked PTTK 
 GPX for any GPS device.
 
 Its standout feature is an **interactive 3D terrain view**: a from-scratch **OpenGL ES 3.0** renderer
-(ANGLE → Direct3D 11 on Windows) draws a Copernicus ~30 m DEM with a real depth buffer, hypsometric
-colouring and hillshading, with hiking trails draped and depth-occluded by the ridges and named summits
-labelled with their elevations. No telemetry, no accounts, no ads.
+(ANGLE → Direct3D 11 on Windows) draws a Copernicus ~30 m DEM with a real depth buffer, **per-pixel
+lighting** and **MSAA**, optionally draped with a **high-resolution orthophoto** (Polish + Slovak imagery
+composited across the border). Hiking trails, roads and the planned route are draped and depth-occluded by
+the ridges; named summits and mountain POIs are labelled. No telemetry, no accounts, no ads.
 
 ## Features
 
@@ -43,7 +48,9 @@ labelled with their elevations. No telemetry, no accounts, no ads.
 | High-resolution DEM terrain mesh | ✅ Verified | Copernicus GLO-30 (~30 m), tiled to beat the 16-bit index limit; hypsometric ramp + Lambert hillshade + vertical exaggeration |
 | Depth-occluded 3D trail & route overlays | ✅ Verified | Screen-space ribbon lines, hidden behind ridges, clipped to the DEM edge |
 | Named summit overlay | ✅ Verified | DEM peak detection + WGS84 gazetteer (incl. Orla Perć), published elevations, label de-collision |
-| Mountain POIs (huts / shelters / viewpoints) | ⏳ In progress | OSM data layer + Overpass query/parser done; 3D billboards + UI pending |
+| Mountain POIs (huts / shelters / chalets / viewpoints) | ✅ Verified | Overpass download; colour-coded markers + labels on 2D map and 3D view (viewpoints as a lookout-tower glyph); per-kind show/hide filter |
+| Orthophoto terrain drape | ✅ Verified | Aerial imagery sampled per-pixel over the DEM — GUGiK Geoportal (PL) + ÚGKK ZBGIS (SK) composited cross-border; mipmaps + anisotropic filtering |
+| Road overlay (OSM highways) | ✅ Verified | Viewport Overpass download; grey depth-tested ribbons in 3D + 2D layer, independent show/hide |
 | Hillshade base layer | ✅ Verified | Multi-layer MBTiles loader + Copernicus hillshade pipeline |
 | Elevation-aware routing (SRTM) | ⏳ Planned | Currently routes are flat (Overpass geometry lacks `ele`) |
 | Off-trail edges in graph | ⏳ Planned | Cost penalty exists; UI tagging gesture pending |
@@ -56,8 +63,10 @@ The 3D view is a **custom real-time renderer**, not an off-the-shelf 3D engine:
 
 - **OpenGL ES 3.0 on the SkiaSharp `SKGLView` context** — on Windows ANGLE translates GLES → Direct3D 11; the same path runs natively on Android/iOS.
 - **24-bit depth buffer** for hardware occlusion — no painter's algorithm, correct from any angle, full DEM resolution.
-- **Tiled mesh** (≤65 536-vertex tiles) built from a Copernicus GLO-30 (~30 m) DEM, hypsometric colouring + Lambert hillshade, adjustable vertical exaggeration.
-- **Trails & route as depth-tested screen-space ribbons** (occluded by ridges, clipped to the DEM); **named summits** with de-cluttered elevation labels (2D overlay drawn by Skia over the GL terrain).
+- **Tiled mesh** (≤65 536-vertex tiles) built from a Copernicus GLO-30 (~30 m) DEM, with adjustable vertical exaggeration.
+- **Per-pixel lighting** (Lambert shading evaluated per fragment from interpolated normals) and **4× MSAA** for smooth slopes and ridgelines.
+- **Orthophoto drape** (optional): a high-resolution aerial image sampled per-pixel over the terrain, with mipmaps + anisotropic filtering; falls back to a hypsometric ramp + hillshade when no image is bundled.
+- **Trails, roads & route as depth-tested screen-space ribbons** (occluded by ridges, clipped to the DEM); **named summits and mountain POIs** with de-cluttered labels (2D overlay drawn by Skia over the GL terrain).
 - Camera: orbit / look-around-in-place / pan / zoom via mouse, keyboard and on-screen pads; **auto-falls-back to a Skia software renderer** on any GL failure, so the view never breaks.
 
 Full write-up: [`docs/3d-terrain.md`](docs/3d-terrain.md).
