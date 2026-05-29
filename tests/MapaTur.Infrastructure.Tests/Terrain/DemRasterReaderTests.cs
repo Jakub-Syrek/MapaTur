@@ -119,6 +119,31 @@ public sealed class DemRasterReaderTests : IDisposable
     }
 
     [Fact]
+    public void Read_ThrowsInvalidDataWhenShorterThanHeader()
+    {
+        File.WriteAllBytes(tempPath, new byte[10]);
+
+        var act = () => DemRasterReader.Read(tempPath);
+
+        act.Should().Throw<InvalidDataException>()
+            .WithMessage("*header*");
+    }
+
+    [Fact]
+    public void Read_ThrowsInvalidDataForDegenerateDimensions()
+    {
+        // A 1-column grid is rejected (cols < 2), before the body-size check.
+        byte[] file = BuildDemFile(2, 2, 19.0, 49.0, 20.0, 50.0, new float[4]);
+        BinaryPrimitives.WriteInt32LittleEndian(file.AsSpan(8), 1);
+        File.WriteAllBytes(tempPath, file);
+
+        var act = () => DemRasterReader.Read(tempPath);
+
+        act.Should().Throw<InvalidDataException>()
+            .WithMessage("*dimensions*");
+    }
+
+    [Fact]
     public void Read_LoadsTatryFixtureWithExpectedDimensionsAndRange()
     {
         string fixturePath = Path.Combine(AppContext.BaseDirectory, "testdata", "dem", "tatry.dem");
