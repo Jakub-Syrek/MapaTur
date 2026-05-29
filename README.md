@@ -1,13 +1,30 @@
 # MapaTur
 
-Offline-first hiking and tourist map application for the Polish Tatras (and any region you bring tiles for), built with .NET MAUI.
+**Offline-first hiking & tourist map for the Polish Tatras — with a real-time 3D terrain engine — built on .NET MAUI.**
 
 [![CI](https://github.com/Jakub-Syrek/MapaTur/actions/workflows/ci.yml/badge.svg)](https://github.com/Jakub-Syrek/MapaTur/actions/workflows/ci.yml)
-[![.NET](https://img.shields.io/badge/.NET-10.0-512BD4)](https://dotnet.microsoft.com/)
-[![MAUI](https://img.shields.io/badge/MAUI-Android%20%7C%20iOS%20%7C%20Windows%20%7C%20macOS-purple)](https://learn.microsoft.com/dotnet/maui/)
+[![.NET 10](https://img.shields.io/badge/.NET-10.0-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
+[![MAUI](https://img.shields.io/badge/.NET%20MAUI-Android%20%7C%20iOS%20%7C%20Windows%20%7C%20macOS-512BD4?logo=dotnet&logoColor=white)](https://learn.microsoft.com/dotnet/maui/)
+[![3D engine](https://img.shields.io/badge/3D-OpenGL%20ES%203.0%20%C2%B7%20ANGLE%20%2F%20D3D11-CC3333)](docs/3d-terrain.md)
+[![Mapsui](https://img.shields.io/badge/maps-Mapsui%20%2B%20SkiaSharp-2E7D32)](https://mapsui.com/)
+[![Tests](https://img.shields.io/badge/tests-408%20passing-brightgreen)](#testing)
+[![Architecture](https://img.shields.io/badge/architecture-Clean-success)](#architecture)
+[![Top language](https://img.shields.io/github/languages/top/Jakub-Syrek/MapaTur)](#)
+[![Code size](https://img.shields.io/github/languages/code-size/Jakub-Syrek/MapaTur)](#)
+[![Last commit](https://img.shields.io/github/last-commit/Jakub-Syrek/MapaTur)](https://github.com/Jakub-Syrek/MapaTur/commits)
 [![License](https://img.shields.io/badge/License-Proprietary-blue)](#license)
 
-MapaTur runs entirely without a network connection. Drop in any raster MBTiles archive, import a Garmin TCX track, download OSM hiking trails ahead of your trip, tap two points on the map, and the app plans an A\*-optimal route along marked PTTK trails — then exports it as GPX you can load into any GPS device.
+## About
+
+MapaTur is a hiking-trip companion for the Tatra mountains that **runs entirely offline**. Drop in any
+raster MBTiles archive, import a Garmin TCX track, download OSM hiking trails ahead of your trip, tap two
+points on the map, and the app plans an **A\*-optimal route** along marked PTTK trails — then exports it as
+GPX for any GPS device.
+
+Its standout feature is an **interactive 3D terrain view**: a from-scratch **OpenGL ES 3.0** renderer
+(ANGLE → Direct3D 11 on Windows) draws a Copernicus ~30 m DEM with a real depth buffer, hypsometric
+colouring and hillshading, with hiking trails draped and depth-occluded by the ridges and named summits
+labelled with their elevations. No telemetry, no accounts, no ads.
 
 ## Features
 
@@ -22,11 +39,28 @@ MapaTur runs entirely without a network connection. Drop in any raster MBTiles a
 | GPX 1.1 export | ✅ Verified | Invariant-culture coords, elevation when present |
 | Localization (PL/EN) | ✅ Verified | Auto-detects from `CultureInfo.CurrentUICulture` |
 | Accessibility (semantic labels, AA contrast) | ✅ Verified | Screen-reader hints on toolbar; heading level on status |
-| Hillshade base layer | ⏳ Scaffolded | Multi-layer MBTiles loader ready; UI button + DEM generator pending |
+| **Interactive 3D terrain (GPU)** | ✅ Verified | OpenGL ES 3.0 / ANGLE renderer, 24-bit depth buffer; orbit / look-around / pan, mouse + keyboard + on-screen pads — see [`docs/3d-terrain.md`](docs/3d-terrain.md) |
+| High-resolution DEM terrain mesh | ✅ Verified | Copernicus GLO-30 (~30 m), tiled to beat the 16-bit index limit; hypsometric ramp + Lambert hillshade + vertical exaggeration |
+| Depth-occluded 3D trail & route overlays | ✅ Verified | Screen-space ribbon lines, hidden behind ridges, clipped to the DEM edge |
+| Named summit overlay | ✅ Verified | DEM peak detection + WGS84 gazetteer (incl. Orla Perć), published elevations, label de-collision |
+| Mountain POIs (huts / shelters / viewpoints) | ⏳ In progress | OSM data layer + Overpass query/parser done; 3D billboards + UI pending |
+| Hillshade base layer | ✅ Verified | Multi-layer MBTiles loader + Copernicus hillshade pipeline |
 | Elevation-aware routing (SRTM) | ⏳ Planned | Currently routes are flat (Overpass geometry lacks `ele`) |
 | Off-trail edges in graph | ⏳ Planned | Cost penalty exists; UI tagging gesture pending |
 | GPS dot / live location | ⏳ Planned | Cross-platform location permission story |
 | Signed store builds (Play / App Store / MSIX) | ⏳ Pending | Requires signing credentials |
+
+## 3D terrain (GPU engine)
+
+The 3D view is a **custom real-time renderer**, not an off-the-shelf 3D engine:
+
+- **OpenGL ES 3.0 on the SkiaSharp `SKGLView` context** — on Windows ANGLE translates GLES → Direct3D 11; the same path runs natively on Android/iOS.
+- **24-bit depth buffer** for hardware occlusion — no painter's algorithm, correct from any angle, full DEM resolution.
+- **Tiled mesh** (≤65 536-vertex tiles) built from a Copernicus GLO-30 (~30 m) DEM, hypsometric colouring + Lambert hillshade, adjustable vertical exaggeration.
+- **Trails & route as depth-tested screen-space ribbons** (occluded by ridges, clipped to the DEM); **named summits** with de-cluttered elevation labels (2D overlay drawn by Skia over the GL terrain).
+- Camera: orbit / look-around-in-place / pan / zoom via mouse, keyboard and on-screen pads; **auto-falls-back to a Skia software renderer** on any GL failure, so the view never breaks.
+
+Full write-up: [`docs/3d-terrain.md`](docs/3d-terrain.md).
 
 ## Architecture
 
@@ -34,15 +68,16 @@ Clean Architecture with five projects + five matching test projects:
 
 ```
 src/
-├── MapaTur.Domain          GeoPoint, Trail, Track, Route, NodeId, ElevationProfile, …
-├── MapaTur.Application     use cases + ports (ITileSource, ITcxParser, IRoutePlanner, …)
-├── MapaTur.Infrastructure  SQLite, HTTP (Overpass), TCX parser, GPX writer
+├── MapaTur.Domain          GeoPoint, Trail, Track, Route, ElevationProfile, DemRaster, MountainPoi, …
+├── MapaTur.Application     use cases + ports + 3D terrain math (Camera3D, TerrainMesh3D, projections)
+├── MapaTur.Infrastructure  SQLite, HTTP (Overpass), TCX parser, GPX writer, DEM reader
 ├── MapaTur.Routing         TrailGraph, AStarRouter, Tobler hiking function
-└── MapaTur.App             MAUI: MapPage + MapPageViewModel, DI bootstrap
-tests/                      77 unit + integration tests (xUnit + FluentAssertions + FsCheck)
-testdata/                   sample-tatry.tcx, overpass-tatry-sample.json, demo MBTiles
+└── MapaTur.App             MAUI: MapPage + view model, OpenGL ES terrain renderer, DI bootstrap
+tests/                      400+ unit + integration tests (xUnit + FluentAssertions + FsCheck)
+testdata/                   sample-tatry.tcx, overpass-tatry-sample.json, demo MBTiles, DEM generators
 docs/
 ├── adr/                    architecture decision records (MADR format)
+├── 3d-terrain.md           3D GPU renderer overview
 ├── ROADMAP.md              milestone-tracked feature plan
 └── PRIVACY.md              what runs locally vs. on network
 ```
@@ -54,7 +89,9 @@ Dependency direction is inward only: `App → Application → Domain`, `Infrastr
 | Concern | Choice | Rationale |
 |---|---|---|
 | UI framework | .NET MAUI (.NET 10) | One codebase across Android / iOS / Windows / macOS |
-| Map rendering | [Mapsui](https://mapsui.com/) + BruTile | Cross-platform 2D map, SkiaSharp-backed |
+| 2D map rendering | [Mapsui](https://mapsui.com/) + BruTile | Cross-platform 2D map, SkiaSharp-backed |
+| 3D terrain rendering | Custom OpenGL ES 3.0 renderer ([Silk.NET](https://github.com/dotnet/Silk.NET) bindings, ANGLE/D3D11) on `SKGLView` | GPU depth buffer + shaders; Skia stays for 2D overlays |
+| Elevation data | Copernicus DEM GLO-30 (~30 m) → custom `.dem` binary | Tiled terrain mesh, generated offline by a Python script |
 | Geometry | NetTopologySuite | Industry-standard topology operations |
 | Storage | SQLite (Microsoft.Data.Sqlite + BruTile.MbTiles) | Embedded, file-based, no server |
 | Routing | Custom A\* with pluggable cost functions | Tobler hiking function for hiker-accurate ETA |
@@ -117,19 +154,17 @@ MapaTur sends no telemetry, has no analytics, no user accounts, no advertising. 
 dotnet test
 ```
 
-Current coverage at the time of last release:
-
 | Suite | Tests | Focus |
 |---|---|---|
-| `MapaTur.Domain.Tests` | 37 | Value objects, aggregates, elevation math |
-| `MapaTur.Application.Tests` | 3 | Overpass query construction |
-| `MapaTur.Infrastructure.Tests` | 24 | TCX parser, MBTiles reader, SQLite repo, GPX writer |
+| `MapaTur.Domain.Tests` | 106 | Value objects, aggregates, elevation math, DEM, POI tags |
+| `MapaTur.Application.Tests` | 236 | Overpass queries, 3D terrain math (camera, mesh, projections, peaks) |
+| `MapaTur.Infrastructure.Tests` | 53 | TCX/Overpass/POI parsers, MBTiles + DEM readers, SQLite, GPX |
 | `MapaTur.Routing.Tests` | 13 | Tobler function, graph snapping, A\* correctness |
-| **Total** | **77** | |
+| **Total** | **408** | xUnit + FluentAssertions + NSubstitute + FsCheck |
 
 ## Roadmap
 
-Milestones tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md). All six initial milestones (M0–M6) are complete and verified live on real Tatra data. Active line of work: hillshade DEM layer (M7) and elevation-aware routing.
+Milestones tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md). Initial milestones (M0–M6), hillshade (M7), climbing POIs (M8) and the **3D terrain GPU engine (M9)** are complete and verified live on real Tatra data. Active line of work: mountain POIs (huts/shelters/viewpoints + chains) in 3D, pre-bundled offline trail dataset, and 3D render polish (per-pixel lighting, ortho-imagery draping).
 
 ## Contributing
 
@@ -144,10 +179,12 @@ Issues and pull requests are welcome at [github.com/Jakub-Syrek/MapaTur](https:/
 
 ## Acknowledgments
 
-- [OpenStreetMap](https://www.openstreetmap.org/) contributors — trail data
+- [OpenStreetMap](https://www.openstreetmap.org/) contributors — trail & POI data
 - [Overpass API](https://overpass-api.de/) — OSM query endpoint
-- [Mapsui](https://mapsui.com/) — map rendering library
-- [SkiaSharp](https://github.com/mono/SkiaSharp) — graphics backend
+- [Copernicus DEM GLO-30](https://spacedata.copernicus.eu/) (ESA / AWS Open Data) — elevation model for the 3D terrain
+- [Mapsui](https://mapsui.com/) — 2D map rendering library
+- [SkiaSharp](https://github.com/mono/SkiaSharp) — graphics backend + GL surface host
+- [Silk.NET](https://github.com/dotnet/Silk.NET) — OpenGL ES bindings; [ANGLE](https://github.com/google/angle) — GLES→Direct3D translation
 - [Compass Kraków](https://compass.krakow.pl/) — Polish Tatry raster MBTiles tested against
 - PTTK — Polish Tourist and Sightseeing Society, originators of the red/blue/green/yellow/black trail-marking convention
 

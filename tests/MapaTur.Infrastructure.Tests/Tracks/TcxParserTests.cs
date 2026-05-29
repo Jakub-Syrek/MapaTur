@@ -1,4 +1,5 @@
 using FluentAssertions;
+
 using MapaTur.Infrastructure.Tracks;
 
 namespace MapaTur.Infrastructure.Tests.Tracks;

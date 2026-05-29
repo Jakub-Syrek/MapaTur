@@ -12,6 +12,10 @@ permissions:
 env:
   DOTNET_NOLOGO: true
   DOTNET_CLI_TELEMETRY_OPTOUT: true
+  # Run JS-based actions on Node 24: GitHub removes the Node 20 runtime (forced from
+  # 2026-06-16). The official opt-in covers setup-dotnet / upload-artifact without guessing
+  # major versions that may not exist yet.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build-and-test:
@@ -19,7 +23,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -65,7 +69,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -85,18 +89,24 @@ jobs:
     needs: build-and-test
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           global-json-file: global.json
 
-      - name: Install MAUI workload
+      - name: Install MAUI workloads
+        # On Windows the App's <TargetFrameworks> resolves to Android + Windows
+        # (iOS / MacCatalyst are gated on macOS in the csproj). Both workloads
+        # are needed at restore time even though the build only targets Windows.
         run: dotnet workload install maui-windows maui-android
 
-      - name: Restore MAUI app
-        run: dotnet restore src/MapaTur.App/MapaTur.App.csproj
-
-      - name: Build MAUI app (Windows target)
-        run: dotnet build src/MapaTur.App/MapaTur.App.csproj --no-restore -c Release -f net10.0-windows10.0.19041.0
+      - name: Publish MAUI app (Windows TFM only)
+        # `dotnet publish` is what you want when you need to scope a RID to a
+        # *specific* TFM: restore + build + apphost wiring all happen against
+        # net10.0-windows10.0.19041.0, so the Android TFM is never asked for
+        # a Mono-win-x64 runtime pack (NU1102). UseAppHost=false skips the
+        # native .exe stamping CI doesn't need, which avoids NETSDK1112's
+        # demand for the win-x64 runtime pack on the build leg.
+        run: dotnet publish src/MapaTur.App/MapaTur.App.csproj -c Release -f net10.0-windows10.0.19041.0 -p:UseAppHost=false -p:WindowsPackageType=None

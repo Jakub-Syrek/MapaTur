@@ -1,6 +1,7 @@
+using MapaTur.Domain.Geography;
+
 using Mapsui;
 using Mapsui.Projections;
-using MapaTur.Domain.Geography;
 
 namespace MapaTur.App.Services;
 

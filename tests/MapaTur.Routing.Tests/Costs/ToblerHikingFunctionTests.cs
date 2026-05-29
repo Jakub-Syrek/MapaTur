@@ -1,4 +1,5 @@
 using FluentAssertions;
+
 using MapaTur.Routing.Costs;
 
 namespace MapaTur.Routing.Tests.Costs;

@@ -1,4 +1,5 @@
 using MapaTur.Domain.Trails;
+
 using Map = Mapsui.Map;
 
 namespace MapaTur.App.Services;

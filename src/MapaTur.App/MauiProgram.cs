@@ -12,9 +12,12 @@ using MapaTur.Infrastructure.Routing;
 using MapaTur.Infrastructure.Tracks;
 using MapaTur.Infrastructure.Trails;
 using MapaTur.Infrastructure.Trails.Overpass;
+
 using Microsoft.Extensions.Logging;
+
 using Serilog;
 using Serilog.Events;
+
 using SkiaSharp.Views.Maui.Controls.Hosting;
 
 namespace MapaTur.App;
@@ -133,6 +136,8 @@ public static class MauiProgram
 #endif
         services.AddSingleton<IFileSaverService, AppDataFileSaverService>();
         services.AddSingleton<IOfflineMapLoader, MBTilesMapLoader>();
+        services.AddSingleton<IMapAutoLoader, FileSystemMapAutoLoader>();
+        services.AddSingleton<I3DSettingsStore, MauiPreferences3DSettingsStore>();
         services.AddSingleton<ITileSourceFactory, MBTilesTileSourceFactory>();
         services.AddSingleton<ITrackLayerRenderer, MapsuiTrackLayerRenderer>();
         services.AddSingleton<ITrailLayerRenderer, MapsuiTrailLayerRenderer>();
@@ -142,7 +147,9 @@ public static class MauiProgram
         services.AddTransient<ImportTcxFileUseCase>();
 
         services.AddSingleton<ITrailRepository>(_ =>
-            new SqliteTrailRepository(Path.Combine(FileSystem.AppDataDirectory, "mapatur-trails.db")));
+            new SqliteTrailRepository(
+                Path.Combine(FileSystem.AppDataDirectory, "mapatur-trails.db"),
+                simplificationEpsilonMeters: 10.0));
         services.AddSingleton<IRoutePlanner, TrailRoutePlanner>();
         services.AddSingleton<IGpxWriter, GpxWriter>();
         services.AddTransient<PlanRouteUseCase>();

@@ -1,4 +1,5 @@
 using FluentAssertions;
+
 using MapaTur.Domain.Trails;
 
 namespace MapaTur.Domain.Tests.Trails;

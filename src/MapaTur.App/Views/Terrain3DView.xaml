@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentView xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:skia="clr-namespace:SkiaSharp.Views.Maui.Controls;assembly=SkiaSharp.Views.Maui.Controls"
+             x:Class="MapaTur.App.Views.Terrain3DView">
+    <ContentView.Resources>
+        <Style x:Key="Cam3DButton" TargetType="Button">
+            <Setter Property="WidthRequest" Value="46" />
+            <Setter Property="HeightRequest" Value="46" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="FontSize" Value="20" />
+            <Setter Property="FontAttributes" Value="Bold" />
+            <Setter Property="CornerRadius" Value="23" />
+            <Setter Property="BackgroundColor" Value="#C0202830" />
+            <Setter Property="TextColor" Value="White" />
+            <Setter Property="BorderColor" Value="#90FFFFFF" />
+            <Setter Property="BorderWidth" Value="1" />
+        </Style>
+        <Style x:Key="Cam3DCaption" TargetType="Label">
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="TextColor" Value="White" />
+            <Setter Property="BackgroundColor" Value="#90000000" />
+            <Setter Property="Padding" Value="6,2" />
+            <Setter Property="HorizontalTextAlignment" Value="Center" />
+            <Setter Property="HorizontalOptions" Value="Center" />
+        </Style>
+    </ContentView.Resources>
+
+    <Grid>
+        <skia:SKGLView x:Name="Canvas" PaintSurface="OnPaintSurface">
+            <skia:SKGLView.GestureRecognizers>
+                <PanGestureRecognizer TouchPoints="1" PanUpdated="OnOrbitPan" />
+                <PanGestureRecognizer TouchPoints="2" PanUpdated="OnTranslatePan" />
+                <PinchGestureRecognizer PinchUpdated="OnPinch" />
+            </skia:SKGLView.GestureRecognizers>
+        </skia:SKGLView>
+
+        <!-- Orbit (look around) pad, bottom-left. -->
+        <VerticalStackLayout HorizontalOptions="Start" VerticalOptions="End"
+                             Margin="12" Spacing="4" InputTransparent="False">
+            <Label Text="Obrót" Style="{StaticResource Cam3DCaption}" />
+            <Grid ColumnSpacing="4" RowSpacing="4"
+                  ColumnDefinitions="Auto,Auto,Auto" RowDefinitions="Auto,Auto,Auto">
+                <Button Grid.Row="0" Grid.Column="1" Text="&#x25B2;" Clicked="OnTiltUpClicked" Style="{StaticResource Cam3DButton}" />
+                <Button Grid.Row="1" Grid.Column="0" Text="&#x25C0;" Clicked="OnRotateLeftClicked" Style="{StaticResource Cam3DButton}" />
+                <Button Grid.Row="1" Grid.Column="2" Text="&#x25B6;" Clicked="OnRotateRightClicked" Style="{StaticResource Cam3DButton}" />
+                <Button Grid.Row="2" Grid.Column="1" Text="&#x25BC;" Clicked="OnTiltDownClicked" Style="{StaticResource Cam3DButton}" />
+            </Grid>
+        </VerticalStackLayout>
+
+        <!-- Pan (move through space) pad, bottom-right. -->
+        <VerticalStackLayout HorizontalOptions="End" VerticalOptions="End"
+                             Margin="12" Spacing="4" InputTransparent="False">
+            <Label Text="Przesuń" Style="{StaticResource Cam3DCaption}" />
+            <Grid ColumnSpacing="4" RowSpacing="4"
+                  ColumnDefinitions="Auto,Auto,Auto" RowDefinitions="Auto,Auto,Auto">
+                <Button Grid.Row="0" Grid.Column="1" Text="&#x25B2;" Clicked="OnPanUpClicked" Style="{StaticResource Cam3DButton}" />
+                <Button Grid.Row="1" Grid.Column="0" Text="&#x25C0;" Clicked="OnPanLeftClicked" Style="{StaticResource Cam3DButton}" />
+                <Button Grid.Row="1" Grid.Column="2" Text="&#x25B6;" Clicked="OnPanRightClicked" Style="{StaticResource Cam3DButton}" />
+                <Button Grid.Row="2" Grid.Column="1" Text="&#x25BC;" Clicked="OnPanDownClicked" Style="{StaticResource Cam3DButton}" />
+            </Grid>
+        </VerticalStackLayout>
+
+        <!-- Zoom + height, centred at the bottom. -->
+        <HorizontalStackLayout HorizontalOptions="Center" VerticalOptions="End"
+                               Margin="12" Spacing="16" InputTransparent="False">
+            <VerticalStackLayout Spacing="4">
+                <Label Text="Zoom" Style="{StaticResource Cam3DCaption}" />
+                <Button Text="+" Clicked="OnZoomInClicked" Style="{StaticResource Cam3DButton}" />
+                <Button Text="&#x2212;" Clicked="OnZoomOutClicked" Style="{StaticResource Cam3DButton}" />
+            </VerticalStackLayout>
+            <VerticalStackLayout Spacing="4">
+                <Label Text="Wys." Style="{StaticResource Cam3DCaption}" />
+                <Button Text="&#x25B2;" Clicked="OnRaiseClicked" Style="{StaticResource Cam3DButton}" />
+                <Button Text="&#x25BC;" Clicked="OnLowerClicked" Style="{StaticResource Cam3DButton}" />
+            </VerticalStackLayout>
+        </HorizontalStackLayout>
+    </Grid>
+</ContentView>

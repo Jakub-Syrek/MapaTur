@@ -489,5 +489,9 @@ run.ps1
 testdata/maps/.dem-cache/
 testdata/maps/tatry-hillshade-real.mbtiles
 
-# User-supplied / commercial map archives (license-restricted, don't redistribute)
-maps/
+# User-supplied / commercial map archives (license-restricted, don't redistribute).
+# The auto-loader scans <repo>/maps and <repo>/dem as preferred roots; both stay local-only.
+# Anchor to repo root so testdata/maps/ (which holds the regenerator scripts and tiny demo
+# fixtures) keeps tracking normally.
+/maps/
+/dem/

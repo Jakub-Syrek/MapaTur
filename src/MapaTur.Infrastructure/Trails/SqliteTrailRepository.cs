@@ -1,8 +1,10 @@
 using System.Globalization;
 using System.Text;
+
 using MapaTur.Application.Trails;
 using MapaTur.Domain.Geography;
 using MapaTur.Domain.Trails;
+
 using Microsoft.Data.Sqlite;
 
 namespace MapaTur.Infrastructure.Trails;
@@ -47,15 +49,28 @@ public sealed class SqliteTrailRepository : ITrailRepository, IDisposable
         """;
 
     private readonly SqliteConnection connection;
+    private readonly double simplificationEpsilonMeters;
     private bool disposed;
 
     /// <summary>
     /// Opens (or creates) a SQLite database at the given path and ensures the schema exists.
     /// </summary>
     /// <param name="databasePath">Absolute path to the SQLite database file.</param>
-    public SqliteTrailRepository(string databasePath)
+    /// <param name="simplificationEpsilonMeters">
+    /// Douglas–Peucker simplification tolerance, in metres, applied at write time.
+    /// Set to 0 (default) to disable. Production typically passes ~10 m so the
+    /// stored geometry already matches typical client zoom levels — pays for itself
+    /// many times over on every subsequent render.
+    /// </param>
+    public SqliteTrailRepository(string databasePath, double simplificationEpsilonMeters = 0.0)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
+        if (simplificationEpsilonMeters < 0.0 || !double.IsFinite(simplificationEpsilonMeters))
+        {
+            throw new ArgumentOutOfRangeException(nameof(simplificationEpsilonMeters), simplificationEpsilonMeters, "Epsilon must be a finite non-negative value.");
+        }
+
+        this.simplificationEpsilonMeters = simplificationEpsilonMeters;
 
         var connectionString = new SqliteConnectionStringBuilder
         {
@@ -89,9 +104,17 @@ public sealed class SqliteTrailRepository : ITrailRepository, IDisposable
     }
 
     /// <inheritdoc />
-    public async Task<IReadOnlyList<Trail>> FindIntersectingAsync(MapBounds bounds, CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<Trail>> FindIntersectingAsync(MapBounds bounds, CancellationToken cancellationToken = default)
+        => FindIntersectingAsync(bounds, 0.0, cancellationToken);
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<Trail>> FindIntersectingAsync(MapBounds bounds, double simplificationEpsilonMeters, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
+        if (simplificationEpsilonMeters < 0.0 || !double.IsFinite(simplificationEpsilonMeters))
+        {
+            throw new ArgumentOutOfRangeException(nameof(simplificationEpsilonMeters), simplificationEpsilonMeters, "Epsilon must be a finite non-negative value.");
+        }
 
         await using var command = connection.CreateCommand();
         command.CommandText = FindIntersectingSql;
@@ -110,6 +133,11 @@ public sealed class SqliteTrailRepository : ITrailRepository, IDisposable
             string geometryString = reader.GetString(3);
 
             var geometry = DeserializeGeometry(geometryString);
+            if (simplificationEpsilonMeters > 0.0 && geometry.Count > 2)
+            {
+                geometry = TrailGeometrySimplifier.Simplify(geometry, simplificationEpsilonMeters);
+            }
+
             if (geometry.Count >= 2)
             {
                 var markings = new List<TrailMarking> { OsmcSymbolParser.Parse(osmc) };
@@ -139,12 +167,15 @@ public sealed class SqliteTrailRepository : ITrailRepository, IDisposable
         command.CommandText = UpsertSql;
 
         string osmcRaw = trail.Markings.FirstOrDefault()?.OsmcRaw ?? string.Empty;
-        var (minLat, minLon, maxLat, maxLon) = ComputeBounds(trail.Geometry);
+        var geometry = simplificationEpsilonMeters > 0.0
+            ? TrailGeometrySimplifier.Simplify(trail.Geometry, simplificationEpsilonMeters)
+            : trail.Geometry;
+        var (minLat, minLon, maxLat, maxLon) = ComputeBounds(geometry);
 
         command.Parameters.AddWithValue("$id", trail.Id);
         command.Parameters.AddWithValue("$name", trail.Name);
         command.Parameters.AddWithValue("$osmc", string.IsNullOrEmpty(osmcRaw) ? DBNull.Value : osmcRaw);
-        command.Parameters.AddWithValue("$geom", SerializeGeometry(trail.Geometry));
+        command.Parameters.AddWithValue("$geom", SerializeGeometry(geometry));
         command.Parameters.AddWithValue("$min_lat", minLat);
         command.Parameters.AddWithValue("$min_lon", minLon);
         command.Parameters.AddWithValue("$max_lat", maxLat);

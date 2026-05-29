@@ -45,4 +45,38 @@ public readonly record struct MapBounds
             && point.Longitude >= SouthWest.Longitude
             && point.Longitude <= NorthEast.Longitude;
     }
+
+    /// <summary>
+    /// Returns the geographic intersection of this box with another, or null when
+    /// the two boxes are disjoint (or touch on an edge, which has zero area).
+    /// </summary>
+    /// <param name="other">The other bounding box.</param>
+    /// <returns>The overlap rectangle, or null if there is no overlap.</returns>
+    /// <summary>
+    /// Returns the smallest axis-aligned bounding box that encloses both this and
+    /// <paramref name="other"/>. Never null — two valid boxes always have a union.
+    /// </summary>
+    public MapBounds Union(MapBounds other)
+    {
+        double south = Math.Min(SouthWest.Latitude, other.SouthWest.Latitude);
+        double north = Math.Max(NorthEast.Latitude, other.NorthEast.Latitude);
+        double west = Math.Min(SouthWest.Longitude, other.SouthWest.Longitude);
+        double east = Math.Max(NorthEast.Longitude, other.NorthEast.Longitude);
+        return new MapBounds(new GeoPoint(south, west), new GeoPoint(north, east));
+    }
+
+    public MapBounds? Intersect(MapBounds other)
+    {
+        double south = Math.Max(SouthWest.Latitude, other.SouthWest.Latitude);
+        double north = Math.Min(NorthEast.Latitude, other.NorthEast.Latitude);
+        double west = Math.Max(SouthWest.Longitude, other.SouthWest.Longitude);
+        double east = Math.Min(NorthEast.Longitude, other.NorthEast.Longitude);
+
+        if (north <= south || east <= west)
+        {
+            return null;
+        }
+
+        return new MapBounds(new GeoPoint(south, west), new GeoPoint(north, east));
+    }
 }

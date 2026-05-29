@@ -1,4 +1,5 @@
 using FluentAssertions;
+
 using MapaTur.Domain.Climbing;
 using MapaTur.Infrastructure.Climbing;
 

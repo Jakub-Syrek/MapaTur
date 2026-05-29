@@ -99,5 +99,26 @@ public static class AppStrings
     /// <summary>Screen reader description of the interactive map control.</summary>
     public static string AccessibilityMapControl => Get(nameof(AccessibilityMapControl));
 
+    /// <summary>"Open DEM" button label.</summary>
+    public static string OpenDem => Get(nameof(OpenDem));
+
+    /// <summary>"Toggle 3D" button label.</summary>
+    public static string Toggle3D => Get(nameof(Toggle3D));
+
+    /// <summary>Status shown after entering 3D mode.</summary>
+    public static string Status3DMode => Get(nameof(Status3DMode));
+
+    /// <summary>Status shown after leaving 3D mode.</summary>
+    public static string Status2DMode => Get(nameof(Status2DMode));
+
+    /// <summary>Status shown after a DEM file loads.</summary>
+    public static string StatusDemLoaded => Get(nameof(StatusDemLoaded));
+
+    /// <summary>Title of the DEM file picker dialog.</summary>
+    public static string FilePickerDem => Get(nameof(FilePickerDem));
+
+    /// <summary>Label for the vertical-exaggeration slider in 3D mode.</summary>
+    public static string LabelVerticalExaggeration => Get(nameof(LabelVerticalExaggeration));
+
     private static string Get(string key) => Manager.GetString(key) ?? key;
 }

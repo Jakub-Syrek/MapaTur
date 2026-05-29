@@ -1,7 +1,9 @@
 using System.Globalization;
+
 using MapaTur.Application.Climbing;
 using MapaTur.Domain.Climbing;
 using MapaTur.Domain.Geography;
+
 using Microsoft.Data.Sqlite;
 
 namespace MapaTur.Infrastructure.Climbing;

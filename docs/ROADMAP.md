@@ -2,6 +2,151 @@
 
 Status legend: `[ ]` planned · `[~]` in progress · `[x]` done
 
+## M9 — 3D terrain mode
+
+### Done
+
+- [x] DEM binary format (`.dem`) — 64-byte header + Float32 LE row-major grid,
+      north→south rows; magic `DEM1`, validated by reader
+- [x] `testdata/maps/generate-tatry-dem.py` — synthetic-peaks generator
+      (max-of-peaks, 700-3221 m range) with optional real-Copernicus mode;
+      outputs `testdata/dem/tatry.dem` (~86 KB, 256×86)
+- [x] `DemRaster` domain value object + `SampleBilinear(lon, lat)` + `Bounds`
+- [x] `DemRasterReader` (Infrastructure) parsing the binary format via
+      `BinaryPrimitives` with header validation
+- [x] `Camera3D` orbit camera (Target, Distance, Azimuth, Pitch clamped to ±89°)
+      with `BuildViewMatrix`, `BuildProjectionMatrix`, `ProjectToScreen`
+- [x] `TerrainMesh3D.Build(DemRaster, options)` — per-vertex world positions
+      (X east, Y north, Z up), central-difference normals, hypsometric colour ramp
+      with Lambertian NW-sun shading, ushort indices
+- [x] `TerrainMesh3D.GeoToWorld(GeoPoint, elevation)` helper for overlay projection
+- [x] `Terrain3DProjection` static class — vertex projection, screen-space backface
+      culling, painter's-algorithm back-to-front triangle sort
+- [x] `Terrain3DCanvasRenderer` — SkiaSharp adapter: sky gradient + DrawVertices
+      mesh draw + optional trail overlay drawing
+- [x] `Terrain3DController` — pure-math orbit/zoom/pan input controller with
+      distance + pitch clamping (18 unit tests)
+- [x] `Terrain3DView` MAUI control — `SKCanvasView` + 1-finger orbit + 2-finger
+      pan + pinch-zoom gesture recognizers + Windows mouse-wheel zoom hook
+- [x] `Trail3DProjection` — DEM-aware trail polyline projection with configurable
+      vertical lift (10 unit tests)
+- [x] Trail overlay rendering in `Terrain3DCanvasRenderer` (PTTK colours via
+      `OsmcSymbolParser.ToHex`)
+- [x] `Route3DProjection` + `ProjectedRoute` — DEM-aware planned-route polyline
+      projection (9 unit tests); rendered as violet stroke in
+      `Terrain3DCanvasRenderer` on top of trails, bound via
+      `Terrain3DView.Route` + `MapPageViewModel.Route3DOverlay`
+- [x] `Climbing3DProjection` + `ProjectedClimbingArea` — DEM-bbox-culled
+      projection of climbing-area positions with ~30 m world-Z lift
+      (10 unit tests); rendered as red filled circles with dark outline in
+      `Terrain3DCanvasRenderer`, bound via `Terrain3DView.ClimbingAreas` +
+      `MapPageViewModel.Climbing3DOverlay`. Added missing "Download Climbing"
+      button to `MapPage.xaml`.
+- [x] **Render pipeline perf pass** — eliminated ~1.3 MB/frame GC churn:
+      `Camera3D.BuildViewProjection` + matrix-accepting `ProjectToScreen`
+      overload (computed once per frame instead of per vertex),
+      `Terrain3DFrameScratch` (reused screen/depth/index buffers,
+      `Array.Sort` over parallel arrays in place of `List<(int,float)>`),
+      `Terrain3DCanvasRenderer` instance-ized with mesh-keyed `SKColor[]` +
+      `SKPoint[]` caches and cached sky shader/paints
+- [x] **Render pipeline perf pass round 2** — O(n) bucket-sort over 4096
+      quantized NDC-depth buckets replaces `Array.Sort` (≈8× faster sort phase
+      on 128k-triangle real-DEM meshes); ping-pong `ushort[]` index buffers in
+      `Terrain3DCanvasRenderer` retire the last per-frame allocation
+- [x] `Climbing3DProjection` + `ProjectedClimbingArea` — DEM-bbox-culled
+      projection (10 unit tests), rendered as red-filled markers with dark
+      outlines via cached paints in `Terrain3DCanvasRenderer`, bound through
+      `Terrain3DView.ClimbingAreas` + `MapPageViewModel.Climbing3DOverlay`;
+      missing "Download Climbing" button added to `MapPage.xaml`
+- [x] `SKGLView` swap for the 3D canvas — hardware-accelerated SkiaSharp
+      surface in place of the CPU `SKCanvasView` for the `Terrain3DView`
+- [x] **Real Copernicus DEM pipeline** —
+      [`testdata/maps/generate-tatry-dem-real.py`](../testdata/maps/generate-tatry-dem-real.py)
+      mosaics two GLO-30 GeoTIFFs from the AWS Open Data bucket and writes the
+      `.dem` binary directly (360×180, ~250 KB); output lands under
+      `<repo>/dem/tatry.dem` which the auto-loader prefers over the synthetic
+      testdata fixture
+- [x] 3D Mode toggle in `MapPage` — button swaps `MapControl` ↔ `Terrain3DView`
+- [x] DEM file picker (`OpenDemAsync`) + auto-trigger on first 3D enable
+- [x] Localization PL + EN — `Toggle3D`, `Status3DMode`, `Status2DMode`,
+      `StatusDemLoaded`, `OpenDem`, `FilePickerDem`
+- [x] Validation: vertex count ≤ 65 536 (ushort index domain) — clear
+      ArgumentException with subsample hint
+- [x] CLAUDE.md TDD rules — added mid-milestone; all subsequent code is
+      test-first
+
+### Not yet
+
+- [ ] **Smoke verification by user** — mouse wheel zoom + trail overlay end-to-end
+      (build green, awaiting in-app confirmation)
+- [ ] **Drape MBTiles tiles as mesh texture** instead of (or alongside) hypsometric
+      colouring. Requires UV mapping per vertex + sampling tile pixels at world
+      coords. Biggest remaining UX win.
+- [ ] **Proper trail occlusion** — trails currently render *over* mountains
+      (no depth buffer). Either per-vertex world-distance depth test against mesh
+      front-faces, or migrate to `SKGLView` for hardware Z-buffer.
+- [ ] **Large-DEM support** — for rasters >65k vertices, split into mesh tiles
+      and render each as a separate `DrawVertices` call.
+- [ ] **Keyboard shortcuts** on desktop — arrow keys orbit, +/- zoom, WASD pan.
+- [ ] **Settings UI** for `VerticalExaggeration` (currently fixed at 2×) and
+      sun direction.
+- [ ] **3D mode persistence** — remember last camera state per DEM file.
+
+**DoD:** user loads `tatry.dem`, sees a 3D mesh with hypsometric shading,
+orbits/pans/zooms smoothly, sees downloaded OSM trails rendered as PTTK-coloured
+polylines lifted above the ground surface.
+
+## M10 — Multi-basemap composition + trail-pipeline UX
+
+### Done
+
+- [x] **Multi-basemap layer stack** — `IOfflineMapLoader.LoadMBTilesArchive`
+      derives a layer key from the archive filename so several regional MBTiles
+      coexist (Tatry, Beskidy, Bieszczady, …); only the first basemap drives
+      `ZoomToBox` so subsequent loads don't yank the camera around;
+      `MBTilesMapLoader` returns `MapBounds?` reprojected from
+      `tileSource.Schema.Extent`
+- [x] `MapBounds.Intersect` (6 tests) + `MapBounds.Union` (4 tests) in Domain —
+      the foundation for download-bounds clipping and basemap-union tracking
+- [x] **Auto-load on first appearance** — `IMapAutoLoader` /
+      `FileSystemMapAutoLoader` probe `<AppData>/MapaTur/maps`, `<repo>/maps`,
+      `<repo>/dem`, then fall back to `testdata/maps` / `testdata/dem`. Repo
+      root located via `MapaTur.slnx` / `.git` marker walk (up to 12 hops).
+      Higher-priority roots own the basemap role exclusively so the synthetic
+      testdata fixture never stacks on top of real downloaded archives.
+      Hillshade auto-loads only as a fallback when no basemap was found
+- [x] **Trail-download bounds clipping** —
+      `MapPageViewModel.ComputeDownloadBounds()` intersects current viewport
+      with the union of all loaded basemaps and DEM bounds before calling
+      Overpass; Download Trails / Download Climbing never fetch data outside
+      the loaded map footprint
+- [x] **Douglas–Peucker simplifier** — `MapaTur.Domain.Trails.TrailGeometrySimplifier`
+      (11 tests) with local-equirectangular cross-track distance; applied at
+      `SqliteTrailRepository.UpsertAsync` (default ε = 10 m in production DI)
+      and again at read time via the new
+      `FindIntersectingAsync(bounds, epsilon)` overload for per-zoom LOD
+- [x] `ZoomEpsilonCalculator` — maps Mapsui resolution (m/pixel) to a tolerance
+      clamped between 1 m and 200 m (5 tests)
+- [x] **Viewport-aware trail layer** — `ViewportAwareTrailLayerController`
+      subscribes to `Map.Navigator.FetchRequested`, cancels in-flight queries,
+      pulls only trails intersecting the new viewport at the zoom-appropriate
+      ε, and re-renders via the existing layer renderer; instead of stuffing
+      the full Overpass download into a MemoryLayer once, the layer is
+      rebuilt per viewport with simplified geometry
+- [x] **Overpass multi-endpoint failover** — `OverpassEndpoints` default list
+      (overpass-api.de + kumi.systems + lz4 + private.coffee + openstreetmap.fr);
+      shared `OverpassRequestExecutor.PostWithFailoverAsync` falls through on
+      5xx / network exceptions / `HttpClient.Timeout`, surfaces 4xx
+      immediately, throws aggregated `HttpRequestException` only when every
+      endpoint failed (6 tests)
+
+**DoD:** user drops any number of `.mbtiles` files into `<repo>/maps/` and a
+DEM into `<repo>/dem/`, launches the app, and sees them auto-loaded into a
+single composed view; trail downloads only fetch within the combined map
+footprint; trails are stored simplified and re-rendered per-viewport at
+zoom-appropriate detail; transient Overpass outages fall through to mirrors
+instead of failing the request.
+
 ## M8 — Climbing POIs from OSM
 
 - [x] `ClimbingArea` aggregate + `ClimbingType` enum (sport, trad, multipitch,
