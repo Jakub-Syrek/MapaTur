@@ -3,6 +3,7 @@ using CommunityToolkit.Mvvm.Input;
 
 using MapaTur.App.Services;
 using MapaTur.Application.Climbing;
+using MapaTur.Application.Maps;
 using MapaTur.Application.Routing;
 using MapaTur.Application.Terrain;
 using MapaTur.Application.Tracks;
@@ -36,6 +37,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     private readonly IFileSaverService fileSaver;
     private readonly IOfflineMapLoader mapLoader;
     private readonly IMapAutoLoader autoLoader;
+    private readonly ITileSourceFactory tileSourceFactory;
     private readonly I3DSettingsStore settingsStore;
     private ViewportAwareTrailLayerController? viewportTrailController;
     private readonly ITrackLayerRenderer trackRenderer;
@@ -196,6 +198,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <param name="fileSaver">File saver service for export destinations.</param>
     /// <param name="mapLoader">Tile archive loader.</param>
     /// <param name="autoLoader">Discovers pre-bundled / installed map data on disk for one-shot auto-load on first appearance.</param>
+    /// <param name="tileSourceFactory">Opens MBTiles archives to read their metadata (zoom range, bounds) when prioritizing basemaps.</param>
     /// <param name="settingsStore">Persistent backing store for 3D-mode user settings (vertical exaggeration, etc.).</param>
     /// <param name="trackRenderer">Track polyline renderer.</param>
     /// <param name="trailRenderer">Trail polyline renderer.</param>
@@ -214,6 +217,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         IFileSaverService fileSaver,
         IOfflineMapLoader mapLoader,
         IMapAutoLoader autoLoader,
+        ITileSourceFactory tileSourceFactory,
         I3DSettingsStore settingsStore,
         ITrackLayerRenderer trackRenderer,
         ITrailLayerRenderer trailRenderer,
@@ -232,6 +236,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         ArgumentNullException.ThrowIfNull(fileSaver);
         ArgumentNullException.ThrowIfNull(mapLoader);
         ArgumentNullException.ThrowIfNull(autoLoader);
+        ArgumentNullException.ThrowIfNull(tileSourceFactory);
         ArgumentNullException.ThrowIfNull(settingsStore);
         ArgumentNullException.ThrowIfNull(trackRenderer);
         ArgumentNullException.ThrowIfNull(trailRenderer);
@@ -250,6 +255,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         this.fileSaver = fileSaver;
         this.mapLoader = mapLoader;
         this.autoLoader = autoLoader;
+        this.tileSourceFactory = tileSourceFactory;
         this.settingsStore = settingsStore;
 
         // Restore the saved vertical exaggeration before the partial OnXxxChanged hook
@@ -768,12 +774,24 @@ public sealed partial class MapPageViewModel : ObservableObject
 
             if (discovery.BasemapMBTilesPaths.Count > 0)
             {
-                foreach (string basemapPath in discovery.BasemapMBTilesPaths)
+                // Prioritize the basemaps by detail so a high-resolution local archive
+                // (e.g. the purchased Tatra raster) is drawn on top of, and framed in
+                // preference to, a coarse broad-area archive whose bounds contain it.
+                // Plain enumeration order would otherwise let a coarse archive that merely
+                // sorts first hijack the launch viewport — "the Polish map never shows".
+                var descriptors = ReadBasemapDescriptors(discovery.BasemapMBTilesPaths);
+                var plan = BasemapLoadPlanner.Plan(descriptors);
+
+                foreach (string basemapPath in plan.LoadOrder)
                 {
                     ExtendBasemapBounds(mapLoader.LoadMBTilesArchive(Map, basemapPath, MBTilesLayerKind.Basemap));
                     loaded.Add(Path.GetFileName(basemapPath));
                     logger.LogInformation("Auto-loaded basemap {Path}", basemapPath);
                 }
+
+                // The loader zooms to whichever basemap loaded first; override that to
+                // frame the primary (most detailed / most local) archive instead.
+                ZoomToPrimaryBasemap(descriptors, plan.PrimaryPath);
             }
             else if (discovery.HillshadeMBTilesPath is { } hillshadePath)
             {
@@ -800,6 +818,53 @@ public sealed partial class MapPageViewModel : ObservableObject
             logger.LogError(ex, "Auto-load failed");
             // Auto-load is best-effort; manual pickers remain available.
         }
+    }
+
+    /// <summary>
+    /// Reads each basemap archive's metadata (max zoom + bounds) so the planner can rank
+    /// them by detail. A file whose metadata can't be read is described conservatively
+    /// (coarsest, no bounds) so it still loads but can never hijack the viewport.
+    /// </summary>
+    private IReadOnlyList<BasemapDescriptor> ReadBasemapDescriptors(IReadOnlyList<string> paths)
+    {
+        var descriptors = new List<BasemapDescriptor>(paths.Count);
+        foreach (string path in paths)
+        {
+            try
+            {
+                using var source = tileSourceFactory.OpenFromFile(path);
+                var meta = source.GetMetadata();
+                descriptors.Add(new BasemapDescriptor(path, meta.MaxZoomLevel, meta.Bounds));
+            }
+            catch (Exception ex) when (ex is IOException or InvalidDataException or InvalidOperationException)
+            {
+                logger.LogWarning(ex, "Could not read MBTiles metadata for {Path}; treating as coarsest", path);
+                descriptors.Add(new BasemapDescriptor(path, MaxZoomLevel: 0, Bounds: null));
+            }
+        }
+        return descriptors;
+    }
+
+    /// <summary>
+    /// Frames the primary basemap's bounds in the viewport. No-op when the primary has
+    /// no declared bounds (then the loader's default zoom-to-first stands).
+    /// </summary>
+    private void ZoomToPrimaryBasemap(IReadOnlyList<BasemapDescriptor> descriptors, string? primaryPath)
+    {
+        if (primaryPath is null)
+        {
+            return;
+        }
+
+        MapBounds? bounds = descriptors.FirstOrDefault(d => d.Path == primaryPath)?.Bounds;
+        if (bounds is not { } extent)
+        {
+            return;
+        }
+
+        var (minX, minY) = SphericalMercator.FromLonLat(extent.SouthWest.Longitude, extent.SouthWest.Latitude);
+        var (maxX, maxY) = SphericalMercator.FromLonLat(extent.NorthEast.Longitude, extent.NorthEast.Latitude);
+        Map.Navigator.ZoomToBox(new MRect(minX, minY, maxX, maxY));
     }
 
     /// <summary>
