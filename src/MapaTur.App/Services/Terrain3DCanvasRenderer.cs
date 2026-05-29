@@ -333,6 +333,38 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         return allLeft || allRight || allAbove || allBelow;
     }
 
+    /// <summary>
+    /// Draws only the 2D overlays (trails, route, climbing markers, peak labels) onto the canvas, with no
+    /// sky or terrain. Used when the terrain itself is rendered by the GPU (OpenGL) engine and Skia is just
+    /// the overlay layer drawn on top. Overlays are projected with the same camera, so they register.
+    /// </summary>
+    public void DrawOverlays(
+        SKCanvas canvas,
+        IReadOnlyList<ProjectedTrail>? trails,
+        ProjectedRoute? route,
+        IReadOnlyList<ProjectedClimbingArea>? climbingAreas,
+        IReadOnlyList<ProjectedPeak>? peaks)
+    {
+        ArgumentNullException.ThrowIfNull(canvas);
+
+        if (trails is not null)
+        {
+            DrawTrails(canvas, trails, null);
+        }
+        if (route is not null)
+        {
+            DrawRoute(canvas, route.Value, null);
+        }
+        if (climbingAreas is not null)
+        {
+            DrawClimbingAreas(canvas, climbingAreas, null);
+        }
+        if (peaks is not null)
+        {
+            DrawPeaks(canvas, peaks, null);
+        }
+    }
+
     private void DrawTrails(SKCanvas canvas, IReadOnlyList<ProjectedTrail> trails, ScreenDepthMap? depthMap)
     {
         if (trails.Count == 0)

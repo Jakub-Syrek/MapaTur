@@ -7,6 +7,7 @@ using MapaTur.Domain.Routing;
 using MapaTur.Domain.Terrain;
 using MapaTur.Domain.Trails;
 
+using SkiaSharp;
 using SkiaSharp.Views.Maui;
 
 namespace MapaTur.App.Views;
@@ -247,6 +248,7 @@ public partial class Terrain3DView : ContentView
     private void OnPaintSurface(object? sender, SKPaintGLSurfaceEventArgs e)
     {
         var canvas = e.Surface.Canvas;
+
         if (Tiles is not { Count: > 0 } tiles || WorldFrame is not { } frame)
         {
             canvas.Clear();
@@ -254,19 +256,19 @@ public partial class Terrain3DView : ContentView
         }
 
         // Fit the clip planes to the scene each frame (distance changes with zoom). A scene radius
-        // padded past the mesh half-extent covers the diagonal corners + vertical relief. This keeps
-        // NDC depth precision high (stable painter's sort, no rotate tearing) and stops close geometry
-        // from clipping through the near plane when zoomed in.
+        // padded past the mesh half-extent covers the diagonal corners + vertical relief. Used by both
+        // the GPU and Skia paths, and by overlay projection, so they stay consistent.
         var (near, far) = CameraClipPlanes.Fit(Camera.Distance, frame.HorizontalExtent * 1.25f);
         Camera.NearPlane = near;
         Camera.FarPlane = far;
 
-        // Overlays project against the shared world frame (tile 0); all tiles share it.
+        // Project the overlays once — needed by both the GPU and Skia paths. The stateful projectors reuse
+        // their world cache + screen buffers, so during a gesture this is just the per-frame screen
+        // transform. All project against the shared world frame (tile 0), with the same camera, so they
+        // line up whether the terrain is drawn by GL or Skia.
         IReadOnlyList<ProjectedTrail>? projectedTrails = null;
         if (Trails is { Count: > 0 } trailsList && Raster is not null)
         {
-            // The projector reuses its world cache + screen buffers when the inputs are unchanged, so a
-            // gesture pays only the per-frame screen transform with zero allocation.
             projectedTrails = trailProjector.Project(
                 trailsList, Raster, frame, Camera, e.Info.Width, e.Info.Height);
         }
@@ -292,6 +294,24 @@ public partial class Terrain3DView : ContentView
             projectedPeaks = peakProjector.Project(
                 peaks, null, frame, Camera, e.Info.Width, e.Info.Height, PeakMarkerLiftMeters);
         }
+
+#if WINDOWS
+        // GPU engine: GL draws the depth-buffered terrain, then the Skia overlays (trails / route /
+        // markers / peak labels) are drawn over it with the same camera so they register. Any GL/shader
+        // failure disables it for the session and falls through to the all-Skia renderer below.
+        uint glFramebuffer = 0;
+        if (e.BackendRenderTarget is { } renderTarget && renderTarget.GetGlFramebufferInfo(out GRGlFramebufferInfo fbInfo))
+        {
+            glFramebuffer = fbInfo.FramebufferObjectId;
+        }
+
+        if (UseGlRenderer && TryRenderTerrainGl(tiles, e.Info.Width, e.Info.Height, glFramebuffer))
+        {
+            // GL already drew the (depth-occluded) trails + route; Skia only adds the markers/labels on top.
+            renderer.DrawOverlays(canvas, null, null, projectedClimbing, projectedPeaks);
+            return;
+        }
+#endif
 
         // depthMap = null disables trail / route / climbing occlusion: trails are drawn always on top
         // of the mesh (the visual the user wants) and it drops a per-frame depth-grid fill.
@@ -502,6 +522,39 @@ public partial class Terrain3DView : ContentView
         {
             Canvas.InvalidateSurface();
             e.Handled = true;
+        }
+    }
+
+    // ── Real GPU terrain engine (OpenGL ES on the SKGLView context) ───────────────────────────────
+    // Flip to false to force the Skia renderer. On any GL/shader failure we fall back automatically.
+    private static readonly bool UseGlRenderer = true;
+
+    private Platforms.Windows.Terrain3DGlRenderer? glRenderer;
+    private bool glDisabled;
+
+    private bool TryRenderTerrainGl(IReadOnlyList<TerrainMesh3D> tiles, int width, int height, uint framebuffer)
+    {
+        if (glDisabled)
+        {
+            return false;
+        }
+
+        try
+        {
+            glRenderer ??= new Platforms.Windows.Terrain3DGlRenderer();
+            // GL draws the terrain AND the depth-tested trail/route lines (so the terrain occludes them).
+            glRenderer.Render(width, height, tiles, Camera, framebuffer, Trails, Raster, Route);
+            // Hand GL state back to Skia so any later 2D drawing on this surface behaves.
+            Canvas.GRContext?.ResetContext();
+            return true;
+        }
+        catch (Exception)
+        {
+            // One failure → drop to the proven Skia path for the rest of the session.
+            glDisabled = true;
+            glRenderer?.Dispose();
+            glRenderer = null;
+            return false;
         }
     }
 #endif

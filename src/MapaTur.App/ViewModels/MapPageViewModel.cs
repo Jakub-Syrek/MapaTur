@@ -157,6 +157,10 @@ public sealed partial class MapPageViewModel : ObservableObject
     // the visible subset without re-hitting the network.
     private IReadOnlyList<Trail>? rawTrails;
 
+    // Same trails simplified once for the 3D overlay (see SimplifyForOverlay3D). Filter toggles just
+    // re-filter this cached set instead of re-simplifying every trail on the UI thread each click.
+    private IReadOnlyList<Trail>? rawTrails3D;
+
     partial void OnTrailColourRedEnabledChanged(bool value) => OnTrailFilterChanged();
     partial void OnTrailColourBlueEnabledChanged(bool value) => OnTrailFilterChanged();
     partial void OnTrailColourGreenEnabledChanged(bool value) => OnTrailFilterChanged();
@@ -175,9 +179,27 @@ public sealed partial class MapPageViewModel : ObservableObject
         }
         var filter = BuildTrailFilter();
         var filtered = rawTrails.Where(filter.IsVisible).ToList();
-        Trails3DOverlay = filtered;
+        // Filter the pre-simplified set for the 3D overlay — cheap, no re-simplification per toggle.
+        Trails3DOverlay = rawTrails3D?.Where(filter.IsVisible).ToList();
         trailRenderer.RenderTrails(Map, filtered);
         viewportTrailController?.RequestRefresh();
+    }
+
+    // Trails feed the 3D overlay at full Overpass resolution (hundreds of polylines × hundreds of
+    // points), and every vertex is lifted to the DEM and projected each frame. At the kilometres-wide
+    // 3D scale that detail is invisible, so simplify to a coarse epsilon for the overlay only — the 2D
+    // map keeps its own (zoom-aware) geometry. This is a one-off per download/filter change, not per frame.
+    private const double Trail3DSimplifyEpsilonMeters = 20.0;
+
+    private static IReadOnlyList<Trail> SimplifyForOverlay3D(IReadOnlyList<Trail> trails)
+    {
+        var result = new List<Trail>(trails.Count);
+        foreach (Trail trail in trails)
+        {
+            IReadOnlyList<GeoPoint> simplified = TrailGeometrySimplifier.Simplify(trail.Geometry, Trail3DSimplifyEpsilonMeters);
+            result.Add(new Trail(trail.Id, trail.Name, trail.Markings, simplified));
+        }
+        return result;
     }
 
     /// <summary>Builds the current <see cref="TrailFilter"/> snapshot from the toggle state.</summary>
@@ -516,6 +538,8 @@ public sealed partial class MapPageViewModel : ObservableObject
             var trails = await overpassClient.FetchHikingTrailsAsync(bounds.Value).ConfigureAwait(true);
             await trailRepository.UpsertAsync(trails).ConfigureAwait(true);
             rawTrails = trails;
+            // Simplify once now (off the per-toggle path) so filter changes are cheap re-filters.
+            rawTrails3D = SimplifyForOverlay3D(trails);
             var filter = BuildTrailFilter();
             var filteredTrails = trails.Where(filter.IsVisible).ToList();
 
@@ -530,7 +554,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             {
                 trailRenderer.RenderTrails(Map, filteredTrails);
             }
-            Trails3DOverlay = filteredTrails;
+            Trails3DOverlay = rawTrails3D.Where(filter.IsVisible).ToList();
 
             StatusMessage = trails.Count == 0
                 ? Localization.AppStrings.StatusNoTrailsFound

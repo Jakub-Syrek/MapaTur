@@ -53,6 +53,9 @@
 		<!-- MVVMTK0045: We ship as an unpackaged MAUI app (WindowsPackageType=None),
 		     so the WinRT marshalling concern for partial properties does not apply. -->
 		<NoWarn>$(NoWarn);MVVMTK0045</NoWarn>
+
+		<!-- The Windows GPU terrain renderer issues raw OpenGL ES calls (Silk.NET), which need pointers. -->
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 	</PropertyGroup>
 
 	<ItemGroup>
@@ -95,6 +98,8 @@
 		<PackageReference Include="Serilog.Extensions.Logging" />
 		<PackageReference Include="Serilog.Sinks.File" />
 		<PackageReference Include="SkiaSharp.Views.Maui.Controls" />
+		<!-- GPU 3D engine: only the Windows TFM (ANGLE OpenGL ES) uses the GL renderer. -->
+		<PackageReference Include="Silk.NET.OpenGLES" Condition="$(TargetFramework.Contains('windows'))" />
 	</ItemGroup>
 
 	<ItemGroup>

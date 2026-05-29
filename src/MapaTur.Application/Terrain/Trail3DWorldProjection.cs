@@ -20,6 +20,9 @@ namespace MapaTur.Application.Terrain;
 /// </summary>
 public static class Trail3DWorldProjection
 {
+    /// <summary>Sentinel world position for a trail vertex outside the DEM — projected to a null screen point (a polyline break).</summary>
+    private static readonly Vector3 OutsideDem = new(float.NaN, float.NaN, float.NaN);
+
     /// <summary>
     /// Lifts every trail vertex to its DEM elevation and converts it into mesh world space. Trails
     /// whose lon/lat bbox doesn't intersect the DEM are dropped (most downloaded trails lie outside
@@ -56,6 +59,17 @@ public static class Trail3DWorldProjection
             for (int i = 0; i < trail.Geometry.Count; i++)
             {
                 var geo = trail.Geometry[i];
+
+                // Clip to the DEM: a vertex outside the loaded raster has no terrain under it, and
+                // SampleBilinear would clamp its elevation to the edge while GeoToWorld still places it at
+                // its true (out-of-bounds) position — so the line would shoot off past the terrain edge.
+                // Mark it invalid; the screen pass turns it into a polyline break instead of drawing it.
+                if (geo.Longitude < demWest || geo.Longitude > demEast || geo.Latitude < demSouth || geo.Latitude > demNorth)
+                {
+                    world[i] = OutsideDem;
+                    continue;
+                }
+
                 float groundElevation = (float)raster.SampleBilinear(geo.Longitude, geo.Latitude);
                 world[i] = mesh.GeoToWorld(geo, groundElevation + trailLiftMeters);
             }
@@ -94,7 +108,8 @@ public static class Trail3DWorldProjection
             var points = new Vector3?[line.World.Count];
             for (int i = 0; i < line.World.Count; i++)
             {
-                points[i] = camera.ProjectToScreen(line.World[i], viewProjection, screenWidth, screenHeight);
+                Vector3 wp = line.World[i];
+                points[i] = float.IsNaN(wp.X) ? null : camera.ProjectToScreen(wp, viewProjection, screenWidth, screenHeight);
             }
 
             result.Add(new ProjectedTrail(line.Source, points));

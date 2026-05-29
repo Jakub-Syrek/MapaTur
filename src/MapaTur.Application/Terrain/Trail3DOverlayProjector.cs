@@ -76,7 +76,9 @@ public sealed class Trail3DOverlayProjector
             var buffer = screenBuffers![li];
             for (int i = 0; i < world.Count; i++)
             {
-                buffer[i] = camera.ProjectToScreen(world[i], viewProjection, screenWidth, screenHeight);
+                Vector3 wp = world[i];
+                // NaN world position = vertex outside the DEM (see Trail3DWorldProjection) → break the line.
+                buffer[i] = float.IsNaN(wp.X) ? null : camera.ProjectToScreen(wp, viewProjection, screenWidth, screenHeight);
             }
         }
 

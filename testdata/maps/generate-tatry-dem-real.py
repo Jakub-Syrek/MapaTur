@@ -44,14 +44,12 @@ OUTPUT_PATH = os.path.join(REPO_ROOT, "dem", "tatry.dem")
 # Tatry bbox — same as the hillshade pipeline.
 WEST, SOUTH, EAST, NORTH = 19.50, 49.10, 20.40, 49.40
 
-# Output grid resolution. TerrainMesh3D.BuildTiles tiles the raster, so this is no longer
-# capped at 65 536 vertices. 1080x540 gives ~60 m horizontal cells over the Tatry bbox
-# (~65x33 km) -- about 3x sharper than the old 360x180 cap, while staying light enough that
-# the whole terrain still projects smoothly when zoomed out (tile frustum culling keeps the
-# zoomed-in case cheap regardless). Native Copernicus is ~30 m, so going much past ~2160x1080
-# only interpolates without adding real detail.
-TARGET_COLS = 1080
-TARGET_ROWS = 540
+# Output grid resolution. TerrainMesh3D.BuildTiles tiles the raster (≤65 536 vertices each) and the
+# GPU renderer transforms + depth-tests every vertex, so we can run at the DEM's native ~30 m detail.
+# 2160x1080 over the Tatry bbox (~65x33 km) is ~30 m cells -- the full Copernicus GLO-30 resolution;
+# going higher would only interpolate without adding real detail.
+TARGET_COLS = 2160
+TARGET_ROWS = 1080
 
 NODATA_SENTINEL = -9999.0
 
