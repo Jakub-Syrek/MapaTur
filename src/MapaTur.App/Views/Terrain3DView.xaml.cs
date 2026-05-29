@@ -515,13 +515,13 @@ public partial class Terrain3DView : ContentView
 
         if (mouseDragButton == 1)
         {
-            // Left-drag orbits: drag up tilts the camera higher (negative dy).
+            // Left-drag orbits around the focus (camera circles the scene).
             controller.ApplyOrbit(dx, -dy);
         }
         else
         {
-            // Right-drag pans the focus; invert so the world tracks the cursor.
-            controller.ApplyPan(-dx, -dy);
+            // Right-drag looks around in place — the camera stays put and turns its view direction.
+            controller.ApplyLookAround(dx, -dy);
         }
 
         Canvas.InvalidateSurface();

@@ -46,6 +46,33 @@ public sealed class Terrain3DController
         Camera.PitchRadians = Math.Clamp(newPitch, MinPitchRadians, MaxPitch);
     }
 
+    /// <summary>
+    /// Look-around in place: rotates the view direction (azimuth/pitch) while keeping the camera
+    /// <see cref="Camera3D.Position"/> fixed — "I stand still and turn my head", as opposed to
+    /// <see cref="ApplyOrbit"/> which circles the camera around the target. Implemented by swinging the
+    /// target so the recomputed orbit position lands back on the original spot.
+    /// </summary>
+    public void ApplyLookAround(float dxPixels, float dyPixels)
+    {
+        Vector3 position = Camera.Position;
+        Camera.AzimuthRadians += dxPixels * OrbitSensitivity;
+        Camera.PitchRadians = Math.Clamp(Camera.PitchRadians + (dyPixels * OrbitSensitivity), MinPitchRadians, MaxPitch);
+        Camera.Target = position - OrbitOffset();
+    }
+
+    // Offset from target to camera position for the current orbit angles (mirrors Camera3D.Position).
+    private Vector3 OrbitOffset()
+    {
+        float cosP = MathF.Cos(Camera.PitchRadians);
+        float sinP = MathF.Sin(Camera.PitchRadians);
+        float cosA = MathF.Cos(Camera.AzimuthRadians);
+        float sinA = MathF.Sin(Camera.AzimuthRadians);
+        return new Vector3(
+            Camera.Distance * cosP * cosA,
+            Camera.Distance * cosP * sinA,
+            Camera.Distance * sinP);
+    }
+
     /// <summary>Pinch-zoom: <paramref name="scale"/> &gt; 1 brings the camera closer (divides distance).</summary>
     public void ApplyZoom(float scale)
     {

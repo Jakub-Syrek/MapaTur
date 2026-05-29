@@ -116,6 +116,33 @@ public sealed class Terrain3DControllerTests
     }
 
     [Fact]
+    public void ApplyLookAround_KeepsCameraPositionFixed_WhileChangingAzimuth()
+    {
+        var ctrl = BuildController(out var camera);
+        Vector3 before = camera.Position;
+        float beforeAzimuth = camera.AzimuthRadians;
+
+        ctrl.ApplyLookAround(30f, 0f);
+
+        // The camera stays put ("I stand in the middle") — only the view direction rotates.
+        camera.Position.X.Should().BeApproximately(before.X, 1e-2f);
+        camera.Position.Y.Should().BeApproximately(before.Y, 1e-2f);
+        camera.Position.Z.Should().BeApproximately(before.Z, 1e-2f);
+        camera.AzimuthRadians.Should().NotBe(beforeAzimuth);
+    }
+
+    [Fact]
+    public void ApplyLookAround_MovesTheTarget()
+    {
+        var ctrl = BuildController(out var camera);
+        Vector3 targetBefore = camera.Target;
+
+        ctrl.ApplyLookAround(30f, 0f);
+
+        camera.Target.Should().NotBe(targetBefore);
+    }
+
+    [Fact]
     public void ApplyZoom_ScaleGreaterThanOne_DividesDistance()
     {
         var ctrl = BuildController(out var camera);
