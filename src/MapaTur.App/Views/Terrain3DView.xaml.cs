@@ -737,10 +737,10 @@ public partial class Terrain3DView : ContentView
 
     // Decoded ortho pixels cached by path so re-entering 3D (which rebuilds the renderer) re-uploads from
     // memory instead of decoding the large PNG from disk every time.
-    private string? cachedOrthoPath;
-    private byte[]? cachedOrthoBytes;
-    private int cachedOrthoWidth;
-    private int cachedOrthoHeight;
+    // Decoded ortho tiles cached by their path signature, so re-entering 3D (which rebuilds the renderer)
+    // re-uploads from memory instead of decoding the large PNGs from disk every time.
+    private string? cachedOrthoSignature;
+    private List<(byte[] Rgba, int Width, int Height)>? cachedOrthoDecoded;
 
     private bool TryRenderTerrainGl(IReadOnlyList<TerrainMesh3D> tiles, int width, int height, uint framebuffer)
     {
@@ -757,7 +757,10 @@ public partial class Terrain3DView : ContentView
             if (orthoPathDirty)
             {
                 orthoPathDirty = false;
-                ApplyOrthoTexture(glRenderer, OrthoTexturePath);
+                IReadOnlyList<string>? orthoPaths = OrthoTexturePaths is { Count: > 0 }
+                    ? OrthoTexturePaths
+                    : (OrthoTexturePath is { Length: > 0 } single ? new[] { single } : null);
+                ApplyOrthoTextures(glRenderer, orthoPaths);
             }
 
             // GL draws the terrain AND the depth-tested trail/route lines (so the terrain occludes them).
@@ -776,24 +779,53 @@ public partial class Terrain3DView : ContentView
         }
     }
 
-    // Decodes the ortho image to tightly-packed top-row-first RGBA8 (row 0 = north, matching the mesh UVs)
-    // and hands it to the GL renderer. A null/missing/undecodable path clears the texture (back to the
-    // hypsometric tint). Decode failure is non-fatal — the terrain still renders.
-    private void ApplyOrthoTexture(Platforms.Windows.Terrain3DGlRenderer renderer, string? path)
+    // Decodes the ortho tiles to tightly-packed top-row-first RGBA8 (row 0 = north, matching the mesh UVs)
+    // and hands the set to the GL renderer. A null/empty list clears the ortho (back to the hypsometric
+    // tint). If any tile fails to decode the whole set is abandoned, so textures never mis-align to cells.
+    private void ApplyOrthoTextures(Platforms.Windows.Terrain3DGlRenderer renderer, IReadOnlyList<string>? paths)
     {
-        if (string.IsNullOrWhiteSpace(path) || !System.IO.File.Exists(path))
+        if (paths is null || paths.Count == 0)
         {
-            cachedOrthoPath = null;
-            cachedOrthoBytes = null;
-            renderer.SetOrthoTexture(null, 0, 0);
+            cachedOrthoSignature = null;
+            cachedOrthoDecoded = null;
+            renderer.SetOrthoTextures(Array.Empty<(byte[], int, int)>());
             return;
         }
 
-        // Reuse the decoded pixels when the path is unchanged (e.g. re-entering 3D), skipping a costly decode.
-        if (path == cachedOrthoPath && cachedOrthoBytes is not null)
+        string signature = string.Join("|", paths);
+        if (signature == cachedOrthoSignature && cachedOrthoDecoded is not null)
         {
-            renderer.SetOrthoTexture(cachedOrthoBytes, cachedOrthoWidth, cachedOrthoHeight);
+            renderer.SetOrthoTextures(cachedOrthoDecoded);
             return;
+        }
+
+        var decoded = new List<(byte[] Rgba, int Width, int Height)>(paths.Count);
+        foreach (string path in paths)
+        {
+            if (DecodeOrtho(path) is { } tile)
+            {
+                decoded.Add(tile);
+            }
+        }
+
+        if (decoded.Count != paths.Count)
+        {
+            cachedOrthoSignature = null;
+            cachedOrthoDecoded = null;
+            renderer.SetOrthoTextures(Array.Empty<(byte[], int, int)>());
+            return;
+        }
+
+        cachedOrthoSignature = signature;
+        cachedOrthoDecoded = decoded;
+        renderer.SetOrthoTextures(decoded);
+    }
+
+    private static (byte[] Rgba, int Width, int Height)? DecodeOrtho(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !System.IO.File.Exists(path))
+        {
+            return null;
         }
 
         try
@@ -802,8 +834,7 @@ public partial class Terrain3DView : ContentView
             using var codec = SkiaSharp.SKCodec.Create(stream);
             if (codec is null)
             {
-                renderer.SetOrthoTexture(null, 0, 0);
-                return;
+                return null;
             }
 
             var info = new SkiaSharp.SKImageInfo(
@@ -814,19 +845,14 @@ public partial class Terrain3DView : ContentView
             using var bitmap = new SkiaSharp.SKBitmap(info);
             if (codec.GetPixels(info, bitmap.GetPixels()) != SkiaSharp.SKCodecResult.Success)
             {
-                renderer.SetOrthoTexture(null, 0, 0);
-                return;
+                return null;
             }
 
-            cachedOrthoPath = path;
-            cachedOrthoBytes = bitmap.Bytes;
-            cachedOrthoWidth = info.Width;
-            cachedOrthoHeight = info.Height;
-            renderer.SetOrthoTexture(cachedOrthoBytes, cachedOrthoWidth, cachedOrthoHeight);
+            return (bitmap.Bytes, info.Width, info.Height);
         }
         catch (Exception)
         {
-            renderer.SetOrthoTexture(null, 0, 0);
+            return null;
         }
     }
 #endif
