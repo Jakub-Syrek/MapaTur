@@ -42,7 +42,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // is bound (uUseOrtho=1) the surface colour is sampled from it; otherwise the hypsometric base tint.
     private const string TerrainFragmentShaderSource =
         "#version 300 es\n" +
-        "precision mediump float;\n" +
+        "precision highp float;\n" +
+        "precision highp sampler2D;\n" +
         "in vec4 vColor;\n" +
         "in vec3 vNormal;\n" +
         "in vec2 vTex;\n" +
@@ -50,11 +51,28 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform float uAmbient;\n" +
         "uniform sampler2D uOrtho;\n" +
         "uniform int uUseOrtho;\n" +
+        "uniform vec2 uOrthoTexel;\n" + // (1/width, 1/height) of the bound ortho texture
+        "uniform float uSharpen;\n" +   // unsharp-mask strength; 0 = off
         "out vec4 fragColor;\n" +
         "void main(){\n" +
         "  float lambert = max(0.0, dot(normalize(vNormal), uLightDir));\n" +
         "  float shade = uAmbient + ((1.0 - uAmbient) * lambert);\n" +
-        "  vec3 base = (uUseOrtho == 1) ? texture(uOrtho, vTex).rgb : vColor.rgb;\n" +
+        "  vec3 base;\n" +
+        "  if (uUseOrtho == 1) {\n" +
+        "    vec3 c = texture(uOrtho, vTex).rgb;\n" +
+        "    if (uSharpen > 0.0) {\n" +
+        // 4-tap unsharp mask: boost the centre over the local average to crisp up edges that
+        // mipmap/anisotropic minification softens. Cheap (4 extra taps) and clamped to [0,1].
+        "      vec3 blur = (texture(uOrtho, vTex + vec2(uOrthoTexel.x, 0.0)).rgb\n" +
+        "                 + texture(uOrtho, vTex - vec2(uOrthoTexel.x, 0.0)).rgb\n" +
+        "                 + texture(uOrtho, vTex + vec2(0.0, uOrthoTexel.y)).rgb\n" +
+        "                 + texture(uOrtho, vTex - vec2(0.0, uOrthoTexel.y)).rgb) * 0.25;\n" +
+        "      c = clamp(c + (uSharpen * (c - blur)), 0.0, 1.0);\n" +
+        "    }\n" +
+        "    base = c;\n" +
+        "  } else {\n" +
+        "    base = vColor.rgb;\n" +
+        "  }\n" +
         "  fragColor = vec4(base * shade, 1.0);\n" +
         "}\n";
 
@@ -147,6 +165,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int ambientLocation = -1;
     private int orthoSamplerLocation = -1;
     private int useOrthoLocation = -1;
+    private int orthoTexelLocation = -1;
+    private int sharpenLocation = -1;
+
+    // Unsharp-mask strength applied to the ortho in the fragment shader (0 = off). Crisps up edges softened
+    // by mipmap/anisotropic minification; kept mild so it doesn't ring.
+    private const float OrthoSharpenStrength = 0.6f;
 
     // Optional ortho-photo texture draped over the terrain. The view hands us decoded RGBA bytes; we upload
     // them lazily on the GL thread. Bytes are kept so the texture can be re-created after a context loss.
@@ -254,6 +278,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             ambientLocation = -1;
             orthoSamplerLocation = -1;
             useOrthoLocation = -1;
+            orthoTexelLocation = -1;
+            sharpenLocation = -1;
             // The ortho texture ID belonged to the dead context; keep the bytes and re-upload them.
             orthoTexture = 0;
             if (orthoBytes is not null)
@@ -339,6 +365,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.ActiveTexture(TextureUnit.Texture0);
             gl.BindTexture(TextureTarget.Texture2D, orthoTexture);
             gl.Uniform1(orthoSamplerLocation, 0);
+            float texelX = orthoTexWidth > 0 ? 1f / orthoTexWidth : 0f;
+            float texelY = orthoTexHeight > 0 ? 1f / orthoTexHeight : 0f;
+            gl.Uniform2(orthoTexelLocation, texelX, texelY);
+            gl.Uniform1(sharpenLocation, OrthoSharpenStrength);
         }
 
         foreach (TileBuffers tile in tileBuffers.Values)
@@ -541,6 +571,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         ambientLocation = g.GetUniformLocation(program, "uAmbient");
         orthoSamplerLocation = g.GetUniformLocation(program, "uOrtho");
         useOrthoLocation = g.GetUniformLocation(program, "uUseOrtho");
+        orthoTexelLocation = g.GetUniformLocation(program, "uOrthoTexel");
+        sharpenLocation = g.GetUniformLocation(program, "uSharpen");
 
         // Line ribbon program (reuses the same fragment shader).
         uint lvs = CompileShader(g, ShaderType.VertexShader, LineVertexShaderSource);
