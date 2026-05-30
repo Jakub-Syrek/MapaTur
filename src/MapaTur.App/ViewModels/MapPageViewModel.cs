@@ -349,6 +349,14 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private string? orthoTexturePath;
 
+    /// <summary>Ortho tiles (row-major) draped over the 3D terrain, one per mesh cell; null/empty for none.</summary>
+    [ObservableProperty]
+    private IReadOnlyList<string>? orthoTexturePaths;
+
+    // Ortho grid the terrain mesh is tiled to match (1×1 = a single full-extent texture).
+    private int orthoGridCols = 1;
+    private int orthoGridRows = 1;
+
     /// <summary>
     /// DEM-derived summits drawn as labelled markers in the 3D view so it isn't bare terrain +
     /// trails. Computed offline from the loaded raster (no network) and refreshed each DEM load.
@@ -978,7 +986,9 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             VerticalExaggeration = (float)Math.Clamp(VerticalExaggeration, 1.0, 5.0),
         };
-        TerrainTiles = await Task.Run(() => TerrainMesh3D.BuildTiles(raster, initialOptions)).ConfigureAwait(true);
+        int gridCols = orthoGridCols;
+        int gridRows = orthoGridRows;
+        TerrainTiles = await Task.Run(() => TerrainMesh3D.BuildTiles(raster, initialOptions, orthoGridCols: gridCols, orthoGridRows: gridRows)).ConfigureAwait(true);
         OnPropertyChanged(nameof(TerrainFrame));
         // Detect summits off the UI thread so the 3D view shows labelled peaks, not just terrain.
         // Match each against the curated Tatra gazetteer so prominent peaks get a name above the
@@ -1153,6 +1163,15 @@ public sealed partial class MapPageViewModel : ObservableObject
                 logger.LogInformation("Auto-loaded hillshade (basemap fallback) {Path}", hillshadePath);
             }
 
+            // Capture the ortho grid BEFORE building the DEM mesh, so the mesh is tiled to match the ortho
+            // cells (each mesh tile samples its own texture). A single/no ortho leaves the default 1×1.
+            if (discovery.OrthoTilePaths is { Count: > 0 } tilePaths)
+            {
+                OrthoTexturePaths = tilePaths;
+                orthoGridCols = discovery.OrthoGridCols;
+                orthoGridRows = discovery.OrthoGridRows;
+            }
+
             if (discovery.DemPath is { } demPath)
             {
                 await LoadDemFromPathAsync(demPath).ConfigureAwait(true);
@@ -1176,8 +1195,11 @@ public sealed partial class MapPageViewModel : ObservableObject
             {
                 // The 3D view decodes + uploads this to the GPU; nothing to parse here, just surface the path.
                 OrthoTexturePath = orthoPath;
-                loaded.Add(Path.GetFileName(orthoPath));
-                logger.LogInformation("Auto-loaded ortho texture {Path}", orthoPath);
+                loaded.Add(discovery.OrthoGridCols * discovery.OrthoGridRows > 1
+                    ? $"ortho {discovery.OrthoGridCols}×{discovery.OrthoGridRows} tiles"
+                    : Path.GetFileName(orthoPath));
+                logger.LogInformation("Auto-loaded ortho ({Cols}x{Rows}) from {Path}",
+                    discovery.OrthoGridCols, discovery.OrthoGridRows, orthoPath);
             }
 
             if (loaded.Count > 0)
