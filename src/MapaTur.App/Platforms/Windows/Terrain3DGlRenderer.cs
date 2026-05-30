@@ -545,6 +545,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.GetInteger(GLEnum.MaxTextureSize, maxTexSize);
         int maxSize = maxTexSize[0];
 
+        // Query the driver's max anisotropy once, outside the upload loop (a per-iteration stackalloc would
+        // risk a stack overflow — CA2014).
+        const GLEnum maxAnisotropyPName = (GLEnum)0x84FF; // GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
+        const GLEnum anisotropyPName = (GLEnum)0x84FE;    // GL_TEXTURE_MAX_ANISOTROPY_EXT
+        Span<float> maxAniso = stackalloc float[1] { 1f };
+        g.GetFloat(maxAnisotropyPName, maxAniso);
+        float aniso = Math.Clamp(16f, 1f, maxAniso[0] < 1f ? 1f : maxAniso[0]);
+
         foreach (OrthoTile tile in orthoTiles)
         {
             if (tile.Texture != 0)
@@ -573,12 +581,6 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
             g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
             g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
-
-            const GLEnum maxAnisotropyPName = (GLEnum)0x84FF; // GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
-            const GLEnum anisotropyPName = (GLEnum)0x84FE;    // GL_TEXTURE_MAX_ANISOTROPY_EXT
-            Span<float> maxAniso = stackalloc float[1] { 1f };
-            g.GetFloat(maxAnisotropyPName, maxAniso);
-            float aniso = Math.Clamp(16f, 1f, maxAniso[0] < 1f ? 1f : maxAniso[0]);
             g.TexParameter(TextureTarget.Texture2D, (TextureParameterName)anisotropyPName, aniso);
         }
 
