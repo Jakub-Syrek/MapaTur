@@ -172,12 +172,19 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // by mipmap/anisotropic minification; kept mild so it doesn't ring.
     private const float OrthoSharpenStrength = 0.6f;
 
-    // Optional ortho-photo texture draped over the terrain. The view hands us decoded RGBA bytes; we upload
-    // them lazily on the GL thread. Bytes are kept so the texture can be re-created after a context loss.
-    private uint orthoTexture;
-    private byte[]? orthoBytes;
-    private int orthoTexWidth;
-    private int orthoTexHeight;
+    // Optional ortho-photo textures draped over the terrain, one per mesh ortho-cell (indexed by
+    // TerrainMesh3D.OrthoTileIndex). A single full-extent ortho is just a 1-element list. CPU bytes are
+    // kept so textures survive a GL context loss. Uploaded lazily on the GL thread.
+    private sealed class OrthoTile
+    {
+        public required byte[] Rgba;
+        public int Width;
+        public int Height;
+        public uint Texture; // 0 until uploaded
+    }
+    private readonly List<OrthoTile> orthoTiles = new();
+    // Old tiles whose GL textures still need deleting on the GL thread (set when textures are swapped).
+    private readonly List<OrthoTile> pendingOrthoRelease = new();
     private bool orthoDirty;
     private uint lineProgram;
     private int lineMvpLocation = -1;
@@ -224,15 +231,30 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     {
         if (rgba is not null && width > 0 && height > 0)
         {
-            orthoBytes = rgba;
-            orthoTexWidth = width;
-            orthoTexHeight = height;
+            SetOrthoTextures(new[] { (rgba, width, height) });
         }
         else
         {
-            orthoBytes = null;
-            orthoTexWidth = 0;
-            orthoTexHeight = 0;
+            SetOrthoTextures(Array.Empty<(byte[], int, int)>());
+        }
+    }
+
+    /// <summary>
+    /// Sets the ortho textures, one per mesh ortho-cell (order = OrthoTileIndex). An empty list clears the
+    /// ortho (terrain falls back to the hypsometric tint). Each entry is tightly-packed top-row-first RGBA8.
+    /// Upload happens on the next <see cref="Render"/> call, on the GL thread.
+    /// </summary>
+    public void SetOrthoTextures(IReadOnlyList<(byte[] Rgba, int Width, int Height)> textures)
+    {
+        // GL handles from the previous set are deleted on the next EnsureOrthoTextures (no context here).
+        pendingOrthoRelease.AddRange(orthoTiles);
+        orthoTiles.Clear();
+        foreach (var (rgba, w, h) in textures)
+        {
+            if (rgba is not null && w > 0 && h > 0)
+            {
+                orthoTiles.Add(new OrthoTile { Rgba = rgba, Width = w, Height = h });
+            }
         }
         orthoDirty = true;
     }
@@ -305,7 +327,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             lastTiles = tiles;
         }
 
-        EnsureOrthoTexture(gl);
+        EnsureOrthoTextures(gl);
 
         int vpWidth = Math.Max(1, width);
         int vpHeight = Math.Max(1, height);
@@ -357,22 +379,41 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform3(lightDirLocation, light.X, light.Y, light.Z);
         gl.Uniform1(ambientLocation, lightFrame.AmbientFactor);
 
-        // Drape the ortho image when one is uploaded; otherwise the shader uses the hypsometric tint.
-        bool useOrtho = orthoTexture != 0;
-        gl.Uniform1(useOrthoLocation, useOrtho ? 1 : 0);
-        if (useOrtho)
+        // Drape the ortho: bind each mesh tile's own cell texture (OrthoTileIndex) so a multi-cell ortho
+        // stays sharp. Without textures the shader uses the hypsometric tint.
+        bool anyOrtho = orthoTiles.Count > 0;
+        gl.ActiveTexture(TextureUnit.Texture0);
+        gl.Uniform1(orthoSamplerLocation, 0);
+        uint boundTexture = 0;
+        foreach (KeyValuePair<TerrainMesh3D, TileBuffers> entry in tileBuffers)
         {
-            gl.ActiveTexture(TextureUnit.Texture0);
-            gl.BindTexture(TextureTarget.Texture2D, orthoTexture);
-            gl.Uniform1(orthoSamplerLocation, 0);
-            float texelX = orthoTexWidth > 0 ? 1f / orthoTexWidth : 0f;
-            float texelY = orthoTexHeight > 0 ? 1f / orthoTexHeight : 0f;
-            gl.Uniform2(orthoTexelLocation, texelX, texelY);
-            gl.Uniform1(sharpenLocation, OrthoSharpenStrength);
-        }
+            TileBuffers tile = entry.Value;
+            OrthoTile? ot = null;
+            if (anyOrtho)
+            {
+                int idx = entry.Key.OrthoTileIndex;
+                if ((uint)idx < (uint)orthoTiles.Count && orthoTiles[idx].Texture != 0)
+                {
+                    ot = orthoTiles[idx];
+                }
+            }
 
-        foreach (TileBuffers tile in tileBuffers.Values)
-        {
+            if (ot is not null)
+            {
+                if (ot.Texture != boundTexture)
+                {
+                    gl.BindTexture(TextureTarget.Texture2D, ot.Texture);
+                    boundTexture = ot.Texture;
+                }
+                gl.Uniform2(orthoTexelLocation, ot.Width > 0 ? 1f / ot.Width : 0f, ot.Height > 0 ? 1f / ot.Height : 0f);
+                gl.Uniform1(sharpenLocation, OrthoSharpenStrength);
+                gl.Uniform1(useOrthoLocation, 1);
+            }
+            else
+            {
+                gl.Uniform1(useOrthoLocation, 0);
+            }
+
             gl.BindVertexArray(tile.Vao);
             gl.DrawElements(PrimitiveType.Triangles, (uint)tile.IndexCount, DrawElementsType.UnsignedShort, (void*)0);
         }
@@ -471,76 +512,70 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         return true;
     }
 
-    /// <summary>Uploads / refreshes / deletes the ortho GL texture when <see cref="orthoDirty"/> is set.</summary>
-    private void EnsureOrthoTexture(GL g)
+    /// <summary>Reclaims swapped-out textures and uploads any not-yet-uploaded ortho cells (GL thread).</summary>
+    private void EnsureOrthoTextures(GL g)
     {
+        // Always reclaim handles from a previous texture set, even if nothing new is pending.
+        if (pendingOrthoRelease.Count > 0)
+        {
+            foreach (OrthoTile old in pendingOrthoRelease)
+            {
+                if (old.Texture != 0)
+                {
+                    g.DeleteTexture(old.Texture);
+                    old.Texture = 0;
+                }
+            }
+            pendingOrthoRelease.Clear();
+        }
+
         if (!orthoDirty)
         {
             return;
         }
         orthoDirty = false;
 
-        if (orthoBytes is null)
-        {
-            if (orthoTexture != 0)
-            {
-                g.DeleteTexture(orthoTexture);
-                orthoTexture = 0;
-            }
-            return;
-        }
-
-        // Guard against an image larger than the GPU allows — uploading beyond GL_MAX_TEXTURE_SIZE yields a
-        // garbage/black texture. If it doesn't fit, skip the ortho (terrain falls back to the hypsometric tint)
-        // rather than render corruption.
+        // Upload beyond GL_MAX_TEXTURE_SIZE yields a garbage/black texture, so guard the size once.
         Span<int> maxTexSize = stackalloc int[1] { 2048 };
         g.GetInteger(GLEnum.MaxTextureSize, maxTexSize);
-        if (orthoTexWidth > maxTexSize[0] || orthoTexHeight > maxTexSize[0])
+        int maxSize = maxTexSize[0];
+
+        foreach (OrthoTile tile in orthoTiles)
         {
-            Log.Information("[GL3D] ortho {W}x{H} exceeds GL_MAX_TEXTURE_SIZE {Max}; skipping (hypsometric fallback)",
-                orthoTexWidth, orthoTexHeight, maxTexSize[0]);
-            if (orthoTexture != 0)
+            if (tile.Texture != 0)
             {
-                g.DeleteTexture(orthoTexture);
-                orthoTexture = 0;
+                continue; // already uploaded
             }
-            return;
+            if (tile.Width > maxSize || tile.Height > maxSize)
+            {
+                Log.Information("[GL3D] ortho tile {W}x{H} exceeds GL_MAX_TEXTURE_SIZE {Max}; skipping",
+                    tile.Width, tile.Height, maxSize);
+                continue;
+            }
+
+            tile.Texture = g.GenTexture();
+            g.BindTexture(TextureTarget.Texture2D, tile.Texture);
+            g.TexImage2D<byte>(
+                TextureTarget.Texture2D, 0, (int)InternalFormat.Rgba8,
+                (uint)tile.Width, (uint)tile.Height, 0,
+                PixelFormat.Rgba, PixelType.UnsignedByte, tile.Rgba);
+
+            // Trilinear (mipmapped) minification + anisotropy — the ortho is seen at grazing angles where
+            // plain bilinear shimmers and smears into blocks. ClampToEdge so adjacent cell textures meet
+            // seamlessly at the shared seam.
+            g.GenerateMipmap(TextureTarget.Texture2D);
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+
+            const GLEnum maxAnisotropyPName = (GLEnum)0x84FF; // GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
+            const GLEnum anisotropyPName = (GLEnum)0x84FE;    // GL_TEXTURE_MAX_ANISOTROPY_EXT
+            Span<float> maxAniso = stackalloc float[1] { 1f };
+            g.GetFloat(maxAnisotropyPName, maxAniso);
+            float aniso = Math.Clamp(16f, 1f, maxAniso[0] < 1f ? 1f : maxAniso[0]);
+            g.TexParameter(TextureTarget.Texture2D, (TextureParameterName)anisotropyPName, aniso);
         }
-
-        if (orthoTexture == 0)
-        {
-            orthoTexture = g.GenTexture();
-        }
-
-        g.BindTexture(TextureTarget.Texture2D, orthoTexture);
-        g.TexImage2D<byte>(
-            TextureTarget.Texture2D,
-            0,
-            (int)InternalFormat.Rgba8,
-            (uint)orthoTexWidth,
-            (uint)orthoTexHeight,
-            0,
-            PixelFormat.Rgba,
-            PixelType.UnsignedByte,
-            orthoBytes);
-
-        // Trilinear (mipmapped) minification + anisotropic filtering — the ortho is draped over terrain
-        // seen at grazing angles, where plain bilinear shimmers and smears into blocky pixels. Mipmaps fix
-        // the minification aliasing; anisotropy keeps oblique slopes sharp.
-        g.GenerateMipmap(TextureTarget.Texture2D);
-        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
-        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
-        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
-        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
-
-        // EXT_texture_filter_anisotropic (supported by ANGLE/D3D11). Clamp our request to the driver max;
-        // if the extension is absent the GL error is ignored and we keep trilinear.
-        const GLEnum maxAnisotropyPName = (GLEnum)0x84FF; // GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
-        const GLEnum anisotropyPName = (GLEnum)0x84FE;    // GL_TEXTURE_MAX_ANISOTROPY_EXT
-        Span<float> maxAniso = stackalloc float[1] { 1f };
-        g.GetFloat(maxAnisotropyPName, maxAniso);
-        float aniso = Math.Clamp(16f, 1f, maxAniso[0] < 1f ? 1f : maxAniso[0]);
-        g.TexParameter(TextureTarget.Texture2D, (TextureParameterName)anisotropyPName, aniso);
 
         g.BindTexture(TextureTarget.Texture2D, 0);
     }
@@ -957,11 +992,23 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         msaaFbo = 0;
         msaaColorRb = 0;
         msaaDepthRb = 0;
-        if (orthoTexture != 0)
+        foreach (OrthoTile t in orthoTiles)
         {
-            gl.DeleteTexture(orthoTexture);
-            orthoTexture = 0;
+            if (t.Texture != 0)
+            {
+                gl.DeleteTexture(t.Texture);
+                t.Texture = 0;
+            }
         }
+        foreach (OrthoTile t in pendingOrthoRelease)
+        {
+            if (t.Texture != 0)
+            {
+                gl.DeleteTexture(t.Texture);
+                t.Texture = 0;
+            }
+        }
+        pendingOrthoRelease.Clear();
         if (programReady)
         {
             gl.DeleteProgram(program);
