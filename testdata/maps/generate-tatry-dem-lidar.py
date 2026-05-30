@@ -56,11 +56,21 @@ WEST, SOUTH, EAST, NORTH = 19.50, 49.10, 20.40, 49.40
 TARGET_COLS = 4320
 TARGET_ROWS = 2200
 
-# Bend point between Polish LiDAR (north) and Copernicus (south). The actual
-# Polish-Slovak border in the Tatras runs from ~49.18 N (Bukowina end) to ~49.23 N
-# (Goryczkowa Czuba); 49.22 catches all the prominent Polish peaks while letting
-# the WCS-returns-0 area on the Slovak side fall back to Copernicus cleanly.
-POLAND_SOUTH = 49.22
+# Polish LiDAR coverage extends a little south of the actual Polish-Slovak border
+# (runs from ~49.18 N at Bukowina to ~49.23 N at Goryczkowa Czuba). Anything we
+# request south of POLAND_SOUTH comes back as 0 m from the WCS and falls through
+# to Copernicus. 49.21 captures all the prominent Polish summits with a little
+# margin for the feathered blend below.
+POLAND_SOUTH = 49.21
+
+# Feathered blend band over the Polish/Slovak border to hide the vertical-datum
+# step between Polish KRON86-NH (DTM WCS) and Copernicus EGM2008 GLO-30 — they
+# can disagree by ~30-50 cm even in flat areas, more in the mountains, which
+# shows up as a 1 m terrace running across the screen exactly through summits
+# sitting on the border (Starorobociański Wierch is the worst offender). Linear
+# weight ramp from full Copernicus at (POLAND_SOUTH - BLEND_BAND_DEG) up to
+# full LiDAR at POLAND_SOUTH; ~2 km wide hides the seam without losing detail.
+BLEND_BAND_DEG = 0.018
 
 # WCS request tiling: 0.1° (~11 km) per side keeps every request comfortably
 # under the GUGiK ~10 km²-per-request soft cap while completing in ~7 s.
@@ -249,8 +259,8 @@ def composite_layers(
     copernicus: np.ndarray, cop_box: tuple[float, float, float, float],
     poland: np.ndarray, pol_box: tuple[float, float, float, float],
 ) -> np.ndarray:
-    """Bilinear-resamples both layers onto the target grid; Polish LiDAR wins where
-    it has data (value > 0), Copernicus fills the Slovak side and any nodata gaps."""
+    """Bilinear-resamples both layers onto the target grid then feather-blends them
+    along the Polish/Slovak border so the vertical-datum step isn't visible."""
     lat_grid = np.linspace(NORTH, SOUTH, TARGET_ROWS, dtype=np.float64)
     lon_grid = np.linspace(WEST, EAST, TARGET_COLS, dtype=np.float64)
     lats, lons = np.meshgrid(lat_grid, lon_grid, indexing="ij")
@@ -258,10 +268,34 @@ def composite_layers(
     cop_resampled = bilinear_sample(copernicus, *cop_box, lats, lons)
     pol_resampled = bilinear_sample(poland, *pol_box, lats, lons)
 
-    # WCS hands back 0.0 outside Polish territory. Trust the LiDAR value wherever
-    # it's strictly positive; everywhere else (Slovak side, sea-level artefacts on
-    # the border) take Copernicus. The Tatry sit above 700 m so >0 is a safe test.
-    out = np.where(pol_resampled > 1.0, pol_resampled, cop_resampled)
+    # Sanitise the LiDAR layer: WCS hands back 0.0 outside Polish territory; we
+    # don't want those zeros bleeding into the blend in the transition band.
+    have_lidar = pol_resampled > 1.0
+
+    # Bias-correct the Polish LiDAR onto the Copernicus datum within a wide band
+    # around the border by lifting it by the median (LiDAR - Copernicus) offset
+    # where they overlap. This collapses the systematic KRON86-vs-EGM2008 step
+    # to near-zero before we feather, so the blend doesn't have to hide many
+    # metres of mismatch.
+    blend_top = POLAND_SOUTH + BLEND_BAND_DEG
+    blend_bot = POLAND_SOUTH - BLEND_BAND_DEG
+    overlap_mask = have_lidar & (lats >= blend_bot) & (lats <= blend_top)
+    if int(overlap_mask.sum()) > 0:
+        offset = float(np.median(pol_resampled[overlap_mask] - cop_resampled[overlap_mask]))
+        print(f"  datum bias correction: shifting Polish LiDAR by {-offset:+.2f} m to match Copernicus")
+        pol_resampled = pol_resampled - offset
+    # After the shift the >1 m gate may have dropped a few cells; rebuild the mask
+    # against the original WCS payload (we know which cells were ever LiDAR).
+    # (`have_lidar` was computed pre-shift so it's still correct.)
+
+    # Build a 0..1 weight ramping linearly across the blend band: full LiDAR
+    # north of POLAND_SOUTH + BAND, full Copernicus south of POLAND_SOUTH - BAND.
+    lidar_weight = np.clip((lats - blend_bot) / (blend_top - blend_bot), 0.0, 1.0)
+    # Zero the weight wherever we don't have LiDAR data (the south half stays pure
+    # Copernicus, plus any WCS gaps in the Polish strip).
+    lidar_weight = np.where(have_lidar, lidar_weight, 0.0).astype(np.float32)
+
+    out = (cop_resampled * (1.0 - lidar_weight)) + (pol_resampled * lidar_weight)
     return out.astype(np.float32)
 
 
