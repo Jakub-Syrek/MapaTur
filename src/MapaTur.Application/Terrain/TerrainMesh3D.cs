@@ -178,6 +178,8 @@ public sealed class TerrainMesh3D
     /// <param name="raster">Source DEM (may exceed 65 536 cells).</param>
     /// <param name="options">Optional tuning; default options use NW sun at 2× vertical exaggeration.</param>
     /// <param name="maxTileSide">Maximum vertices per tile side minus one; a tile spans up to (maxTileSide + 1)² vertices. Default 255 → ≤ 256² = 65 536.</param>
+    /// <param name="orthoGridCols">Number of ortho texture cells across (west–east). 1 = a single texture over the whole raster.</param>
+    /// <param name="orthoGridRows">Number of ortho texture cells down (north–south). 1 = a single texture over the whole raster.</param>
     public static IReadOnlyList<TerrainMesh3D> BuildTiles(
         DemRaster raster,
         TerrainMeshOptions? options = null,
