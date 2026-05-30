@@ -152,6 +152,19 @@ public partial class Terrain3DView : ContentView
         view.Canvas.InvalidateSurface();
     }
 
+    /// <summary>Bindable ortho tiles (row-major), one per mesh cell. Takes precedence over the single OrthoTexturePath.</summary>
+    public static readonly BindableProperty OrthoTexturePathsProperty = BindableProperty.Create(
+        nameof(OrthoTexturePaths),
+        typeof(IReadOnlyList<string>),
+        typeof(Terrain3DView),
+        propertyChanged: OnOrthoTexturePathChanged);
+
+    public IReadOnlyList<string>? OrthoTexturePaths
+    {
+        get => (IReadOnlyList<string>?)GetValue(OrthoTexturePathsProperty);
+        set => SetValue(OrthoTexturePathsProperty, value);
+    }
+
     /// <summary>Camera state mutated by gestures and used by the renderer.</summary>
     public Camera3D Camera { get; } = new Camera3D();
 
