@@ -111,7 +111,76 @@ public sealed class FileSystemMapAutoLoader : IMapAutoLoader
             }
         }
 
-        return new MapAutoLoadDiscovery(basemaps, hillshade, dem, trailsData, orthoTexture);
+        // Prefer a tiled ortho set (*ortho*-r{R}-c{C}.png/jpg) — one hi-res texture per mesh cell, far
+        // sharper than the single GL_MAX_TEXTURE_SIZE-capped image. Falls back to the single ortho.
+        (IReadOnlyList<string> tilePaths, int gridCols, int gridRows) = DiscoverOrthoTiles();
+        if (tilePaths.Count > 0)
+        {
+            return new MapAutoLoadDiscovery(
+                basemaps, hillshade, dem, trailsData, tilePaths[0], tilePaths, gridCols, gridRows);
+        }
+
+        IReadOnlyList<string>? singleTile = orthoTexture is null ? null : new[] { orthoTexture };
+        return new MapAutoLoadDiscovery(basemaps, hillshade, dem, trailsData, orthoTexture, singleTile, 1, 1);
+    }
+
+    // Scans the search roots for a tiled ortho set named *ortho*-r{R}-c{C}.(png|jpg). Returns the tiles in
+    // row-major order plus grid dimensions, or an empty list when no complete rectangular set exists.
+    private (IReadOnlyList<string> Paths, int Cols, int Rows) DiscoverOrthoTiles()
+    {
+        var pattern = new System.Text.RegularExpressions.Regex(
+            @"ortho.*-r(\d+)-c(\d+)\.(png|jpg)$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+        foreach (string root in searchRoots)
+        {
+            if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
+            {
+                continue;
+            }
+
+            var byCell = new Dictionary<(int Row, int Col), string>();
+            int maxRow = -1;
+            int maxCol = -1;
+            foreach (string path in EnumerateFilesSafe(root, "*.png").Concat(EnumerateFilesSafe(root, "*.jpg")))
+            {
+                var match = pattern.Match(Path.GetFileName(path));
+                if (!match.Success)
+                {
+                    continue;
+                }
+                int r = int.Parse(match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+                int c = int.Parse(match.Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture);
+                byCell.TryAdd((r, c), path);
+                maxRow = Math.Max(maxRow, r);
+                maxCol = Math.Max(maxCol, c);
+            }
+
+            if (byCell.Count == 0)
+            {
+                continue;
+            }
+
+            int rows = maxRow + 1;
+            int cols = maxCol + 1;
+            // Only accept a complete rectangular set so the mesh grid lines up with every texture.
+            if (byCell.Count != rows * cols)
+            {
+                continue;
+            }
+
+            var ordered = new List<string>(rows * cols);
+            for (int r = 0; r < rows; r++)
+            {
+                for (int c = 0; c < cols; c++)
+                {
+                    ordered.Add(byCell[(r, c)]);
+                }
+            }
+            return (ordered, cols, rows);
+        }
+
+        return (Array.Empty<string>(), 1, 1);
     }
 
     private static IEnumerable<string> EnumerateFilesSafe(string root, string pattern)
