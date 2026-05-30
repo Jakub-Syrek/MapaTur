@@ -1,6 +1,7 @@
 using System.Numerics;
 
 using MapaTur.App.Services;
+using MapaTur.Application.Maps;
 using MapaTur.Application.Terrain;
 using MapaTur.Domain.Climbing;
 using MapaTur.Domain.Pois;
@@ -165,6 +166,23 @@ public partial class Terrain3DView : ContentView
         set => SetValue(OrthoTexturePathsProperty, value);
     }
 
+    /// <summary>
+    /// Pre-decoded ortho cells supplied directly as RGBA8 bytes (e.g. composited from MBTiles).
+    /// Takes precedence over both <see cref="OrthoTexturePaths"/> and <see cref="OrthoTexturePath"/>:
+    /// the view uploads these bytes verbatim without touching the filesystem.
+    /// </summary>
+    public static readonly BindableProperty OrthoTextureCellsProperty = BindableProperty.Create(
+        nameof(OrthoTextureCells),
+        typeof(IReadOnlyList<OrthoTextureCell>),
+        typeof(Terrain3DView),
+        propertyChanged: OnOrthoTexturePathChanged);
+
+    public IReadOnlyList<OrthoTextureCell>? OrthoTextureCells
+    {
+        get => (IReadOnlyList<OrthoTextureCell>?)GetValue(OrthoTextureCellsProperty);
+        set => SetValue(OrthoTextureCellsProperty, value);
+    }
+
     /// <summary>Camera state mutated by gestures and used by the renderer.</summary>
     public Camera3D Camera { get; } = new Camera3D();
 
@@ -209,8 +227,11 @@ public partial class Terrain3DView : ContentView
     private double lastPinchScale = 1.0;
 
     // Set when OrthoTexturePath changes; the GPU render path decodes the image and hands it to the GL
-    // renderer once (off the per-frame path). Lives outside #if WINDOWS because the bindable setter does.
+    // renderer once (off the per-frame path). Lives outside #if WINDOWS because the bindable setter does;
+    // non-Windows builds carry the field for parity but never read it (CPU Skia path has no GL ortho).
+#pragma warning disable CS0414 // assigned but never used — read only inside #if WINDOWS
     private bool orthoPathDirty;
+#pragma warning restore CS0414
 
     public Terrain3DView()
     {
@@ -757,10 +778,18 @@ public partial class Terrain3DView : ContentView
             if (orthoPathDirty)
             {
                 orthoPathDirty = false;
-                IReadOnlyList<string>? orthoPaths = OrthoTexturePaths is { Count: > 0 }
-                    ? OrthoTexturePaths
-                    : (OrthoTexturePath is { Length: > 0 } single ? new[] { single } : null);
-                ApplyOrthoTextures(glRenderer, orthoPaths);
+                if (OrthoTextureCells is { Count: > 0 } cells)
+                {
+                    // MBTiles-composited textures: bytes already RGBA8, skip the PNG decoder.
+                    ApplyOrthoTextureCells(glRenderer, cells);
+                }
+                else
+                {
+                    IReadOnlyList<string>? orthoPaths = OrthoTexturePaths is { Count: > 0 }
+                        ? OrthoTexturePaths
+                        : (OrthoTexturePath is { Length: > 0 } single ? new[] { single } : null);
+                    ApplyOrthoTextures(glRenderer, orthoPaths);
+                }
             }
 
             // GL draws the terrain AND the depth-tested trail/route lines (so the terrain occludes them).
@@ -818,6 +847,20 @@ public partial class Terrain3DView : ContentView
 
         cachedOrthoSignature = signature;
         cachedOrthoDecoded = decoded;
+        renderer.SetOrthoTextures(decoded);
+    }
+
+    // Skips DecodeOrtho entirely: pre-composited cells (e.g. from an MBTiles archive) already carry
+    // RGBA8 pixels and just need to flow through to SetOrthoTextures in row-major order.
+    private void ApplyOrthoTextureCells(Platforms.Windows.Terrain3DGlRenderer renderer, IReadOnlyList<OrthoTextureCell> cells)
+    {
+        var decoded = new List<(byte[] Rgba, int Width, int Height)>(cells.Count);
+        foreach (OrthoTextureCell cell in cells)
+        {
+            decoded.Add((cell.Rgba, cell.Width, cell.Height));
+        }
+        cachedOrthoSignature = null; // bypass the path-keyed cache; cells are the source of truth now
+        cachedOrthoDecoded = null;
         renderer.SetOrthoTextures(decoded);
     }
 

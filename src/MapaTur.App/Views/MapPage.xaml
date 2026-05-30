@@ -132,6 +132,7 @@
                              Peaks="{Binding Peaks3DOverlay}"
                              OrthoTexturePath="{Binding OrthoTexturePath}"
                              OrthoTexturePaths="{Binding OrthoTexturePaths}"
+                             OrthoTextureCells="{Binding OrthoTextureCells}"
                              IsVisible="{Binding Is3DMode}" />
 
         <Label Grid.Row="3"
