@@ -43,7 +43,7 @@ The request body is a public OSM query indistinguishable from any other Overpass
 
 ## Open source
 
-MapaTur is open source: [github.com/Jakub-Syrek/MapaTur](https://github.com/Jakub-Syrek/MapaTur). You can audit every network call, every file write, and every dependency in the source tree.
+MapaTur is open source: [github.com/Jakub-Syrek/MapaTur2](https://github.com/Jakub-Syrek/MapaTur2). You can audit every network call, every file write, and every dependency in the source tree.
 
 ## Contact
 
