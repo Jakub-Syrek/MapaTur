@@ -237,6 +237,50 @@ def build_cell(gx: int, gy: int) -> np.ndarray:
     return bilinear_sample_rgb(mosaic, src_y, src_x)
 
 
+def normalize_cell_colors(cell_paths: list[str]) -> None:
+    """Reinhard transfer across the 8 cells: shifts each cell's per-channel RGB mean and std
+    onto a common target (the average across all cells). Esri World Imagery composites many
+    underlying sources (Maxar, NLC, regional providers); each has its own colour pipeline, so
+    adjacent areas can read as a tonal jump even when the seam isn't on a 4×2 cell boundary.
+    Normalising to a shared mean/std hides those internal jumps without flattening real terrain
+    contrast — the LOCAL variation inside each cell is preserved, only the GLOBAL bias shifts.
+
+    Two-pass to keep peak memory under one cell's worth of pixels (~500 MB RGB for 16384×10923):
+      1. Scan all cells, accumulate per-channel mean + variance.
+      2. Reload each cell, apply (x − μ_cell)/σ_cell × σ_target + μ_target, save back.
+    """
+    print(f"  normalising colours across {len(cell_paths)} cells (Reinhard RGB transfer)")
+    Image.MAX_IMAGE_PIXELS = None  # 16384×10923 trips the default decompression-bomb guard
+
+    means = np.zeros((len(cell_paths), 3), dtype=np.float64)
+    stds = np.zeros((len(cell_paths), 3), dtype=np.float64)
+    for i, path in enumerate(cell_paths):
+        # Read as uint8 (default), let numpy promote to float64 when computing the stats.
+        # Don't pre-cast to float32: 16384×10923×3 = 537 M pixels of byte values sum to ~1.4e11,
+        # which loses ~6 bits of precision in a float32 accumulator and silently gives wrong means.
+        arr = np.asarray(Image.open(path).convert("RGB"))  # uint8
+        flat = arr.reshape(-1, 3)
+        means[i] = flat.mean(axis=0, dtype=np.float64)
+        stds[i] = flat.std(axis=0, dtype=np.float64)
+        print(f"    [{i+1}/{len(cell_paths)}] stats {os.path.basename(path)}: "
+              f"μ={means[i].round(1).tolist()}  σ={stds[i].round(1).tolist()}")
+
+    target_mean = means.mean(axis=0)
+    target_std = stds.mean(axis=0)
+    print(f"  target μ={target_mean.round(1).tolist()}  σ={target_std.round(1).tolist()}")
+
+    # Apply correction. Guard against σ≈0 in degenerate cells (uniform colour) — fall back to a
+    # pure mean shift so we don't blow up the dynamic range. Per-pixel arithmetic is fine in
+    # float32 (no large sum involved), only the global stats need float64.
+    for i, path in enumerate(cell_paths):
+        arr = np.asarray(Image.open(path).convert("RGB")).astype(np.float32)
+        safe_std = np.where(stds[i] > 1.0, stds[i], 1.0)
+        scaled = (arr - means[i].astype(np.float32)) * (target_std / safe_std).astype(np.float32) + target_mean.astype(np.float32)
+        normalised = np.clip(scaled, 0, 255).astype(np.uint8)
+        Image.fromarray(normalised, "RGB").save(path, "PNG")
+        print(f"    [{i+1}/{len(cell_paths)}] wrote normalised {os.path.basename(path)}")
+
+
 def main() -> int:
     print(f"Building tiled Tatry ortho from Esri World Imagery z{TILE_ZOOM}")
     print(f"  grid {ORTHO_GRID_COLS}x{ORTHO_GRID_ROWS}, cell {CELL_W}x{CELL_H}")
@@ -247,6 +291,7 @@ def main() -> int:
     # remove the stale single-image ortho AFTER the whole tiled set is complete, so the terrain never loses
     # its texture mid-run.
     written: list[str] = []
+    fresh: list[str] = []
     for gy in range(ORTHO_GRID_ROWS):
         for gx in range(ORTHO_GRID_COLS):
             out = os.path.join(OUTPUT_DIR, f"{OUTPUT_PREFIX}-r{gy}-c{gx}.png")
@@ -257,10 +302,15 @@ def main() -> int:
             cell = build_cell(gx, gy)
             Image.fromarray(cell, "RGB").save(out, "PNG")
             written.append(out)
+            fresh.append(out)
             print(f"    wrote {out}")
 
     expected = ORTHO_GRID_COLS * ORTHO_GRID_ROWS
     if len(written) == expected:
+        # Always run normalisation when we have a full set, even on a pure-skip run, so that an
+        # interrupted-then-resumed generator still ends up with cross-cell colour balance.
+        normalize_cell_colors(written)
+
         legacy = os.path.join(OUTPUT_DIR, f"{OUTPUT_PREFIX}.png")
         if os.path.exists(legacy):
             os.remove(legacy)
