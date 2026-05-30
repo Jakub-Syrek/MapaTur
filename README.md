@@ -177,7 +177,7 @@ Milestones tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md). Initial milestones (
 
 ## Contributing
 
-Issues and pull requests are welcome at [github.com/Jakub-Syrek/MapaTur](https://github.com/Jakub-Syrek/MapaTur). Style and quality requirements:
+Issues and pull requests are welcome at [github.com/Jakub-Syrek/MapaTur2](https://github.com/Jakub-Syrek/MapaTur2). Style and quality requirements:
 
 - English-only code, comments, and commit messages
 - Conventional Commits (`feat:`, `fix:`, `perf:`, `refactor:`, `test:`, `docs:`, `chore:`)
