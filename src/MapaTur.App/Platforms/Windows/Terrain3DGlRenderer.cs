@@ -302,9 +302,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             useOrthoLocation = -1;
             orthoTexelLocation = -1;
             sharpenLocation = -1;
-            // The ortho texture ID belonged to the dead context; keep the bytes and re-upload them.
-            orthoTexture = 0;
-            if (orthoBytes is not null)
+            // The ortho texture IDs belonged to the dead context; drop the handles (don't GL-delete the
+            // stale ones) but keep the CPU bytes so they re-upload on the next EnsureOrthoTextures.
+            pendingOrthoRelease.Clear();
+            foreach (OrthoTile t in orthoTiles)
+            {
+                t.Texture = 0;
+            }
+            if (orthoTiles.Count > 0)
             {
                 orthoDirty = true;
             }
