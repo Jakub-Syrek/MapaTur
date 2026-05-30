@@ -41,6 +41,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     private readonly IOfflineMapLoader mapLoader;
     private readonly IMapAutoLoader autoLoader;
     private readonly ITileSourceFactory tileSourceFactory;
+    private readonly MBTilesOrthoCompositor? orthoCompositor;
     private readonly I3DSettingsStore settingsStore;
     private ViewportAwareTrailLayerController? viewportTrailController;
     private readonly ITrackLayerRenderer trackRenderer;
@@ -353,6 +354,19 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private IReadOnlyList<string>? orthoTexturePaths;
 
+    /// <summary>
+    /// Pre-decoded ortho cells composited from a basemap MBTiles archive (row-major). When set,
+    /// the 3D view uploads these RGBA8 buffers directly and ignores <see cref="OrthoTexturePath"/>
+    /// / <see cref="OrthoTexturePaths"/>. Null when no MBTiles draping is in effect.
+    /// </summary>
+    [ObservableProperty]
+    private IReadOnlyList<OrthoTextureCell>? orthoTextureCells;
+
+    // Path of the basemap MBTiles to drape on the 3D mesh once a DEM is available. Set during
+    // auto-load; consumed by EnsureOrthoTextureCellsAsync after LoadDemFromPathAsync finishes
+    // (the DEM provides the bounds the compositor needs to project tiles into mesh UV space).
+    private string? draping3DBasemapPath;
+
     // Ortho grid the terrain mesh is tiled to match (1×1 = a single full-extent texture).
     private int orthoGridCols = 1;
     private int orthoGridRows = 1;
@@ -404,6 +418,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <param name="planRouteUseCase">Route planning use case.</param>
     /// <param name="exportRouteToGpxUseCase">GPX export use case.</param>
     /// <param name="logger">Logger.</param>
+    /// <param name="orthoCompositor">Optional compositor that drapes basemap MBTiles tiles onto the 3D terrain mesh; null disables MBTiles draping.</param>
     public MapPageViewModel(
         IFilePickerService filePicker,
         IFileSaverService fileSaver,
@@ -426,7 +441,8 @@ public sealed partial class MapPageViewModel : ObservableObject
         IRoadLayerRenderer roadRenderer,
         PlanRouteUseCase planRouteUseCase,
         ExportRouteToGpxUseCase exportRouteToGpxUseCase,
-        ILogger<MapPageViewModel> logger)
+        ILogger<MapPageViewModel> logger,
+        MBTilesOrthoCompositor? orthoCompositor = null)
     {
         ArgumentNullException.ThrowIfNull(filePicker);
         ArgumentNullException.ThrowIfNull(fileSaver);
@@ -456,6 +472,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         this.mapLoader = mapLoader;
         this.autoLoader = autoLoader;
         this.tileSourceFactory = tileSourceFactory;
+        this.orthoCompositor = orthoCompositor;
         this.settingsStore = settingsStore;
 
         // Restore the saved vertical exaggeration before the partial OnXxxChanged hook
@@ -1113,6 +1130,42 @@ public sealed partial class MapPageViewModel : ObservableObject
         };
     }
 
+    /// <summary>
+    /// Composites the basemap's XYZ tiles into a single ortho texture sized to the loaded DEM and
+    /// hands it to the 3D view via <see cref="OrthoTextureCells"/>. Best-effort: a failure leaves
+    /// the terrain showing its hypsometric tint instead.
+    /// </summary>
+    private async Task TryComposite3DOrthoFromBasemapAsync(string basemapPath)
+    {
+        if (orthoCompositor is null || TerrainRaster is null)
+        {
+            return;
+        }
+        try
+        {
+            // Mesh is 1×1 ortho cells (the only grid we build when no ortho PNGs were discovered),
+            // so a single composited texture spanning the DEM is exactly what the renderer expects.
+            // 2048×2048 is the safe baseline for GL_MAX_TEXTURE_SIZE on every target platform.
+            const int cellSize = 2048;
+            MapBounds bounds = TerrainRaster.Bounds;
+            IReadOnlyList<OrthoTextureCell> cells = await Task.Run(async () =>
+            {
+                using ITileSource source = tileSourceFactory.OpenFromFile(basemapPath);
+                return await orthoCompositor.CompositeAsync(
+                    source, bounds, gridCols: 1, gridRows: 1, cellSize, cellSize).ConfigureAwait(false);
+            }).ConfigureAwait(true);
+
+            OrthoTextureCells = cells;
+            logger.LogInformation(
+                "Composited 3D ortho ({Count} cell(s), {Px}px) from basemap {Path}",
+                cells.Count, cellSize, basemapPath);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "MBTiles 3D ortho compositing failed for {Path}", basemapPath);
+        }
+    }
+
     public async Task AutoLoadOnStartupAsync()
     {
         if (autoLoadAttempted)
@@ -1153,6 +1206,10 @@ public sealed partial class MapPageViewModel : ObservableObject
                 // The loader zooms to whichever basemap loaded first; override that to
                 // frame the primary (most detailed / most local) archive instead.
                 ZoomToPrimaryBasemap(descriptors, plan.PrimaryPath);
+
+                // Remember the most-detailed archive so we can composite its tiles into the
+                // 3D ortho texture once the DEM (and therefore the cell bounds) is available.
+                draping3DBasemapPath = plan.PrimaryPath ?? plan.LoadOrder.LastOrDefault();
             }
             else if (discovery.HillshadeMBTilesPath is { } hillshadePath)
             {
@@ -1177,6 +1234,15 @@ public sealed partial class MapPageViewModel : ObservableObject
                 await LoadDemFromPathAsync(demPath).ConfigureAwait(true);
                 loaded.Add(Path.GetFileName(demPath));
                 logger.LogInformation("Auto-loaded DEM {Path}", demPath);
+
+                // Only drape the basemap on 3D when no explicit ortho PNG was discovered — a
+                // checked-in ortho image is always higher fidelity than re-sampled XYZ tiles.
+                if (discovery.OrthoTexturePath is null
+                    && (discovery.OrthoTilePaths is null || discovery.OrthoTilePaths.Count == 0)
+                    && draping3DBasemapPath is { } basemapForDraping)
+                {
+                    await TryComposite3DOrthoFromBasemapAsync(basemapForDraping).ConfigureAwait(true);
+                }
             }
 
             if (discovery.TrailsDataPath is { } trailsPath)

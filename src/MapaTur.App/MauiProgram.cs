@@ -143,6 +143,8 @@ public static class MauiProgram
         services.AddSingleton<IMapAutoLoader, FileSystemMapAutoLoader>();
         services.AddSingleton<I3DSettingsStore, MauiPreferences3DSettingsStore>();
         services.AddSingleton<ITileSourceFactory, MBTilesTileSourceFactory>();
+        services.AddSingleton<IRasterTileDecoder, SkiaRasterTileDecoder>();
+        services.AddSingleton<MBTilesOrthoCompositor>();
         services.AddSingleton<ITrackLayerRenderer, MapsuiTrackLayerRenderer>();
         services.AddSingleton<ITrailLayerRenderer, MapsuiTrailLayerRenderer>();
         services.AddSingleton<IRouteLayerRenderer, MapsuiRouteLayerRenderer>();
