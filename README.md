@@ -7,7 +7,7 @@
 [![MAUI](https://img.shields.io/badge/.NET%20MAUI-Android%20%7C%20iOS%20%7C%20Windows%20%7C%20macOS-512BD4?logo=dotnet&logoColor=white)](https://learn.microsoft.com/dotnet/maui/)
 [![3D engine](https://img.shields.io/badge/3D-OpenGL%20ES%203.0%20%C2%B7%20ANGLE%20%2F%20D3D11-CC3333)](docs/3d-terrain.md)
 [![Mapsui](https://img.shields.io/badge/maps-Mapsui%20%2B%20SkiaSharp-2E7D32)](https://mapsui.com/)
-[![Tests](https://img.shields.io/badge/tests-471%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-473%20passing-brightgreen)](#testing)
 [![Architecture](https://img.shields.io/badge/architecture-Clean-success)](#architecture)
 [![Top language](https://img.shields.io/github/languages/top/Jakub-Syrek/MapaTur2)](#)
 [![Code size](https://img.shields.io/github/languages/code-size/Jakub-Syrek/MapaTur2)](#)
@@ -166,7 +166,7 @@ dotnet test
 | Suite | Tests | Focus |
 |---|---|---|
 | `MapaTur.Domain.Tests` | 117 | Value objects, aggregates (Route), elevation math, DEM, POI tags + colours |
-| `MapaTur.Application.Tests` | 272 | Overpass queries (trails/POI/roads), 3D terrain math, route planner + use cases |
+| `MapaTur.Application.Tests` | 274 | Overpass queries (trails/POI/roads), 3D terrain math, route planner + use cases |
 | `MapaTur.Infrastructure.Tests` | 60 | TCX/Overpass/POI/road parsers, MBTiles + DEM readers, SQLite, GPX |
 | `MapaTur.Routing.Tests` | 22 | Tobler function, distance/time cost functions, graph snapping, A\* correctness |
 | **Total** | **471** | xUnit + FluentAssertions + NSubstitute + FsCheck |
