@@ -27,8 +27,12 @@ public sealed class TerrainMesh3D
     /// <summary>Per-vertex unshaded hypsometric ARGB colours. The GPU renderer combines these with <see cref="Normals"/> to shade per-pixel.</summary>
     public uint[] BaseColors { get; }
 
-    /// <summary>Per-vertex texture coordinates (2 floats u,v per vertex) mapping an ortho image across the full raster: (0,0)=NW, (1,1)=SE.</summary>
+    /// <summary>Per-vertex texture coordinates (2 floats u,v per vertex). With a 1×1 ortho grid they span the
+    /// full raster (0,0)=NW..(1,1)=SE; with a finer grid they are LOCAL to this tile's ortho cell.</summary>
     public float[] TexCoords { get; }
+
+    /// <summary>Index (row-major) of the ortho texture cell this mesh tile samples; 0 for a single full-extent ortho.</summary>
+    public int OrthoTileIndex { get; }
 
     /// <summary>Triangle index buffer (3 ushorts per triangle).</summary>
     public ushort[] Indices { get; }
@@ -63,13 +67,15 @@ public sealed class TerrainMesh3D
         float verticalExaggeration,
         MapBounds bounds,
         Vector3 lightDirection,
-        float ambientFactor)
+        float ambientFactor,
+        int orthoTileIndex)
     {
         Vertices = vertices;
         Normals = normals;
         Colors = colors;
         BaseColors = baseColors;
         TexCoords = texCoords;
+        OrthoTileIndex = orthoTileIndex;
         Indices = indices;
         Center = center;
         HorizontalExtent = horizontalExtent;
@@ -114,6 +120,30 @@ public sealed class TerrainMesh3D
     private const int MaxVerticesPerMesh = ushort.MaxValue + 1;
 
     /// <summary>
+    /// The ortho texture cell a mesh tile samples: its span in raster-grid indices (so per-vertex UV is
+    /// local to the cell) and its index in the ortho grid. Default (<see cref="Spans"/> false) means
+    /// "one texture over the whole raster" — the legacy single-image behaviour.
+    /// </summary>
+    private readonly record struct OrthoCell(int ColStart, int ColEnd, int RowStart, int RowEnd, int TileIndex, bool Spans)
+    {
+        public static OrthoCell Full(int cols, int rows) => new(0, cols - 1, 0, rows - 1, 0, true);
+    }
+
+    /// <summary>
+    /// Returns <paramref name="parts"/>+1 grid-index boundaries splitting [0, count-1] into contiguous
+    /// ranges that share their seam index with the next range (so adjacent meshes have no crack).
+    /// </summary>
+    private static int[] SplitPoints(int count, int parts)
+    {
+        var splits = new int[parts + 1];
+        for (int i = 0; i <= parts; i++)
+        {
+            splits[i] = (int)Math.Round((double)(count - 1) * i / parts);
+        }
+        return splits;
+    }
+
+    /// <summary>
     /// Builds a single terrain mesh from a DEM raster. The raster must fit within the 16-bit index
     /// limit (≤ 65 536 vertices); larger rasters must use <see cref="BuildTiles"/>.
     /// </summary>
@@ -148,7 +178,12 @@ public sealed class TerrainMesh3D
     /// <param name="raster">Source DEM (may exceed 65 536 cells).</param>
     /// <param name="options">Optional tuning; default options use NW sun at 2× vertical exaggeration.</param>
     /// <param name="maxTileSide">Maximum vertices per tile side minus one; a tile spans up to (maxTileSide + 1)² vertices. Default 255 → ≤ 256² = 65 536.</param>
-    public static IReadOnlyList<TerrainMesh3D> BuildTiles(DemRaster raster, TerrainMeshOptions? options = null, int maxTileSide = 255)
+    public static IReadOnlyList<TerrainMesh3D> BuildTiles(
+        DemRaster raster,
+        TerrainMeshOptions? options = null,
+        int maxTileSide = 255,
+        int orthoGridCols = 1,
+        int orthoGridRows = 1)
     {
         ArgumentNullException.ThrowIfNull(raster);
         if (maxTileSide < 1)
@@ -162,21 +197,42 @@ public sealed class TerrainMesh3D
                 nameof(maxTileSide), maxTileSide, "A tile of this side would exceed the 16-bit vertex limit.");
         }
 
+        ArgumentOutOfRangeException.ThrowIfLessThan(orthoGridCols, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(orthoGridRows, 1);
+
         options ??= new TerrainMeshOptions();
         MeshFrame frame = ComputeFrame(raster);
         int cols = raster.Columns;
         int rows = raster.Rows;
 
         var tiles = new List<TerrainMesh3D>();
-        // Step by maxTileSide and make ranges inclusive, so tile N's last row/column equals tile N+1's
-        // first — the seam vertices are bit-identical in both tiles, leaving no gap between them.
-        for (int r0 = 0; r0 < rows - 1; r0 += maxTileSide)
+
+        // Tile per ortho cell so a mesh tile never straddles a texture boundary: each mesh tile samples one
+        // ortho cell with UV local to that cell. Cells share their seam row/column with the neighbour, and
+        // mesh sub-tiles use inclusive ranges, so there are no cracks and textures meet seamlessly under
+        // ClampToEdge. orthoGrid 1×1 → one cell over the whole raster (the legacy single-texture path).
+        int[] colSplits = SplitPoints(cols, orthoGridCols);
+        int[] rowSplits = SplitPoints(rows, orthoGridRows);
+
+        for (int gy = 0; gy < orthoGridRows; gy++)
         {
-            int r1 = Math.Min(r0 + maxTileSide, rows - 1);
-            for (int c0 = 0; c0 < cols - 1; c0 += maxTileSide)
+            int cellR0 = rowSplits[gy];
+            int cellR1 = rowSplits[gy + 1];
+            for (int gx = 0; gx < orthoGridCols; gx++)
             {
-                int c1 = Math.Min(c0 + maxTileSide, cols - 1);
-                tiles.Add(BuildBlock(raster, options, frame, c0, c1, r0, r1));
+                int cellC0 = colSplits[gx];
+                int cellC1 = colSplits[gx + 1];
+                var cell = new OrthoCell(cellC0, cellC1, cellR0, cellR1, (gy * orthoGridCols) + gx, true);
+
+                for (int r0 = cellR0; r0 < cellR1; r0 += maxTileSide)
+                {
+                    int r1 = Math.Min(r0 + maxTileSide, cellR1);
+                    for (int c0 = cellC0; c0 < cellC1; c0 += maxTileSide)
+                    {
+                        int c1 = Math.Min(c0 + maxTileSide, cellC1);
+                        tiles.Add(BuildBlock(raster, options, frame, c0, c1, r0, r1, cell));
+                    }
+                }
             }
         }
 
@@ -218,7 +274,8 @@ public sealed class TerrainMesh3D
         int colStart,
         int colEnd,
         int rowStart,
-        int rowEnd)
+        int rowEnd,
+        OrthoCell orthoCell = default)
     {
         int cols = raster.Columns;
         int rows = raster.Rows;
@@ -234,10 +291,12 @@ public sealed class TerrainMesh3D
         var texCoords = new float[vertexCount * 2];
         var indices = new ushort[(tileCols - 1) * (tileRows - 1) * 2 * 3];
 
-        // Normalisers map each vertex's GLOBAL grid index to [0,1] across the full raster, so an ortho image
-        // drapes seamlessly across every tile. Guard the 1-column/1-row degenerate case.
-        float uDenom = cols > 1 ? cols - 1 : 1;
-        float vDenom = rows > 1 ? rows - 1 : 1;
+        // UV maps each vertex to [0,1] within its ORTHO CELL (the texture this tile samples). The default
+        // full-extent cell spans the whole raster (legacy global mapping); a finer grid gives local UV so
+        // each cell has its own texture.
+        OrthoCell cell = orthoCell.Spans ? orthoCell : OrthoCell.Full(cols, rows);
+        float uDenom = cell.ColEnd > cell.ColStart ? cell.ColEnd - cell.ColStart : 1;
+        float vDenom = cell.RowEnd > cell.RowStart ? cell.RowEnd - cell.RowStart : 1;
 
         // Vertex positions in the full-raster world frame. Row 0 = north edge = +Y; last row = -Y.
         for (int r = rowStart; r <= rowEnd; r++)
@@ -278,8 +337,8 @@ public sealed class TerrainMesh3D
                 Vector3 normal = Vector3.Normalize(new Vector3(-dzdx, -dzdy, 1f));
                 int li = (localRow * tileCols) + (c - colStart);
                 normals[li] = normal;
-                texCoords[li * 2] = c / uDenom;
-                texCoords[(li * 2) + 1] = r / vDenom;
+                texCoords[li * 2] = (c - cell.ColStart) / uDenom;
+                texCoords[(li * 2) + 1] = (r - cell.RowStart) / vDenom;
 
                 uint baseColor = HypsometricColor(raster[c, r]);
                 baseColors[li] = baseColor;
@@ -323,7 +382,8 @@ public sealed class TerrainMesh3D
             exaggeration,
             raster.Bounds,
             options.LightDirection,
-            options.AmbientFactor);
+            options.AmbientFactor,
+            cell.TileIndex);
     }
 
     /// <summary>

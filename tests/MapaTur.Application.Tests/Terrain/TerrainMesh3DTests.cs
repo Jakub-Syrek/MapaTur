@@ -66,6 +66,37 @@ public sealed class TerrainMesh3DTests
     }
 
     [Fact]
+    public void BuildTiles_DefaultOrthoGrid_AllTilesUseCellZeroWithFullUv()
+    {
+        var raster = BuildFlatRaster(300, 300); // forces multiple mesh tiles at maxTileSide 255
+
+        var tiles = TerrainMesh3D.BuildTiles(raster);
+
+        tiles.Should().OnlyContain(t => t.OrthoTileIndex == 0, "a 1x1 ortho grid has a single texture");
+        tiles.SelectMany(t => t.TexCoords).Min().Should().BeApproximately(0f, 1e-6f);
+        tiles.SelectMany(t => t.TexCoords).Max().Should().BeApproximately(1f, 1e-6f);
+    }
+
+    [Fact]
+    public void BuildTiles_TwoByOneOrthoGrid_AssignsCellIndicesAndLocalUv()
+    {
+        var raster = BuildFlatRaster(200, 100);
+
+        var tiles = TerrainMesh3D.BuildTiles(raster, maxTileSide: 255, orthoGridCols: 2, orthoGridRows: 1);
+
+        tiles.Select(t => t.OrthoTileIndex).Distinct().OrderBy(i => i).Should().Equal(0, 1);
+        // Each cell's UV is local: u spans the full [0,1] within its own half, not 0..0.5.
+        foreach (var t in tiles)
+        {
+            int n = t.TexCoords.Length / 2;
+            float minU = Enumerable.Range(0, n).Select(i => t.TexCoords[i * 2]).Min();
+            float maxU = Enumerable.Range(0, n).Select(i => t.TexCoords[i * 2]).Max();
+            minU.Should().BeApproximately(0f, 1e-6f);
+            maxU.Should().BeApproximately(1f, 1e-6f);
+        }
+    }
+
+    [Fact]
     public void Build_TexCoordsMapCornersAcrossFullRaster()
     {
         // 2x2 raster → 4 vertices in row-major order: NW, NE, SW, SE. UV spans [0,1]² with the
