@@ -139,20 +139,31 @@ def main() -> int:
     print(f"Building tiled Tatry ortho ({ORTHO_GRID_COLS}x{ORTHO_GRID_ROWS} cells of {CELL_W}x{CELL_H})...")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # Remove any stale single-image ortho so the auto-loader prefers the tiled set unambiguously.
-    legacy = os.path.join(OUTPUT_DIR, f"{OUTPUT_PREFIX}.png")
-    if os.path.exists(legacy):
-        os.remove(legacy)
-        print(f"  removed stale single-image {legacy}")
-
+    # Resume-friendly: skip cells that already exist (a previous run may have been interrupted) and only
+    # remove the stale single-image ortho AFTER the whole tiled set is complete, so the terrain never loses
+    # its texture mid-run.
+    written = []
     for gy in range(ORTHO_GRID_ROWS):
         for gx in range(ORTHO_GRID_COLS):
-            cell = build_cell(gx, gy)
             out = os.path.join(OUTPUT_DIR, f"{OUTPUT_PREFIX}-r{gy}-c{gx}.png")
+            if os.path.exists(out):
+                print(f"    skip existing {out}")
+                written.append(out)
+                continue
+            cell = build_cell(gx, gy)
             Image.fromarray(cell, "RGB").save(out, "PNG")
+            written.append(out)
             print(f"    wrote {out}")
 
-    print("done.")
+    expected = ORTHO_GRID_COLS * ORTHO_GRID_ROWS
+    if len(written) == expected:
+        legacy = os.path.join(OUTPUT_DIR, f"{OUTPUT_PREFIX}.png")
+        if os.path.exists(legacy):
+            os.remove(legacy)
+            print(f"  removed stale single-image {legacy}")
+        print(f"done — {expected} tiles ready.")
+    else:
+        print(f"WARNING: only {len(written)}/{expected} tiles present; kept any single-image ortho as fallback.")
     return 0
 
 
