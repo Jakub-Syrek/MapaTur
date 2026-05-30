@@ -2,16 +2,16 @@
 
 **Offline-first hiking & tourist map for the Polish Tatras — with a real-time 3D terrain engine — built on .NET MAUI.**
 
-[![CI](https://github.com/Jakub-Syrek/MapaTur/actions/workflows/ci.yml/badge.svg)](https://github.com/Jakub-Syrek/MapaTur/actions/workflows/ci.yml)
+[![CI](https://github.com/Jakub-Syrek/MapaTur2/actions/workflows/ci.yml/badge.svg)](https://github.com/Jakub-Syrek/MapaTur2/actions/workflows/ci.yml)
 [![.NET 10](https://img.shields.io/badge/.NET-10.0-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
 [![MAUI](https://img.shields.io/badge/.NET%20MAUI-Android%20%7C%20iOS%20%7C%20Windows%20%7C%20macOS-512BD4?logo=dotnet&logoColor=white)](https://learn.microsoft.com/dotnet/maui/)
 [![3D engine](https://img.shields.io/badge/3D-OpenGL%20ES%203.0%20%C2%B7%20ANGLE%20%2F%20D3D11-CC3333)](docs/3d-terrain.md)
 [![Mapsui](https://img.shields.io/badge/maps-Mapsui%20%2B%20SkiaSharp-2E7D32)](https://mapsui.com/)
 [![Tests](https://img.shields.io/badge/tests-471%20passing-brightgreen)](#testing)
 [![Architecture](https://img.shields.io/badge/architecture-Clean-success)](#architecture)
-[![Top language](https://img.shields.io/github/languages/top/Jakub-Syrek/MapaTur)](#)
-[![Code size](https://img.shields.io/github/languages/code-size/Jakub-Syrek/MapaTur)](#)
-[![Last commit](https://img.shields.io/github/last-commit/Jakub-Syrek/MapaTur)](https://github.com/Jakub-Syrek/MapaTur/commits)
+[![Top language](https://img.shields.io/github/languages/top/Jakub-Syrek/MapaTur2)](#)
+[![Code size](https://img.shields.io/github/languages/code-size/Jakub-Syrek/MapaTur2)](#)
+[![Last commit](https://img.shields.io/github/last-commit/Jakub-Syrek/MapaTur2)](https://github.com/Jakub-Syrek/MapaTur2/commits)
 [![License](https://img.shields.io/badge/License-Proprietary-blue)](#license)
 
 ![MapaTur 3D terrain — orthophoto-draped Tatras](docs/screenshots/3d-tatry.png)
