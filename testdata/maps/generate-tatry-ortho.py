@@ -57,17 +57,21 @@ WEST, SOUTH, EAST, NORTH = 19.50, 49.10, 20.40, 49.40
 ORTHO_GRID_COLS = 4
 ORTHO_GRID_ROWS = 2
 
-# Per-cell output resolution. 8192 ≤ GL_MAX_TEXTURE_SIZE; height keeps the cell's lon/lat aspect.
-CELL_W = 8192
+# Per-cell output resolution. 16384 = GL_MAX_TEXTURE_SIZE on every desktop GPU we ship to;
+# height keeps the cell's lon/lat aspect. At 16384 over the 16.4 km cell width that is ~1 m/px
+# output — matches the z17 native sample size below so detail isn't wasted to downsampling.
+CELL_W = 16384
 CELL_H = int(round(CELL_W * ((NORTH - SOUTH) / ORTHO_GRID_ROWS) / ((EAST - WEST) / ORTHO_GRID_COLS)))
 
-# Tile source. z16 over the Tatras = ~1.6 m/px native, a slight downsample into 8192-px-wide cells
-# (cell is 25 km wide → 3 m/px output) so the result is sharp, not upscaled-soft.
+# Tile source. z17 over the Tatras = ~0.8 m/px native. The output above is ~1 m/px, so each
+# output pixel averages about 1.6 source pixels — proper bilinear oversample, no aliasing on
+# rooftops, road edges or tree-line. z16 (~1.6 m/px) was an under-sample for 1 m/px output;
+# z17 fully populates the bigger cell instead of upscaling.
 TILE_URL_FMT = (
     "https://services.arcgisonline.com/ArcGIS/rest/services/"
     "World_Imagery/MapServer/tile/{z}/{y}/{x}"
 )
-TILE_ZOOM = 16
+TILE_ZOOM = 17
 TILE_SIZE = 256
 
 USER_AGENT = "MapaTur/0.1 (+https://github.com/Jakub-Syrek/MapaTur)"
