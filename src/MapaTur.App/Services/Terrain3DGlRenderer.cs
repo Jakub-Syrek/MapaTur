@@ -1,4 +1,6 @@
-#if WINDOWS
+// Cross-platform: every TFM where SkiaSharp's SKGLView exposes a live OpenGL ES context
+// (Windows ANGLE, Android system GLES, iOS/Mac Catalyst OpenGLES.framework) shares this
+// renderer. Library loading lives in PlatformGl so the renderer itself stays GL-only.
 using System.Numerics;
 
 using MapaTur.Application.Terrain;
@@ -10,7 +12,7 @@ using Serilog;
 
 using Silk.NET.OpenGLES;
 
-namespace MapaTur.App.Platforms.Windows;
+namespace MapaTur.App.Services;
 
 /// <summary>
 /// Real GPU terrain renderer: draws the mesh tiles through OpenGL ES 3.0 (ANGLE) with a depth buffer, on
@@ -271,7 +273,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         Route? route,
         IReadOnlyList<Trail>? roads = null)
     {
-        gl ??= AngleGl.Get();
+        gl ??= PlatformGl.Get();
 
         // Resizing the window (e.g. maximise) makes SKGLView recreate the GL context, which invalidates
         // every GPU object ID we cached (shader program, VAOs, VBOs). Detect that — the old program ID is
@@ -1024,4 +1026,3 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
     }
 }
-#endif

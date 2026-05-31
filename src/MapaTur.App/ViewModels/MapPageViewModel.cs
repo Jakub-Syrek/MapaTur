@@ -1077,11 +1077,11 @@ public sealed partial class MapPageViewModel : ObservableObject
         StatusMessage = Localization.AppStrings.Status3DMode;
     }
 
-    // Vertex budget per platform — sized to the renderer that draws the mesh:
-    //   - Windows: hardware GL path handles tens of millions of verts; no cap.
-    //   - Android / mobile / non-Windows: software Skia path is the bottleneck; ~2 M verts keeps
-    //     pinch/orbit smooth on a mid-range phone. Above that, subsample.
-#if WINDOWS
+    // Vertex budget per platform — sized to the renderer that draws the mesh. Android now also
+    // ships the hardware GL renderer (Services.Terrain3DGlRenderer is no longer Windows-only),
+    // so phones can handle the full LiDAR mesh too. iOS / Mac Catalyst still fall through to CPU
+    // Skia until the GL bridge is verified there, so they keep the conservative cap.
+#if WINDOWS || ANDROID
     private const int MaxMeshVerticesForPlatform = int.MaxValue;
 #else
     private const int MaxMeshVerticesForPlatform = 2_000_000;
@@ -1397,12 +1397,25 @@ public sealed partial class MapPageViewModel : ObservableObject
                 StatusMessage = $"Auto-loaded: {string.Join(", ", loaded)}";
             }
 
-            // Start in 3D when a terrain mesh is available — the app's headline view. Falls back to the
-            // flat map when no DEM was found (3D would otherwise be an empty scene).
+            // Start in 3D when a terrain mesh is available — the app's headline view. Falls back to
+            // the flat map when no DEM was found (3D would otherwise be an empty scene).
+            // On non-Windows (mobile + Mac) ALWAYS start in 3D when DEM is present, and force-fall
+            // even without DEM is avoided to spare an empty sky view. On Windows we also default
+            // to 3D for the same reason.
             if (TerrainTiles is not null)
             {
                 Is3DMode = true;
             }
+#if ANDROID || IOS
+            // Mobile-specific: explicitly prefer 3D on phones because the 2D Mapsui view is hard
+            // to fit/use on small portrait screens, while 3D shows the mountains immediately —
+            // the whole reason someone installs the app. The if-block above already covered this,
+            // but the duplicate guard makes the intent obvious for the next reader.
+            if (TerrainTiles is not null)
+            {
+                Is3DMode = true;
+            }
+#endif
         }
         catch (Exception ex)
         {

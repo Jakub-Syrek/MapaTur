@@ -254,7 +254,12 @@ public partial class Terrain3DView : ContentView
     private double lastOrbitTotalY;
     private double lastTranslateTotalX;
     private double lastTranslateTotalY;
+    // Only used on non-Android platforms where Scale is cumulative — Android reads e.Scale as a
+    // per-update delta directly. The pragma silences the analyzer "assigned but never used" on the
+    // ANDROID partial build where the #else branch is excluded.
+#pragma warning disable CS0414, IDE0044
     private double lastPinchScale = 1.0;
+#pragma warning restore CS0414, IDE0044
 
     // Set when OrthoTexturePath changes; the GPU render path decodes the image and hands it to the GL
     // renderer once (off the per-frame path). Lives outside #if WINDOWS because the bindable setter does;
@@ -267,9 +272,35 @@ public partial class Terrain3DView : ContentView
     {
         InitializeComponent();
         controller = new Terrain3DController(Camera);
+
+        // Orbit gizmo: drag on the sphere widget rotates the camera; mirror current camera
+        // azimuth + pitch onto the gizmo so its red marker shows where we're looking. The
+        // gizmo's PanGesture is independent of the mesh's, so there's no conflict.
+        OrbitGizmo.OrbitDragged += OnOrbitGizmoDragged;
+        SyncOrbitGizmo();
 #if WINDOWS
         Canvas.HandlerChanged += OnCanvasHandlerChanged;
 #endif
+    }
+
+    private void OnOrbitGizmoDragged(object? sender, OrbitDragEventArgs e)
+    {
+        // The orb is a "turn-the-head" widget: camera position stays put, only the view
+        // direction rotates. ApplyLookAround swings the target so the recomputed orbit
+        // position lands back where the camera already was.
+        controller.ApplyLookAround(e.DxPixels, e.DyPixels);
+        Canvas.InvalidateSurface();
+        SyncOrbitGizmo();
+    }
+
+    private void SyncOrbitGizmo()
+    {
+        if (OrbitGizmo is null)
+        {
+            return;
+        }
+        OrbitGizmo.CameraAzimuthRadians = Camera.AzimuthRadians;
+        OrbitGizmo.CameraPitchRadians = Camera.PitchRadians;
     }
 
     /// <summary>
@@ -317,6 +348,10 @@ public partial class Terrain3DView : ContentView
 
     private void OnZoomOutClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyZoom(1f / ButtonZoomFactor));
 
+    // Wys. ▲ / ▼ buttons now move the camera target up/down in world-Z (vertical translation),
+    // regardless of camera pitch. The earlier tilt mapping was confusing — users expect "up"
+    // to lift the camera straight up. ApplyVertical clamps Target.Z to [-2000, 8000] m so a
+    // runaway click can't push the target off the mesh and turn the view into pure sky.
     private void OnRaiseClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyVertical(ButtonVerticalStep));
 
     private void OnLowerClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyVertical(-ButtonVerticalStep));
@@ -347,6 +382,29 @@ public partial class Terrain3DView : ContentView
         Camera.Distance = Math.Max(frame.HorizontalExtent * 2.5f, 5_000f);
         Camera.AzimuthRadians = MathF.PI / 4f;
         Camera.PitchRadians = MathF.PI / 4f;
+
+        // Push safety bounds into the controller so the camera can't tunnel through the surface
+        // (CameraFloorZ = highest world-Z + a 50 m clearance) and Pan can't drag the target off
+        // the mesh footprint (Target X/Y clamped to ±HorizontalExtent around the mesh centre).
+        // Find the global max elevation across ALL loaded tiles, not just the WorldFrame one —
+        // each tile holds its own subset of vertices.
+        float globalMaxZ = float.NegativeInfinity;
+        if (Tiles is { Count: > 0 } tiles)
+        {
+            for (int i = 0; i < tiles.Count; i++)
+            {
+                if (tiles[i].MaxElevationZ > globalMaxZ)
+                {
+                    globalMaxZ = tiles[i].MaxElevationZ;
+                }
+            }
+        }
+        controller.CameraFloorZ = float.IsNegativeInfinity(globalMaxZ) ? float.NaN : globalMaxZ + 50f;
+        controller.MinTargetX = frame.Center.X - frame.HorizontalExtent;
+        controller.MaxTargetX = frame.Center.X + frame.HorizontalExtent;
+        controller.MinTargetY = frame.Center.Y - frame.HorizontalExtent;
+        controller.MaxTargetY = frame.Center.Y + frame.HorizontalExtent;
+
         Canvas.InvalidateSurface();
     }
 
@@ -368,6 +426,12 @@ public partial class Terrain3DView : ContentView
 
     private void OnPaintSurface(object? sender, SKPaintGLSurfaceEventArgs e)
     {
+        // Mirror the latest camera angles onto the orbit gizmo on every paint so its marker
+        // stays in sync no matter how the camera was moved (gestures, gizmo, keyboard, buttons).
+        // The gizmo's BindableProperty only re-paints when the float changes, so a no-op camera
+        // frame is free.
+        SyncOrbitGizmo();
+
         var canvas = e.Surface.Canvas;
 
         if (Tiles is not { Count: > 0 } tiles || WorldFrame is not { } frame)
@@ -437,7 +501,7 @@ public partial class Terrain3DView : ContentView
             }
         }
 
-#if WINDOWS
+#if WINDOWS || ANDROID
         // GPU engine: GL draws the depth-buffered terrain, then the Skia overlays (trails / route /
         // markers / peak labels) are drawn over it with the same camera so they register. Any GL/shader
         // failure disables it for the session and falls through to the all-Skia renderer below.
@@ -460,7 +524,13 @@ public partial class Terrain3DView : ContentView
         renderer.RenderTiles(canvas, e.Info.Width, e.Info.Height, tiles, Camera, frameScratch, null, projectedTrails, projectedRoute, projectedClimbing, projectedPois, projectedPeaks, projectedUserLocation);
     }
 
-    private void OnOrbitPan(object? sender, PanUpdatedEventArgs e)
+    /// <summary>
+    /// 1-finger drag on the mesh = PAN. World moves under the finger (Cesium / Google Maps
+    /// convention). Translation only — rotation lives on the orbit-gizmo widget so a drag never
+    /// has a hidden second meaning. ApplyPan inverts the deltas internally so the world tracks
+    /// the finger rather than runs away from it.
+    /// </summary>
+    private void OnMeshPan(object? sender, PanUpdatedEventArgs e)
     {
         // On Windows the mouse is driven by the raw pointer handlers (OnPlatformPointer*); the touch
         // PanGestureRecognizer would otherwise fight them. Touch platforms keep using this gesture.
@@ -482,8 +552,8 @@ public partial class Terrain3DView : ContentView
                 float dy = (float)(e.TotalY - lastOrbitTotalY);
                 lastOrbitTotalX = e.TotalX;
                 lastOrbitTotalY = e.TotalY;
-                // Drag up (negative dy on screen) tilts the camera higher.
-                controller.ApplyOrbit(dx, -dy);
+                // Drag-to-pan: invert deltas so the world tracks the finger.
+                controller.ApplyPan(-dx, -dy);
                 Canvas.InvalidateSurface();
                 return;
         }
@@ -516,27 +586,57 @@ public partial class Terrain3DView : ContentView
         }
     }
 
+    // pinchActive used to mediate the 2-finger pan vs pinch race. The Cesium-style gesture set
+    // doesn't bind 2-finger pan at all, so the flag is no longer read — kept (with pragma) only
+    // because OnPinch still sets it, in case we later restore a 2-finger gesture that needs to
+    // know when zoom is in progress.
+#pragma warning disable CS0414, IDE0044
+    private bool pinchActive;
+#pragma warning restore CS0414, IDE0044
+
     private void OnPinch(object? sender, PinchGestureUpdatedEventArgs e)
     {
         if (e.Status == GestureStatus.Started)
         {
+            pinchActive = true;
             lastPinchScale = 1.0;
             return;
         }
-
+        if (e.Status == GestureStatus.Completed || e.Status == GestureStatus.Canceled)
+        {
+            pinchActive = false;
+            return;
+        }
         if (e.Status != GestureStatus.Running)
         {
             return;
         }
 
+        // Platform divergence in PinchGestureUpdatedEventArgs.Scale:
+        //   - Windows / macOS / iOS report CUMULATIVE scale relative to gesture start, so per-frame
+        //     delta = current / lastReported.
+        //   - Android reports PER-UPDATE delta directly (each update is the multiplier vs. the
+        //     previous one, typically 0.97..1.03 even mid-gesture).
+        // Confirmed against `adb logcat`: 10 consecutive Running updates each at 0.987 — would mean
+        // cumulative -1.3% total if treated as cumulative, but actually mean -1.3% PER STEP.
+        // Trust the platform-native interpretation rather than try to unify in one direction.
+        double perFrame;
+#if ANDROID
+        perFrame = e.Scale;
+#else
         if (lastPinchScale <= 0)
         {
             lastPinchScale = e.Scale;
         }
-
-        double scaleDelta = e.Scale / lastPinchScale;
+        perFrame = e.Scale / lastPinchScale;
         lastPinchScale = e.Scale;
-        controller.ApplyZoom((float)scaleDelta);
+#endif
+
+        // Power-2.5 boost so a tiny finger-spread (perFrame ~ 1.02) produces a visible zoom step
+        // on a phone screen — without it pinch barely moved because two-finger spread between
+        // 60 Hz update frames is only a couple of pixels.
+        double boosted = Math.Pow(perFrame, 2.5);
+        controller.ApplyZoom((float)boosted);
         Canvas.InvalidateSurface();
     }
 
@@ -792,12 +892,16 @@ public partial class Terrain3DView : ContentView
             e.Handled = true;
         }
     }
+#endif  // WINDOWS — mouse-wheel + keyboard region close
 
+#if WINDOWS || ANDROID
     // ── Real GPU terrain engine (OpenGL ES on the SKGLView context) ───────────────────────────────
     // Flip to false to force the Skia renderer. On any GL/shader failure we fall back automatically.
+    // Region applies to every TFM where the GLES renderer is built; iOS/Mac targets fall through to
+    // the CPU Skia path until SKGLView's framework bridge is verified there.
     private static readonly bool UseGlRenderer = true;
 
-    private Platforms.Windows.Terrain3DGlRenderer? glRenderer;
+    private Services.Terrain3DGlRenderer? glRenderer;
     private bool glDisabled;
 
     // Decoded ortho pixels cached by path so re-entering 3D (which rebuilds the renderer) re-uploads from
@@ -816,7 +920,7 @@ public partial class Terrain3DView : ContentView
 
         try
         {
-            glRenderer ??= new Platforms.Windows.Terrain3DGlRenderer();
+            glRenderer ??= new Services.Terrain3DGlRenderer();
 
             // Push a changed ortho image to the GL renderer once (it uploads on the GL thread next Render).
             if (orthoPathDirty)
@@ -855,7 +959,7 @@ public partial class Terrain3DView : ContentView
     // Decodes the ortho tiles to tightly-packed top-row-first RGBA8 (row 0 = north, matching the mesh UVs)
     // and hands the set to the GL renderer. A null/empty list clears the ortho (back to the hypsometric
     // tint). If any tile fails to decode the whole set is abandoned, so textures never mis-align to cells.
-    private void ApplyOrthoTextures(Platforms.Windows.Terrain3DGlRenderer renderer, IReadOnlyList<string>? paths)
+    private void ApplyOrthoTextures(Services.Terrain3DGlRenderer renderer, IReadOnlyList<string>? paths)
     {
         if (paths is null || paths.Count == 0)
         {
@@ -896,7 +1000,7 @@ public partial class Terrain3DView : ContentView
 
     // Skips DecodeOrtho entirely: pre-composited cells (e.g. from an MBTiles archive) already carry
     // RGBA8 pixels and just need to flow through to SetOrthoTextures in row-major order.
-    private void ApplyOrthoTextureCells(Platforms.Windows.Terrain3DGlRenderer renderer, IReadOnlyList<OrthoTextureCell> cells)
+    private void ApplyOrthoTextureCells(Services.Terrain3DGlRenderer renderer, IReadOnlyList<OrthoTextureCell> cells)
     {
         var decoded = new List<(byte[] Rgba, int Width, int Height)>(cells.Count);
         foreach (OrthoTextureCell cell in cells)

@@ -98,8 +98,10 @@
 		<PackageReference Include="Serilog.Extensions.Logging" />
 		<PackageReference Include="Serilog.Sinks.File" />
 		<PackageReference Include="SkiaSharp.Views.Maui.Controls" />
-		<!-- GPU 3D engine: only the Windows TFM (ANGLE OpenGL ES) uses the GL renderer. -->
-		<PackageReference Include="Silk.NET.OpenGLES" Condition="$(TargetFramework.Contains('windows'))" />
+		<!-- GPU 3D engine: every TFM where SkiaSharp's SKGLView exposes a live OpenGL ES context.
+		     Windows = ANGLE, Android = system GLES2/3, iOS / Mac Catalyst = system GLES bridge.
+		     Silk.NET gives us pointer-level GL calls without P/Invoking each entry point. -->
+		<PackageReference Include="Silk.NET.OpenGLES" />
 	</ItemGroup>
 
 	<ItemGroup>
