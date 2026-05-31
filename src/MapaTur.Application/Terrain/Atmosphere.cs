@@ -104,10 +104,14 @@ public sealed class Atmosphere
         AmbientFactor = Math.Clamp(0.05f + (0.40f * elevationSin), 0.02f, 0.45f);
 
         // Fog: density spikes near the horizon (longer atmospheric path = more aerial
-        // perspective), drops to a minimum at noon. Colour matches the horizon so distant
-        // ridges blend optically into the sky instead of looking cropped.
-        const float fogMin = 0.000045f;
-        const float fogMax = 0.000180f;
+        // perspective), drops to a minimum at noon. Calibrated against the Tatra scene scale
+        // (camera typically 10-50 km from the focal target, ridges up to ~80 km away):
+        //   noon @ 30 km    => 1-exp(-30000*2e-6) ≈ 6% blend toward horizon — subtle haze
+        //   sunset @ 30 km  => 1-exp(-30000*1.5e-5) ≈ 36% blend — visible golden veil
+        //   sunset @ 80 km  => 1-exp(-80000*1.5e-5) ≈ 70% blend — far ridges fade into sky
+        // The earlier numbers (45e-6 .. 180e-6) washed the entire mesh out even at noon.
+        const float fogMin = 0.000002f;
+        const float fogMax = 0.000015f;
         FogDensity = fogMin + ((fogMax - fogMin) * warmth);
         FogColor = SkyHorizonColor;
     }

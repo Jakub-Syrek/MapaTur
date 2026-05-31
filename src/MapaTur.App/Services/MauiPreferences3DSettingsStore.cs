@@ -7,6 +7,7 @@ namespace MapaTur.App.Services;
 public sealed class MauiPreferences3DSettingsStore : I3DSettingsStore
 {
     private const string VerticalExaggerationKey = "Terrain3D.VerticalExaggeration";
+    private const string TimeOfDayHoursKey = "Terrain3D.TimeOfDayHours";
     private const double SentinelMissing = double.NaN;
 
     /// <inheritdoc />
@@ -26,6 +27,27 @@ public sealed class MauiPreferences3DSettingsStore : I3DSettingsStore
             else
             {
                 Preferences.Default.Set(VerticalExaggerationKey, value.Value);
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public double? TimeOfDayHours
+    {
+        get
+        {
+            double value = Preferences.Default.Get(TimeOfDayHoursKey, SentinelMissing);
+            return double.IsNaN(value) ? null : value;
+        }
+        set
+        {
+            if (value is null)
+            {
+                Preferences.Default.Remove(TimeOfDayHoursKey);
+            }
+            else
+            {
+                Preferences.Default.Set(TimeOfDayHoursKey, value.Value);
             }
         }
     }

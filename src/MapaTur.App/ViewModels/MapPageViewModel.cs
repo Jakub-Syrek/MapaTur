@@ -108,6 +108,28 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private double verticalExaggeration = 2.0;
 
+    /// <summary>
+    /// Time of day in hours, [0,24). Drives the <see cref="Atmosphere"/> sun / sky / fog model
+    /// the 3D renderer samples each frame. 14.0 = early afternoon (default), 18.0 = sunset,
+    /// 6.0 = sunrise, 0.0 = midnight. Persisted in <see cref="settingsStore"/>.
+    /// </summary>
+    [ObservableProperty]
+    private double timeOfDayHours = 14.0;
+
+    /// <summary>
+    /// Live atmospheric model derived from <see cref="TimeOfDayHours"/>. Recomputed whenever
+    /// the time changes and bound straight into <c>Terrain3DView.Atmosphere</c>. Cheap to build
+    /// (a handful of trig + lerp) so deriving per change is fine — no caching needed.
+    /// </summary>
+    public Atmosphere Atmosphere => new((float)TimeOfDayHours);
+
+    partial void OnTimeOfDayHoursChanged(double value)
+    {
+        settingsStore.TimeOfDayHours = value;
+        // Atmosphere is a computed property; notify so the View re-binds the new instance.
+        OnPropertyChanged(nameof(Atmosphere));
+    }
+
     private readonly MeshRebuildCoalescer meshRebuildCoalescer = new();
 
     /// <summary>
@@ -566,6 +588,12 @@ public sealed partial class MapPageViewModel : ObservableObject
         if (settingsStore.VerticalExaggeration is { } saved)
         {
             verticalExaggeration = Math.Clamp(saved, 1.0, 5.0);
+        }
+        if (settingsStore.TimeOfDayHours is { } savedTime)
+        {
+            // Clamp to [0,24); the Atmosphere also wraps, but a tampered value (e.g. negative)
+            // could land the default-day visual on a midnight initial frame which is jarring.
+            timeOfDayHours = Math.Clamp(savedTime, 0.0, 24.0);
         }
         this.trackRenderer = trackRenderer;
         this.trailRenderer = trailRenderer;

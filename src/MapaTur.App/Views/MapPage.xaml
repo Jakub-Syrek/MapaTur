@@ -133,6 +133,21 @@
                        VerticalOptions="Center"
                        WidthRequest="42" />
             </HorizontalStackLayout>
+            <!-- Time-of-day slider drives the Atmosphere (sky + sun position + aerial perspective).
+                 Range 0..24 hours; users sweep from midnight through sunrise / noon / sunset back to
+                 midnight with one continuous gesture. Default is afternoon (14.0). -->
+            <HorizontalStackLayout Spacing="6" VerticalOptions="Center" IsVisible="{Binding Is3DMode}">
+                <Label Text="Czas:" VerticalOptions="Center" />
+                <Slider Minimum="0"
+                        Maximum="24"
+                        Value="{Binding TimeOfDayHours, Mode=TwoWay}"
+                        WidthRequest="180"
+                        VerticalOptions="Center"
+                        SemanticProperties.Hint="Pora dnia" />
+                <Label Text="{Binding TimeOfDayHours, StringFormat='{0:F1}h'}"
+                       VerticalOptions="Center"
+                       WidthRequest="48" />
+            </HorizontalStackLayout>
             <ActivityIndicator IsRunning="{Binding IsBusy}"
                                IsVisible="{Binding IsBusy}"
                                VerticalOptions="Center" />
@@ -205,6 +220,7 @@
                              OrthoTexturePaths="{Binding OrthoTexturePaths}"
                              OrthoTextureCells="{Binding OrthoTextureCells}"
                              UserLocation="{Binding UserLocation}"
+                             Atmosphere="{Binding Atmosphere}"
                              IsVisible="{Binding Is3DMode}" />
 
         <Label Grid.Row="3"

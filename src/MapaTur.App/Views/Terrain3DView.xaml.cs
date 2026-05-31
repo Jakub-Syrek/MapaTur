@@ -201,6 +201,23 @@ public partial class Terrain3DView : ContentView
         set => SetValue(OrthoTextureCellsProperty, value);
     }
 
+    /// <summary>
+    /// Atmospheric model (time-of-day driven sun + sky + fog) the GPU renderer samples each
+    /// frame. When null the renderer falls back to the legacy flat-clear sky and the per-mesh
+    /// baked Lambert / ambient — same code path as before atmospherics shipped.
+    /// </summary>
+    public static readonly BindableProperty AtmosphereProperty = BindableProperty.Create(
+        nameof(Atmosphere),
+        typeof(Atmosphere),
+        typeof(Terrain3DView),
+        propertyChanged: OnOverlayDataChanged);
+
+    public Atmosphere? Atmosphere
+    {
+        get => (Atmosphere?)GetValue(AtmosphereProperty);
+        set => SetValue(AtmosphereProperty, value);
+    }
+
     /// <summary>Camera state mutated by gestures and used by the renderer.</summary>
     public Camera3D Camera { get; } = new Camera3D();
 
@@ -963,8 +980,9 @@ public partial class Terrain3DView : ContentView
 
             // GL draws the terrain AND the depth-tested trail/route lines (so the terrain occludes them)
             // into a colour texture it owns and returns the texture handle. A 0 handle means the present
-            // FBO couldn't be allocated this frame; fall back to Skia.
-            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads);
+            // FBO couldn't be allocated this frame; fall back to Skia. The optional Atmosphere drives the
+            // sky pass and the terrain fragment shader's aerial-perspective blend; passing null skips both.
+            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, Atmosphere);
             if (terrainTextureId == 0)
             {
                 return false;

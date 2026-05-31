@@ -23,10 +23,9 @@ namespace MapaTur.App.Services;
 /// </summary>
 internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 {
-    // Terrain vertex shader: carries the UNSHADED base colour and the world-space normal through to the
-    // fragment stage so lighting is computed per-pixel (smooth) instead of per-vertex (Gouraud) baked into
-    // the colour. The normal is left in world space — the sun is a fixed world-space direction (cartographic
-    // convention), so no normal matrix is needed and the shading matches the Skia fallback's baked light.
+    // Terrain vertex shader: carries the UNSHADED base colour, world-space normal, UV and world-space
+    // position to the fragment stage. Position is needed so the fragment can compute an exponential-fog
+    // (aerial-perspective) blend against the camera position without re-deriving it from depth.
     private const string VertexShaderSource =
         "#version 300 es\n" +
         "layout(location=0) in vec3 aPos;\n" +
@@ -37,11 +36,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "out vec4 vColor;\n" +
         "out vec3 vNormal;\n" +
         "out vec2 vTex;\n" +
-        "void main(){ vColor = aColor; vNormal = aNormal; vTex = aTex; gl_Position = uMvp * vec4(aPos, 1.0); }\n";
+        "out vec3 vWorldPos;\n" +
+        "void main(){ vColor = aColor; vNormal = aNormal; vTex = aTex; vWorldPos = aPos; gl_Position = uMvp * vec4(aPos, 1.0); }\n";
 
-    // Per-pixel Lambert lighting: shade = ambient + (1-ambient)*max(0, dot(N, L)), matching the CPU bake in
-    // TerrainMesh3D.BuildBlock but evaluated per fragment from the interpolated normal. When an ortho image
-    // is bound (uUseOrtho=1) the surface colour is sampled from it; otherwise the hypsometric base tint.
+    // Per-pixel Lambert lighting + exponential-fog aerial perspective. shade = ambient + (1-ambient) *
+    // max(0, dot(N, L)). When an ortho image is bound (uUseOrtho=1) the surface colour is sampled from it
+    // (with optional unsharp), otherwise the hypsometric base tint. After the surface colour is computed
+    // it is blended toward uFogColor by an exponential function of view distance — distant ridges fade
+    // into the horizon haze the way they do in golden-hour photos. uFogDensity=0 disables the blend.
     private const string TerrainFragmentShaderSource =
         "#version 300 es\n" +
         "precision highp float;\n" +
@@ -49,12 +51,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "in vec4 vColor;\n" +
         "in vec3 vNormal;\n" +
         "in vec2 vTex;\n" +
+        "in vec3 vWorldPos;\n" +
         "uniform vec3 uLightDir;\n" +
         "uniform float uAmbient;\n" +
         "uniform sampler2D uOrtho;\n" +
         "uniform int uUseOrtho;\n" +
         "uniform vec2 uOrthoTexel;\n" + // (1/width, 1/height) of the bound ortho texture
         "uniform float uSharpen;\n" +   // unsharp-mask strength; 0 = off
+        "uniform vec3 uFogColor;\n" +
+        "uniform float uFogDensity;\n" + // per-metre exponential; 0 = no aerial perspective
+        "uniform vec3 uCameraPos;\n" +
         "out vec4 fragColor;\n" +
         "void main(){\n" +
         "  float lambert = max(0.0, dot(normalize(vNormal), uLightDir));\n" +
@@ -75,7 +81,52 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  } else {\n" +
         "    base = vColor.rgb;\n" +
         "  }\n" +
-        "  fragColor = vec4(base * shade, 1.0);\n" +
+        "  vec3 lit = base * shade;\n" +
+        "  float dist = length(vWorldPos - uCameraPos);\n" +
+        "  float fogAmount = 1.0 - exp(-dist * uFogDensity);\n" +
+        "  fragColor = vec4(mix(lit, uFogColor, fogAmount), 1.0);\n" +
+        "}\n";
+
+    // Sky pass: a fullscreen triangle whose fragment shader reconstructs a world-space view
+    // direction from screen NDC via the inverse view-projection matrix, then evaluates a smoothly
+    // mixed horizon-to-zenith gradient plus a sun disc with a Mie-style scattering halo around it.
+    // Rendered FIRST each frame with depth-write disabled; the depth-tested terrain pass then
+    // composites on top, leaving sky visible only where there's no geometry. This is what gives
+    // the golden-hour "sun behind the ridge" look — the sun pokes out wherever the silhouette ends.
+    private const string SkyVertexShaderSource =
+        "#version 300 es\n" +
+        "layout(location=0) in vec2 aClip;\n" + // clip-space xy in [-1,1]; one triangle covers the screen
+        "out vec2 vClip;\n" +
+        "void main(){ vClip = aClip; gl_Position = vec4(aClip, 1.0, 1.0); }\n";
+
+    private const string SkyFragmentShaderSource =
+        "#version 300 es\n" +
+        "precision highp float;\n" +
+        "in vec2 vClip;\n" +
+        "uniform mat4 uInvViewProj;\n" +
+        "uniform vec3 uCameraPos;\n" +
+        "uniform vec3 uSunDir;\n" +
+        "uniform vec3 uSunColor;\n" +
+        "uniform vec3 uSkyZenith;\n" +
+        "uniform vec3 uSkyHorizon;\n" +
+        "out vec4 fragColor;\n" +
+        "void main(){\n" +
+        // Unproject the screen NDC to a far-plane world point, then build a view direction
+        // from camera to that point. invViewProj handles aspect/fov/orientation in one matrix.
+        "  vec4 farPoint = uInvViewProj * vec4(vClip, 1.0, 1.0);\n" +
+        "  vec3 viewDir = normalize((farPoint.xyz / farPoint.w) - uCameraPos);\n" +
+        // Vertical gradient: pow(viewDir.z, 0.4) compresses the transition near the horizon so
+        // the warm band is narrow and the cool zenith dominates — matches a real sky's profile.
+        "  float upward = clamp(viewDir.z, 0.0, 1.0);\n" +
+        "  float zenithBlend = pow(upward, 0.4);\n" +
+        "  vec3 sky = mix(uSkyHorizon, uSkyZenith, zenithBlend);\n" +
+        // Sun disc + halo. smoothstep gives a soft-edged disc the right pixel size; pow gives
+        // the Mie-style fall-off (the "glow") that bleeds well past the disc.
+        "  float sunDot = dot(viewDir, uSunDir);\n" +
+        "  float sunCore = smoothstep(0.9994, 0.99985, sunDot);\n" +
+        "  float sunHalo = pow(max(sunDot, 0.0), 80.0) * 0.55;\n" +
+        "  vec3 sun = uSunColor * (sunCore + sunHalo);\n" +
+        "  fragColor = vec4(sky + sun, 1.0);\n" +
         "}\n";
 
     // Flat fragment shader for the line/ribbon program (trails/route): no lighting, just the vertex colour.
@@ -169,6 +220,22 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int useOrthoLocation = -1;
     private int orthoTexelLocation = -1;
     private int sharpenLocation = -1;
+    private int terrainFogColorLocation = -1;
+    private int terrainFogDensityLocation = -1;
+    private int terrainCameraPosLocation = -1;
+
+    // Sky / atmospheric program: drawn as a fullscreen triangle BEFORE the terrain pass, with the
+    // depth-write disabled so the depth-tested terrain composes on top. Owns its own program +
+    // single 6-float VBO (one triangle covering NDC).
+    private uint skyProgram;
+    private int skyInvViewProjLocation = -1;
+    private int skyCameraPosLocation = -1;
+    private int skySunDirLocation = -1;
+    private int skySunColorLocation = -1;
+    private int skyZenithLocation = -1;
+    private int skyHorizonLocation = -1;
+    private uint skyVao;
+    private uint skyVbo;
 
     // Unsharp-mask strength applied to the ortho in the fragment shader (0 = off). Crisps up edges softened
     // by mipmap/anisotropic minification; kept mild so it doesn't ring.
@@ -288,7 +355,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         IReadOnlyList<Trail>? trails,
         DemRaster? raster,
         Route? route,
-        IReadOnlyList<Trail>? roads = null)
+        IReadOnlyList<Trail>? roads = null,
+        Atmosphere? atmosphere = null)
     {
         gl ??= PlatformGl.Get();
 
@@ -321,6 +389,19 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             useOrthoLocation = -1;
             orthoTexelLocation = -1;
             sharpenLocation = -1;
+            terrainFogColorLocation = -1;
+            terrainFogDensityLocation = -1;
+            terrainCameraPosLocation = -1;
+            // Sky program + fullscreen triangle VAO belonged to the dead context too.
+            skyProgram = 0;
+            skyInvViewProjLocation = -1;
+            skyCameraPosLocation = -1;
+            skySunDirLocation = -1;
+            skySunColorLocation = -1;
+            skyZenithLocation = -1;
+            skyHorizonLocation = -1;
+            skyVao = 0;
+            skyVbo = 0;
             // The ortho texture IDs belonged to the dead context; drop the handles (don't GL-delete the
             // stale ones) but keep the CPU bytes so they re-upload on the next EnsureOrthoTextures.
             pendingOrthoRelease.Clear();
@@ -392,12 +473,50 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.DepthRange(0.0f, 1.0f);
 
         gl.Viewport(0, 0, (uint)vpWidth, (uint)vpHeight);
+        // Sky clear is a safety floor in case the sky pass is skipped (no atmosphere set) — the
+        // atmospheric pass paints over the whole frame anyway, so the colour is irrelevant when
+        // atmosphere != null. Always clear depth so the test stays sane between frames.
         gl.ClearColor(SkyR, SkyG, SkyB, 1f);
         gl.Clear((uint)(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit));
 
-        gl.UseProgram(program);
-
         Matrix4x4 mvp = camera.BuildViewProjection((float)width / Math.Max(1, height));
+
+        // Sky pass FIRST: fullscreen triangle, no depth write, no depth test — the depth-tested
+        // terrain pass that follows composites on top, so the sky shows through wherever there's
+        // no geometry. Skipping the pass when atmosphere is null preserves the legacy flat clear.
+        if (atmosphere is not null)
+        {
+            Matrix4x4.Invert(mvp, out Matrix4x4 invMvp);
+            Span<float> invMvpData = stackalloc float[16]
+            {
+                invMvp.M11, invMvp.M12, invMvp.M13, invMvp.M14,
+                invMvp.M21, invMvp.M22, invMvp.M23, invMvp.M24,
+                invMvp.M31, invMvp.M32, invMvp.M33, invMvp.M34,
+                invMvp.M41, invMvp.M42, invMvp.M43, invMvp.M44,
+            };
+            gl.DepthMask(false);
+            gl.Disable(EnableCap.DepthTest);
+            gl.UseProgram(skyProgram);
+            gl.UniformMatrix4(skyInvViewProjLocation, 1, false, invMvpData);
+            Vector3 camPos = camera.Position;
+            gl.Uniform3(skyCameraPosLocation, camPos.X, camPos.Y, camPos.Z);
+            Vector3 sunDir = atmosphere.SunDirection;
+            gl.Uniform3(skySunDirLocation, sunDir.X, sunDir.Y, sunDir.Z);
+            Vector3 sunColor = atmosphere.SunColor;
+            gl.Uniform3(skySunColorLocation, sunColor.X, sunColor.Y, sunColor.Z);
+            Vector3 zen = atmosphere.SkyZenithColor;
+            gl.Uniform3(skyZenithLocation, zen.X, zen.Y, zen.Z);
+            Vector3 hor = atmosphere.SkyHorizonColor;
+            gl.Uniform3(skyHorizonLocation, hor.X, hor.Y, hor.Z);
+            gl.BindVertexArray(skyVao);
+            gl.DrawArrays(PrimitiveType.Triangles, 0, 3);
+            gl.BindVertexArray(0);
+            // Restore depth state for the terrain pass.
+            gl.Enable(EnableCap.DepthTest);
+            gl.DepthMask(true);
+        }
+
+        gl.UseProgram(program);
         // System.Numerics is row-vector/row-major; uploading its fields with transpose=false lets GL read
         // them column-major, i.e. transposed — exactly the column-vector matrix GLSL's uMvp*v expects, so
         // it matches Camera.ProjectToScreen used for the overlays.
@@ -410,12 +529,23 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         };
         gl.UniformMatrix4(mvpLocation, 1, false, m);
 
-        // Per-pixel lighting: feed the shader the same world-space sun + ambient the mesh baked with, so the
-        // GPU path shades identically to (but smoother than) the Skia fallback. All tiles share one light.
+        // Per-pixel lighting: the Atmosphere instance, when provided, overrides the per-tile baked
+        // light direction + ambient so the time-of-day slider drives shading live. Without an
+        // atmosphere the renderer falls back to the mesh-bake values (legacy behaviour).
         TerrainMesh3D lightFrame = tiles[0];
-        Vector3 light = lightFrame.LightDirection;
+        Vector3 light = atmosphere?.SunDirection ?? lightFrame.LightDirection;
+        float ambient = atmosphere?.AmbientFactor ?? lightFrame.AmbientFactor;
         gl.Uniform3(lightDirLocation, light.X, light.Y, light.Z);
-        gl.Uniform1(ambientLocation, lightFrame.AmbientFactor);
+        gl.Uniform1(ambientLocation, ambient);
+
+        // Aerial perspective: when the atmosphere is bound, distant fragments blend toward
+        // uFogColor with an exponential ramp. uFogDensity = 0 disables the blend (legacy path).
+        Vector3 fogColor = atmosphere?.FogColor ?? Vector3.Zero;
+        float fogDensity = atmosphere?.FogDensity ?? 0f;
+        Vector3 cameraWorldPos = camera.Position;
+        gl.Uniform3(terrainFogColorLocation, fogColor.X, fogColor.Y, fogColor.Z);
+        gl.Uniform1(terrainFogDensityLocation, fogDensity);
+        gl.Uniform3(terrainCameraPosLocation, cameraWorldPos.X, cameraWorldPos.Y, cameraWorldPos.Z);
 
         // Drape the ortho: bind each mesh tile's own cell texture (OrthoTileIndex) so a multi-cell ortho
         // stays sharp. Without textures the shader uses the hypsometric tint.
@@ -721,6 +851,45 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         useOrthoLocation = g.GetUniformLocation(program, "uUseOrtho");
         orthoTexelLocation = g.GetUniformLocation(program, "uOrthoTexel");
         sharpenLocation = g.GetUniformLocation(program, "uSharpen");
+        terrainFogColorLocation = g.GetUniformLocation(program, "uFogColor");
+        terrainFogDensityLocation = g.GetUniformLocation(program, "uFogDensity");
+        terrainCameraPosLocation = g.GetUniformLocation(program, "uCameraPos");
+
+        // Sky program — single triangle covering the screen, fragment-shader-only atmospheric model.
+        uint sks = CompileShader(g, ShaderType.VertexShader, SkyVertexShaderSource);
+        uint skf = CompileShader(g, ShaderType.FragmentShader, SkyFragmentShaderSource);
+        skyProgram = g.CreateProgram();
+        g.AttachShader(skyProgram, sks);
+        g.AttachShader(skyProgram, skf);
+        g.LinkProgram(skyProgram);
+        g.GetProgram(skyProgram, ProgramPropertyARB.LinkStatus, out int skyLinked);
+        if (skyLinked == 0)
+        {
+            string log = g.GetProgramInfoLog(skyProgram);
+            throw new InvalidOperationException("Sky shader link failed: " + log);
+        }
+        g.DetachShader(skyProgram, sks);
+        g.DetachShader(skyProgram, skf);
+        g.DeleteShader(sks);
+        g.DeleteShader(skf);
+        skyInvViewProjLocation = g.GetUniformLocation(skyProgram, "uInvViewProj");
+        skyCameraPosLocation = g.GetUniformLocation(skyProgram, "uCameraPos");
+        skySunDirLocation = g.GetUniformLocation(skyProgram, "uSunDir");
+        skySunColorLocation = g.GetUniformLocation(skyProgram, "uSunColor");
+        skyZenithLocation = g.GetUniformLocation(skyProgram, "uSkyZenith");
+        skyHorizonLocation = g.GetUniformLocation(skyProgram, "uSkyHorizon");
+
+        // Fullscreen triangle: 3 vertices, each xy in clip space, covering NDC [-1,1]^2 with one extra
+        // vertex outside the rect so the rasteriser fills the full screen without re-clipping a quad.
+        Span<float> tri = stackalloc float[6] { -1f, -1f,  3f, -1f,  -1f,  3f };
+        skyVao = g.GenVertexArray();
+        g.BindVertexArray(skyVao);
+        skyVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, skyVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(tri.Length * sizeof(float)), tri, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(0);
+        g.VertexAttribPointer(0, 2, VertexAttribPointerType.Float, false, 2 * sizeof(float), (void*)0);
+        g.BindVertexArray(0);
 
         // Line ribbon program (reuses the same fragment shader).
         uint lvs = CompileShader(g, ShaderType.VertexShader, LineVertexShaderSource);
@@ -1132,6 +1301,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             gl.DeleteProgram(program);
             gl.DeleteProgram(lineProgram);
+            gl.DeleteProgram(skyProgram);
+            gl.DeleteVertexArray(skyVao);
+            gl.DeleteBuffer(skyVbo);
+            skyProgram = 0;
+            skyVao = 0;
+            skyVbo = 0;
             programReady = false;
         }
     }
