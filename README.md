@@ -7,7 +7,7 @@
 [![MAUI](https://img.shields.io/badge/.NET%20MAUI-Android%20%7C%20iOS%20%7C%20Windows%20%7C%20macOS-512BD4?logo=dotnet&logoColor=white)](https://learn.microsoft.com/dotnet/maui/)
 [![3D engine](https://img.shields.io/badge/3D-OpenGL%20ES%203.0%20%C2%B7%20ANGLE%20%2F%20D3D11-CC3333)](docs/3d-terrain.md)
 [![Mapsui](https://img.shields.io/badge/maps-Mapsui%20%2B%20SkiaSharp-2E7D32)](https://mapsui.com/)
-[![Tests](https://img.shields.io/badge/tests-473%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-506%20passing-brightgreen)](#testing)
 [![Architecture](https://img.shields.io/badge/architecture-Clean-success)](#architecture)
 [![Top language](https://img.shields.io/github/languages/top/Jakub-Syrek/MapaTur2)](#)
 [![Code size](https://img.shields.io/github/languages/code-size/Jakub-Syrek/MapaTur2)](#)
@@ -17,6 +17,12 @@
 ![MapaTur 3D terrain — orthophoto-draped Tatras](docs/screenshots/3d-tatry.png)
 
 *Real-time 3D terrain: a high-resolution PL + SK orthophoto draped over the Copernicus DEM, with named summits, depth-occluded hiking trails and roads, and per-pixel lighting.*
+
+<p align="center">
+  <img src="docs/screenshots/3d-tatry-android.png" alt="MapaTur 3D terrain running on Android — Samsung S25 Ultra" width="320" />
+</p>
+
+*The same engine on Android — Samsung S25 Ultra (Adreno 830, GLES 3.2). Raw OpenGL ES 3.0 draws the terrain mesh, **8 ortho cells (8192×5462 RGBA8, ~1.9 GB VRAM after mipmaps)**, and depth-tested trail ribbons into a 4× MSAA off-screen FBO; the resolve target is a **single-sampled colour-texture FBO whose GL handle is wrapped via `SKImage.FromTexture`** (`GRBackendTexture` + `GRGlTextureInfo`) and composed into SkiaSharp's canvas with `DrawImage`. That texture hand-off sidesteps Android's FBO-0 collision (where Skia's compositor would otherwise repaint its empty surface over our output) and lets the same code path drive Windows ANGLE and Android natively — no platform-specific render branch.*
 
 ## About
 
@@ -61,7 +67,8 @@ the ridges; named summits and mountain POIs are labelled. No telemetry, no accou
 
 The 3D view is a **custom real-time renderer**, not an off-the-shelf 3D engine:
 
-- **OpenGL ES 3.0 on the SkiaSharp `SKGLView` context** — on Windows ANGLE translates GLES → Direct3D 11; the same path runs natively on Android/iOS.
+- **OpenGL ES 3.0 on the SkiaSharp `SKGLView` context** — on Windows ANGLE translates GLES → Direct3D 11; the same path runs natively on Android.
+- **Texture-bridge composition** — the renderer draws into an off-screen colour-texture FBO that it owns; the texture handle is wrapped via `SKImage.FromTexture` (`GRBackendTexture` + `GRGlTextureInfo`) and composed by Skia with `DrawImage`. Sidesteps Android's FBO-0 collision and unifies the Windows / Android render path (no `#if` branch in the renderer).
 - **24-bit depth buffer** for hardware occlusion — no painter's algorithm, correct from any angle, full DEM resolution.
 - **Tiled mesh** (≤65 536-vertex tiles) built from a Copernicus GLO-30 (~30 m) DEM, with adjustable vertical exaggeration.
 - **Per-pixel lighting** (Lambert shading evaluated per fragment from interpolated normals) and **4× MSAA** for smooth slopes and ridgelines.
@@ -165,11 +172,11 @@ dotnet test
 
 | Suite | Tests | Focus |
 |---|---|---|
-| `MapaTur.Domain.Tests` | 117 | Value objects, aggregates (Route), elevation math, DEM, POI tags + colours |
-| `MapaTur.Application.Tests` | 274 | Overpass queries (trails/POI/roads), 3D terrain math, route planner + use cases |
+| `MapaTur.Domain.Tests` | 129 | Value objects, aggregates (Route), elevation math, DEM, POI tags + colours |
+| `MapaTur.Application.Tests` | 295 | Overpass queries (trails/POI/roads), 3D terrain math, route planner + use cases |
 | `MapaTur.Infrastructure.Tests` | 60 | TCX/Overpass/POI/road parsers, MBTiles + DEM readers, SQLite, GPX |
 | `MapaTur.Routing.Tests` | 22 | Tobler function, distance/time cost functions, graph snapping, A\* correctness |
-| **Total** | **471** | xUnit + FluentAssertions + NSubstitute + FsCheck |
+| **Total** | **506** | xUnit + FluentAssertions + NSubstitute + FsCheck |
 
 ## Roadmap
 
