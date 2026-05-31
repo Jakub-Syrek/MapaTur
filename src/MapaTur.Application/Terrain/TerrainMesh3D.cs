@@ -55,6 +55,14 @@ public sealed class TerrainMesh3D
     /// <summary>Ambient term used to bake <see cref="Colors"/>, in [0,1]; reused by the GPU shader.</summary>
     public float AmbientFactor { get; }
 
+    /// <summary>Highest world-Z (already includes <see cref="VerticalExaggeration"/>) across this
+    /// tile's vertices. Used by the controller to derive a camera safety floor so the camera can
+    /// never drop below the surface or be zoomed inside a peak.</summary>
+    public float MaxElevationZ { get; }
+
+    /// <summary>Lowest world-Z across this tile's vertices.</summary>
+    public float MinElevationZ { get; }
+
     private TerrainMesh3D(
         Vector3[] vertices,
         Vector3[] normals,
@@ -83,6 +91,25 @@ public sealed class TerrainMesh3D
         Bounds = bounds;
         LightDirection = lightDirection;
         AmbientFactor = ambientFactor;
+
+        // Compute Z range over vertices once at construction so the host can ask without iterating
+        // every frame. Empty meshes (shouldn't happen — Build guards) report 0..0.
+        float minZ = float.PositiveInfinity;
+        float maxZ = float.NegativeInfinity;
+        for (int i = 0; i < vertices.Length; i++)
+        {
+            float z = vertices[i].Z;
+            if (z < minZ)
+            {
+                minZ = z;
+            }
+            if (z > maxZ)
+            {
+                maxZ = z;
+            }
+        }
+        MinElevationZ = float.IsPositiveInfinity(minZ) ? 0f : minZ;
+        MaxElevationZ = float.IsNegativeInfinity(maxZ) ? 0f : maxZ;
     }
 
     /// <summary>

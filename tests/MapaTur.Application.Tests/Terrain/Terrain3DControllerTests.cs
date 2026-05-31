@@ -108,11 +108,14 @@ public sealed class Terrain3DControllerTests
     }
 
     [Fact]
-    public void MinPitchRadians_DefaultsToAboutTenDegrees()
+    public void MinPitchRadians_DefaultsToAboutTwentyDegrees()
     {
+        // Raised from 10° → 20° so the camera never grazes the horizon — at near-flat angles
+        // the painter's-algorithm sort starts tearing and "from below" views aren't useful for a
+        // map app anyway.
         var ctrl = BuildController(out _);
 
-        ctrl.MinPitchRadians.Should().BeApproximately(MathF.PI / 18f, 1e-5f);
+        ctrl.MinPitchRadians.Should().BeApproximately(MathF.PI / 9f, 1e-5f);
     }
 
     [Fact]
