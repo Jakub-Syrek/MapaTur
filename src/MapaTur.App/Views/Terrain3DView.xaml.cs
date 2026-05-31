@@ -516,16 +516,11 @@ public partial class Terrain3DView : ContentView
         }
 
 #if WINDOWS || ANDROID
-        // GPU engine: GL draws the depth-buffered terrain, then the Skia overlays (trails / route /
-        // markers / peak labels) are drawn over it with the same camera so they register. Any GL/shader
-        // failure disables it for the session and falls through to the all-Skia renderer below.
-        uint glFramebuffer = 0;
-        if (e.BackendRenderTarget is { } renderTarget && renderTarget.GetGlFramebufferInfo(out GRGlFramebufferInfo fbInfo))
-        {
-            glFramebuffer = fbInfo.FramebufferObjectId;
-        }
-
-        if (UseGlRenderer && TryRenderTerrainGl(tiles, e.Info.Width, e.Info.Height, glFramebuffer))
+        // GPU engine: GL draws the depth-buffered terrain into a colour TEXTURE we own, which Skia then
+        // composes into the surface via DrawImage. Sidesteps the FBO-0 collision on Android (where Skia
+        // would re-paint over anything we drew into its on-screen FBO) and lets the same code path work on
+        // Windows. Any GL/shader/wrapper failure disables it for the session and falls through to Skia.
+        if (UseGlRenderer && TryRenderTerrainGl(canvas, tiles, e.Info.Width, e.Info.Height))
         {
             // GL already drew the (depth-occluded) trails + route; Skia only adds the markers/labels on top.
             renderer.DrawOverlays(canvas, null, null, projectedClimbing, projectedPois, projectedPeaks, projectedUserLocation);
@@ -910,20 +905,13 @@ public partial class Terrain3DView : ContentView
 
 #if WINDOWS || ANDROID
     // ── Real GPU terrain engine (OpenGL ES on the SKGLView context) ───────────────────────────────
-    // Flip to false to force the Skia renderer. On any GL/shader failure we fall back automatically.
-    // ANDROID: SkiaSharp/MAUI on Android exposes the on-screen FBO as 0 with no intermediate
-    // backend FBO. Even after rebinding to whatever glGetIntegerv reports, Skia's compositor
-    // re-paints its (empty) logical surface over our GL output → user sees white. The raw-GL
-    // engine needs a different surface bridge here (drawing through Skia's own GR context, or
-    // a textured Skia post-pass). Until that ships, fall back to the Skia canvas renderer —
-    // which on SKGLView is still GPU-accelerated through Skia's own GL backend, just without
-    // our custom depth buffer / texture-drape shaders. Mesh renders fine; ortho lands as the
-    // hypsometric colouring instead of the real photo until the GL bridge is fixed.
-#if ANDROID
-    private static readonly bool UseGlRenderer = false;
-#else
+    // The renderer draws the terrain into a colour TEXTURE it owns and returns the texture handle;
+    // we wrap that texture as an SKImage and let SkiaSharp DrawImage compose it. That hand-off works
+    // identically on Windows (ANGLE) and Android — historically Android's SKGLView exposes the
+    // on-screen FBO as 0 and Skia's compositor would repaint over anything we drew into it. With
+    // the texture bridge there's no FBO-0 collision: Skia samples our texture as part of its own
+    // draw pass. Any GL/shader/wrapper failure disables the GPU path for the session.
     private static readonly bool UseGlRenderer = true;
-#endif
 
     private Services.Terrain3DGlRenderer? glRenderer;
     private bool glDisabled;
@@ -935,9 +923,18 @@ public partial class Terrain3DView : ContentView
     private string? cachedOrthoSignature;
     private List<(byte[] Rgba, int Width, int Height)>? cachedOrthoDecoded;
 
-    private bool TryRenderTerrainGl(IReadOnlyList<TerrainMesh3D> tiles, int width, int height, uint framebuffer)
+    private bool TryRenderTerrainGl(SKCanvas canvas, IReadOnlyList<TerrainMesh3D> tiles, int width, int height)
     {
         if (glDisabled)
+        {
+            return false;
+        }
+
+        // No GR context means SKGLView hasn't finished initialising its GL backend yet — Skia's wrapping of
+        // a GL texture as an SKImage needs that context to bind it. Bail this frame so the Skia fallback
+        // paints instead; next paint will retry. GRContext lives on the SKGLView, not on SKCanvas.
+        GRContext? grContext = Canvas.GRContext;
+        if (grContext is null)
         {
             return false;
         }
@@ -964,10 +961,33 @@ public partial class Terrain3DView : ContentView
                 }
             }
 
-            // GL draws the terrain AND the depth-tested trail/route lines (so the terrain occludes them).
-            glRenderer.Render(width, height, tiles, Camera, framebuffer, Trails, Raster, Route, Roads);
-            // Hand GL state back to Skia so any later 2D drawing on this surface behaves.
-            Canvas.GRContext?.ResetContext();
+            // GL draws the terrain AND the depth-tested trail/route lines (so the terrain occludes them)
+            // into a colour texture it owns and returns the texture handle. A 0 handle means the present
+            // FBO couldn't be allocated this frame; fall back to Skia.
+            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads);
+            if (terrainTextureId == 0)
+            {
+                return false;
+            }
+
+            // Tell Skia we touched GL state, then wrap our texture as an SKImage and let Skia compose it.
+            // BottomLeft origin: GL textures have their origin at the bottom-left of the image. RGBA8 +
+            // Premul matches how our shader writes the colour (vec3 * alpha=1.0). Skia owns nothing here —
+            // releaseProc:null leaves the texture's lifetime in our hands so we can reuse it next frame.
+            grContext.ResetContext();
+            var glInfo = new GRGlTextureInfo((uint)0x0DE1u, terrainTextureId, (uint)0x8058u); // GL_TEXTURE_2D, GL_RGBA8
+            using var backendTexture = new GRBackendTexture(width, height, mipmapped: false, glInfo);
+            using SKImage? terrainImage = SKImage.FromTexture(
+                grContext,
+                backendTexture,
+                GRSurfaceOrigin.BottomLeft,
+                SKColorType.Rgba8888,
+                SKAlphaType.Premul);
+            if (terrainImage is null)
+            {
+                return false;
+            }
+            canvas.DrawImage(terrainImage, 0, 0);
             return true;
         }
         catch (Exception)
