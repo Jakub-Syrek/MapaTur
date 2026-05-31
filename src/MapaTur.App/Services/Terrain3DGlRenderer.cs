@@ -194,9 +194,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int lineHalfPxLocation = -1;
     private bool programReady;
 
-    // Off-screen multisampled target. SkiaSharp hands us a single-sampled FBO, so to anti-alias the terrain
-    // silhouette we render into our own MSAA colour+depth renderbuffers and blit-resolve into Skia's FBO.
-    // Degrades gracefully: if MSAA can't be set up (driver/format), we draw straight into Skia's FBO.
+    // Off-screen multisampled target. We render the terrain into our own MSAA colour+depth renderbuffers
+    // and blit-resolve into a single-sampled colour TEXTURE that the caller hands to SkiaSharp as an
+    // SKImage. That texture-based hand-off is what lets the same path work on Windows (where Skia hands
+    // us an intermediate FBO) AND Android (where it hands us FBO 0 and re-paints over anything we draw
+    // there). Degrades gracefully: if MSAA can't be set up we draw straight into the present FBO.
     private const int RequestedSamples = 4;
     private uint msaaFbo;
     private uint msaaColorRb;
@@ -205,6 +207,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int msaaHeight;
     private int msaaSamples; // 0 = not yet probed
     private bool msaaUnsupported;
+
+    // Single-sampled present target: a colour TEXTURE we own, attached to its own FBO together with a
+    // depth renderbuffer. The colour texture is what the caller wraps into SKImage.FromTexture and draws
+    // through Skia — sidestepping the FBO 0 collision on Android where Skia would otherwise re-paint over
+    // our output. Depth RB is only used by the non-MSAA path (drawing directly into this FBO).
+    private uint presentFbo;
+    private uint presentColorTex;
+    private uint presentDepthRb;
+    private int presentWidth;
+    private int presentHeight;
+    private bool presentUnsupported;
 
     private readonly Dictionary<TerrainMesh3D, TileBuffers> tileBuffers = new();
     private IReadOnlyList<TerrainMesh3D>? lastTiles;
@@ -261,13 +274,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         orthoDirty = true;
     }
 
-    /// <summary>Draws the terrain and the depth-tested trail/route overlays. Throws on GL/shader failure so the caller can fall back to Skia.</summary>
-    public void Render(
+    /// <summary>
+    /// Draws the terrain and the depth-tested trail/route overlays into an owned GL colour texture, and
+    /// returns the texture handle so the caller can compose it through Skia (<see cref="SkiaSharp.SKImage.FromTexture(SkiaSharp.GRContext, SkiaSharp.GRBackendTexture, SkiaSharp.GRSurfaceOrigin, SkiaSharp.SKColorType, SkiaSharp.SKAlphaType)"/>).
+    /// Returns 0 if a present target couldn't be allocated. Throws on GL/shader failure so the caller can
+    /// fall back to Skia.
+    /// </summary>
+    public uint Render(
         int width,
         int height,
         IReadOnlyList<TerrainMesh3D> tiles,
         Camera3D camera,
-        uint framebuffer,
         IReadOnlyList<Trail>? trails,
         DemRaster? raster,
         Route? route,
@@ -323,6 +340,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             msaaHeight = 0;
             msaaSamples = 0;
             msaaUnsupported = false;
+            // Same story for the present FBO / colour texture / depth RB — drop the stale IDs.
+            presentFbo = 0;
+            presentColorTex = 0;
+            presentDepthRb = 0;
+            presentWidth = 0;
+            presentHeight = 0;
+            presentUnsupported = false;
         }
 
         EnsureProgram(gl);
@@ -339,11 +363,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         int vpWidth = Math.Max(1, width);
         int vpHeight = Math.Max(1, height);
 
+        // Present target (colour texture + depth RB) is mandatory: that's the texture the caller wraps as an
+        // SKImage. If it can't be allocated, bail — the Skia fallback will paint instead.
+        if (!EnsurePresentTarget(gl, vpWidth, vpHeight))
+        {
+            return 0;
+        }
+
         // Render into our multisampled FBO when available (anti-aliased terrain edges), else straight into the
-        // FBO SkiaSharp presents. Drawing into the default framebuffer (0) would land off-screen after a resize
-        // (SkiaSharp allocates a new non-zero FBO) — the symptom being only the sky clear showing.
+        // present FBO (which has its own depth RB). We never bind FBO 0 here: on Android that *is* the on-screen
+        // surface and Skia's compositor would paint over anything we drew there.
         bool useMsaa = EnsureMsaaTarget(gl, vpWidth, vpHeight);
-        gl.BindFramebuffer(FramebufferTarget.Framebuffer, useMsaa ? msaaFbo : framebuffer);
+        gl.BindFramebuffer(FramebufferTarget.Framebuffer, useMsaa ? msaaFbo : presentFbo);
 
         // Take full ownership of the GL state we rely on. SkiaSharp shares this context and leaves its own
         // clip/raster state behind — notably it enables GL_STENCIL_TEST (and blend/scissor/colour-mask) for
@@ -439,17 +470,90 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         if (useMsaa)
         {
-            // Resolve the multisampled colour into Skia's single-sampled FBO, then leave it bound so Skia's
-            // own overlay pass (markers/labels) composes on top of the anti-aliased terrain.
+            // Resolve the multisampled colour into our present FBO's colour texture. That texture is what
+            // the caller hands to SkiaSharp as an SKImage; Skia then composes it into its surface during
+            // its own draw pass — no FBO 0 collision on Android, no special-cased "intermediate FBO" on
+            // Windows, same code path everywhere.
             gl.BindFramebuffer(FramebufferTarget.ReadFramebuffer, msaaFbo);
-            gl.BindFramebuffer(FramebufferTarget.DrawFramebuffer, framebuffer);
+            gl.BindFramebuffer(FramebufferTarget.DrawFramebuffer, presentFbo);
             gl.BlitFramebuffer(
                 0, 0, vpWidth, vpHeight,
                 0, 0, vpWidth, vpHeight,
                 (uint)ClearBufferMask.ColorBufferBit,
                 BlitFramebufferFilter.Nearest);
-            gl.BindFramebuffer(FramebufferTarget.Framebuffer, framebuffer);
         }
+
+        // Unbind everything before returning. The caller will re-establish whatever framebuffer Skia
+        // expects (via GRContext.ResetContext) before sampling the texture we just produced.
+        gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+        return presentColorTex;
+    }
+
+    /// <summary>
+    /// Creates / resizes the single-sampled colour-texture FBO we return to the caller. Returns false (and
+    /// sets <see cref="presentUnsupported"/> for the session) when the framebuffer is incomplete — the
+    /// caller then falls back to Skia. Texture is RGBA8, linear filtering, clamp-to-edge — matching what
+    /// SkiaSharp expects when wrapping it as an SKImage.
+    /// </summary>
+    private bool EnsurePresentTarget(GL g, int width, int height)
+    {
+        if (presentUnsupported)
+        {
+            return false;
+        }
+
+        if (presentFbo != 0 && presentWidth == width && presentHeight == height)
+        {
+            return true;
+        }
+
+        // (Re)allocate for the new size. Deleting 0 is a no-op so this also handles first-time creation.
+        g.DeleteFramebuffer(presentFbo);
+        g.DeleteTexture(presentColorTex);
+        g.DeleteRenderbuffer(presentDepthRb);
+
+        presentColorTex = g.GenTexture();
+        g.BindTexture(TextureTarget.Texture2D, presentColorTex);
+        g.TexImage2D(
+            TextureTarget.Texture2D, 0, (int)InternalFormat.Rgba8,
+            (uint)width, (uint)height, 0,
+            PixelFormat.Rgba, PixelType.UnsignedByte, null);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+        g.BindTexture(TextureTarget.Texture2D, 0);
+
+        // Depth RB only used by the non-MSAA path (when we draw straight into presentFbo). Allocating it
+        // unconditionally keeps the FBO shape stable and is cheap on modern mobile GPUs.
+        presentDepthRb = g.GenRenderbuffer();
+        g.BindRenderbuffer(RenderbufferTarget.Renderbuffer, presentDepthRb);
+        g.RenderbufferStorage(RenderbufferTarget.Renderbuffer, InternalFormat.DepthComponent24, (uint)width, (uint)height);
+        g.BindRenderbuffer(RenderbufferTarget.Renderbuffer, 0);
+
+        presentFbo = g.GenFramebuffer();
+        g.BindFramebuffer(FramebufferTarget.Framebuffer, presentFbo);
+        g.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, presentColorTex, 0);
+        g.FramebufferRenderbuffer(FramebufferTarget.Framebuffer, FramebufferAttachment.DepthAttachment, RenderbufferTarget.Renderbuffer, presentDepthRb);
+
+        GLEnum status = g.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
+        g.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+        if (status != GLEnum.FramebufferComplete)
+        {
+            Log.Information("[GL3D] present framebuffer incomplete ({Status}) — falling back to Skia", status);
+            g.DeleteFramebuffer(presentFbo);
+            g.DeleteTexture(presentColorTex);
+            g.DeleteRenderbuffer(presentDepthRb);
+            presentFbo = 0;
+            presentColorTex = 0;
+            presentDepthRb = 0;
+            presentUnsupported = true;
+            return false;
+        }
+
+        presentWidth = width;
+        presentHeight = height;
+        return true;
     }
 
     /// <summary>
@@ -1001,6 +1105,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         msaaFbo = 0;
         msaaColorRb = 0;
         msaaDepthRb = 0;
+        gl.DeleteFramebuffer(presentFbo);
+        gl.DeleteTexture(presentColorTex);
+        gl.DeleteRenderbuffer(presentDepthRb);
+        presentFbo = 0;
+        presentColorTex = 0;
+        presentDepthRb = 0;
         foreach (OrthoTile t in orthoTiles)
         {
             if (t.Texture != 0)
