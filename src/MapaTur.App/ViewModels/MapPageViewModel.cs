@@ -1077,9 +1077,51 @@ public sealed partial class MapPageViewModel : ObservableObject
         StatusMessage = Localization.AppStrings.Status3DMode;
     }
 
+    // Vertex budget per platform — sized to the renderer that draws the mesh:
+    //   - Windows: hardware GL path handles tens of millions of verts; no cap.
+    //   - Android / mobile / non-Windows: software Skia path is the bottleneck; ~2 M verts keeps
+    //     pinch/orbit smooth on a mid-range phone. Above that, subsample.
+#if WINDOWS
+    private const int MaxMeshVerticesForPlatform = int.MaxValue;
+#else
+    private const int MaxMeshVerticesForPlatform = 2_000_000;
+#endif
+
+    /// <summary>
+    /// Picks the smallest subsample stride that brings the raster's vertex count under the
+    /// platform budget, then returns the (possibly identical) decimated raster. The Bounds and
+    /// no-data sentinel are preserved so every downstream lookup (overlay projection, autoload
+    /// status, peak detection) stays meaningful.
+    /// </summary>
+    private DemRaster SubsampleRasterForRenderer(DemRaster source)
+    {
+        long verts = (long)source.Columns * source.Rows;
+        if (verts <= MaxMeshVerticesForPlatform)
+        {
+            return source;
+        }
+
+        // Find the smallest step where (cols/step) × (rows/step) ≤ budget. Squared because both
+        // dimensions decimate, so the ratio drops quadratically.
+        double ratio = Math.Sqrt((double)verts / MaxMeshVerticesForPlatform);
+        int step = Math.Max(2, (int)Math.Ceiling(ratio));
+        DemRaster decimated = source.Subsample(step);
+        logger.LogInformation(
+            "DEM subsampled {Step}× for renderer budget: {SrcCols}×{SrcRows} → {DstCols}×{DstRows} verts",
+            step, source.Columns, source.Rows, decimated.Columns, decimated.Rows);
+        return decimated;
+    }
+
     private async Task LoadDemFromPathAsync(string path)
     {
         var raster = await Task.Run(() => DemRasterReader.Read(path)).ConfigureAwait(true);
+
+        // CPU-Skia 3D path (mobile + non-Windows desktop) can't keep an interactive frame rate on
+        // ~9 M-vertex LiDAR meshes — orbit/pinch stutter — so subsample the loaded DEM down to a
+        // vertex budget the CPU rasteriser handles cleanly. Step is the smallest stride that
+        // brings cols × rows under the budget; 1 leaves the raster untouched.
+        raster = SubsampleRasterForRenderer(raster);
+
         TerrainRaster = raster;
         var initialOptions = new MapaTur.Application.Terrain.TerrainMeshOptions
         {

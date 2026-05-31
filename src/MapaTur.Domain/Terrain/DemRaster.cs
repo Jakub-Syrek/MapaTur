@@ -162,4 +162,56 @@ public sealed class DemRaster
 
         return (min, max);
     }
+
+    /// <summary>
+    /// Returns a coarser raster by keeping every <paramref name="step"/>'th column and row
+    /// (nearest-neighbour decimation). Preserves <see cref="Bounds"/> and <see cref="NoDataValue"/>;
+    /// the returned raster's cell pitch is <c>step</c>× larger so the same bbox is described by
+    /// <c>columns/step × rows/step</c> samples (rounded up). Use to drop the vertex count for
+    /// mobile / low-end GPU paths where the source raster is too dense to render at interactive
+    /// rates — at 30 m / 60 m / 90 m visible detail on a phone screen is already pixel-limited.
+    /// </summary>
+    /// <param name="step">Stride (≥ 1). 1 returns the original raster unchanged.</param>
+    /// <returns>The subsampled raster, or this instance when <paramref name="step"/> is 1.</returns>
+    /// <exception cref="ArgumentOutOfRangeException">Thrown when <paramref name="step"/> &lt; 1.</exception>
+    public DemRaster Subsample(int step)
+    {
+        if (step < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(step), step, "step must be at least 1.");
+        }
+
+        if (step == 1)
+        {
+            return this;
+        }
+
+        // Cap step so the result always has the ≥ 2 columns / rows the ctor demands; this matters
+        // for tiny rasters that would otherwise round down to 1×1 (illegal mesh) when over-stepped.
+        int effective = step;
+        while (effective > 1 && ((Columns + effective - 1) / effective < 2 || (Rows + effective - 1) / effective < 2))
+        {
+            effective--;
+        }
+
+        if (effective <= 1)
+        {
+            return this;
+        }
+
+        int newCols = (Columns + effective - 1) / effective;
+        int newRows = (Rows + effective - 1) / effective;
+        var samples = new float[newCols * newRows];
+        for (int r = 0; r < newRows; r++)
+        {
+            int sourceRow = Math.Min(r * effective, Rows - 1);
+            for (int c = 0; c < newCols; c++)
+            {
+                int sourceCol = Math.Min(c * effective, Columns - 1);
+                samples[(r * newCols) + c] = Samples[(sourceRow * Columns) + sourceCol];
+            }
+        }
+
+        return new DemRaster(newCols, newRows, Bounds, samples, NoDataValue);
+    }
 }
