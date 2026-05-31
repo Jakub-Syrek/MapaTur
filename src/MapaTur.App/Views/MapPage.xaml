@@ -11,7 +11,12 @@
 
     <Grid RowDefinitions="Auto,Auto,*,Auto" Padding="0">
 
-        <HorizontalStackLayout Grid.Row="0" Padding="12" Spacing="12" BackgroundColor="{AppThemeBinding Light=#F4F4F5, Dark=#1F1F23}">
+        <!-- ScrollView wrapper so the toolbar stays usable on portrait phones where the full button
+             row is wider than the screen. Without it the 3D Mode / Track me buttons run off the right
+             edge and become untappable. Horizontal-only scrolling keeps the vertical layout intact. -->
+        <ScrollView Grid.Row="0" Orientation="Horizontal" HorizontalScrollBarVisibility="Never"
+                    BackgroundColor="{AppThemeBinding Light=#F4F4F5, Dark=#1F1F23}">
+        <HorizontalStackLayout Padding="12" Spacing="12">
             <Button Text="{x:Static loc:AppStrings.OpenMBTiles}"
                     Command="{Binding OpenMBTilesCommand}"
                     IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
@@ -70,10 +75,13 @@
                                IsVisible="{Binding IsBusy}"
                                VerticalOptions="Center" />
         </HorizontalStackLayout>
+        </ScrollView>
 
-        <!-- Trail filter row: 5 PTTK colour toggles + 4 Karpat region toggles. -->
-        <HorizontalStackLayout Grid.Row="1" Padding="12,4" Spacing="6"
-                               BackgroundColor="{AppThemeBinding Light=#FAFAFA, Dark=#27272A}">
+        <!-- Trail filter row: 5 PTTK colour toggles + 4 Karpat region toggles. Also scrollable so
+             the POI / region toggles don't clip off a narrow screen. -->
+        <ScrollView Grid.Row="1" Orientation="Horizontal" HorizontalScrollBarVisibility="Never"
+                    BackgroundColor="{AppThemeBinding Light=#FAFAFA, Dark=#27272A}">
+        <HorizontalStackLayout Padding="12,4" Spacing="6">
             <CheckBox IsChecked="{Binding ShowTrails}" />
             <Label Text="Szlaki" VerticalOptions="Center" FontSize="11" />
             <CheckBox IsChecked="{Binding ShowRoads}" />
@@ -113,6 +121,7 @@
             <CheckBox IsChecked="{Binding ShowViewpoints}" />
             <Label Text="Widoki" VerticalOptions="Center" FontSize="11" />
         </HorizontalStackLayout>
+        </ScrollView>
 
         <mapsui:MapControl x:Name="MapControl"
                            Grid.Row="2"

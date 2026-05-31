@@ -205,10 +205,26 @@ public sealed class FileSystemMapAutoLoader : IMapAutoLoader
 
     private static IReadOnlyList<string> BuildDefaultSearchRoots()
     {
-        var roots = new List<string>(capacity: 3)
+        var roots = new List<string>(capacity: 6)
         {
+            // Production install location — both .mbtiles and .dem land here. The probe later filters
+            // by extension so dropping a .dem into …/maps would still be found by the DEM lookup.
             Path.Combine(FileSystem.AppDataDirectory, "maps"),
+            Path.Combine(FileSystem.AppDataDirectory, "dem"),
         };
+
+#if ANDROID
+        // App-scoped external storage: /sdcard/Android/data/<pkg>/files/… is writable by adb push
+        // and by file-manager apps without root, so users (and devs deploying via WiFi adb) can
+        // drop region archives + DEMs here without touching the protected internal data dir.
+        if (Android.App.Application.Context.GetExternalFilesDir(null) is { } externalRoot)
+        {
+            AddIfExists(roots, Path.Combine(externalRoot.AbsolutePath, "maps"));
+            AddIfExists(roots, Path.Combine(externalRoot.AbsolutePath, "dem"));
+            AddIfExists(roots, Path.Combine(externalRoot.AbsolutePath, "MapaTur", "maps"));
+            AddIfExists(roots, Path.Combine(externalRoot.AbsolutePath, "MapaTur", "dem"));
+        }
+#endif
 
         // Walk up from AppContext.BaseDirectory looking for a repo-root marker so we
         // can locate testdata/ for development runs. Counting `..` levels is fragile
