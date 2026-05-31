@@ -495,6 +495,8 @@ testdata/maps/tatry-hillshade-real.mbtiles
 # fixtures) keeps tracking normally.
 /maps/
 /dem/
+# Mobile-tier downscaled ortho set (regenerate via testdata/maps/generate-tatry-ortho-mobile.py).
+/dem-mobile/
 
 # Local screenshot scratch folder
 /screens/
