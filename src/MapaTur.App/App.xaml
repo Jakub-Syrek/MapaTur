@@ -12,6 +12,7 @@
             </ResourceDictionary.MergedDictionaries>
 
             <converters:InverseBoolConverter x:Key="InverseBool" />
+            <converters:LocationTrackingLabelConverter x:Key="LocationTrackingLabel" />
         </ResourceDictionary>
     </Application.Resources>
 </Application>

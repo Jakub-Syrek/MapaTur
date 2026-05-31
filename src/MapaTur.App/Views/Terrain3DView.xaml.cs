@@ -4,6 +4,7 @@ using MapaTur.App.Services;
 using MapaTur.Application.Maps;
 using MapaTur.Application.Terrain;
 using MapaTur.Domain.Climbing;
+using MapaTur.Domain.Location;
 using MapaTur.Domain.Pois;
 using MapaTur.Domain.Routing;
 using MapaTur.Domain.Terrain;
@@ -133,6 +134,23 @@ public partial class Terrain3DView : ContentView
         set => SetValue(PeaksProperty, value);
     }
 
+    /// <summary>
+    /// Bindable current GPS fix of the device. A null value hides the marker. The view wraps the
+    /// fix in a one-element list internally so the existing <c>Marker3DOverlayProjector</c> caching
+    /// machinery applies — only re-projects when the fix reference (not its contents) changes.
+    /// </summary>
+    public static readonly BindableProperty UserLocationProperty = BindableProperty.Create(
+        nameof(UserLocation),
+        typeof(UserLocation),
+        typeof(Terrain3DView),
+        propertyChanged: OnOverlayDataChanged);
+
+    public UserLocation? UserLocation
+    {
+        get => (UserLocation?)GetValue(UserLocationProperty);
+        set => SetValue(UserLocationProperty, value);
+    }
+
     /// <summary>Bindable path to an ortho-photo image draped over the terrain (GPU path only). Null = hypsometric tint.</summary>
     public static readonly BindableProperty OrthoTexturePathProperty = BindableProperty.Create(
         nameof(OrthoTexturePath),
@@ -219,6 +237,18 @@ public partial class Terrain3DView : ContentView
         new(
             (peaks, _, mesh, lift) => Peak3DProjection.ToWorld(peaks, mesh, lift),
             (source, screen) => new ProjectedPeak(source, screen));
+
+    // GPS marker: prefer the OS-reported altitude when present (UserLocation3DProjection takes care
+    // of that), otherwise fall back to a DEM lookup. Lift higher than POI/climbing so the dot
+    // visibly hovers above the ground on flat sections instead of merging with the mesh.
+    private const float UserLocationMarkerLiftMeters = 20f;
+    private readonly Marker3DOverlayProjector<UserLocation, ProjectedUserLocation> userLocationProjector =
+        new(
+            (fixes, raster, mesh, lift) => UserLocation3DProjection.ToWorld(fixes, raster, mesh, lift),
+            (source, screen) => new ProjectedUserLocation(source, screen));
+    // Reused one-element buffer so a fix update doesn't allocate a fresh list per frame; the
+    // projector compares by reference so we only swap the contained UserLocation when it changes.
+    private readonly UserLocation[] userLocationBuffer = new UserLocation[1];
 
     private double lastOrbitTotalX;
     private double lastOrbitTotalY;
@@ -393,6 +423,20 @@ public partial class Terrain3DView : ContentView
                 peaks, null, frame, Camera, e.Info.Width, e.Info.Height, PeakMarkerLiftMeters);
         }
 
+        // Single GPS fix: wrap into our reusable one-element buffer so the projector keeps its
+        // world-cache hit when only the contained data shifts (it compares list reference).
+        ProjectedUserLocation? projectedUserLocation = null;
+        if (UserLocation is { } fix)
+        {
+            userLocationBuffer[0] = fix;
+            IReadOnlyList<ProjectedUserLocation> projected = userLocationProjector.Project(
+                userLocationBuffer, Raster, frame, Camera, e.Info.Width, e.Info.Height, UserLocationMarkerLiftMeters);
+            if (projected.Count > 0)
+            {
+                projectedUserLocation = projected[0];
+            }
+        }
+
 #if WINDOWS
         // GPU engine: GL draws the depth-buffered terrain, then the Skia overlays (trails / route /
         // markers / peak labels) are drawn over it with the same camera so they register. Any GL/shader
@@ -406,14 +450,14 @@ public partial class Terrain3DView : ContentView
         if (UseGlRenderer && TryRenderTerrainGl(tiles, e.Info.Width, e.Info.Height, glFramebuffer))
         {
             // GL already drew the (depth-occluded) trails + route; Skia only adds the markers/labels on top.
-            renderer.DrawOverlays(canvas, null, null, projectedClimbing, projectedPois, projectedPeaks);
+            renderer.DrawOverlays(canvas, null, null, projectedClimbing, projectedPois, projectedPeaks, projectedUserLocation);
             return;
         }
 #endif
 
         // depthMap = null disables trail / route / climbing occlusion: trails are drawn always on top
         // of the mesh (the visual the user wants) and it drops a per-frame depth-grid fill.
-        renderer.RenderTiles(canvas, e.Info.Width, e.Info.Height, tiles, Camera, frameScratch, null, projectedTrails, projectedRoute, projectedClimbing, projectedPois, projectedPeaks);
+        renderer.RenderTiles(canvas, e.Info.Width, e.Info.Height, tiles, Camera, frameScratch, null, projectedTrails, projectedRoute, projectedClimbing, projectedPois, projectedPeaks, projectedUserLocation);
     }
 
     private void OnOrbitPan(object? sender, PanUpdatedEventArgs e)

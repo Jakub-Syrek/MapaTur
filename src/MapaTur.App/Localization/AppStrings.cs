@@ -144,5 +144,20 @@ public static class AppStrings
     /// <summary>Label for the vertical-exaggeration slider in 3D mode.</summary>
     public static string LabelVerticalExaggeration => Get(nameof(LabelVerticalExaggeration));
 
+    /// <summary>Label for the location-tracking button when tracking is OFF (clicking turns it on).</summary>
+    public static string ToggleLocationTrackingOn => Get(nameof(ToggleLocationTrackingOn));
+
+    /// <summary>Label for the location-tracking button when tracking is ON (clicking turns it off).</summary>
+    public static string ToggleLocationTrackingOff => Get(nameof(ToggleLocationTrackingOff));
+
+    /// <summary>Status line shown immediately after location tracking starts.</summary>
+    public static string StatusLocationTrackingStarted => Get(nameof(StatusLocationTrackingStarted));
+
+    /// <summary>Status line shown immediately after location tracking stops.</summary>
+    public static string StatusLocationTrackingStopped => Get(nameof(StatusLocationTrackingStopped));
+
+    /// <summary>Status line shown when the user / OS denies location permission.</summary>
+    public static string StatusLocationPermissionDenied => Get(nameof(StatusLocationPermissionDenied));
+
     private static string Get(string key) => Manager.GetString(key) ?? key;
 }
