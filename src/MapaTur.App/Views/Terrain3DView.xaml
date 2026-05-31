@@ -65,21 +65,23 @@
             <views:OrbitGizmoView x:Name="OrbitGizmo" />
         </VerticalStackLayout>
 
-        <!-- Pan + slow-rotate pad, bottom-right. Centre column has the pan arrows (▲ ▼) and the
-             rotate-in-place arrows (⟲ ⟳) in the centre row — small azimuth step per tap so the
-             user can dial in the heading without overshooting. Rotate sits in the same cluster
-             as pan so the navigation cross stays in one place. -->
+        <!-- Pan + slow-rotate pad, bottom-right. Top row flanks the forward-pan arrow (▲) with the
+             two in-place rotate arrows (⟲ ⟳) so a thumb sitting on ▲ can flick straight onto the
+             azimuth nudge without crossing the screen. The remaining two rows form the rest of
+             the pan cross. The whole cluster is shorter than before (3 rows instead of 4), which
+             — anchored to VerticalOptions="End" — sinks the pan cross visibly lower on the screen
+             so it doesn't push up into the orthophoto. -->
         <VerticalStackLayout HorizontalOptions="End" VerticalOptions="End"
                              Margin="12" Spacing="4" InputTransparent="False">
             <Label Text="Przesuń" Style="{StaticResource Cam3DCaption}" />
             <Grid ColumnSpacing="4" RowSpacing="4"
-                  ColumnDefinitions="Auto,Auto,Auto" RowDefinitions="Auto,Auto,Auto,Auto">
+                  ColumnDefinitions="Auto,Auto,Auto" RowDefinitions="Auto,Auto,Auto">
+                <Button Grid.Row="0" Grid.Column="0" Text="&#x21BA;" Clicked="OnRotateLeftSlowClicked" Style="{StaticResource Cam3DButton}" />
                 <Button Grid.Row="0" Grid.Column="1" Text="&#x25B2;" Clicked="OnPanUpClicked" Style="{StaticResource Cam3DButton}" />
+                <Button Grid.Row="0" Grid.Column="2" Text="&#x21BB;" Clicked="OnRotateRightSlowClicked" Style="{StaticResource Cam3DButton}" />
                 <Button Grid.Row="1" Grid.Column="0" Text="&#x25C0;" Clicked="OnPanLeftClicked" Style="{StaticResource Cam3DButton}" />
                 <Button Grid.Row="1" Grid.Column="2" Text="&#x25B6;" Clicked="OnPanRightClicked" Style="{StaticResource Cam3DButton}" />
                 <Button Grid.Row="2" Grid.Column="1" Text="&#x25BC;" Clicked="OnPanDownClicked" Style="{StaticResource Cam3DButton}" />
-                <Button Grid.Row="3" Grid.Column="0" Text="&#x21BA;" Clicked="OnRotateLeftSlowClicked" Style="{StaticResource Cam3DButton}" />
-                <Button Grid.Row="3" Grid.Column="2" Text="&#x21BB;" Clicked="OnRotateRightSlowClicked" Style="{StaticResource Cam3DButton}" />
             </Grid>
         </VerticalStackLayout>
     </Grid>
