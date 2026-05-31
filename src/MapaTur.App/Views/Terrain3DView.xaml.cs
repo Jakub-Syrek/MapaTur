@@ -327,6 +327,16 @@ public partial class Terrain3DView : ContentView
         Canvas.InvalidateSurface();
     }
 
+    // Slow-rotate step is ~⅓ of the full button-orbit step so the dedicated arrow-pad rotate
+    // buttons feel like a deliberate fine adjustment, not a swipe. ApplyLookAround (in-place
+    // rotation, same as the gizmo and 1-finger drag) per user spec: rotation must NEVER also
+    // translate the camera.
+    private const float SlowRotateStep = 10f;
+
+    private void OnRotateLeftSlowClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyLookAround(-SlowRotateStep, 0f));
+
+    private void OnRotateRightSlowClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyLookAround(SlowRotateStep, 0f));
+
     private void OnRotateLeftClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyOrbit(-ButtonOrbitStep, 0f));
 
     private void OnRotateRightClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyOrbit(ButtonOrbitStep, 0f));
@@ -436,7 +446,11 @@ public partial class Terrain3DView : ContentView
 
         if (Tiles is not { Count: > 0 } tiles || WorldFrame is not { } frame)
         {
-            canvas.Clear();
+            // The view can paint BEFORE the DEM finishes auto-loading. canvas.Clear() with no
+            // argument leaves the surface transparent → underlying page background bleeds through
+            // and reads as solid white on mobile. Fill with the sky colour so the empty 3D scene
+            // looks like a placeholder rather than a blank page.
+            canvas.Clear(new SkiaSharp.SKColor(0x6C, 0x8E, 0xB0));
             return;
         }
 
@@ -897,9 +911,19 @@ public partial class Terrain3DView : ContentView
 #if WINDOWS || ANDROID
     // ── Real GPU terrain engine (OpenGL ES on the SKGLView context) ───────────────────────────────
     // Flip to false to force the Skia renderer. On any GL/shader failure we fall back automatically.
-    // Region applies to every TFM where the GLES renderer is built; iOS/Mac targets fall through to
-    // the CPU Skia path until SKGLView's framework bridge is verified there.
+    // ANDROID: SkiaSharp/MAUI on Android exposes the on-screen FBO as 0 with no intermediate
+    // backend FBO. Even after rebinding to whatever glGetIntegerv reports, Skia's compositor
+    // re-paints its (empty) logical surface over our GL output → user sees white. The raw-GL
+    // engine needs a different surface bridge here (drawing through Skia's own GR context, or
+    // a textured Skia post-pass). Until that ships, fall back to the Skia canvas renderer —
+    // which on SKGLView is still GPU-accelerated through Skia's own GL backend, just without
+    // our custom depth buffer / texture-drape shaders. Mesh renders fine; ortho lands as the
+    // hypsometric colouring instead of the real photo until the GL bridge is fixed.
+#if ANDROID
+    private static readonly bool UseGlRenderer = false;
+#else
     private static readonly bool UseGlRenderer = true;
+#endif
 
     private Services.Terrain3DGlRenderer? glRenderer;
     private bool glDisabled;

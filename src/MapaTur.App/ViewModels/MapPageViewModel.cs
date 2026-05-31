@@ -73,6 +73,9 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private bool isBusy;
 
+    // Default false — AutoLoadOnStartupAsync flips to 3D once the DEM finishes loading.
+    // Initial true caused a race on Android where Terrain3DView painted before AutoLoad
+    // pushed Tiles, leaving a sky-only screen the user perceived as "biała mapa".
     [ObservableProperty]
     private bool is3DMode;
 
@@ -1077,12 +1080,18 @@ public sealed partial class MapPageViewModel : ObservableObject
         StatusMessage = Localization.AppStrings.Status3DMode;
     }
 
-    // Vertex budget per platform — sized to the renderer that draws the mesh. Android now also
-    // ships the hardware GL renderer (Services.Terrain3DGlRenderer is no longer Windows-only),
-    // so phones can handle the full LiDAR mesh too. iOS / Mac Catalyst still fall through to CPU
-    // Skia until the GL bridge is verified there, so they keep the conservative cap.
-#if WINDOWS || ANDROID
+    // Vertex budget per platform — sized to the renderer that draws the mesh AND the build
+    // pipeline that produces it. The GL renderer can chew through tens of millions of verts but
+    // BuildTiles allocates a couple of float arrays per vertex on the CPU first, and pushing
+    // 9.5 M-vert mesh through that on a phone hung the auto-load for 30 s+ on a Samsung S22.
+    //   - Windows: hardware GL + plenty of RAM, full mesh.
+    //   - Android: 5 M cap balances GPU detail (LiDAR ~30 m output) with a build that finishes
+    //     in a couple of seconds on mobile CPU.
+    //   - iOS / Mac Catalyst still on CPU Skia path; the 2 M cap keeps them interactive.
+#if WINDOWS
     private const int MaxMeshVerticesForPlatform = int.MaxValue;
+#elif ANDROID
+    private const int MaxMeshVerticesForPlatform = 5_000_000;
 #else
     private const int MaxMeshVerticesForPlatform = 2_000_000;
 #endif
@@ -1269,8 +1278,11 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             // Mesh is 1×1 ortho cells (the only grid we build when no ortho PNGs were discovered),
             // so a single composited texture spanning the DEM is exactly what the renderer expects.
-            // 2048×2048 is the safe baseline for GL_MAX_TEXTURE_SIZE on every target platform.
-            const int cellSize = 2048;
+            // 4096×4096 over the Tatra bbox (~90 km × 33 km) is ~22 m/px output — 4× better than
+            // the previous 2048 baseline (~44 m/px) which read as a "soft blur". Costs ~85 MB GPU
+            // memory after mipmaps; well under GL_MAX_TEXTURE_SIZE on every modern phone/desktop
+            // (typically 8192–16384) and under the ~600 MB VRAM headroom we have on mobile.
+            const int cellSize = 4096;
             MapBounds bounds = TerrainRaster.Bounds;
             IReadOnlyList<OrthoTextureCell> cells = await Task.Run(async () =>
             {
