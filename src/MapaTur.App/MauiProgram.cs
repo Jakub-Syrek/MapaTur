@@ -2,6 +2,7 @@ using MapaTur.App.Services;
 using MapaTur.App.ViewModels;
 using MapaTur.App.Views;
 using MapaTur.Application.Climbing;
+using MapaTur.Application.Location;
 using MapaTur.Application.Maps;
 using MapaTur.Application.Pois;
 using MapaTur.Application.Roads;
@@ -145,6 +146,8 @@ public static class MauiProgram
         services.AddSingleton<ITileSourceFactory, MBTilesTileSourceFactory>();
         services.AddSingleton<IRasterTileDecoder, SkiaRasterTileDecoder>();
         services.AddSingleton<MBTilesOrthoCompositor>();
+        services.AddSingleton<IUserLocationService, MauiUserLocationService>();
+        services.AddSingleton<IUserLocationLayerRenderer, MapsuiUserLocationLayerRenderer>();
         services.AddSingleton<ITrackLayerRenderer, MapsuiTrackLayerRenderer>();
         services.AddSingleton<ITrailLayerRenderer, MapsuiTrailLayerRenderer>();
         services.AddSingleton<IRouteLayerRenderer, MapsuiRouteLayerRenderer>();

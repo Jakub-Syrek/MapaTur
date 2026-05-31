@@ -28,5 +28,7 @@
 	</array>
 	<key>XSAppIconAssets</key>
 	<string>Assets.xcassets/appicon.appiconset</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>MapaTur shows your live position as a dot on the map so you can navigate trails without losing your bearings.</string>
 </dict>
 </plist>

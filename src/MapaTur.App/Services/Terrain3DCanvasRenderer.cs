@@ -35,6 +35,16 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
     private static readonly SKColor PeakMarkerColor = new(0xFF, 0xD7, 0x4A);
     private static readonly SKColor PeakOutlineColor = new(0x3A, 0x2E, 0x10);
     private static readonly SKColor PeakLabelHaloColor = new(0x10, 0x14, 0x20);
+
+    // GPS marker palette: vivid blue (matches the 2D dot) over an alpha-modulated halo. The halo's
+    // alpha drops with accuracy so a precise fix shows a tight, opaque ring while a low-confidence
+    // fix dissolves into a soft glow — communicates uncertainty without a numeric overlay.
+    private static readonly SKColor UserLocationFill = new(0x25, 0x63, 0xEB);
+    private static readonly SKColor UserLocationOutline = new(0xFF, 0xFF, 0xFF);
+    private static readonly SKColor UserLocationHalo = new(0x25, 0x63, 0xEB);
+    private const float UserLocationDotRadiusPx = 7f;
+    private const float UserLocationOutlineWidthPx = 2.5f;
+    private const float UserLocationHaloMaxRadiusPx = 26f;
     private const float PeakMarkerHalfWidthPx = 6f;
     private const float PeakMarkerHeightPx = 12f;
     private const float PeakLabelSizePx = 12.5f;
@@ -120,7 +130,8 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         ProjectedRoute? route = null,
         IReadOnlyList<ProjectedClimbingArea>? climbingAreas = null,
         IReadOnlyList<ProjectedPoi>? pois = null,
-        IReadOnlyList<ProjectedPeak>? peaks = null)
+        IReadOnlyList<ProjectedPeak>? peaks = null,
+        ProjectedUserLocation? userLocation = null)
     {
         ArgumentNullException.ThrowIfNull(canvas);
         ArgumentNullException.ThrowIfNull(tiles);
@@ -199,6 +210,12 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         if (peaks is not null)
         {
             DrawPeaks(canvas, peaks, depthMap);
+        }
+        // Always drawn last so the user-location dot sits on top of everything else — it's the
+        // single most important overlay (where am I?) and must never be hidden behind a label.
+        if (userLocation is not null)
+        {
+            DrawUserLocation(canvas, userLocation.Value, depthMap);
         }
     }
 
@@ -358,7 +375,8 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         ProjectedRoute? route,
         IReadOnlyList<ProjectedClimbingArea>? climbingAreas,
         IReadOnlyList<ProjectedPoi>? pois,
-        IReadOnlyList<ProjectedPeak>? peaks)
+        IReadOnlyList<ProjectedPeak>? peaks,
+        ProjectedUserLocation? userLocation = null)
     {
         ArgumentNullException.ThrowIfNull(canvas);
 
@@ -381,6 +399,10 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         if (peaks is not null)
         {
             DrawPeaks(canvas, peaks, null);
+        }
+        if (userLocation is not null)
+        {
+            DrawUserLocation(canvas, userLocation.Value, null);
         }
     }
 
@@ -843,5 +865,56 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         peakPath = null;
         skyPaint = null;
         skyShader = null;
+        userLocationFillPaint = null;
+        userLocationOutlinePaint = null;
+        userLocationHaloPaint = null;
+    }
+
+    private SKPaint? userLocationFillPaint;
+    private SKPaint? userLocationOutlinePaint;
+    private SKPaint? userLocationHaloPaint;
+
+    /// <summary>
+    /// Draws the current GPS fix: a soft accuracy halo (radius scales with reported accuracy),
+    /// a vivid blue dot, and a white outline so the marker stays legible over forest, snow or rock
+    /// alike. Always drawn last so it sits above every other overlay. Honours the depth map when
+    /// supplied so a fix behind a peak gets occluded just like trails / route do.
+    /// </summary>
+    private void DrawUserLocation(SKCanvas canvas, ProjectedUserLocation location, ScreenDepthMap? depthMap)
+    {
+        if (location.ScreenPosition is not { } screen)
+        {
+            return;
+        }
+        if (depthMap is not null && depthMap.IsBehind(screen, OcclusionEpsilon))
+        {
+            return;
+        }
+
+        userLocationHaloPaint ??= new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill, Color = UserLocationHalo };
+        userLocationFillPaint ??= new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill, Color = UserLocationFill };
+        userLocationOutlinePaint ??= new SKPaint
+        {
+            IsAntialias = true,
+            Style = SKPaintStyle.Stroke,
+            StrokeWidth = UserLocationOutlineWidthPx,
+            Color = UserLocationOutline,
+        };
+
+        float x = screen.X;
+        float y = screen.Y;
+
+        // Halo radius: scale linearly with the reported accuracy, clamp to a sensible max so a 200 m
+        // fix doesn't paint a quarter of the screen blue. Alpha drops as the halo grows so wider
+        // (= less certain) halos read as softer, not louder.
+        double accuracy = Math.Max(1.0, location.Source.AccuracyMeters);
+        float haloRadius = Math.Min(UserLocationHaloMaxRadiusPx, UserLocationDotRadiusPx + (float)accuracy * 0.4f);
+        byte haloAlpha = (byte)Math.Max(30, 96 - (int)(accuracy * 1.2));
+        userLocationHaloPaint.Color = UserLocationHalo.WithAlpha(haloAlpha);
+        canvas.DrawCircle(x, y, haloRadius, userLocationHaloPaint);
+
+        // Inner dot + outline.
+        canvas.DrawCircle(x, y, UserLocationDotRadiusPx, userLocationFillPaint);
+        canvas.DrawCircle(x, y, UserLocationDotRadiusPx, userLocationOutlinePaint);
     }
 }

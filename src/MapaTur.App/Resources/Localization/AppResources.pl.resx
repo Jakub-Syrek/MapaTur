@@ -141,4 +141,19 @@
   <data name="LabelVerticalExaggeration" xml:space="preserve">
     <value>Skala pionowa</value>
   </data>
+  <data name="ToggleLocationTrackingOn" xml:space="preserve">
+    <value>Śledź mnie</value>
+  </data>
+  <data name="ToggleLocationTrackingOff" xml:space="preserve">
+    <value>Stop śledzenia</value>
+  </data>
+  <data name="StatusLocationTrackingStarted" xml:space="preserve">
+    <value>Śledzę twoją lokalizację.</value>
+  </data>
+  <data name="StatusLocationTrackingStopped" xml:space="preserve">
+    <value>Śledzenie lokalizacji wyłączone.</value>
+  </data>
+  <data name="StatusLocationPermissionDenied" xml:space="preserve">
+    <value>Brak zgody na lokalizację — włącz w ustawieniach systemu, aby śledzić pozycję.</value>
+  </data>
 </root>

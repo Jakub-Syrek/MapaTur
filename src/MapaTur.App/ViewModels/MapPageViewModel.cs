@@ -3,6 +3,7 @@ using CommunityToolkit.Mvvm.Input;
 
 using MapaTur.App.Services;
 using MapaTur.Application.Climbing;
+using MapaTur.Application.Location;
 using MapaTur.Application.Maps;
 using MapaTur.Application.Pois;
 using MapaTur.Application.Roads;
@@ -11,6 +12,7 @@ using MapaTur.Application.Terrain;
 using MapaTur.Application.Tracks;
 using MapaTur.Application.Trails;
 using MapaTur.Domain.Geography;
+using MapaTur.Domain.Location;
 using MapaTur.Domain.Terrain;
 using MapaTur.Domain.Trails;
 using MapaTur.Infrastructure.Terrain;
@@ -43,6 +45,8 @@ public sealed partial class MapPageViewModel : ObservableObject
     private readonly ITileSourceFactory tileSourceFactory;
     private readonly MBTilesOrthoCompositor? orthoCompositor;
     private readonly I3DSettingsStore settingsStore;
+    private readonly IUserLocationService? userLocationService;
+    private readonly IUserLocationLayerRenderer? userLocationRenderer;
     private ViewportAwareTrailLayerController? viewportTrailController;
     private readonly ITrackLayerRenderer trackRenderer;
     private readonly ITrailLayerRenderer trailRenderer;
@@ -72,6 +76,14 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private bool is3DMode;
 
+    /// <summary>Current GPS fix or null. Bound by both the 2D map renderer and the 3D view.</summary>
+    [ObservableProperty]
+    private UserLocation? userLocation;
+
+    /// <summary>True when the location service is actively polling for fixes. Drives the button label.</summary>
+    [ObservableProperty]
+    private bool isLocationTracking;
+
     [ObservableProperty]
     private IReadOnlyList<TerrainMesh3D>? terrainTiles;
 
@@ -94,6 +106,43 @@ public sealed partial class MapPageViewModel : ObservableObject
     private double verticalExaggeration = 2.0;
 
     private readonly MeshRebuildCoalescer meshRebuildCoalescer = new();
+
+    /// <summary>
+    /// Mirror every GPS fix onto the 2D Mapsui layer. The 3D view binds <c>UserLocation</c>
+    /// directly so it picks the change up through its own bindable handler.
+    /// </summary>
+    partial void OnUserLocationChanged(UserLocation? value)
+    {
+        userLocationRenderer?.RenderUserLocation(Map, value);
+    }
+
+    /// <summary>
+    /// Toggles GPS tracking. First press requests permission and starts the poll loop; second
+    /// press stops the loop and clears the marker. Idempotent — safe to spam.
+    /// </summary>
+    [RelayCommand]
+    public async Task ToggleLocationTrackingAsync()
+    {
+        if (userLocationService is null)
+        {
+            return;
+        }
+        if (userLocationService.IsTracking)
+        {
+            userLocationService.Stop();
+            IsLocationTracking = false;
+            UserLocation = null;
+            StatusMessage = Localization.AppStrings.StatusLocationTrackingStopped;
+            return;
+        }
+
+        bool started = await userLocationService.StartAsync().ConfigureAwait(true);
+        if (started)
+        {
+            IsLocationTracking = true;
+            StatusMessage = Localization.AppStrings.StatusLocationTrackingStarted;
+        }
+    }
 
     partial void OnVerticalExaggerationChanged(double value)
     {
@@ -419,6 +468,8 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <param name="exportRouteToGpxUseCase">GPX export use case.</param>
     /// <param name="logger">Logger.</param>
     /// <param name="orthoCompositor">Optional compositor that drapes basemap MBTiles tiles onto the 3D terrain mesh; null disables MBTiles draping.</param>
+    /// <param name="userLocationService">Optional OS GPS feed; null disables the live location dot (e.g. in tests / on a headless host).</param>
+    /// <param name="userLocationRenderer">Optional 2D-map renderer for the live GPS dot; null skips 2D rendering of the location.</param>
     public MapPageViewModel(
         IFilePickerService filePicker,
         IFileSaverService fileSaver,
@@ -442,7 +493,9 @@ public sealed partial class MapPageViewModel : ObservableObject
         PlanRouteUseCase planRouteUseCase,
         ExportRouteToGpxUseCase exportRouteToGpxUseCase,
         ILogger<MapPageViewModel> logger,
-        MBTilesOrthoCompositor? orthoCompositor = null)
+        MBTilesOrthoCompositor? orthoCompositor = null,
+        IUserLocationService? userLocationService = null,
+        IUserLocationLayerRenderer? userLocationRenderer = null)
     {
         ArgumentNullException.ThrowIfNull(filePicker);
         ArgumentNullException.ThrowIfNull(fileSaver);
@@ -473,7 +526,36 @@ public sealed partial class MapPageViewModel : ObservableObject
         this.autoLoader = autoLoader;
         this.tileSourceFactory = tileSourceFactory;
         this.orthoCompositor = orthoCompositor;
+        this.userLocationService = userLocationService;
+        this.userLocationRenderer = userLocationRenderer;
         this.settingsStore = settingsStore;
+
+        // Subscribe to the location feed once at construction. The service stays silent until the
+        // user opts in via ToggleLocationTracking; we just need to be listening so the first fix
+        // lands on the right thread. The handler hops to the dispatcher because the OS may deliver
+        // updates from a non-UI thread.
+        if (userLocationService is not null)
+        {
+            userLocationService.LocationChanged += (_, fix) =>
+            {
+                if (MainThread.IsMainThread)
+                {
+                    UserLocation = fix;
+                }
+                else
+                {
+                    MainThread.BeginInvokeOnMainThread(() => UserLocation = fix);
+                }
+            };
+            userLocationService.PermissionDenied += (_, _) =>
+            {
+                MainThread.BeginInvokeOnMainThread(() =>
+                {
+                    IsLocationTracking = false;
+                    StatusMessage = Localization.AppStrings.StatusLocationPermissionDenied;
+                });
+            };
+        }
 
         // Restore the saved vertical exaggeration before the partial OnXxxChanged hook
         // can fire on the default value. Clamp to [1, 5] to defend against tampered

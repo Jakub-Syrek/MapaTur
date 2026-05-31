@@ -141,4 +141,19 @@
   <data name="LabelVerticalExaggeration" xml:space="preserve">
     <value>Vertical exaggeration</value>
   </data>
+  <data name="ToggleLocationTrackingOn" xml:space="preserve">
+    <value>Track me</value>
+  </data>
+  <data name="ToggleLocationTrackingOff" xml:space="preserve">
+    <value>Stop tracking</value>
+  </data>
+  <data name="StatusLocationTrackingStarted" xml:space="preserve">
+    <value>Following your location.</value>
+  </data>
+  <data name="StatusLocationTrackingStopped" xml:space="preserve">
+    <value>Location tracking off.</value>
+  </data>
+  <data name="StatusLocationPermissionDenied" xml:space="preserve">
+    <value>Location permission denied — enable it in system settings to track your position.</value>
+  </data>
 </root>

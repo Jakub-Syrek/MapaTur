@@ -52,6 +52,11 @@
                     Command="{Binding Toggle3DCommand}"
                     IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
                     SemanticProperties.Hint="{x:Static loc:AppStrings.Toggle3D}" />
+            <!-- Live GPS dot toggle: label flips between "Track me" / "Stop tracking" via the
+                 IsLocationTracking flag, so users always see what the next click will do. -->
+            <Button Text="{Binding IsLocationTracking, Converter={StaticResource LocationTrackingLabel}}"
+                    Command="{Binding ToggleLocationTrackingCommand}"
+                    SemanticProperties.Hint="{x:Static loc:AppStrings.ToggleLocationTrackingOn}" />
             <!-- Vertical-exaggeration slider for 3D mode. Range 1..5 with snap at 0.5. -->
             <HorizontalStackLayout Spacing="6" VerticalOptions="Center" IsVisible="{Binding Is3DMode}">
                 <Label Text="{x:Static loc:AppStrings.LabelVerticalExaggeration}"
@@ -133,6 +138,7 @@
                              OrthoTexturePath="{Binding OrthoTexturePath}"
                              OrthoTexturePaths="{Binding OrthoTexturePaths}"
                              OrthoTextureCells="{Binding OrthoTextureCells}"
+                             UserLocation="{Binding UserLocation}"
                              IsVisible="{Binding Is3DMode}" />
 
         <Label Grid.Row="3"
