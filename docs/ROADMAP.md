@@ -2,6 +2,45 @@
 
 Status legend: `[ ]` planned · `[~]` in progress · `[x]` done
 
+## M11 — Mobile-class production rendering
+
+The 3D engine is feature-complete tech-demo grade. On a flagship phone
+(Adreno 830 / 16 GB shared) the current 8 × 8192×5462 ortho set (~1.9 GB
+VRAM after mipmaps) renders fluently — but on mid-range Android the same
+upload would trigger eviction / stutter / process-kill on memory pressure.
+The items below were identified by an external review (GL/memory focus) and
+turn the engine into something that can ship to the Play Store across the
+device matrix.
+
+### Not yet
+
+- [ ] **#39 Viewport-aware ortho cell streaming** — currently all ortho cells
+      upload eagerly on first paint. Switch to frustum-vs-cell-bbox check, queue
+      uploads on a background GL share-context, decode PNG only for cells about
+      to enter view. Biggest single win for mid-range memory pressure.
+- [ ] **#40 Texture compression (ASTC 4×4 / ETC2)** — RGBA8 is 4 B/px; ASTC 4×4
+      is 1 B/px ⇒ 1.9 GB → ~480 MB. Detect `GL_KHR_texture_compression_astc_ldr`
+      on init; bake compressed `.ktx2` cells via a python pipeline next to the
+      PNG generator; runtime picks the supported format per device.
+- [ ] **#41 Low-end device tier + auto-degradation** — probe `GL_MAX_TEXTURE_SIZE`
+      + total / per-process RAM at startup and pick a tier:
+      `high` (current path) / `mid` (single-cell 4096² MBTiles composite + 2.5 M
+      mesh) / `low` (no ortho, hypsometric tint + 1 M mesh). Tier selectable in
+      Settings (#29) for manual override.
+- [ ] **#42 HUD auto-hide in explore mode** — the on-screen pads + checkbox row
+      cover ~40 % of the phone screen. Fade pads/toolbar after N s of camera
+      inactivity, tap-to-reveal. Keep visible during gestures.
+- [ ] **#43 LRU texture eviction policy** — companion to #39: cap resident
+      ortho-cell VRAM at a budget (tier-dependent), evict the least-recently-rendered
+      cell when a new one is uploaded. Release CPU PNG bytes after upload too
+      (we currently keep them around for context-loss recovery — change to
+      lazy re-decode from disk).
+
+**DoD:** the same APK starts fluently on a 4 GB-RAM Android device (Pixel 4a /
+Galaxy A52-class) at the same camera framing as on the S25 Ultra. The lowest
+tier renders the mesh + hypsometric tint at 30 FPS+ without OOM; the highest
+tier on a flagship matches the current visual fidelity.
+
 ## M9 — 3D terrain mode
 
 ### Done

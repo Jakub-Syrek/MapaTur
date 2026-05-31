@@ -1278,11 +1278,13 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             // Mesh is 1×1 ortho cells (the only grid we build when no ortho PNGs were discovered),
             // so a single composited texture spanning the DEM is exactly what the renderer expects.
-            // 4096×4096 over the Tatra bbox (~90 km × 33 km) is ~22 m/px output — 4× better than
-            // the previous 2048 baseline (~44 m/px) which read as a "soft blur". Costs ~85 MB GPU
-            // memory after mipmaps; well under GL_MAX_TEXTURE_SIZE on every modern phone/desktop
-            // (typically 8192–16384) and under the ~600 MB VRAM headroom we have on mobile.
+            // 4096×4096 over the Tatra bbox is ~16 m/px output. 8192 was tried but on Android the
+            // composite (allocating a ~256 MB intermediate RGBA8 buffer + bilinear-sampling 67 M
+            // output pixels through MBTiles z15 tiles) stalled / silently failed for the user. Until
+            // we have a tiled composite path that streams cell-by-cell, 4096 is the proven cap.
+            // Costs ~85 MB GPU after mipmaps.
             const int cellSize = 4096;
+            logger.LogInformation("Starting MBTiles 3D ortho composite {Size}x{Size} from {Path}", cellSize, cellSize, basemapPath);
             MapBounds bounds = TerrainRaster.Bounds;
             IReadOnlyList<OrthoTextureCell> cells = await Task.Run(async () =>
             {
