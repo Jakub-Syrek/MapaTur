@@ -29,6 +29,9 @@ public sealed class Atmosphere
     /// <summary>Input: time of day in hours, wrapped into [0,24).</summary>
     public float TimeOfDayHours { get; }
 
+    /// <summary>Cloud coverage in [0,1]. 0 = clear sky, ~0.4 = scattered cirrus, 1.0 = overcast.</summary>
+    public float CloudCoverage { get; }
+
     /// <summary>Unit vector from the surface toward the sun, in world frame (X east, Y north, Z up).</summary>
     public Vector3 SunDirection { get; }
 
@@ -50,10 +53,15 @@ public sealed class Atmosphere
     /// <summary>Exponential fog density per metre of view depth. Higher = murkier distance.</summary>
     public float FogDensity { get; }
 
-    /// <summary>Builds the model from a time-of-day in hours. Values outside [0,24) wrap.</summary>
-    public Atmosphere(float timeOfDayHours)
+    /// <summary>
+    /// Builds the model from a time-of-day in hours (wrapped into [0,24)) and an optional cloud
+    /// coverage in [0,1]. Default coverage = 0.35 (scattered cirrus, the look that fits a
+    /// blue-sky day with high-altitude wisps).
+    /// </summary>
+    public Atmosphere(float timeOfDayHours, float cloudCoverage = 0.35f)
     {
         TimeOfDayHours = WrapToDay(timeOfDayHours);
+        CloudCoverage = Math.Clamp(cloudCoverage, 0f, 1f);
 
         // Sun arc: sin(π · t/12) shapes a half-cycle that peaks at noon and bottoms at midnight.
         // Scaling by PeakElevationRadians gives a max of ~64° above the horizon during the day

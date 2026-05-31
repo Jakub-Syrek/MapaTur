@@ -578,8 +578,12 @@ public partial class Terrain3DView : ContentView
                 float dy = (float)(e.TotalY - lastOrbitTotalY);
                 lastOrbitTotalX = e.TotalX;
                 lastOrbitTotalY = e.TotalY;
-                // Drag-to-pan: invert deltas so the world tracks the finger.
-                controller.ApplyPan(-dx, -dy);
+                // Drag-to-pan: ApplyPan moves the camera target along world axes derived from
+                // camera azimuth. Drag finger left (dx<0) -> world tracks finger left -> camera
+                // moves right -> target shifts +right -> pass -dx. Vertically the screen Y axis
+                // is inverted relative to the controller's "forward" vector (screen Y grows down,
+                // forward grows up the screen) so dy comes through with the same sign as dx.
+                controller.ApplyPan(-dx, dy);
                 Canvas.InvalidateSurface();
                 return;
         }

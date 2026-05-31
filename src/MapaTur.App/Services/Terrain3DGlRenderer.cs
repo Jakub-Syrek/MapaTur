@@ -109,7 +109,26 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform vec3 uSunColor;\n" +
         "uniform vec3 uSkyZenith;\n" +
         "uniform vec3 uSkyHorizon;\n" +
+        "uniform float uTime;\n" +          // seconds since renderer start; drives cloud drift
+        "uniform float uCloudCoverage;\n" + // 0 = clear, 1 = overcast
         "out vec4 fragColor;\n" +
+        // 2D value-noise + fractal Brownian motion. Hash-based, no texture lookups — costs ~5
+        // sin() + ~40 lerps per cloud pixel. Adreno 830 chews through this without breaking a
+        // sweat (sky pass is fullscreen but tiny pixel cost; <0.5 ms on a phone).
+        "float hash21(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n" +
+        "float noise2(vec2 p){\n" +
+        "  vec2 i = floor(p); vec2 f = fract(p);\n" +
+        "  f = f * f * (3.0 - 2.0 * f);\n" +
+        "  return mix(\n" +
+        "    mix(hash21(i + vec2(0.0, 0.0)), hash21(i + vec2(1.0, 0.0)), f.x),\n" +
+        "    mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x),\n" +
+        "    f.y);\n" +
+        "}\n" +
+        "float fbm(vec2 p){\n" +
+        "  float v = 0.0; float a = 0.5;\n" +
+        "  for (int i = 0; i < 5; i++) { v += a * noise2(p); p *= 2.0; a *= 0.5; }\n" +
+        "  return v;\n" +
+        "}\n" +
         "void main(){\n" +
         // Unproject the screen NDC to a far-plane world point, then build a view direction
         // from camera to that point. invViewProj handles aspect/fov/orientation in one matrix.
@@ -120,6 +139,38 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  float upward = clamp(viewDir.z, 0.0, 1.0);\n" +
         "  float zenithBlend = pow(upward, 0.4);\n" +
         "  vec3 sky = mix(uSkyHorizon, uSkyZenith, zenithBlend);\n" +
+        // Cirrus pass: project the view direction onto a horizontal cloud plane far overhead
+        // (perspective division by viewDir.z gives the (x,y) on that plane). Add a slow
+        // time-driven drift; fBm produces wispy bands. The smoothstep band controls how
+        // aggressively coverage maps to alpha — uCloudCoverage of 0.35 already paints a soft
+        // pattern, 0.6 gives full bands, 0.9 verges on overcast.
+        "  if (upward > 0.03) {\n" +
+        // Project view direction onto a flat cloud layer overhead. Multiplier 2.0 keeps the
+        // first fBm octave at ~2-3 cells across the visible sky — big enough that the lowest
+        // frequency dominates (otherwise 5-octave fBm averages to ~0.5 everywhere and clouds
+        // look like a flat tint). Drift at 0.03 u/s gives obvious motion over a few seconds.
+        "    vec2 cloudUv = viewDir.xy / max(0.1, viewDir.z) * 2.0 + uTime * vec2(0.03, 0.012);\n" +
+        // Two-band sum gives more contrast than 5-octave fBm: a low-freq pass for the band
+        // structure plus a mid-freq pass for the wispy edges. Output range roughly [0.0, 1.0]
+        // with a meaningful spread (vs fBm's narrow ~[0.35, 0.65]).
+        "    float clouds = noise2(cloudUv) * 0.65 + noise2(cloudUv * 2.7) * 0.35;\n" +
+        // Lower threshold so default coverage 0.35 paints clearly visible bands. coverage=0
+        // -> threshold 0.55 (sparse wisps); coverage=1 -> threshold 0.15 (broken overcast).
+        "    float threshold = 0.55 - (uCloudCoverage * 0.40);\n" +
+        "    float density = smoothstep(threshold, threshold + 0.18, clouds);\n" +
+        // Fade clouds near the horizon to avoid the "string of pearls" ring artefact (the
+        // perspective projection explodes as viewDir.z -> 0).
+        "    density *= smoothstep(0.03, 0.25, upward);\n" +
+        // Cloud colour: derived from the sky horizon tint so the clouds glow warm orange/
+        // pink at sunset (when uSunColor is zero because the sun is below the horizon —
+        // tying clouds to uSunColor made them go dark grey at exactly the most photogenic
+        // moment). Boost saturation a touch above the base sky so they read as foreground.
+        "    vec3 cloudHot = uSkyHorizon * 1.4 + vec3(0.18);\n" +
+        "    vec3 cloudBright = vec3(1.0, 0.99, 0.97);\n" +
+        "    float sunHeight = clamp(uSunDir.z, 0.0, 1.0);\n" +
+        "    vec3 cloudColor = mix(cloudHot, cloudBright, sunHeight);\n" +
+        "    sky = mix(sky, cloudColor, density);\n" +
+        "  }\n" +
         // Sun disc + halo. smoothstep gives a soft-edged disc the right pixel size; pow gives
         // the Mie-style fall-off (the "glow") that bleeds well past the disc.
         "  float sunDot = dot(viewDir, uSunDir);\n" +
@@ -234,8 +285,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int skySunColorLocation = -1;
     private int skyZenithLocation = -1;
     private int skyHorizonLocation = -1;
+    private int skyTimeLocation = -1;
+    private int skyCloudCoverageLocation = -1;
     private uint skyVao;
     private uint skyVbo;
+
+    // Wall-clock seconds since the renderer was constructed; drives the cirrus drift in the sky
+    // shader. Started lazily so a Disposed renderer doesn't leak the stopwatch into the next one.
+    private readonly System.Diagnostics.Stopwatch atmosphereClock = System.Diagnostics.Stopwatch.StartNew();
 
     // Unsharp-mask strength applied to the ortho in the fragment shader (0 = off). Crisps up edges softened
     // by mipmap/anisotropic minification; kept mild so it doesn't ring.
@@ -400,6 +457,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             skySunColorLocation = -1;
             skyZenithLocation = -1;
             skyHorizonLocation = -1;
+            skyTimeLocation = -1;
+            skyCloudCoverageLocation = -1;
             skyVao = 0;
             skyVbo = 0;
             // The ortho texture IDs belonged to the dead context; drop the handles (don't GL-delete the
@@ -508,6 +567,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.Uniform3(skyZenithLocation, zen.X, zen.Y, zen.Z);
             Vector3 hor = atmosphere.SkyHorizonColor;
             gl.Uniform3(skyHorizonLocation, hor.X, hor.Y, hor.Z);
+            gl.Uniform1(skyTimeLocation, (float)atmosphereClock.Elapsed.TotalSeconds);
+            gl.Uniform1(skyCloudCoverageLocation, atmosphere.CloudCoverage);
             gl.BindVertexArray(skyVao);
             gl.DrawArrays(PrimitiveType.Triangles, 0, 3);
             gl.BindVertexArray(0);
@@ -878,6 +939,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         skySunColorLocation = g.GetUniformLocation(skyProgram, "uSunColor");
         skyZenithLocation = g.GetUniformLocation(skyProgram, "uSkyZenith");
         skyHorizonLocation = g.GetUniformLocation(skyProgram, "uSkyHorizon");
+        skyTimeLocation = g.GetUniformLocation(skyProgram, "uTime");
+        skyCloudCoverageLocation = g.GetUniformLocation(skyProgram, "uCloudCoverage");
 
         // Fullscreen triangle: 3 vertices, each xy in clip space, covering NDC [-1,1]^2 with one extra
         // vertex outside the rect so the rasteriser fills the full screen without re-clipping a quad.
