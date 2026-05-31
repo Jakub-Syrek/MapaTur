@@ -144,31 +144,35 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // time-driven drift; fBm produces wispy bands. The smoothstep band controls how
         // aggressively coverage maps to alpha — uCloudCoverage of 0.35 already paints a soft
         // pattern, 0.6 gives full bands, 0.9 verges on overcast.
-        "  if (upward > 0.03) {\n" +
-        // Project view direction onto a flat cloud layer overhead. Multiplier 2.0 keeps the
-        // first fBm octave at ~2-3 cells across the visible sky — big enough that the lowest
-        // frequency dominates (otherwise 5-octave fBm averages to ~0.5 everywhere and clouds
-        // look like a flat tint). Drift at 0.03 u/s gives obvious motion over a few seconds.
-        "    vec2 cloudUv = viewDir.xy / max(0.1, viewDir.z) * 2.0 + uTime * vec2(0.03, 0.012);\n" +
-        // Two-band sum gives more contrast than 5-octave fBm: a low-freq pass for the band
-        // structure plus a mid-freq pass for the wispy edges. Output range roughly [0.0, 1.0]
+        "  if (upward > 0.0) {\n" +
+        // Project view direction onto a flat cloud layer overhead. Clamp viewDir.z so the
+        // projection doesn't explode at the horizon (would alias to gigantic fBm coords),
+        // but otherwise let clouds reach all the way down to the horizon — typical 3D
+        // terrain camera angles are mostly horizontal, so fading clouds near the horizon
+        // made them invisible at exactly the angle the user is looking from.
+        "    vec2 cloudUv = viewDir.xy / max(0.15, viewDir.z) * 2.0 + uTime * vec2(0.03, 0.012);\n" +
+        // Two-band noise sum gives more contrast than 5-octave fBm: a low-freq pass for the
+        // band structure plus a mid-freq pass for the wispy edges. Output range ~[0.0, 1.0]
         // with a meaningful spread (vs fBm's narrow ~[0.35, 0.65]).
         "    float clouds = noise2(cloudUv) * 0.65 + noise2(cloudUv * 2.7) * 0.35;\n" +
         // Lower threshold so default coverage 0.35 paints clearly visible bands. coverage=0
         // -> threshold 0.55 (sparse wisps); coverage=1 -> threshold 0.15 (broken overcast).
         "    float threshold = 0.55 - (uCloudCoverage * 0.40);\n" +
         "    float density = smoothstep(threshold, threshold + 0.18, clouds);\n" +
-        // Fade clouds near the horizon to avoid the "string of pearls" ring artefact (the
-        // perspective projection explodes as viewDir.z -> 0).
-        "    density *= smoothstep(0.03, 0.25, upward);\n" +
-        // Cloud colour: derived from the sky horizon tint so the clouds glow warm orange/
-        // pink at sunset (when uSunColor is zero because the sun is below the horizon —
-        // tying clouds to uSunColor made them go dark grey at exactly the most photogenic
-        // moment). Boost saturation a touch above the base sky so they read as foreground.
-        "    vec3 cloudHot = uSkyHorizon * 1.4 + vec3(0.18);\n" +
+        // Cloud colour. Two contrasted endpoints chosen so the cloud reads as foreground at
+        // every time of day:
+        //   sun high (noon) -> bright lit-from-above white (1, 0.99, 0.97)
+        //   sun low (sunset) -> a SATURATED warm pink/orange built from the sky horizon tint
+        //     by *2.0 + lifting greens/blues — pure horizon * 1.4 came out the same brown
+        //     as the sky itself, leaving clouds invisible.
+        //   sun below horizon (night) -> a dim cool blue-grey so clouds still silhouette.
+        "    vec3 cloudHot = clamp(uSkyHorizon * 2.0 + vec3(0.25, 0.10, 0.05), 0.0, 1.5);\n" +
         "    vec3 cloudBright = vec3(1.0, 0.99, 0.97);\n" +
+        "    vec3 cloudNight = vec3(0.18, 0.20, 0.28);\n" +
         "    float sunHeight = clamp(uSunDir.z, 0.0, 1.0);\n" +
+        "    float nightFactor = clamp(-uSunDir.z * 3.0, 0.0, 1.0);\n" +
         "    vec3 cloudColor = mix(cloudHot, cloudBright, sunHeight);\n" +
+        "    cloudColor = mix(cloudColor, cloudNight, nightFactor);\n" +
         "    sky = mix(sky, cloudColor, density);\n" +
         "  }\n" +
         // Sun disc + halo. smoothstep gives a soft-edged disc the right pixel size; pow gives
