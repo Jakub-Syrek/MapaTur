@@ -500,3 +500,7 @@ testdata/maps/tatry-hillshade-real.mbtiles
 
 # Local screenshot scratch folder
 /screens/
+
+# Local video captures (fly-through recordings) + music assets — large / licensed, kept local-only.
+/docs/videos/
+/music/

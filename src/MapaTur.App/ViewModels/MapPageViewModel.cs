@@ -80,6 +80,18 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private bool is3DMode;
 
+    /// <summary>True while the 3D view is running a scripted fly-through (two-way bound from the
+    /// view). Used to hide the toolbar / slider chrome for a clean cinematic shot.</summary>
+    [ObservableProperty]
+    private bool is3DFlying;
+
+    /// <summary>Whether to show the 3D on-screen chrome (sliders): only in 3D mode and not mid-flight.</summary>
+    public bool Show3DChrome => Is3DMode && !Is3DFlying;
+
+    partial void OnIs3DModeChanged(bool value) => OnPropertyChanged(nameof(Show3DChrome));
+
+    partial void OnIs3DFlyingChanged(bool value) => OnPropertyChanged(nameof(Show3DChrome));
+
     /// <summary>Current GPS fix or null. Bound by both the 2D map renderer and the 3D view.</summary>
     [ObservableProperty]
     private UserLocation? userLocation;

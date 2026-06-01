@@ -95,7 +95,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "      vec2 warp = vec2(fbmT(p * 0.5 + uCloudTime * 0.010),\n" +
         "                       fbmT(p * 0.5 + vec2(5.2, 1.3) + uCloudTime * 0.012));\n" +
         "      float n = fbmT(p + (warp - 0.5) * 1.6);\n" +
-        "      float thr = 0.62 - (uCloudCoverage * 0.42);\n" +
+        "      float thr = 0.72 - (uCloudCoverage * 0.34);\n" + // match the sea-of-clouds layer threshold
         "      sunShadow = smoothstep(thr, thr + 0.20, n);\n" +
         "    }\n" +
         "  }\n" +
@@ -197,8 +197,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    vec2 cloudUv = viewDir.xy / h;\n" +
         "    cloudUv = vec2(cloudUv.x * 0.5, cloudUv.y * 1.6) + (uCloudDrift * uTime);\n" +
         "    float clouds = noise2(cloudUv) * 0.6 + noise2(cloudUv * 2.3) * 0.4;\n" +
-        "    float threshold = 0.60 - (uCloudCoverage * 0.32);\n" +
-        "    cloudDensity = smoothstep(threshold, threshold + 0.16, clouds) * 0.8;\n" +
+        "    float threshold = 0.68 - (uCloudCoverage * 0.28);\n" + // sparser cirrus
+        "    cloudDensity = smoothstep(threshold, threshold + 0.16, clouds) * 0.7;\n" +
         // Fade clouds out near the horizon (h -> 0) where the overhead-plane projection
         // stretches to infinity and would smear into a hard band.
         "    cloudDensity *= smoothstep(0.015, 0.18, h);\n" +
@@ -272,12 +272,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  vec2 warp = vec2(fbmC(p * 0.5 + uTime * 0.010),\n" +
         "                   fbmC(p * 0.5 + vec2(5.2, 1.3) + uTime * 0.012));\n" +
         "  float n = fbmC(p + (warp - 0.5) * 1.6);\n" +
-        "  float thr = 0.62 - (uCoverage * 0.42);\n" +
+        "  float thr = 0.72 - (uCoverage * 0.34);\n" + // higher threshold = fewer, sparser low clouds
         "  float a = smoothstep(thr, thr + 0.20, n);\n" +
         // Soft-fade the quad's outer ring so the (finite) sheet doesn't show a hard rectangular
         // edge out toward the horizon.
         "  float edge = smoothstep(1.0, 0.65, max(abs(vLocal.x), abs(vLocal.y)));\n" +
-        "  a *= edge * 0.70;\n" +
+        "  a *= edge * 0.55;\n" + // lower peak opacity so the sheet is lighter / less obtrusive
         "  fragColor = vec4(uCloudColor, a);\n" +
         "}\n";
 

@@ -5,6 +5,9 @@
              xmlns:views="clr-namespace:MapaTur.App.Views"
              x:Class="MapaTur.App.Views.Terrain3DView">
     <ContentView.Resources>
+        <!-- Camera-pad button: nearly invisible at rest so it doesn't cover the terrain, then
+             "materialises" to full opacity on hover (desktop) or press (touch) via the
+             VisualStateManager. Cam3DSmallButton inherits all of this and only overrides its size. -->
         <Style x:Key="Cam3DButton" TargetType="Button">
             <Setter Property="WidthRequest" Value="46" />
             <Setter Property="HeightRequest" Value="46" />
@@ -16,10 +19,32 @@
             <Setter Property="TextColor" Value="White" />
             <Setter Property="BorderColor" Value="#90FFFFFF" />
             <Setter Property="BorderWidth" Value="1" />
+            <Setter Property="Opacity" Value="0.20" />
+            <Setter Property="VisualStateManager.VisualStateGroups">
+                <VisualStateGroupList>
+                    <VisualStateGroup x:Name="CommonStates">
+                        <VisualState x:Name="Normal">
+                            <VisualState.Setters>
+                                <Setter Property="Opacity" Value="0.20" />
+                            </VisualState.Setters>
+                        </VisualState>
+                        <VisualState x:Name="PointerOver">
+                            <VisualState.Setters>
+                                <Setter Property="Opacity" Value="1" />
+                            </VisualState.Setters>
+                        </VisualState>
+                        <VisualState x:Name="Pressed">
+                            <VisualState.Setters>
+                                <Setter Property="Opacity" Value="1" />
+                            </VisualState.Setters>
+                        </VisualState>
+                    </VisualStateGroup>
+                </VisualStateGroupList>
+            </Setter>
         </Style>
-        <!-- Compact variant of Cam3DButton for the two tilt arrows, so they tuck between the
-             full-size pan buttons in the centre column without bloating the pad height. -->
-        <Style x:Key="Cam3DSmallButton" TargetType="Button">
+        <!-- Compact variant for the two tilt arrows — same transparency/materialise behaviour,
+             just smaller so they tuck between the full-size pan buttons in the centre column. -->
+        <Style x:Key="Cam3DSmallButton" TargetType="Button" BasedOn="{StaticResource Cam3DButton}">
             <Setter Property="WidthRequest">
                 <Setter.Value>
                     <OnIdiom x:TypeArguments="x:Double" Default="34" Phone="28" />
@@ -30,22 +55,16 @@
                     <OnIdiom x:TypeArguments="x:Double" Default="34" Phone="28" />
                 </Setter.Value>
             </Setter>
-            <Setter Property="Padding" Value="0" />
             <Setter Property="FontSize">
                 <Setter.Value>
                     <OnIdiom x:TypeArguments="x:Double" Default="15" Phone="13" />
                 </Setter.Value>
             </Setter>
-            <Setter Property="FontAttributes" Value="Bold" />
             <Setter Property="CornerRadius">
                 <Setter.Value>
                     <OnIdiom x:TypeArguments="x:Int32" Default="17" Phone="14" />
                 </Setter.Value>
             </Setter>
-            <Setter Property="BackgroundColor" Value="#C0202830" />
-            <Setter Property="TextColor" Value="White" />
-            <Setter Property="BorderColor" Value="#90FFFFFF" />
-            <Setter Property="BorderWidth" Value="1" />
             <Setter Property="HorizontalOptions" Value="Center" />
         </Style>
         <Style x:Key="Cam3DCaption" TargetType="Label">
@@ -75,11 +94,22 @@
             </skia:SKGLView.GestureRecognizers>
         </skia:SKGLView>
 
+        <!-- Cinematic fly-through trigger, top-right (clear of the bottom pads and the top-left
+             slider overlay). Tapping runs the scripted Orla Perć ridge flight; any manual camera
+             input cancels it. -->
+        <Button x:Name="FlightButton"
+                Text="&#x2708; Orla Perć"
+                Clicked="OnFlyOrlaPercClicked"
+                HorizontalOptions="End" VerticalOptions="Start"
+                Margin="8" Padding="12,6" FontSize="12" FontAttributes="Bold"
+                BackgroundColor="#C0202830" TextColor="White"
+                CornerRadius="16" BorderColor="#90FFFFFF" BorderWidth="1" />
+
         <!-- Camera-altitude (raise / lower) pad, bottom-LEFT. Orbit + zoom live on touch gestures
              (1-finger drag = orbit, pinch = zoom), translation is on the bottom-right pad. Altitude
              is the one camera dimension that's awkward to reach via a 2D screen gesture, so it
              keeps its own tappable column. -->
-        <VerticalStackLayout HorizontalOptions="Start" VerticalOptions="End"
+        <VerticalStackLayout x:Name="AltitudePad" HorizontalOptions="Start" VerticalOptions="End"
                              Margin="12" Spacing="4" InputTransparent="False">
             <Label Text="Wys." Style="{StaticResource Cam3DCaption}" />
             <Button Text="&#x25B2;" Pressed="OnRaiseClicked" Released="OnPadReleased" Style="{StaticResource Cam3DButton}" />
@@ -92,9 +122,8 @@
              top row flanks ▲ with the in-place rotate arrows (⟲ ⟳); ◀ ▶ flank the tilt-up row.
              Tilt is clamped in ApplyOrbit (pitch ∈ [20°, ~90°]) so the camera can't fly under the
              terrain or past straight-down. -->
-        <VerticalStackLayout HorizontalOptions="End" VerticalOptions="End"
+        <VerticalStackLayout x:Name="PanTiltPad" HorizontalOptions="End" VerticalOptions="End"
                              Margin="12" Spacing="4" InputTransparent="False">
-            <Label Text="Przesuń / Pochyl" Style="{StaticResource Cam3DCaption}" />
             <Grid ColumnSpacing="4" RowSpacing="4"
                   ColumnDefinitions="Auto,Auto,Auto" RowDefinitions="Auto,Auto,Auto,Auto">
                 <Button Grid.Row="0" Grid.Column="0" Text="&#x21BA;" Pressed="OnRotateLeftSlowClicked" Released="OnPadReleased" Style="{StaticResource Cam3DButton}" />
