@@ -86,11 +86,17 @@ public sealed class Atmosphere
         float dayness = MathF.Max(0f, MathF.Sin(sunElevation));         // 0 at horizon / night, ~0.9 at noon
         float warmth = MathF.Max(0f, 1f - MathF.Abs(sunElevation / 0.35f));// peaks when sun is within ±20° of horizon
 
-        // Sky colours: cool deep blue at zenith during the day, warm orange at the horizon
-        // during sunrise/sunset, near-black across the dome at night.
-        var dayZenith = new Vector3(0.30f, 0.50f, 0.85f);
-        var nightZenith = new Vector3(0.02f, 0.03f, 0.07f);
-        SkyZenithColor = Vector3.Lerp(nightZenith, dayZenith, dayness);
+        // Sky colours: cool blue at zenith during the day, warm orange at the horizon during
+        // sunrise/sunset, deep blue (not black) across the dome at night. The daytime zenith
+        // floor is kept fairly bright so clear-sky gaps between clouds don't read as dark
+        // holes at low sun angles — at golden hour the sky between cirrus streaks is still a
+        // luminous blue, not navy.
+        var dayZenith = new Vector3(0.33f, 0.53f, 0.86f);
+        var nightZenith = new Vector3(0.03f, 0.04f, 0.10f);
+        // Blend in a touch more brightness at low (but still positive) sun than dayness alone
+        // would give, so sunset zenith doesn't crash to near-night while the horizon is ablaze.
+        float zenithLift = MathF.Max(dayness, warmth * 0.45f);
+        SkyZenithColor = Vector3.Lerp(nightZenith, dayZenith, zenithLift);
 
         var coolHorizon = new Vector3(0.78f, 0.84f, 0.92f);
         var warmHorizon = new Vector3(0.95f, 0.55f, 0.20f);

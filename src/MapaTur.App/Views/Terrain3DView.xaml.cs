@@ -358,9 +358,16 @@ public partial class Terrain3DView : ContentView
 
     private void OnRotateRightClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyOrbit(ButtonOrbitStep, 0f));
 
-    private void OnTiltUpClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyOrbit(0f, ButtonOrbitStep));
+    // View-pitch tilt. Named by what the user SEES, not by the pitch sign:
+    //  • Look up toward the sky/horizon = LOWER the orbit pitch (camera drops toward the
+    //    horizontal), which brings the sky dome + clouds into the upper screen.
+    //  • Look down at the terrain = RAISE the orbit pitch (camera climbs to a top-down map view).
+    // ApplyOrbit clamps pitch to [MinPitchRadians (20°), MaxPitch (~90°)], so neither button can
+    // drive the camera under the terrain or past straight-down — the "don't fly off" guard the
+    // user asked for is the existing clamp.
+    private void OnLookUpClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyOrbit(0f, -ButtonOrbitStep));
 
-    private void OnTiltDownClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyOrbit(0f, -ButtonOrbitStep));
+    private void OnLookDownClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyOrbit(0f, ButtonOrbitStep));
 
     // Pan ▲ moves the focus forward (into the scene), ▼ pulls it back toward the camera.
     private void OnPanUpClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyPan(0f, ButtonPanStep));

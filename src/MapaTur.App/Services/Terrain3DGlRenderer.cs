@@ -134,47 +134,42 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // from camera to that point. invViewProj handles aspect/fov/orientation in one matrix.
         "  vec4 farPoint = uInvViewProj * vec4(vClip, 1.0, 1.0);\n" +
         "  vec3 viewDir = normalize((farPoint.xyz / farPoint.w) - uCameraPos);\n" +
-        // Vertical gradient: pow(viewDir.z, 0.4) compresses the transition near the horizon so
-        // the warm band is narrow and the cool zenith dominates — matches a real sky's profile.
-        "  float upward = clamp(viewDir.z, 0.0, 1.0);\n" +
-        "  float zenithBlend = pow(upward, 0.4);\n" +
-        "  vec3 sky = mix(uSkyHorizon, uSkyZenith, zenithBlend);\n" +
-        // Cirrus pass: project the view direction onto a horizontal cloud plane far overhead
-        // (perspective division by viewDir.z gives the (x,y) on that plane). Add a slow
-        // time-driven drift; fBm produces wispy bands. The smoothstep band controls how
-        // aggressively coverage maps to alpha — uCloudCoverage of 0.35 already paints a soft
-        // pattern, 0.6 gives full bands, 0.9 verges on overcast.
-        "  if (upward > 0.0) {\n" +
-        // Project view direction onto a flat cloud layer overhead. Clamp viewDir.z so the
-        // projection doesn't explode at the horizon (would alias to gigantic fBm coords),
-        // but otherwise let clouds reach all the way down to the horizon — typical 3D
-        // terrain camera angles are mostly horizontal, so fading clouds near the horizon
-        // made them invisible at exactly the angle the user is looking from.
-        "    vec2 cloudUv = viewDir.xy / max(0.15, viewDir.z) * 2.0 + uTime * vec2(0.03, 0.012);\n" +
-        // Two-band noise sum gives more contrast than 5-octave fBm: a low-freq pass for the
-        // band structure plus a mid-freq pass for the wispy edges. Output range ~[0.0, 1.0]
-        // with a meaningful spread (vs fBm's narrow ~[0.35, 0.65]).
-        "    float clouds = noise2(cloudUv) * 0.65 + noise2(cloudUv * 2.7) * 0.35;\n" +
-        // Lower threshold so default coverage 0.35 paints clearly visible bands. coverage=0
-        // -> threshold 0.55 (sparse wisps); coverage=1 -> threshold 0.15 (broken overcast).
-        "    float threshold = 0.55 - (uCloudCoverage * 0.40);\n" +
-        "    float density = smoothstep(threshold, threshold + 0.18, clouds);\n" +
-        // Cloud colour. Two contrasted endpoints chosen so the cloud reads as foreground at
-        // every time of day:
-        //   sun high (noon) -> bright lit-from-above white (1, 0.99, 0.97)
-        //   sun low (sunset) -> a SATURATED warm pink/orange built from the sky horizon tint
-        //     by *2.0 + lifting greens/blues — pure horizon * 1.4 came out the same brown
-        //     as the sky itself, leaving clouds invisible.
-        //   sun below horizon (night) -> a dim cool blue-grey so clouds still silhouette.
-        "    vec3 cloudHot = clamp(uSkyHorizon * 2.0 + vec3(0.25, 0.10, 0.05), 0.0, 1.5);\n" +
-        "    vec3 cloudBright = vec3(1.0, 0.99, 0.97);\n" +
-        "    vec3 cloudNight = vec3(0.18, 0.20, 0.28);\n" +
-        "    float sunHeight = clamp(uSunDir.z, 0.0, 1.0);\n" +
-        "    float nightFactor = clamp(-uSunDir.z * 3.0, 0.0, 1.0);\n" +
-        "    vec3 cloudColor = mix(cloudHot, cloudBright, sunHeight);\n" +
-        "    cloudColor = mix(cloudColor, cloudNight, nightFactor);\n" +
-        "    sky = mix(sky, cloudColor, density);\n" +
+        // WORLD-SPACE sky dome. Vertical tone follows the world-up component of the view ray
+        // (viewDir.z), so the zenith is always world +Z and the dome stays anchored to the
+        // world no matter how the camera orbits — clouds sit "above the terrain", not "at the
+        // top of the screen". h in [-1,1]: +1 straight up, 0 at the horizon, -1 straight down.
+        "  float h = viewDir.z;\n" +
+        "  vec3 skyUp = mix(uSkyHorizon, uSkyZenith, pow(clamp(h, 0.0, 1.0), 0.45));\n" +
+        // Below horizon (looking down past the terrain edge / into a top-down view's corners):
+        // a darkened horizon tone reading as distant ground haze, NOT blue sky and NOT clouds.
+        // Cross-faded across the horizon line so there's no hard seam.
+        "  vec3 skyDown = uSkyHorizon * 0.72;\n" +
+        "  vec3 sky = mix(skyDown, skyUp, smoothstep(-0.12, 0.06, h));\n" +
+        // Cirrus on an INFINITE horizontal layer overhead: perspective-project the view ray
+        // onto a constant-world-Z plane by dividing xy by the up component. Classic skybox
+        // cloud trick — bands lock to world directions, pan correctly as the camera rotates,
+        // and only appear in genuinely upward-looking pixels.
+        "  float cloudDensity = 0.0;\n" +
+        "  if (h > 0.015) {\n" +
+        "    vec2 cloudUv = viewDir.xy / h;\n" +
+        "    cloudUv = vec2(cloudUv.x * 0.5, cloudUv.y * 1.6) + uTime * vec2(0.012, 0.005);\n" +
+        "    float clouds = noise2(cloudUv) * 0.6 + noise2(cloudUv * 2.3) * 0.4;\n" +
+        "    float threshold = 0.60 - (uCloudCoverage * 0.32);\n" +
+        "    cloudDensity = smoothstep(threshold, threshold + 0.16, clouds) * 0.8;\n" +
+        // Fade clouds out near the horizon (h -> 0) where the overhead-plane projection
+        // stretches to infinity and would smear into a hard band.
+        "    cloudDensity *= smoothstep(0.015, 0.18, h);\n" +
         "  }\n" +
+        // Cloud colour: noon -> bright lit-from-above white; sunset -> warm pink-orange built
+        // from a boosted horizon tint; night -> dim cool blue-grey for silhouettes.
+        "  vec3 cloudHot = clamp(uSkyHorizon * 2.0 + vec3(0.25, 0.10, 0.05), 0.0, 1.5);\n" +
+        "  vec3 cloudBright = vec3(1.0, 0.99, 0.97);\n" +
+        "  vec3 cloudNight = vec3(0.18, 0.20, 0.28);\n" +
+        "  float sunHeight = clamp(uSunDir.z, 0.0, 1.0);\n" +
+        "  float nightFactor = clamp(-uSunDir.z * 3.0, 0.0, 1.0);\n" +
+        "  vec3 cloudColor = mix(cloudHot, cloudBright, sunHeight);\n" +
+        "  cloudColor = mix(cloudColor, cloudNight, nightFactor);\n" +
+        "  sky = mix(sky, cloudColor, cloudDensity);\n" +
         // Sun disc + halo. smoothstep gives a soft-edged disc the right pixel size; pow gives
         // the Mie-style fall-off (the "glow") that bleeds well past the disc.
         "  float sunDot = dot(viewDir, uSunDir);\n" +
