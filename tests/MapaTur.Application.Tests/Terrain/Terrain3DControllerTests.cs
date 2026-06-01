@@ -146,6 +146,33 @@ public sealed class Terrain3DControllerTests
     }
 
     [Fact]
+    public void LookAroundMinPitchRadians_IsNegative_SoTheGazeCanTiltAboveTheHorizon()
+    {
+        // Look-around rotates the view in place (camera position fixed), so unlike orbit it has no
+        // tunnelling risk and is allowed to tilt the gaze well above the horizon — pitch below zero.
+        var ctrl = BuildController(out _);
+
+        ctrl.LookAroundMinPitchRadians.Should().BeLessThan(0f);
+    }
+
+    [Fact]
+    public void ApplyLookAround_LargeNegativeDy_TiltsGazeUp_WithoutMovingTheCamera()
+    {
+        var ctrl = BuildController(out var camera);
+        Vector3 before = camera.Position;
+
+        ctrl.ApplyLookAround(0f, -100_000f);
+
+        // Pitch floors at the (negative) look-around minimum — the gaze is now pointing upward …
+        camera.PitchRadians.Should().BeApproximately(ctrl.LookAroundMinPitchRadians, 1e-5f);
+        camera.PitchRadians.Should().BeLessThan(0f);
+        // … and the camera itself has not moved through space.
+        camera.Position.X.Should().BeApproximately(before.X, 1e-2f);
+        camera.Position.Y.Should().BeApproximately(before.Y, 1e-2f);
+        camera.Position.Z.Should().BeApproximately(before.Z, 1e-2f);
+    }
+
+    [Fact]
     public void ApplyZoom_ScaleGreaterThanOne_DividesDistance()
     {
         var ctrl = BuildController(out var camera);

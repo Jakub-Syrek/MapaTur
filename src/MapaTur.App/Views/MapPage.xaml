@@ -210,6 +210,13 @@
                         SemanticProperties.Hint="Zachmurzenie" />
                 <Label Text="{Binding Cloudiness, StringFormat='{0:P0}'}" TextColor="White" FontSize="11" WidthRequest="36" VerticalOptions="Center" />
             </HorizontalStackLayout>
+            <HorizontalStackLayout Spacing="6" VerticalOptions="Center">
+                <Label Text="Wiatr:" TextColor="White" FontSize="11" WidthRequest="44" VerticalOptions="Center" />
+                <Slider Minimum="0" Maximum="1" WidthRequest="120" VerticalOptions="Center"
+                        Value="{Binding Wind, Mode=TwoWay}"
+                        SemanticProperties.Hint="Siła wiatru" />
+                <Label Text="{Binding Wind, StringFormat='{0:P0}'}" TextColor="White" FontSize="11" WidthRequest="36" VerticalOptions="Center" />
+            </HorizontalStackLayout>
         </VerticalStackLayout>
 
         <Label Grid.Row="3"

@@ -86,16 +86,6 @@
             <Button Text="&#x25BC;" Pressed="OnLowerClicked" Released="OnPadReleased" Style="{StaticResource Cam3DButton}" />
         </VerticalStackLayout>
 
-        <!-- Orbit gizmo — sphere widget anchored to the bottom-LEFT just past the altitude
-             column, so on a portrait phone it sits clearly left of the right-anchored Przesuń
-             pad with no overlap. Drag the sphere to rotate the camera around its target; the
-             red marker on the orb tracks the current azimuth. -->
-        <VerticalStackLayout HorizontalOptions="Start" VerticalOptions="End"
-                             Margin="80,12,12,12" Spacing="4" InputTransparent="False">
-            <Label Text="Obrót" Style="{StaticResource Cam3DCaption}" />
-            <views:OrbitGizmoView x:Name="OrbitGizmo" />
-        </VerticalStackLayout>
-
         <!-- Pan + tilt + slow-rotate pad, bottom-right. The centre column stacks, top→bottom:
              pan-forward (▲), tilt-view-up-to-sky (⤒), tilt-view-down-to-ground (⤓), pan-back (▼)
              — so the two tilt controls sit between the forward/back pan as the user asked. The

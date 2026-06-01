@@ -314,12 +314,6 @@ public partial class Terrain3DView : ContentView
     {
         InitializeComponent();
         controller = new Terrain3DController(Camera);
-
-        // Orbit gizmo: drag on the sphere widget rotates the camera; mirror current camera
-        // azimuth + pitch onto the gizmo so its red marker shows where we're looking. The
-        // gizmo's PanGesture is independent of the mesh's, so there's no conflict.
-        OrbitGizmo.OrbitDragged += OnOrbitGizmoDragged;
-        SyncOrbitGizmo();
 #if WINDOWS
         Canvas.HandlerChanged += OnCanvasHandlerChanged;
 #endif
@@ -405,26 +399,6 @@ public partial class Terrain3DView : ContentView
         }
     }
 
-    private void OnOrbitGizmoDragged(object? sender, OrbitDragEventArgs e)
-    {
-        // The orb is a "turn-the-head" widget: camera position stays put, only the view
-        // direction rotates. ApplyLookAround swings the target so the recomputed orbit
-        // position lands back where the camera already was.
-        controller.ApplyLookAround(e.DxPixels, e.DyPixels);
-        Canvas.InvalidateSurface();
-        SyncOrbitGizmo();
-    }
-
-    private void SyncOrbitGizmo()
-    {
-        if (OrbitGizmo is null)
-        {
-            return;
-        }
-        OrbitGizmo.CameraAzimuthRadians = Camera.AzimuthRadians;
-        OrbitGizmo.CameraPitchRadians = Camera.PitchRadians;
-    }
-
     /// <summary>
     /// Applies a multiplicative zoom (scale &gt; 1 zooms in, &lt; 1 zooms out)
     /// and re-renders. Public so the host page can hook keyboard or mouse-wheel input.
@@ -505,16 +479,17 @@ public partial class Terrain3DView : ContentView
 
     private void OnRotateRightClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyOrbit(ButtonOrbitStep, 0f));
 
-    // View-pitch tilt. Named by what the user SEES, not by the pitch sign:
-    //  • Look up toward the sky/horizon = LOWER the orbit pitch (camera drops toward the
-    //    horizontal), which brings the sky dome + clouds into the upper screen.
-    //  • Look down at the terrain = RAISE the orbit pitch (camera climbs to a top-down map view).
-    // ApplyOrbit clamps pitch to [MinPitchRadians (20°), MaxPitch (~90°)], so neither button can
-    // drive the camera under the terrain or past straight-down — the "don't fly off" guard the
-    // user asked for is the existing clamp.
-    private void OnLookUpClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyOrbit(0f, -ButtonTiltStep));
+    // View-pitch tilt = IN-PLACE rotation (ApplyLookAround), not an orbit: the camera POSITION
+    // stays put and only the view direction rotates — "turn your head", the same widget the orbit
+    // gizmo uses. ApplyOrbit was wrong here; it circled the camera around the target, sliding it
+    // through space, which is exactly what the user said felt broken.
+    //  • Look up toward the sky = tilt the gaze up (negative pitch step).
+    //  • Look down at the terrain = tilt the gaze down (positive pitch step).
+    // ApplyLookAround clamps to LookAroundMinPitchRadians..MaxPitch — wide enough to look well
+    // above the horizon at the sky/clouds without the camera ever moving.
+    private void OnLookUpClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyLookAround(0f, -ButtonTiltStep));
 
-    private void OnLookDownClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyOrbit(0f, ButtonTiltStep));
+    private void OnLookDownClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyLookAround(0f, ButtonTiltStep));
 
     // Pan ▲ moves the focus forward (into the scene), ▼ pulls it back toward the camera.
     private void OnPanUpClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyPan(0f, ButtonPanStep));
@@ -579,10 +554,16 @@ public partial class Terrain3DView : ContentView
             }
         }
         controller.CameraFloorZ = float.IsNegativeInfinity(globalMaxZ) ? float.NaN : globalMaxZ + 50f;
-        controller.MinTargetX = frame.Center.X - frame.HorizontalExtent;
-        controller.MaxTargetX = frame.Center.X + frame.HorizontalExtent;
-        controller.MinTargetY = frame.Center.Y - frame.HorizontalExtent;
-        controller.MaxTargetY = frame.Center.Y + frame.HorizontalExtent;
+        // Generous focal-point bounds. The clamp only exists to stop the target wandering far into
+        // empty space — it must NOT bite mid-mesh. In-place tilt (ApplyLookAround) legitimately
+        // swings the target a long way toward the horizon/sky, so a tight footprint box made forward
+        // pan "hit an invisible wall" in the middle of the map. A 3× margin keeps panning free across
+        // the whole terrain and only catches a genuinely runaway target.
+        float targetMargin = frame.HorizontalExtent * 3f;
+        controller.MinTargetX = frame.Center.X - targetMargin;
+        controller.MaxTargetX = frame.Center.X + targetMargin;
+        controller.MinTargetY = frame.Center.Y - targetMargin;
+        controller.MaxTargetY = frame.Center.Y + targetMargin;
 
         // Restore the camera saved for this DEM; if none (or a different region), auto-frame.
         if (!TryRestoreCamera(frame))
@@ -614,12 +595,6 @@ public partial class Terrain3DView : ContentView
 
     private void OnPaintSurface(object? sender, SKPaintGLSurfaceEventArgs e)
     {
-        // Mirror the latest camera angles onto the orbit gizmo on every paint so its marker
-        // stays in sync no matter how the camera was moved (gestures, gizmo, keyboard, buttons).
-        // The gizmo's BindableProperty only re-paints when the float changes, so a no-op camera
-        // frame is free.
-        SyncOrbitGizmo();
-
         var canvas = e.Surface.Canvas;
 
         if (Tiles is not { Count: > 0 } tiles || WorldFrame is not { } frame)

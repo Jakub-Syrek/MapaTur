@@ -126,11 +126,18 @@ public sealed partial class MapPageViewModel : ObservableObject
     private double cloudiness = 0.35;
 
     /// <summary>
-    /// Live atmospheric model derived from <see cref="TimeOfDayHours"/> and <see cref="Cloudiness"/>.
-    /// Recomputed whenever either changes and bound straight into <c>Terrain3DView.Atmosphere</c>.
-    /// Cheap to build (a handful of trig + lerp) so deriving per change is fine — no caching needed.
+    /// Wind strength, [0,1]: 0 = calm (slow, bright clouds), 1 = gale (fast-drifting, dark storm
+    /// clouds). Drives the cloud drift speed and storm-darkening in the renderer. Persisted.
     /// </summary>
-    public Atmosphere Atmosphere => new((float)TimeOfDayHours, (float)Cloudiness);
+    [ObservableProperty]
+    private double wind = 0.3;
+
+    /// <summary>
+    /// Live atmospheric model derived from <see cref="TimeOfDayHours"/>, <see cref="Cloudiness"/>
+    /// and <see cref="Wind"/>. Recomputed whenever any change and bound straight into
+    /// <c>Terrain3DView.Atmosphere</c>. Cheap to build so deriving per change is fine.
+    /// </summary>
+    public Atmosphere Atmosphere => new((float)TimeOfDayHours, (float)Cloudiness, (float)Wind);
 
     partial void OnTimeOfDayHoursChanged(double value)
     {
@@ -142,6 +149,12 @@ public sealed partial class MapPageViewModel : ObservableObject
     partial void OnCloudinessChanged(double value)
     {
         settingsStore.Cloudiness = value;
+        OnPropertyChanged(nameof(Atmosphere));
+    }
+
+    partial void OnWindChanged(double value)
+    {
+        settingsStore.Wind = value;
         OnPropertyChanged(nameof(Atmosphere));
     }
 
@@ -653,6 +666,10 @@ public sealed partial class MapPageViewModel : ObservableObject
         if (settingsStore.Cloudiness is { } savedCloudiness)
         {
             cloudiness = Math.Clamp(savedCloudiness, 0.0, 1.0);
+        }
+        if (settingsStore.Wind is { } savedWind)
+        {
+            wind = Math.Clamp(savedWind, 0.0, 1.0);
         }
         cameraState = settingsStore.CameraState;
         this.trackRenderer = trackRenderer;

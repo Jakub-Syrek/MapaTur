@@ -32,6 +32,10 @@ public sealed class Atmosphere
     /// <summary>Cloud coverage in [0,1]. 0 = clear sky, ~0.4 = scattered cirrus, 1.0 = overcast.</summary>
     public float CloudCoverage { get; }
 
+    /// <summary>Wind strength in [0,1]. Drives how fast the clouds drift and how dark they get —
+    /// 0 = calm + bright, 1 = gale + dark storm clouds.</summary>
+    public float Wind { get; }
+
     /// <summary>Unit vector from the surface toward the sun, in world frame (X east, Y north, Z up).</summary>
     public Vector3 SunDirection { get; }
 
@@ -58,10 +62,11 @@ public sealed class Atmosphere
     /// coverage in [0,1]. Default coverage = 0.35 (scattered cirrus, the look that fits a
     /// blue-sky day with high-altitude wisps).
     /// </summary>
-    public Atmosphere(float timeOfDayHours, float cloudCoverage = 0.35f)
+    public Atmosphere(float timeOfDayHours, float cloudCoverage = 0.35f, float wind = 0.3f)
     {
         TimeOfDayHours = WrapToDay(timeOfDayHours);
         CloudCoverage = Math.Clamp(cloudCoverage, 0f, 1f);
+        Wind = Math.Clamp(wind, 0f, 1f);
 
         // Sun arc: sin(π · t/12) shapes a half-cycle that peaks at noon and bottoms at midnight.
         // Scaling by PeakElevationRadians gives a max of ~64° above the horizon during the day

@@ -21,6 +21,15 @@ public sealed class Terrain3DController
     /// </summary>
     public float MinPitchRadians { get; set; } = MathF.PI / 9f;
 
+    /// <summary>
+    /// Lower pitch bound for <see cref="ApplyLookAround"/> only (~-75°). Look-around rotates the
+    /// view in place WITHOUT moving the camera position, so it carries none of the surface-tunnelling
+    /// risk that forces <see cref="MinPitchRadians"/> to stay positive for orbit. The wider range lets
+    /// the user tilt the gaze well above the horizon to take in the sky/clouds, or steeply down at
+    /// their feet, without the camera flying through space.
+    /// </summary>
+    public float LookAroundMinPitchRadians { get; set; } = -1.3f;
+
     /// <summary>Radians of orbit per input-pixel.</summary>
     public float OrbitSensitivity { get; set; } = 0.005f;
 
@@ -67,7 +76,7 @@ public sealed class Terrain3DController
         // Looking around turns the head: dragging right should swing the view right, the opposite azimuth
         // sign to ApplyOrbit (which circles the camera the other way). dy keeps its sign — dragging up looks up.
         Camera.AzimuthRadians -= dxPixels * OrbitSensitivity;
-        Camera.PitchRadians = Math.Clamp(Camera.PitchRadians + (dyPixels * OrbitSensitivity), MinPitchRadians, MaxPitch);
+        Camera.PitchRadians = Math.Clamp(Camera.PitchRadians + (dyPixels * OrbitSensitivity), LookAroundMinPitchRadians, MaxPitch);
         Camera.Target = position - OrbitOffset();
     }
 
