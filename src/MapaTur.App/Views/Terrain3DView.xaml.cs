@@ -201,6 +201,23 @@ public partial class Terrain3DView : ContentView
         set => SetValue(OrthoTextureCellsProperty, value);
     }
 
+    /// <summary>
+    /// Atmospheric model (time-of-day driven sun + sky + fog) the GPU renderer samples each
+    /// frame. When null the renderer falls back to the legacy flat-clear sky and the per-mesh
+    /// baked Lambert / ambient — same code path as before atmospherics shipped.
+    /// </summary>
+    public static readonly BindableProperty AtmosphereProperty = BindableProperty.Create(
+        nameof(Atmosphere),
+        typeof(Atmosphere),
+        typeof(Terrain3DView),
+        propertyChanged: OnOverlayDataChanged);
+
+    public Atmosphere? Atmosphere
+    {
+        get => (Atmosphere?)GetValue(AtmosphereProperty);
+        set => SetValue(AtmosphereProperty, value);
+    }
+
     /// <summary>Camera state mutated by gestures and used by the renderer.</summary>
     public Camera3D Camera { get; } = new Camera3D();
 
@@ -268,6 +285,13 @@ public partial class Terrain3DView : ContentView
     private bool orthoPathDirty;
 #pragma warning restore CS0414
 
+    // Continuous-animation tick for the live atmosphere (drifting clouds / wind). The GL terrain
+    // only repaints on demand (gesture / property change), but the weather model evolves off the
+    // wall-clock, so without a heartbeat the clouds would freeze whenever the user stops touching
+    // the screen. ~15 fps is plenty for slow cloud motion and keeps the GPU/thermals modest; the
+    // tick only invalidates while the 3D view is actually visible and an atmosphere is bound.
+    private readonly IDispatcherTimer animationTimer;
+
     public Terrain3DView()
     {
         InitializeComponent();
@@ -281,6 +305,21 @@ public partial class Terrain3DView : ContentView
 #if WINDOWS
         Canvas.HandlerChanged += OnCanvasHandlerChanged;
 #endif
+
+        animationTimer = Dispatcher.CreateTimer();
+        animationTimer.Interval = TimeSpan.FromMilliseconds(66); // ~15 fps
+        animationTimer.Tick += OnAnimationTick;
+        animationTimer.Start();
+    }
+
+    private void OnAnimationTick(object? sender, EventArgs e)
+    {
+        // Repaint only when the 3D view is on screen and there's live atmosphere to animate —
+        // otherwise this is a no-op so 2D mode pays nothing.
+        if (IsVisible && Atmosphere is not null)
+        {
+            Canvas.InvalidateSurface();
+        }
     }
 
     private void OnOrbitGizmoDragged(object? sender, OrbitDragEventArgs e)
@@ -341,9 +380,16 @@ public partial class Terrain3DView : ContentView
 
     private void OnRotateRightClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyOrbit(ButtonOrbitStep, 0f));
 
-    private void OnTiltUpClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyOrbit(0f, ButtonOrbitStep));
+    // View-pitch tilt. Named by what the user SEES, not by the pitch sign:
+    //  • Look up toward the sky/horizon = LOWER the orbit pitch (camera drops toward the
+    //    horizontal), which brings the sky dome + clouds into the upper screen.
+    //  • Look down at the terrain = RAISE the orbit pitch (camera climbs to a top-down map view).
+    // ApplyOrbit clamps pitch to [MinPitchRadians (20°), MaxPitch (~90°)], so neither button can
+    // drive the camera under the terrain or past straight-down — the "don't fly off" guard the
+    // user asked for is the existing clamp.
+    private void OnLookUpClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyOrbit(0f, -ButtonOrbitStep));
 
-    private void OnTiltDownClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyOrbit(0f, -ButtonOrbitStep));
+    private void OnLookDownClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyOrbit(0f, ButtonOrbitStep));
 
     // Pan ▲ moves the focus forward (into the scene), ▼ pulls it back toward the camera.
     private void OnPanUpClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyPan(0f, ButtonPanStep));
@@ -524,6 +570,7 @@ public partial class Terrain3DView : ContentView
         {
             // GL already drew the (depth-occluded) trails + route; Skia only adds the markers/labels on top.
             renderer.DrawOverlays(canvas, null, null, projectedClimbing, projectedPois, projectedPeaks, projectedUserLocation);
+            DrawNightLights(canvas, projectedPois);
             return;
         }
 #endif
@@ -531,7 +578,78 @@ public partial class Terrain3DView : ContentView
         // depthMap = null disables trail / route / climbing occlusion: trails are drawn always on top
         // of the mesh (the visual the user wants) and it drops a per-frame depth-grid fill.
         renderer.RenderTiles(canvas, e.Info.Width, e.Info.Height, tiles, Camera, frameScratch, null, projectedTrails, projectedRoute, projectedClimbing, projectedPois, projectedPeaks, projectedUserLocation);
+        DrawNightLights(canvas, projectedPois);
     }
+
+    // Warm window lights that switch on in every refuge (hut / wilderness hut / chalet / shelter)
+    // once the sun drops below the horizon — a small, atmospheric night-time touch. Drawn additively
+    // over the finished frame so they glow against the dark terrain. Fades in across dusk via the
+    // sun elevation and stays off entirely in daylight (zero cost: the loop early-returns).
+    private void DrawNightLights(SKCanvas canvas, IReadOnlyList<ProjectedPoi>? pois)
+    {
+        if (pois is null || pois.Count == 0 || Atmosphere is not { } atmo)
+        {
+            return;
+        }
+
+        // nightFactor: 0 above ~6° sun elevation, ramping to 1 once the sun is ~6° below the
+        // horizon — so lights warm up through dusk rather than snapping on at the exact sunset.
+        float sunUp = atmo.SunDirection.Z; // sin(elevation)
+        float nightFactor = Math.Clamp((0.10f - sunUp) / 0.20f, 0f, 1f);
+        if (nightFactor <= 0.01f)
+        {
+            return;
+        }
+
+        byte haloAlpha = (byte)(nightFactor * 150f);
+        byte glowAlpha = (byte)(nightFactor * 230f);
+        byte coreAlpha = (byte)(nightFactor * 255f);
+        const float haloRadius = 16f; // soft outer bloom
+        const float glowRadius = 7f;  // warm body
+        const float coreRadius = 2.6f; // hot near-white centre
+
+        using var haloPaint = new SKPaint { IsAntialias = true, BlendMode = SKBlendMode.Plus };
+        using var glowPaint = new SKPaint { IsAntialias = true, BlendMode = SKBlendMode.Plus };
+        using var corePaint = new SKPaint { IsAntialias = true, BlendMode = SKBlendMode.Plus };
+
+        foreach (ProjectedPoi poi in pois)
+        {
+            if (!IsLitRefuge(poi.Source.Kind) || poi.ScreenPosition is not { } sp)
+            {
+                continue;
+            }
+
+            float x = sp.X;
+            float y = sp.Y;
+            // Three additive layers: a wide soft bloom, a warmer body, and a hot near-white core,
+            // so several nearby lights blend into a glowing hamlet against the dark night terrain.
+            haloPaint.Shader = SKShader.CreateRadialGradient(
+                new SKPoint(x, y), haloRadius,
+                new[] { new SKColor(0xFF, 0xC8, 0x70, haloAlpha), new SKColor(0xFF, 0xA0, 0x30, 0) },
+                null, SKShaderTileMode.Clamp);
+            canvas.DrawCircle(x, y, haloRadius, haloPaint);
+
+            glowPaint.Shader = SKShader.CreateRadialGradient(
+                new SKPoint(x, y), glowRadius,
+                new[] { new SKColor(0xFF, 0xDC, 0x88, glowAlpha), new SKColor(0xFF, 0xB0, 0x40, 0) },
+                null, SKShaderTileMode.Clamp);
+            canvas.DrawCircle(x, y, glowRadius, glowPaint);
+
+            corePaint.Color = new SKColor(0xFF, 0xF4, 0xCC, coreAlpha);
+            canvas.DrawCircle(x, y, coreRadius, corePaint);
+        }
+
+        haloPaint.Shader = null;
+        glowPaint.Shader = null;
+    }
+
+    // Refuges that "light up" at night: everything with a roof a hiker could be inside. Viewpoints
+    // (lookout towers / panoramas) are excluded — nobody's home to switch a lamp on.
+    private static bool IsLitRefuge(Domain.Pois.PoiKind kind) => kind is
+        Domain.Pois.PoiKind.Hut or
+        Domain.Pois.PoiKind.WildernessHut or
+        Domain.Pois.PoiKind.Chalet or
+        Domain.Pois.PoiKind.Shelter;
 
     /// <summary>
     /// 1-finger drag on the mesh = PAN. World moves under the finger (Cesium / Google Maps
@@ -561,8 +679,12 @@ public partial class Terrain3DView : ContentView
                 float dy = (float)(e.TotalY - lastOrbitTotalY);
                 lastOrbitTotalX = e.TotalX;
                 lastOrbitTotalY = e.TotalY;
-                // Drag-to-pan: invert deltas so the world tracks the finger.
-                controller.ApplyPan(-dx, -dy);
+                // Drag-to-pan: ApplyPan moves the camera target along world axes derived from
+                // camera azimuth. Drag finger left (dx<0) -> world tracks finger left -> camera
+                // moves right -> target shifts +right -> pass -dx. Vertically the screen Y axis
+                // is inverted relative to the controller's "forward" vector (screen Y grows down,
+                // forward grows up the screen) so dy comes through with the same sign as dx.
+                controller.ApplyPan(-dx, dy);
                 Canvas.InvalidateSurface();
                 return;
         }
@@ -963,8 +1085,9 @@ public partial class Terrain3DView : ContentView
 
             // GL draws the terrain AND the depth-tested trail/route lines (so the terrain occludes them)
             // into a colour texture it owns and returns the texture handle. A 0 handle means the present
-            // FBO couldn't be allocated this frame; fall back to Skia.
-            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads);
+            // FBO couldn't be allocated this frame; fall back to Skia. The optional Atmosphere drives the
+            // sky pass and the terrain fragment shader's aerial-perspective blend; passing null skips both.
+            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, Atmosphere);
             if (terrainTextureId == 0)
             {
                 return false;

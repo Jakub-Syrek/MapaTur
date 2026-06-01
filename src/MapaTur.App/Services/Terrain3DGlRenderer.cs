@@ -23,10 +23,9 @@ namespace MapaTur.App.Services;
 /// </summary>
 internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 {
-    // Terrain vertex shader: carries the UNSHADED base colour and the world-space normal through to the
-    // fragment stage so lighting is computed per-pixel (smooth) instead of per-vertex (Gouraud) baked into
-    // the colour. The normal is left in world space — the sun is a fixed world-space direction (cartographic
-    // convention), so no normal matrix is needed and the shading matches the Skia fallback's baked light.
+    // Terrain vertex shader: carries the UNSHADED base colour, world-space normal, UV and world-space
+    // position to the fragment stage. Position is needed so the fragment can compute an exponential-fog
+    // (aerial-perspective) blend against the camera position without re-deriving it from depth.
     private const string VertexShaderSource =
         "#version 300 es\n" +
         "layout(location=0) in vec3 aPos;\n" +
@@ -37,11 +36,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "out vec4 vColor;\n" +
         "out vec3 vNormal;\n" +
         "out vec2 vTex;\n" +
-        "void main(){ vColor = aColor; vNormal = aNormal; vTex = aTex; gl_Position = uMvp * vec4(aPos, 1.0); }\n";
+        "out vec3 vWorldPos;\n" +
+        "void main(){ vColor = aColor; vNormal = aNormal; vTex = aTex; vWorldPos = aPos; gl_Position = uMvp * vec4(aPos, 1.0); }\n";
 
-    // Per-pixel Lambert lighting: shade = ambient + (1-ambient)*max(0, dot(N, L)), matching the CPU bake in
-    // TerrainMesh3D.BuildBlock but evaluated per fragment from the interpolated normal. When an ortho image
-    // is bound (uUseOrtho=1) the surface colour is sampled from it; otherwise the hypsometric base tint.
+    // Per-pixel Lambert lighting + exponential-fog aerial perspective. shade = ambient + (1-ambient) *
+    // max(0, dot(N, L)). When an ortho image is bound (uUseOrtho=1) the surface colour is sampled from it
+    // (with optional unsharp), otherwise the hypsometric base tint. After the surface colour is computed
+    // it is blended toward uFogColor by an exponential function of view distance — distant ridges fade
+    // into the horizon haze the way they do in golden-hour photos. uFogDensity=0 disables the blend.
     private const string TerrainFragmentShaderSource =
         "#version 300 es\n" +
         "precision highp float;\n" +
@@ -49,16 +51,61 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "in vec4 vColor;\n" +
         "in vec3 vNormal;\n" +
         "in vec2 vTex;\n" +
+        "in vec3 vWorldPos;\n" +
         "uniform vec3 uLightDir;\n" +
         "uniform float uAmbient;\n" +
+        "uniform vec3 uSunColor;\n" +    // direct-sun colour (warm at sunset, white at noon)
+        "uniform vec3 uSkyAmbient;\n" +  // ambient sky-fill colour for shadowed slopes
         "uniform sampler2D uOrtho;\n" +
         "uniform int uUseOrtho;\n" +
         "uniform vec2 uOrthoTexel;\n" + // (1/width, 1/height) of the bound ortho texture
         "uniform float uSharpen;\n" +   // unsharp-mask strength; 0 = off
+        "uniform vec3 uFogColor;\n" +
+        "uniform float uFogDensity;\n" + // per-metre exponential; 0 = no aerial perspective
+        "uniform vec3 uCameraPos;\n" +
+        // Cloud-shadow inputs: the SAME field the sea-of-clouds layer draws, so the shadows on the
+        // ground line up with the clouds overhead. The terrain fragment projects up along the sun
+        // ray to the cloud plane and samples the field there — moving dappled light at any sun angle.
+        "uniform float uCloudAltitude;\n" +
+        "uniform float uCloudNoiseScale;\n" +
+        "uniform vec2 uCloudWind;\n" +
+        "uniform float uCloudTime;\n" +
+        "uniform float uCloudCoverage;\n" +
+        "uniform float uCloudShadow;\n" + // strength 0..1; 0 disables
         "out vec4 fragColor;\n" +
+        "float hashT(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n" +
+        "float noiseT(vec2 p){\n" +
+        "  vec2 i = floor(p); vec2 f = fract(p);\n" +
+        "  f = f * f * (3.0 - 2.0 * f);\n" +
+        "  return mix(mix(hashT(i), hashT(i + vec2(1.0,0.0)), f.x),\n" +
+        "             mix(hashT(i + vec2(0.0,1.0)), hashT(i + vec2(1.0,1.0)), f.x), f.y);\n" +
+        "}\n" +
+        "float fbmT(vec2 p){ float v=0.0,a=0.5; for(int i=0;i<5;i++){ v+=a*noiseT(p); p*=2.0; a*=0.5;} return v; }\n" +
         "void main(){\n" +
+        // Cloud shadow: march from this fragment toward the sun (uLightDir) up to the cloud plane,
+        // sample the identical animated cloud field, and darken the DIRECT-sun term where a cloud
+        // blocks the ray. Only when the sun is meaningfully above the horizon (uLightDir.z) — at
+        // grazing angles the projection length explodes and shadows would smear.
+        "  float sunShadow = 0.0;\n" +
+        "  if (uCloudShadow > 0.001 && uCloudCoverage > 0.001 && uLightDir.z > 0.12) {\n" +
+        "    float tt = (uCloudAltitude - vWorldPos.z) / uLightDir.z;\n" +
+        "    if (tt > 0.0) {\n" +
+        "      vec2 cp = vWorldPos.xy + (uLightDir.xy * tt);\n" +
+        "      vec2 p = cp * uCloudNoiseScale + uCloudWind * uCloudTime;\n" +
+        "      vec2 warp = vec2(fbmT(p * 0.5 + uCloudTime * 0.010),\n" +
+        "                       fbmT(p * 0.5 + vec2(5.2, 1.3) + uCloudTime * 0.012));\n" +
+        "      float n = fbmT(p + (warp - 0.5) * 1.6);\n" +
+        "      float thr = 0.62 - (uCloudCoverage * 0.42);\n" +
+        "      sunShadow = smoothstep(thr, thr + 0.20, n);\n" +
+        "    }\n" +
+        "  }\n" +
+        // COLOURED lighting: shadowed slopes get the cool sky-ambient fill, sun-facing slopes get
+        // the warm direct-sun colour scaled by Lambert AND attenuated by any cloud blocking the
+        // sun. Tinting (not just dimming) makes the terrain read as genuinely sunlit; the cloud
+        // shadow term adds the moving dappled light that sells "sun + clouds" at any time of day.
         "  float lambert = max(0.0, dot(normalize(vNormal), uLightDir));\n" +
-        "  float shade = uAmbient + ((1.0 - uAmbient) * lambert);\n" +
+        "  float sunlit = lambert * (1.0 - uAmbient) * (1.0 - (sunShadow * uCloudShadow));\n" +
+        "  vec3 lightSum = (uSkyAmbient * uAmbient) + (uSunColor * sunlit);\n" +
         "  vec3 base;\n" +
         "  if (uUseOrtho == 1) {\n" +
         "    vec3 c = texture(uOrtho, vTex).rgb;\n" +
@@ -75,7 +122,160 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  } else {\n" +
         "    base = vColor.rgb;\n" +
         "  }\n" +
-        "  fragColor = vec4(base * shade, 1.0);\n" +
+        "  vec3 lit = base * lightSum;\n" +
+        "  float dist = length(vWorldPos - uCameraPos);\n" +
+        "  float fogAmount = 1.0 - exp(-dist * uFogDensity);\n" +
+        "  fragColor = vec4(mix(lit, uFogColor, fogAmount), 1.0);\n" +
+        "}\n";
+
+    // Sky pass: a fullscreen triangle whose fragment shader reconstructs a world-space view
+    // direction from screen NDC via the inverse view-projection matrix, then evaluates a smoothly
+    // mixed horizon-to-zenith gradient plus a sun disc with a Mie-style scattering halo around it.
+    // Rendered FIRST each frame with depth-write disabled; the depth-tested terrain pass then
+    // composites on top, leaving sky visible only where there's no geometry. This is what gives
+    // the golden-hour "sun behind the ridge" look — the sun pokes out wherever the silhouette ends.
+    private const string SkyVertexShaderSource =
+        "#version 300 es\n" +
+        "layout(location=0) in vec2 aClip;\n" + // clip-space xy in [-1,1]; one triangle covers the screen
+        "out vec2 vClip;\n" +
+        "void main(){ vClip = aClip; gl_Position = vec4(aClip, 1.0, 1.0); }\n";
+
+    private const string SkyFragmentShaderSource =
+        "#version 300 es\n" +
+        "precision highp float;\n" +
+        "in vec2 vClip;\n" +
+        "uniform mat4 uInvViewProj;\n" +
+        "uniform vec3 uCameraPos;\n" +
+        "uniform vec3 uSunDir;\n" +
+        "uniform vec3 uSunColor;\n" +
+        "uniform vec3 uSkyZenith;\n" +
+        "uniform vec3 uSkyHorizon;\n" +
+        "uniform float uTime;\n" +          // seconds since renderer start; drives cloud drift
+        "uniform float uCloudCoverage;\n" + // 0 = clear, 1 = overcast
+        "out vec4 fragColor;\n" +
+        // 2D value-noise + fractal Brownian motion. Hash-based, no texture lookups — costs ~5
+        // sin() + ~40 lerps per cloud pixel. Adreno 830 chews through this without breaking a
+        // sweat (sky pass is fullscreen but tiny pixel cost; <0.5 ms on a phone).
+        "float hash21(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n" +
+        "float noise2(vec2 p){\n" +
+        "  vec2 i = floor(p); vec2 f = fract(p);\n" +
+        "  f = f * f * (3.0 - 2.0 * f);\n" +
+        "  return mix(\n" +
+        "    mix(hash21(i + vec2(0.0, 0.0)), hash21(i + vec2(1.0, 0.0)), f.x),\n" +
+        "    mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x),\n" +
+        "    f.y);\n" +
+        "}\n" +
+        "float fbm(vec2 p){\n" +
+        "  float v = 0.0; float a = 0.5;\n" +
+        "  for (int i = 0; i < 5; i++) { v += a * noise2(p); p *= 2.0; a *= 0.5; }\n" +
+        "  return v;\n" +
+        "}\n" +
+        "void main(){\n" +
+        // Unproject the screen NDC to a far-plane world point, then build a view direction
+        // from camera to that point. invViewProj handles aspect/fov/orientation in one matrix.
+        "  vec4 farPoint = uInvViewProj * vec4(vClip, 1.0, 1.0);\n" +
+        "  vec3 viewDir = normalize((farPoint.xyz / farPoint.w) - uCameraPos);\n" +
+        // WORLD-SPACE sky dome. Vertical tone follows the world-up component of the view ray
+        // (viewDir.z), so the zenith is always world +Z and the dome stays anchored to the
+        // world no matter how the camera orbits — clouds sit "above the terrain", not "at the
+        // top of the screen". h in [-1,1]: +1 straight up, 0 at the horizon, -1 straight down.
+        "  float h = viewDir.z;\n" +
+        "  vec3 skyUp = mix(uSkyHorizon, uSkyZenith, pow(clamp(h, 0.0, 1.0), 0.45));\n" +
+        // Below horizon (looking down past the terrain edge / into a top-down view's corners):
+        // a darkened horizon tone reading as distant ground haze, NOT blue sky and NOT clouds.
+        // Cross-faded across the horizon line so there's no hard seam.
+        "  vec3 skyDown = uSkyHorizon * 0.72;\n" +
+        "  vec3 sky = mix(skyDown, skyUp, smoothstep(-0.12, 0.06, h));\n" +
+        // Cirrus on an INFINITE horizontal layer overhead: perspective-project the view ray
+        // onto a constant-world-Z plane by dividing xy by the up component. Classic skybox
+        // cloud trick — bands lock to world directions, pan correctly as the camera rotates,
+        // and only appear in genuinely upward-looking pixels.
+        "  float cloudDensity = 0.0;\n" +
+        "  if (h > 0.015) {\n" +
+        "    vec2 cloudUv = viewDir.xy / h;\n" +
+        "    cloudUv = vec2(cloudUv.x * 0.5, cloudUv.y * 1.6) + uTime * vec2(0.012, 0.005);\n" +
+        "    float clouds = noise2(cloudUv) * 0.6 + noise2(cloudUv * 2.3) * 0.4;\n" +
+        "    float threshold = 0.60 - (uCloudCoverage * 0.32);\n" +
+        "    cloudDensity = smoothstep(threshold, threshold + 0.16, clouds) * 0.8;\n" +
+        // Fade clouds out near the horizon (h -> 0) where the overhead-plane projection
+        // stretches to infinity and would smear into a hard band.
+        "    cloudDensity *= smoothstep(0.015, 0.18, h);\n" +
+        "  }\n" +
+        // Cloud colour: noon -> bright lit-from-above white; sunset -> warm pink-orange built
+        // from a boosted horizon tint; night -> dim cool blue-grey for silhouettes.
+        "  vec3 cloudHot = clamp(uSkyHorizon * 2.0 + vec3(0.25, 0.10, 0.05), 0.0, 1.5);\n" +
+        "  vec3 cloudBright = vec3(1.0, 0.99, 0.97);\n" +
+        "  vec3 cloudNight = vec3(0.18, 0.20, 0.28);\n" +
+        "  float sunHeight = clamp(uSunDir.z, 0.0, 1.0);\n" +
+        "  float nightFactor = clamp(-uSunDir.z * 3.0, 0.0, 1.0);\n" +
+        "  vec3 cloudColor = mix(cloudHot, cloudBright, sunHeight);\n" +
+        "  cloudColor = mix(cloudColor, cloudNight, nightFactor);\n" +
+        "  sky = mix(sky, cloudColor, cloudDensity);\n" +
+        // Sun disc + halo. smoothstep gives a soft-edged disc the right pixel size; pow gives
+        // the Mie-style fall-off (the "glow") that bleeds well past the disc.
+        "  float sunDot = dot(viewDir, uSunDir);\n" +
+        "  float sunCore = smoothstep(0.9994, 0.99985, sunDot);\n" +
+        "  float sunHalo = pow(max(sunDot, 0.0), 80.0) * 0.55;\n" +
+        "  vec3 sun = uSunColor * (sunCore + sunHalo);\n" +
+        "  fragColor = vec4(sky + sun, 1.0);\n" +
+        "}\n";
+
+    // Cloud-layer ("sea of clouds") program. A large horizontal quad at a fixed world altitude,
+    // drawn AFTER the terrain with the depth test on (so peaks above the layer occlude it and the
+    // valleys below are veiled) but depth-write off and alpha blending on. The fragment shader
+    // samples animated fBm at the fragment's WORLD (x,y) so the cloud field is locked to the world
+    // and drifts smoothly — the iconic Tatra temperature-inversion look, peaks poking through fog.
+    private const string CloudLayerVertexShaderSource =
+        "#version 300 es\n" +
+        "layout(location=0) in vec2 aCorner;\n" + // unit quad corner in [-1,1]
+        "uniform mat4 uMvp;\n" +
+        "uniform vec2 uCenter;\n" +    // world XY centre of the layer
+        "uniform float uHalfExtent;\n" + // world half-size of the quad
+        "uniform float uAltitude;\n" + // world Z of the layer
+        "out vec2 vWorldXY;\n" +
+        "out vec2 vLocal;\n" +
+        "void main(){\n" +
+        "  vLocal = aCorner;\n" +
+        "  vec2 world = uCenter + (aCorner * uHalfExtent);\n" +
+        "  vWorldXY = world;\n" +
+        "  gl_Position = uMvp * vec4(world, uAltitude, 1.0);\n" +
+        "}\n";
+
+    private const string CloudLayerFragmentShaderSource =
+        "#version 300 es\n" +
+        "precision highp float;\n" +
+        "in vec2 vWorldXY;\n" +
+        "in vec2 vLocal;\n" +
+        "uniform float uTime;\n" +
+        "uniform float uCoverage;\n" +
+        "uniform vec3 uCloudColor;\n" +
+        "uniform float uNoiseScale;\n" + // 1/metres; sets cloud-cell size
+        "uniform vec2 uWind;\n" +        // drift velocity in noise-units/sec (varies over time)
+        "out vec4 fragColor;\n" +
+        "float hashC(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n" +
+        "float noiseC(vec2 p){\n" +
+        "  vec2 i = floor(p); vec2 f = fract(p);\n" +
+        "  f = f * f * (3.0 - 2.0 * f);\n" +
+        "  return mix(mix(hashC(i), hashC(i + vec2(1.0,0.0)), f.x),\n" +
+        "             mix(hashC(i + vec2(0.0,1.0)), hashC(i + vec2(1.0,1.0)), f.x), f.y);\n" +
+        "}\n" +
+        "float fbmC(vec2 p){ float v=0.0,a=0.5; for(int i=0;i<5;i++){ v+=a*noiseC(p); p*=2.0; a*=0.5;} return v; }\n" +
+        "void main(){\n" +
+        // World-space sample point translated by the wind (clouds slide downwind).
+        "  vec2 p = vWorldXY * uNoiseScale + uWind * uTime;\n" +
+        // Domain warp by a SECOND, slowly time-evolving noise field: this is what makes the
+        // clouds form and dissipate (shapes morph) instead of merely sliding rigidly — the
+        // warp offset drifts in its own slow time so cells grow, merge and tear apart.
+        "  vec2 warp = vec2(fbmC(p * 0.5 + uTime * 0.010),\n" +
+        "                   fbmC(p * 0.5 + vec2(5.2, 1.3) + uTime * 0.012));\n" +
+        "  float n = fbmC(p + (warp - 0.5) * 1.6);\n" +
+        "  float thr = 0.62 - (uCoverage * 0.42);\n" +
+        "  float a = smoothstep(thr, thr + 0.20, n);\n" +
+        // Soft-fade the quad's outer ring so the (finite) sheet doesn't show a hard rectangular
+        // edge out toward the horizon.
+        "  float edge = smoothstep(1.0, 0.65, max(abs(vLocal.x), abs(vLocal.y)));\n" +
+        "  a *= edge * 0.70;\n" +
+        "  fragColor = vec4(uCloudColor, a);\n" +
         "}\n";
 
     // Flat fragment shader for the line/ribbon program (trails/route): no lighting, just the vertex colour.
@@ -165,10 +365,54 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int mvpLocation = -1;
     private int lightDirLocation = -1;
     private int ambientLocation = -1;
+    private int sunColorLocation = -1;
+    private int skyAmbientLocation = -1;
     private int orthoSamplerLocation = -1;
     private int useOrthoLocation = -1;
     private int orthoTexelLocation = -1;
     private int sharpenLocation = -1;
+    private int terrainFogColorLocation = -1;
+    private int terrainFogDensityLocation = -1;
+    private int terrainCameraPosLocation = -1;
+    private int terrainCloudAltitudeLocation = -1;
+    private int terrainCloudNoiseScaleLocation = -1;
+    private int terrainCloudWindLocation = -1;
+    private int terrainCloudTimeLocation = -1;
+    private int terrainCloudCoverageLocation = -1;
+    private int terrainCloudShadowLocation = -1;
+
+    // Sky / atmospheric program: drawn as a fullscreen triangle BEFORE the terrain pass, with the
+    // depth-write disabled so the depth-tested terrain composes on top. Owns its own program +
+    // single 6-float VBO (one triangle covering NDC).
+    private uint skyProgram;
+    private int skyInvViewProjLocation = -1;
+    private int skyCameraPosLocation = -1;
+    private int skySunDirLocation = -1;
+    private int skySunColorLocation = -1;
+    private int skyZenithLocation = -1;
+    private int skyHorizonLocation = -1;
+    private int skyTimeLocation = -1;
+    private int skyCloudCoverageLocation = -1;
+    private uint skyVao;
+    private uint skyVbo;
+
+    // Cloud-layer ("sea of clouds") program + unit-quad geometry.
+    private uint cloudProgram;
+    private int cloudMvpLocation = -1;
+    private int cloudCenterLocation = -1;
+    private int cloudHalfExtentLocation = -1;
+    private int cloudAltitudeLocation = -1;
+    private int cloudTimeLocation = -1;
+    private int cloudCoverageLocation = -1;
+    private int cloudColorLocation = -1;
+    private int cloudNoiseScaleLocation = -1;
+    private int cloudWindLocation = -1;
+    private uint cloudVao;
+    private uint cloudVbo;
+
+    // Wall-clock seconds since the renderer was constructed; drives the cirrus drift in the sky
+    // shader. Started lazily so a Disposed renderer doesn't leak the stopwatch into the next one.
+    private readonly System.Diagnostics.Stopwatch atmosphereClock = System.Diagnostics.Stopwatch.StartNew();
 
     // Unsharp-mask strength applied to the ortho in the fragment shader (0 = off). Crisps up edges softened
     // by mipmap/anisotropic minification; kept mild so it doesn't ring.
@@ -288,7 +532,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         IReadOnlyList<Trail>? trails,
         DemRaster? raster,
         Route? route,
-        IReadOnlyList<Trail>? roads = null)
+        IReadOnlyList<Trail>? roads = null,
+        Atmosphere? atmosphere = null)
     {
         gl ??= PlatformGl.Get();
 
@@ -317,10 +562,45 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             mvpLocation = -1;
             lightDirLocation = -1;
             ambientLocation = -1;
+            sunColorLocation = -1;
+            skyAmbientLocation = -1;
             orthoSamplerLocation = -1;
             useOrthoLocation = -1;
             orthoTexelLocation = -1;
             sharpenLocation = -1;
+            terrainFogColorLocation = -1;
+            terrainFogDensityLocation = -1;
+            terrainCameraPosLocation = -1;
+            terrainCloudAltitudeLocation = -1;
+            terrainCloudNoiseScaleLocation = -1;
+            terrainCloudWindLocation = -1;
+            terrainCloudTimeLocation = -1;
+            terrainCloudCoverageLocation = -1;
+            terrainCloudShadowLocation = -1;
+            // Sky program + fullscreen triangle VAO belonged to the dead context too.
+            skyProgram = 0;
+            skyInvViewProjLocation = -1;
+            skyCameraPosLocation = -1;
+            skySunDirLocation = -1;
+            skySunColorLocation = -1;
+            skyZenithLocation = -1;
+            skyHorizonLocation = -1;
+            skyTimeLocation = -1;
+            skyCloudCoverageLocation = -1;
+            skyVao = 0;
+            skyVbo = 0;
+            cloudProgram = 0;
+            cloudMvpLocation = -1;
+            cloudCenterLocation = -1;
+            cloudHalfExtentLocation = -1;
+            cloudAltitudeLocation = -1;
+            cloudTimeLocation = -1;
+            cloudCoverageLocation = -1;
+            cloudColorLocation = -1;
+            cloudNoiseScaleLocation = -1;
+            cloudWindLocation = -1;
+            cloudVao = 0;
+            cloudVbo = 0;
             // The ortho texture IDs belonged to the dead context; drop the handles (don't GL-delete the
             // stale ones) but keep the CPU bytes so they re-upload on the next EnsureOrthoTextures.
             pendingOrthoRelease.Clear();
@@ -392,12 +672,92 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.DepthRange(0.0f, 1.0f);
 
         gl.Viewport(0, 0, (uint)vpWidth, (uint)vpHeight);
+        // Sky clear is a safety floor in case the sky pass is skipped (no atmosphere set) — the
+        // atmospheric pass paints over the whole frame anyway, so the colour is irrelevant when
+        // atmosphere != null. Always clear depth so the test stays sane between frames.
         gl.ClearColor(SkyR, SkyG, SkyB, 1f);
         gl.Clear((uint)(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit));
 
-        gl.UseProgram(program);
-
         Matrix4x4 mvp = camera.BuildViewProjection((float)width / Math.Max(1, height));
+
+        // ── Live weather ────────────────────────────────────────────────────────────────────────
+        // Clouds are not a static dial: the coverage wanders over minutes (sometimes near-clear,
+        // sometimes heavy) and the wind direction + speed drift, so the field is never the same
+        // twice. Driven off the renderer wall-clock (atmosphereClock), independent of the
+        // time-of-day slider, so clouds keep evolving while the user just looks around. Built from
+        // a few incommensurate sines (a cheap, tileless "weather noise"). effectiveCoverage feeds
+        // both the cirrus sky pass and the sea-of-clouds layer so they wax and wane together.
+        float weatherT = (float)atmosphereClock.Elapsed.TotalSeconds;
+        float baseCoverage = atmosphere?.CloudCoverage ?? 0f;
+        float weatherNoise =
+            (MathF.Sin(weatherT * 0.013f) * 0.5f)
+            + (MathF.Sin((weatherT * 0.031f) + 1.7f) * 0.3f)
+            + (MathF.Sin((weatherT * 0.057f) + 4.2f) * 0.2f); // ~[-1,1]
+        float effectiveCoverage = Math.Clamp(baseCoverage + (0.35f * weatherNoise), 0f, 1f);
+        // Wind in noise-units/sec: slowly rotating heading + gently pulsing speed.
+        float windAngle = (MathF.Sin(weatherT * 0.008f) * 0.9f) + (MathF.Sin((weatherT * 0.017f) + 2f) * 0.5f);
+        float windSpeed = 0.012f + (0.010f * MathF.Sin(weatherT * 0.005f));
+        var windVec = new Vector2(MathF.Cos(windAngle) * windSpeed, MathF.Sin(windAngle) * windSpeed);
+
+        // Cloud-layer geometry, computed once and shared by BOTH the sea-of-clouds draw and the
+        // terrain's cloud-shadow lookup so the shadows on the ground register with the clouds above.
+        // Altitude = halfway between the mesh centre and its highest world-Z, so peaks poke through.
+        float cloudMaxZ = float.NegativeInfinity;
+        for (int i = 0; i < tiles.Count; i++)
+        {
+            if (tiles[i].MaxElevationZ > cloudMaxZ)
+            {
+                cloudMaxZ = tiles[i].MaxElevationZ;
+            }
+        }
+        TerrainMesh3D geomFrame = tiles[0];
+        float cloudAltitude = float.IsNegativeInfinity(cloudMaxZ)
+            ? 0f
+            : geomFrame.Center.Z + ((cloudMaxZ - geomFrame.Center.Z) * 0.5f);
+        float cloudHalfExtent = MathF.Max(geomFrame.HorizontalExtent * 4f, 20_000f);
+        float cloudNoiseScale = 1f / MathF.Max(geomFrame.HorizontalExtent * 0.5f, 4_000f);
+        bool cloudsActive = atmosphere is not null && effectiveCoverage > 0.001f && !float.IsNegativeInfinity(cloudMaxZ);
+        // Cloud-shadow darkening of direct sun where a cloud blocks the ray (0 = off).
+        const float CloudShadowStrength = 0.55f;
+
+        // Sky pass FIRST: fullscreen triangle, no depth write, no depth test — the depth-tested
+        // terrain pass that follows composites on top, so the sky shows through wherever there's
+        // no geometry. Skipping the pass when atmosphere is null preserves the legacy flat clear.
+        if (atmosphere is not null)
+        {
+            Matrix4x4.Invert(mvp, out Matrix4x4 invMvp);
+            Span<float> invMvpData = stackalloc float[16]
+            {
+                invMvp.M11, invMvp.M12, invMvp.M13, invMvp.M14,
+                invMvp.M21, invMvp.M22, invMvp.M23, invMvp.M24,
+                invMvp.M31, invMvp.M32, invMvp.M33, invMvp.M34,
+                invMvp.M41, invMvp.M42, invMvp.M43, invMvp.M44,
+            };
+            gl.DepthMask(false);
+            gl.Disable(EnableCap.DepthTest);
+            gl.UseProgram(skyProgram);
+            gl.UniformMatrix4(skyInvViewProjLocation, 1, false, invMvpData);
+            Vector3 camPos = camera.Position;
+            gl.Uniform3(skyCameraPosLocation, camPos.X, camPos.Y, camPos.Z);
+            Vector3 sunDir = atmosphere.SunDirection;
+            gl.Uniform3(skySunDirLocation, sunDir.X, sunDir.Y, sunDir.Z);
+            Vector3 sunColor = atmosphere.SunColor;
+            gl.Uniform3(skySunColorLocation, sunColor.X, sunColor.Y, sunColor.Z);
+            Vector3 zen = atmosphere.SkyZenithColor;
+            gl.Uniform3(skyZenithLocation, zen.X, zen.Y, zen.Z);
+            Vector3 hor = atmosphere.SkyHorizonColor;
+            gl.Uniform3(skyHorizonLocation, hor.X, hor.Y, hor.Z);
+            gl.Uniform1(skyTimeLocation, weatherT);
+            gl.Uniform1(skyCloudCoverageLocation, effectiveCoverage);
+            gl.BindVertexArray(skyVao);
+            gl.DrawArrays(PrimitiveType.Triangles, 0, 3);
+            gl.BindVertexArray(0);
+            // Restore depth state for the terrain pass.
+            gl.Enable(EnableCap.DepthTest);
+            gl.DepthMask(true);
+        }
+
+        gl.UseProgram(program);
         // System.Numerics is row-vector/row-major; uploading its fields with transpose=false lets GL read
         // them column-major, i.e. transposed — exactly the column-vector matrix GLSL's uMvp*v expects, so
         // it matches Camera.ProjectToScreen used for the overlays.
@@ -410,12 +770,50 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         };
         gl.UniformMatrix4(mvpLocation, 1, false, m);
 
-        // Per-pixel lighting: feed the shader the same world-space sun + ambient the mesh baked with, so the
-        // GPU path shades identically to (but smoother than) the Skia fallback. All tiles share one light.
+        // Per-pixel lighting: the Atmosphere instance, when provided, overrides the per-tile baked
+        // light direction + ambient so the time-of-day slider drives shading live. Without an
+        // atmosphere the renderer falls back to the mesh-bake values (legacy behaviour).
         TerrainMesh3D lightFrame = tiles[0];
-        Vector3 light = lightFrame.LightDirection;
+        Vector3 light = atmosphere?.SunDirection ?? lightFrame.LightDirection;
+        float ambient = atmosphere?.AmbientFactor ?? lightFrame.AmbientFactor;
         gl.Uniform3(lightDirLocation, light.X, light.Y, light.Z);
-        gl.Uniform1(ambientLocation, lightFrame.AmbientFactor);
+        gl.Uniform1(ambientLocation, ambient);
+
+        // Coloured-light uniforms. With an atmosphere: warm direct-sun colour (boosted a touch so
+        // sunlit slopes really glow at golden hour) + a brightened sky-tint ambient so shadows go
+        // cool rather than muddy. Without one: both white, so the shader reproduces the legacy
+        // grey scalar shade exactly.
+        Vector3 sunCol = Vector3.One;
+        Vector3 skyAmbient = Vector3.One;
+        if (atmosphere is not null)
+        {
+            // Direct sun: lift toward white a little so even a deep-orange sunset still has enough
+            // luminance to light the slopes (pure (1,0.5,0.15) × albedo can read too dark).
+            sunCol = Vector3.Lerp(atmosphere.SunColor, Vector3.One, 0.25f) * 1.15f;
+            // Ambient fill = a bright, desaturated version of the zenith sky tint so shadowed
+            // faces pick up a soft cool cast that contrasts with the warm sun.
+            skyAmbient = Vector3.Lerp(atmosphere.SkyZenithColor, Vector3.One, 0.55f);
+        }
+        gl.Uniform3(sunColorLocation, sunCol.X, sunCol.Y, sunCol.Z);
+        gl.Uniform3(skyAmbientLocation, skyAmbient.X, skyAmbient.Y, skyAmbient.Z);
+
+        // Cloud-shadow uniforms: feed the terrain the same cloud field the layer draws so moving
+        // clouds throw moving shadows. Coverage 0 (or no atmosphere) disables it via the shader guard.
+        gl.Uniform1(terrainCloudAltitudeLocation, cloudAltitude);
+        gl.Uniform1(terrainCloudNoiseScaleLocation, cloudNoiseScale);
+        gl.Uniform2(terrainCloudWindLocation, windVec.X, windVec.Y);
+        gl.Uniform1(terrainCloudTimeLocation, weatherT);
+        gl.Uniform1(terrainCloudCoverageLocation, cloudsActive ? effectiveCoverage : 0f);
+        gl.Uniform1(terrainCloudShadowLocation, cloudsActive ? CloudShadowStrength : 0f);
+
+        // Aerial perspective: when the atmosphere is bound, distant fragments blend toward
+        // uFogColor with an exponential ramp. uFogDensity = 0 disables the blend (legacy path).
+        Vector3 fogColor = atmosphere?.FogColor ?? Vector3.Zero;
+        float fogDensity = atmosphere?.FogDensity ?? 0f;
+        Vector3 cameraWorldPos = camera.Position;
+        gl.Uniform3(terrainFogColorLocation, fogColor.X, fogColor.Y, fogColor.Z);
+        gl.Uniform1(terrainFogDensityLocation, fogDensity);
+        gl.Uniform3(terrainCameraPosLocation, cameraWorldPos.X, cameraWorldPos.Y, cameraWorldPos.Z);
 
         // Drape the ortho: bind each mesh tile's own cell texture (OrthoTileIndex) so a multi-cell ortho
         // stays sharp. Without textures the shader uses the hypsometric tint.
@@ -467,6 +865,39 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         DrawRouteLine(gl, route, raster, frame);
 
         gl.BindVertexArray(0);
+
+        // "Sea of clouds" layer: a horizontal translucent sheet at the shared cloud altitude, drawn
+        // after the terrain so the depth test lets peaks poke through and veils the valleys. Geometry
+        // + field params come from the precomputed cloud locals so the layer matches the shadows the
+        // terrain pass already cast. Alpha-blended, depth-write off (must not occlude later overlays).
+        if (cloudsActive)
+        {
+            // Colour: warm-tinted near sunset (toward the horizon hue), bright white when the sun is
+            // high, dimmed at night. Built from the atmosphere so it matches the sky.
+            float dayness = Math.Clamp(atmosphere!.SunDirection.Z + 0.1f, 0f, 1f);
+            Vector3 white = new(0.97f, 0.97f, 0.99f);
+            Vector3 tint = Vector3.Lerp(atmosphere.SkyHorizonColor, white, dayness);
+            Vector3 cloudCol = tint * (0.35f + (0.65f * dayness));
+
+            gl.Enable(EnableCap.Blend);
+            gl.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+            gl.DepthMask(false); // translucent: test against terrain but don't write depth
+            gl.UseProgram(cloudProgram);
+            gl.UniformMatrix4(cloudMvpLocation, 1, false, m);
+            gl.Uniform2(cloudCenterLocation, geomFrame.Center.X, geomFrame.Center.Y);
+            gl.Uniform1(cloudHalfExtentLocation, cloudHalfExtent);
+            gl.Uniform1(cloudAltitudeLocation, cloudAltitude);
+            gl.Uniform1(cloudTimeLocation, weatherT);
+            gl.Uniform1(cloudCoverageLocation, effectiveCoverage);
+            gl.Uniform3(cloudColorLocation, cloudCol.X, cloudCol.Y, cloudCol.Z);
+            gl.Uniform1(cloudNoiseScaleLocation, cloudNoiseScale);
+            gl.Uniform2(cloudWindLocation, windVec.X, windVec.Y);
+            gl.BindVertexArray(cloudVao);
+            gl.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
+            gl.BindVertexArray(0);
+            gl.DepthMask(true);
+            gl.Disable(EnableCap.Blend);
+        }
 
         if (useMsaa)
         {
@@ -717,10 +1148,97 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         mvpLocation = g.GetUniformLocation(program, "uMvp");
         lightDirLocation = g.GetUniformLocation(program, "uLightDir");
         ambientLocation = g.GetUniformLocation(program, "uAmbient");
+        sunColorLocation = g.GetUniformLocation(program, "uSunColor");
+        skyAmbientLocation = g.GetUniformLocation(program, "uSkyAmbient");
         orthoSamplerLocation = g.GetUniformLocation(program, "uOrtho");
         useOrthoLocation = g.GetUniformLocation(program, "uUseOrtho");
         orthoTexelLocation = g.GetUniformLocation(program, "uOrthoTexel");
         sharpenLocation = g.GetUniformLocation(program, "uSharpen");
+        terrainFogColorLocation = g.GetUniformLocation(program, "uFogColor");
+        terrainFogDensityLocation = g.GetUniformLocation(program, "uFogDensity");
+        terrainCameraPosLocation = g.GetUniformLocation(program, "uCameraPos");
+        terrainCloudAltitudeLocation = g.GetUniformLocation(program, "uCloudAltitude");
+        terrainCloudNoiseScaleLocation = g.GetUniformLocation(program, "uCloudNoiseScale");
+        terrainCloudWindLocation = g.GetUniformLocation(program, "uCloudWind");
+        terrainCloudTimeLocation = g.GetUniformLocation(program, "uCloudTime");
+        terrainCloudCoverageLocation = g.GetUniformLocation(program, "uCloudCoverage");
+        terrainCloudShadowLocation = g.GetUniformLocation(program, "uCloudShadow");
+
+        // Sky program — single triangle covering the screen, fragment-shader-only atmospheric model.
+        uint sks = CompileShader(g, ShaderType.VertexShader, SkyVertexShaderSource);
+        uint skf = CompileShader(g, ShaderType.FragmentShader, SkyFragmentShaderSource);
+        skyProgram = g.CreateProgram();
+        g.AttachShader(skyProgram, sks);
+        g.AttachShader(skyProgram, skf);
+        g.LinkProgram(skyProgram);
+        g.GetProgram(skyProgram, ProgramPropertyARB.LinkStatus, out int skyLinked);
+        if (skyLinked == 0)
+        {
+            string log = g.GetProgramInfoLog(skyProgram);
+            throw new InvalidOperationException("Sky shader link failed: " + log);
+        }
+        g.DetachShader(skyProgram, sks);
+        g.DetachShader(skyProgram, skf);
+        g.DeleteShader(sks);
+        g.DeleteShader(skf);
+        skyInvViewProjLocation = g.GetUniformLocation(skyProgram, "uInvViewProj");
+        skyCameraPosLocation = g.GetUniformLocation(skyProgram, "uCameraPos");
+        skySunDirLocation = g.GetUniformLocation(skyProgram, "uSunDir");
+        skySunColorLocation = g.GetUniformLocation(skyProgram, "uSunColor");
+        skyZenithLocation = g.GetUniformLocation(skyProgram, "uSkyZenith");
+        skyHorizonLocation = g.GetUniformLocation(skyProgram, "uSkyHorizon");
+        skyTimeLocation = g.GetUniformLocation(skyProgram, "uTime");
+        skyCloudCoverageLocation = g.GetUniformLocation(skyProgram, "uCloudCoverage");
+
+        // Fullscreen triangle: 3 vertices, each xy in clip space, covering NDC [-1,1]^2 with one extra
+        // vertex outside the rect so the rasteriser fills the full screen without re-clipping a quad.
+        Span<float> tri = stackalloc float[6] { -1f, -1f,  3f, -1f,  -1f,  3f };
+        skyVao = g.GenVertexArray();
+        g.BindVertexArray(skyVao);
+        skyVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, skyVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(tri.Length * sizeof(float)), tri, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(0);
+        g.VertexAttribPointer(0, 2, VertexAttribPointerType.Float, false, 2 * sizeof(float), (void*)0);
+        g.BindVertexArray(0);
+
+        // Cloud-layer program — horizontal quad at altitude, fBm-alpha "sea of clouds".
+        uint cvs = CompileShader(g, ShaderType.VertexShader, CloudLayerVertexShaderSource);
+        uint cfs = CompileShader(g, ShaderType.FragmentShader, CloudLayerFragmentShaderSource);
+        cloudProgram = g.CreateProgram();
+        g.AttachShader(cloudProgram, cvs);
+        g.AttachShader(cloudProgram, cfs);
+        g.LinkProgram(cloudProgram);
+        g.GetProgram(cloudProgram, ProgramPropertyARB.LinkStatus, out int cloudLinked);
+        if (cloudLinked == 0)
+        {
+            string log = g.GetProgramInfoLog(cloudProgram);
+            throw new InvalidOperationException("Cloud-layer shader link failed: " + log);
+        }
+        g.DetachShader(cloudProgram, cvs);
+        g.DetachShader(cloudProgram, cfs);
+        g.DeleteShader(cvs);
+        g.DeleteShader(cfs);
+        cloudMvpLocation = g.GetUniformLocation(cloudProgram, "uMvp");
+        cloudCenterLocation = g.GetUniformLocation(cloudProgram, "uCenter");
+        cloudHalfExtentLocation = g.GetUniformLocation(cloudProgram, "uHalfExtent");
+        cloudAltitudeLocation = g.GetUniformLocation(cloudProgram, "uAltitude");
+        cloudTimeLocation = g.GetUniformLocation(cloudProgram, "uTime");
+        cloudCoverageLocation = g.GetUniformLocation(cloudProgram, "uCoverage");
+        cloudColorLocation = g.GetUniformLocation(cloudProgram, "uCloudColor");
+        cloudNoiseScaleLocation = g.GetUniformLocation(cloudProgram, "uNoiseScale");
+        cloudWindLocation = g.GetUniformLocation(cloudProgram, "uWind");
+
+        // Unit quad as a triangle strip: (-1,-1) (1,-1) (-1,1) (1,1).
+        Span<float> quad = stackalloc float[8] { -1f, -1f,  1f, -1f,  -1f, 1f,  1f, 1f };
+        cloudVao = g.GenVertexArray();
+        g.BindVertexArray(cloudVao);
+        cloudVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, cloudVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(quad.Length * sizeof(float)), quad, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(0);
+        g.VertexAttribPointer(0, 2, VertexAttribPointerType.Float, false, 2 * sizeof(float), (void*)0);
+        g.BindVertexArray(0);
 
         // Line ribbon program (reuses the same fragment shader).
         uint lvs = CompileShader(g, ShaderType.VertexShader, LineVertexShaderSource);
@@ -1132,6 +1650,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             gl.DeleteProgram(program);
             gl.DeleteProgram(lineProgram);
+            gl.DeleteProgram(skyProgram);
+            gl.DeleteVertexArray(skyVao);
+            gl.DeleteBuffer(skyVbo);
+            gl.DeleteProgram(cloudProgram);
+            gl.DeleteVertexArray(cloudVao);
+            gl.DeleteBuffer(cloudVbo);
+            skyProgram = 0;
+            skyVao = 0;
+            skyVbo = 0;
+            cloudProgram = 0;
+            cloudVao = 0;
+            cloudVbo = 0;
             programReady = false;
         }
     }
