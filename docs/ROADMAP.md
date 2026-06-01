@@ -2,6 +2,35 @@
 
 Status legend: `[ ]` planned · `[~]` in progress · `[x]` done
 
+## M12 — Atmosphere & ambience
+
+- [x] **Time-of-day `Atmosphere` model** — single `Atmosphere(timeOfDay)` drives
+      a deterministic Tatra-latitude solar arc plus interpolated sky / sun /
+      ambient / fog presets (13 unit tests). "Czas" slider, persisted.
+- [x] **World-space sky dome** — fullscreen-triangle sky pass, world-up gradient
+      (zenith = +Z), sun disc + Mie halo; anchored to the world so it stays above
+      the terrain at any camera angle.
+- [x] **Aerial perspective** — exponential distance fog blending terrain toward
+      the horizon tint; density rises at low sun angles (golden-hour haze).
+- [x] **Coloured terrain lighting** — warm direct-sun on lit slopes, cool
+      sky-ambient in shadow (was a flat grey scalar shade).
+- [x] **Procedural clouds** — cirrus streaks on the sky dome + a "sea of clouds"
+      inversion layer (peaks poke through, valleys veiled), both fBm-driven.
+- [x] **Dynamic weather** — coverage wanders and wind drifts off the wall-clock;
+      a ~15 fps animation tick keeps clouds moving without user input.
+- [x] **Cloud shadows** — terrain marches toward the sun to the cloud plane and
+      samples the same field, so moving clouds throw moving dappled shadows.
+- [x] **Night refuge lights** — warm additive glows switch on in huts / shelters
+      / chalets after sunset, fading in through dusk.
+- [ ] **#48 POI cache auto-load** — POIs persist to SQLite on download but aren't
+      reloaded on startup (unlike maps / DEM / trails), so refuges + their night
+      lights vanish on every relaunch until re-downloaded. Add a viewport / bounds
+      query against the local POI repo at auto-load time so once-downloaded POIs
+      stay put offline.
+- [ ] **#49 Cloud / weather controls** — expose cloud coverage (and maybe a
+      manual wind / "lock weather" toggle) in the UI; currently coverage is a
+      fixed base modulated by the auto weather.
+
 ## M11 — Mobile-class production rendering
 
 The 3D engine is feature-complete tech-demo grade. On a flagship phone
