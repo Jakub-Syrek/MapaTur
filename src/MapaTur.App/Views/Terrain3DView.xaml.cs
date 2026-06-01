@@ -355,30 +355,72 @@ public partial class Terrain3DView : ContentView
     // Per-click steps for the on-screen control pads, sized so one tap produces a clearly
     // visible move. Pixel-equivalents feed the same controller methods the gestures use
     // (OrbitSensitivity 0.005 rad/px → 28 px ≈ 8°).
-    private const float ButtonOrbitStep = 28f;
-    private const float ButtonPanStep = 48f;
-    private const float ButtonVerticalStep = 48f;
-    private const float ButtonZoomFactor = 1.2f;
+    // Per-tap step sizes, kept deliberately SMALL so each repeat tick (the buttons hold-to-repeat
+    // at ~25 Hz) moves only a little — the camera glides smoothly while held and a single tap is a
+    // fine nudge for precise framing, rather than a coarse jump.
+    private const float ButtonOrbitStep = 14f;
+    private const float ButtonPanStep = 22f;
+    private const float ButtonVerticalStep = 22f;
+    private const float ButtonZoomFactor = 1.08f;
 
-    private void StepCamera(Action mutate)
+    // Tilt + slow-rotate steps are smaller still (≈1.4° per tap) for the finest control of pitch
+    // and heading while looking around the sky / ridgeline.
+    private const float ButtonTiltStep = 5f;
+
+    // Hold-to-repeat for the on-screen camera pad. A tap fires the action once (immediately on
+    // press); holding the button down repeats it at a fixed cadence so the camera glides smoothly
+    // instead of needing rapid tapping. The repeat timer only runs while a button is held and
+    // re-invokes the last-pressed action; Released (finger lifts / pointer leaves) stops it.
+    private Action? heldAction;
+    private IDispatcherTimer? holdTimer;
+
+    private void StartHold(Action mutate)
     {
         mutate();
         Canvas.InvalidateSurface();
+        heldAction = mutate;
+        if (holdTimer is null)
+        {
+            holdTimer = Dispatcher.CreateTimer();
+            // ~25 Hz: small steps at this cadence read as smooth continuous motion, while a quick
+            // tap (press+release inside one interval) still only applies the single immediate step.
+            holdTimer.Interval = TimeSpan.FromMilliseconds(40);
+            holdTimer.Tick += OnHoldTick;
+        }
+        holdTimer.Start();
+    }
+
+    private void OnHoldTick(object? sender, EventArgs e)
+    {
+        if (heldAction is null)
+        {
+            holdTimer?.Stop();
+            return;
+        }
+        heldAction();
+        Canvas.InvalidateSurface();
+    }
+
+    // Shared Released handler for every pad button: stop repeating when the finger lifts.
+    private void OnPadReleased(object? sender, EventArgs e)
+    {
+        holdTimer?.Stop();
+        heldAction = null;
     }
 
     // Slow-rotate step is ~⅓ of the full button-orbit step so the dedicated arrow-pad rotate
     // buttons feel like a deliberate fine adjustment, not a swipe. ApplyLookAround (in-place
     // rotation, same as the gizmo and 1-finger drag) per user spec: rotation must NEVER also
     // translate the camera.
-    private const float SlowRotateStep = 10f;
+    private const float SlowRotateStep = 5f;
 
-    private void OnRotateLeftSlowClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyLookAround(-SlowRotateStep, 0f));
+    private void OnRotateLeftSlowClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyLookAround(-SlowRotateStep, 0f));
 
-    private void OnRotateRightSlowClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyLookAround(SlowRotateStep, 0f));
+    private void OnRotateRightSlowClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyLookAround(SlowRotateStep, 0f));
 
-    private void OnRotateLeftClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyOrbit(-ButtonOrbitStep, 0f));
+    private void OnRotateLeftClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyOrbit(-ButtonOrbitStep, 0f));
 
-    private void OnRotateRightClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyOrbit(ButtonOrbitStep, 0f));
+    private void OnRotateRightClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyOrbit(ButtonOrbitStep, 0f));
 
     // View-pitch tilt. Named by what the user SEES, not by the pitch sign:
     //  • Look up toward the sky/horizon = LOWER the orbit pitch (camera drops toward the
@@ -387,30 +429,30 @@ public partial class Terrain3DView : ContentView
     // ApplyOrbit clamps pitch to [MinPitchRadians (20°), MaxPitch (~90°)], so neither button can
     // drive the camera under the terrain or past straight-down — the "don't fly off" guard the
     // user asked for is the existing clamp.
-    private void OnLookUpClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyOrbit(0f, -ButtonOrbitStep));
+    private void OnLookUpClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyOrbit(0f, -ButtonTiltStep));
 
-    private void OnLookDownClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyOrbit(0f, ButtonOrbitStep));
+    private void OnLookDownClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyOrbit(0f, ButtonTiltStep));
 
     // Pan ▲ moves the focus forward (into the scene), ▼ pulls it back toward the camera.
-    private void OnPanUpClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyPan(0f, ButtonPanStep));
+    private void OnPanUpClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyPan(0f, ButtonPanStep));
 
-    private void OnPanDownClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyPan(0f, -ButtonPanStep));
+    private void OnPanDownClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyPan(0f, -ButtonPanStep));
 
-    private void OnPanLeftClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyPan(-ButtonPanStep, 0f));
+    private void OnPanLeftClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyPan(-ButtonPanStep, 0f));
 
-    private void OnPanRightClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyPan(ButtonPanStep, 0f));
+    private void OnPanRightClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyPan(ButtonPanStep, 0f));
 
-    private void OnZoomInClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyZoom(ButtonZoomFactor));
+    private void OnZoomInClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyZoom(ButtonZoomFactor));
 
-    private void OnZoomOutClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyZoom(1f / ButtonZoomFactor));
+    private void OnZoomOutClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyZoom(1f / ButtonZoomFactor));
 
     // Wys. ▲ / ▼ buttons now move the camera target up/down in world-Z (vertical translation),
     // regardless of camera pitch. The earlier tilt mapping was confusing — users expect "up"
     // to lift the camera straight up. ApplyVertical clamps Target.Z to [-2000, 8000] m so a
     // runaway click can't push the target off the mesh and turn the view into pure sky.
-    private void OnRaiseClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyVertical(ButtonVerticalStep));
+    private void OnRaiseClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyVertical(ButtonVerticalStep));
 
-    private void OnLowerClicked(object? sender, EventArgs e) => StepCamera(() => controller.ApplyVertical(-ButtonVerticalStep));
+    private void OnLowerClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyVertical(-ButtonVerticalStep));
 
     /// <summary>
     /// Points the camera at a world-space target from a given distance, preserving the current

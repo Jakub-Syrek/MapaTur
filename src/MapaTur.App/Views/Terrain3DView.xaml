@@ -20,12 +20,28 @@
         <!-- Compact variant of Cam3DButton for the two tilt arrows, so they tuck between the
              full-size pan buttons in the centre column without bloating the pad height. -->
         <Style x:Key="Cam3DSmallButton" TargetType="Button">
-            <Setter Property="WidthRequest" Value="34" />
-            <Setter Property="HeightRequest" Value="34" />
+            <Setter Property="WidthRequest">
+                <Setter.Value>
+                    <OnIdiom x:TypeArguments="x:Double" Default="34" Phone="28" />
+                </Setter.Value>
+            </Setter>
+            <Setter Property="HeightRequest">
+                <Setter.Value>
+                    <OnIdiom x:TypeArguments="x:Double" Default="34" Phone="28" />
+                </Setter.Value>
+            </Setter>
             <Setter Property="Padding" Value="0" />
-            <Setter Property="FontSize" Value="15" />
+            <Setter Property="FontSize">
+                <Setter.Value>
+                    <OnIdiom x:TypeArguments="x:Double" Default="15" Phone="13" />
+                </Setter.Value>
+            </Setter>
             <Setter Property="FontAttributes" Value="Bold" />
-            <Setter Property="CornerRadius" Value="17" />
+            <Setter Property="CornerRadius">
+                <Setter.Value>
+                    <OnIdiom x:TypeArguments="x:Int32" Default="17" Phone="14" />
+                </Setter.Value>
+            </Setter>
             <Setter Property="BackgroundColor" Value="#C0202830" />
             <Setter Property="TextColor" Value="White" />
             <Setter Property="BorderColor" Value="#90FFFFFF" />
@@ -66,8 +82,8 @@
         <VerticalStackLayout HorizontalOptions="Start" VerticalOptions="End"
                              Margin="12" Spacing="4" InputTransparent="False">
             <Label Text="Wys." Style="{StaticResource Cam3DCaption}" />
-            <Button Text="&#x25B2;" Clicked="OnRaiseClicked" Style="{StaticResource Cam3DButton}" />
-            <Button Text="&#x25BC;" Clicked="OnLowerClicked" Style="{StaticResource Cam3DButton}" />
+            <Button Text="&#x25B2;" Pressed="OnRaiseClicked" Released="OnPadReleased" Style="{StaticResource Cam3DButton}" />
+            <Button Text="&#x25BC;" Pressed="OnLowerClicked" Released="OnPadReleased" Style="{StaticResource Cam3DButton}" />
         </VerticalStackLayout>
 
         <!-- Orbit gizmo — sphere widget anchored to the bottom-LEFT just past the altitude
@@ -91,14 +107,14 @@
             <Label Text="Przesuń / Pochyl" Style="{StaticResource Cam3DCaption}" />
             <Grid ColumnSpacing="4" RowSpacing="4"
                   ColumnDefinitions="Auto,Auto,Auto" RowDefinitions="Auto,Auto,Auto,Auto">
-                <Button Grid.Row="0" Grid.Column="0" Text="&#x21BA;" Clicked="OnRotateLeftSlowClicked" Style="{StaticResource Cam3DButton}" />
-                <Button Grid.Row="0" Grid.Column="1" Text="&#x25B2;" Clicked="OnPanUpClicked" Style="{StaticResource Cam3DButton}" />
-                <Button Grid.Row="0" Grid.Column="2" Text="&#x21BB;" Clicked="OnRotateRightSlowClicked" Style="{StaticResource Cam3DButton}" />
-                <Button Grid.Row="1" Grid.Column="0" Text="&#x25C0;" Clicked="OnPanLeftClicked" Style="{StaticResource Cam3DButton}" />
-                <Button Grid.Row="1" Grid.Column="1" Text="&#x2912;" Clicked="OnLookUpClicked" Style="{StaticResource Cam3DSmallButton}" />
-                <Button Grid.Row="1" Grid.Column="2" Text="&#x25B6;" Clicked="OnPanRightClicked" Style="{StaticResource Cam3DButton}" />
-                <Button Grid.Row="2" Grid.Column="1" Text="&#x2913;" Clicked="OnLookDownClicked" Style="{StaticResource Cam3DSmallButton}" />
-                <Button Grid.Row="3" Grid.Column="1" Text="&#x25BC;" Clicked="OnPanDownClicked" Style="{StaticResource Cam3DButton}" />
+                <Button Grid.Row="0" Grid.Column="0" Text="&#x21BA;" Pressed="OnRotateLeftSlowClicked" Released="OnPadReleased" Style="{StaticResource Cam3DButton}" />
+                <Button Grid.Row="0" Grid.Column="1" Text="&#x25B2;" Pressed="OnPanUpClicked" Released="OnPadReleased" Style="{StaticResource Cam3DButton}" />
+                <Button Grid.Row="0" Grid.Column="2" Text="&#x21BB;" Pressed="OnRotateRightSlowClicked" Released="OnPadReleased" Style="{StaticResource Cam3DButton}" />
+                <Button Grid.Row="1" Grid.Column="0" Text="&#x25C0;" Pressed="OnPanLeftClicked" Released="OnPadReleased" Style="{StaticResource Cam3DButton}" />
+                <Button Grid.Row="1" Grid.Column="1" Text="&#x2912;" Pressed="OnLookUpClicked" Released="OnPadReleased" Style="{StaticResource Cam3DSmallButton}" />
+                <Button Grid.Row="1" Grid.Column="2" Text="&#x25B6;" Pressed="OnPanRightClicked" Released="OnPadReleased" Style="{StaticResource Cam3DButton}" />
+                <Button Grid.Row="2" Grid.Column="1" Text="&#x2913;" Pressed="OnLookDownClicked" Released="OnPadReleased" Style="{StaticResource Cam3DSmallButton}" />
+                <Button Grid.Row="3" Grid.Column="1" Text="&#x25BC;" Pressed="OnPanDownClicked" Released="OnPadReleased" Style="{StaticResource Cam3DButton}" />
             </Grid>
         </VerticalStackLayout>
     </Grid>
