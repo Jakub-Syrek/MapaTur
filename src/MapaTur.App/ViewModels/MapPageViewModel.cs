@@ -553,6 +553,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <param name="climbingRepository">Climbing-area persistence repository.</param>
     /// <param name="poiOverpassClient">Overpass HTTP client (mountain POIs).</param>
     /// <param name="poiRenderer">Mountain-POI marker renderer.</param>
+    /// <param name="poiRepository">Local SQLite cache for mountain POIs (offline re-load).</param>
     /// <param name="roadOverpassClient">Overpass HTTP client (roads).</param>
     /// <param name="roadRenderer">Road polyline renderer.</param>
     /// <param name="planRouteUseCase">Route planning use case.</param>
