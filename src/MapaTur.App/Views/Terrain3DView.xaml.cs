@@ -601,11 +601,14 @@ public partial class Terrain3DView : ContentView
             return;
         }
 
-        byte glowAlpha = (byte)(nightFactor * 200f);
+        byte haloAlpha = (byte)(nightFactor * 150f);
+        byte glowAlpha = (byte)(nightFactor * 230f);
         byte coreAlpha = (byte)(nightFactor * 255f);
-        const float glowRadius = 7f;
-        const float coreRadius = 1.8f;
+        const float haloRadius = 16f; // soft outer bloom
+        const float glowRadius = 7f;  // warm body
+        const float coreRadius = 2.6f; // hot near-white centre
 
+        using var haloPaint = new SKPaint { IsAntialias = true, BlendMode = SKBlendMode.Plus };
         using var glowPaint = new SKPaint { IsAntialias = true, BlendMode = SKBlendMode.Plus };
         using var corePaint = new SKPaint { IsAntialias = true, BlendMode = SKBlendMode.Plus };
 
@@ -618,24 +621,25 @@ public partial class Terrain3DView : ContentView
 
             float x = sp.X;
             float y = sp.Y;
-            // Soft warm halo (radial gradient, transparent at the rim) + a near-white hot core,
-            // both additive so several nearby lights bloom together like a lit hamlet.
+            // Three additive layers: a wide soft bloom, a warmer body, and a hot near-white core,
+            // so several nearby lights blend into a glowing hamlet against the dark night terrain.
+            haloPaint.Shader = SKShader.CreateRadialGradient(
+                new SKPoint(x, y), haloRadius,
+                new[] { new SKColor(0xFF, 0xC8, 0x70, haloAlpha), new SKColor(0xFF, 0xA0, 0x30, 0) },
+                null, SKShaderTileMode.Clamp);
+            canvas.DrawCircle(x, y, haloRadius, haloPaint);
+
             glowPaint.Shader = SKShader.CreateRadialGradient(
-                new SKPoint(x, y),
-                glowRadius,
-                new[]
-                {
-                    new SKColor(0xFF, 0xD8, 0x80, glowAlpha),
-                    new SKColor(0xFF, 0xB0, 0x40, 0),
-                },
-                null,
-                SKShaderTileMode.Clamp);
+                new SKPoint(x, y), glowRadius,
+                new[] { new SKColor(0xFF, 0xDC, 0x88, glowAlpha), new SKColor(0xFF, 0xB0, 0x40, 0) },
+                null, SKShaderTileMode.Clamp);
             canvas.DrawCircle(x, y, glowRadius, glowPaint);
 
-            corePaint.Color = new SKColor(0xFF, 0xF2, 0xC8, coreAlpha);
+            corePaint.Color = new SKColor(0xFF, 0xF4, 0xCC, coreAlpha);
             canvas.DrawCircle(x, y, coreRadius, corePaint);
         }
 
+        haloPaint.Shader = null;
         glowPaint.Shader = null;
     }
 
