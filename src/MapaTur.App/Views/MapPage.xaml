@@ -201,7 +201,7 @@
                 <Slider Minimum="0" Maximum="24" WidthRequest="120" VerticalOptions="Center"
                         Value="{Binding TimeOfDayHours, Mode=TwoWay}"
                         SemanticProperties.Hint="Pora dnia" />
-                <Label Text="{Binding TimeOfDayHours, StringFormat='{0:F1}h'}" TextColor="White" FontSize="11" WidthRequest="36" VerticalOptions="Center" />
+                <Label Text="{Binding TimeOfDayHours, Converter={StaticResource HoursToClock}}" TextColor="White" FontSize="11" WidthRequest="36" VerticalOptions="Center" />
             </HorizontalStackLayout>
             <HorizontalStackLayout Spacing="6" VerticalOptions="Center">
                 <Label Text="Chmury:" TextColor="White" FontSize="11" WidthRequest="44" VerticalOptions="Center" />
