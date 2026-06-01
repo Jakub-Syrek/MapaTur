@@ -174,6 +174,8 @@ public static class MauiProgram
 
         services.AddSingleton<IClimbingRepository>(_ =>
             new SqliteClimbingRepository(Path.Combine(FileSystem.AppDataDirectory, "mapatur-climbing.db")));
+        services.AddSingleton<IPoiRepository>(_ =>
+            new SqlitePoiRepository(Path.Combine(FileSystem.AppDataDirectory, "mapatur-pois.db")));
         services.AddHttpClient<IClimbingOverpassClient, OverpassClimbingHttpClient>(client =>
         {
             client.Timeout = TimeSpan.FromSeconds(90);

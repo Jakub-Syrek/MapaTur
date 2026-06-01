@@ -22,14 +22,16 @@ Status legend: `[ ]` planned · `[~]` in progress · `[x]` done
       samples the same field, so moving clouds throw moving dappled shadows.
 - [x] **Night refuge lights** — warm additive glows switch on in huts / shelters
       / chalets after sunset, fading in through dusk.
-- [ ] **#48 POI cache auto-load** — POIs persist to SQLite on download but aren't
-      reloaded on startup (unlike maps / DEM / trails), so refuges + their night
-      lights vanish on every relaunch until re-downloaded. Add a viewport / bounds
-      query against the local POI repo at auto-load time so once-downloaded POIs
-      stay put offline.
-- [ ] **#49 Cloud / weather controls** — expose cloud coverage (and maybe a
-      manual wind / "lock weather" toggle) in the UI; currently coverage is a
-      fixed base modulated by the auto weather.
+- [x] **#48 POI cache auto-load** — new `IPoiRepository` / `SqlitePoiRepository`
+      (mirrors the climbing repo). Downloads are cached to SQLite; at auto-load
+      the DEM-footprint POIs are re-hydrated, so refuges + their night lights
+      survive a restart without another Overpass round-trip.
+- [x] **#49 Cloud coverage control** — "Chmury" slider [0,1] drives the base
+      coverage (renderer still drifts it with weather); 0% is a dead-clear sky.
+      Persisted; moved with the other 3D sliders into a non-scrolling overlay.
+- [x] **#22 Camera state persistence** — camera (target / distance / azimuth /
+      pitch) is saved per DEM (keyed by bounds) and restored on reload; falls
+      back to auto-framing for a different region.
 
 ## M11 — Mobile-class production rendering
 

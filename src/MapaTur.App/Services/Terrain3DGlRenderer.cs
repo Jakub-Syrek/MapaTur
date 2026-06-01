@@ -152,6 +152,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform vec3 uSkyHorizon;\n" +
         "uniform float uTime;\n" +          // seconds since renderer start; drives cloud drift
         "uniform float uCloudCoverage;\n" + // 0 = clear, 1 = overcast
+        "uniform vec2 uCloudDrift;\n" +     // wind drift velocity (scaled by the wind setting)
+        "uniform float uCloudDark;\n" +     // storm darkening, 1 = bright, <1 = darker
         "out vec4 fragColor;\n" +
         // 2D value-noise + fractal Brownian motion. Hash-based, no texture lookups — costs ~5
         // sin() + ~40 lerps per cloud pixel. Adreno 830 chews through this without breaking a
@@ -193,7 +195,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  float cloudDensity = 0.0;\n" +
         "  if (h > 0.015) {\n" +
         "    vec2 cloudUv = viewDir.xy / h;\n" +
-        "    cloudUv = vec2(cloudUv.x * 0.5, cloudUv.y * 1.6) + uTime * vec2(0.012, 0.005);\n" +
+        "    cloudUv = vec2(cloudUv.x * 0.5, cloudUv.y * 1.6) + (uCloudDrift * uTime);\n" +
         "    float clouds = noise2(cloudUv) * 0.6 + noise2(cloudUv * 2.3) * 0.4;\n" +
         "    float threshold = 0.60 - (uCloudCoverage * 0.32);\n" +
         "    cloudDensity = smoothstep(threshold, threshold + 0.16, clouds) * 0.8;\n" +
@@ -210,6 +212,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  float nightFactor = clamp(-uSunDir.z * 3.0, 0.0, 1.0);\n" +
         "  vec3 cloudColor = mix(cloudHot, cloudBright, sunHeight);\n" +
         "  cloudColor = mix(cloudColor, cloudNight, nightFactor);\n" +
+        "  cloudColor *= uCloudDark;\n" +
         "  sky = mix(sky, cloudColor, cloudDensity);\n" +
         // Sun disc + halo. smoothstep gives a soft-edged disc the right pixel size; pow gives
         // the Mie-style fall-off (the "glow") that bleeds well past the disc.
@@ -393,6 +396,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int skyHorizonLocation = -1;
     private int skyTimeLocation = -1;
     private int skyCloudCoverageLocation = -1;
+    private int skyCloudDriftLocation = -1;
+    private int skyCloudDarkLocation = -1;
     private uint skyVao;
     private uint skyVbo;
 
@@ -587,6 +592,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             skyHorizonLocation = -1;
             skyTimeLocation = -1;
             skyCloudCoverageLocation = -1;
+            skyCloudDriftLocation = -1;
+            skyCloudDarkLocation = -1;
             skyVao = 0;
             skyVbo = 0;
             cloudProgram = 0;
@@ -693,15 +700,22 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             (MathF.Sin(weatherT * 0.013f) * 0.5f)
             + (MathF.Sin((weatherT * 0.031f) + 1.7f) * 0.3f)
             + (MathF.Sin((weatherT * 0.057f) + 4.2f) * 0.2f); // ~[-1,1]
-        float effectiveCoverage = Math.Clamp(baseCoverage + (0.35f * weatherNoise), 0f, 1f);
-        // Wind in noise-units/sec: slowly rotating heading + gently pulsing speed.
+        // Multiplicative weather variation around the user's base coverage, so a base of 0 stays a
+        // dead-clear sky (an additive bump used to leave ~0.35 coverage even at the 0% slider).
+        float effectiveCoverage = Math.Clamp(baseCoverage * (1f + (0.6f * weatherNoise)), 0f, 1f);
+        // Wind in noise-units/sec: slowly rotating heading + gently pulsing speed, scaled by the
+        // user's wind setting (calm → barely drifting, gale → racing). The same setting darkens the
+        // clouds toward storm-grey: stormDarken multiplies every cloud colour below.
+        float wind = atmosphere?.Wind ?? 0.3f;
+        float windScale = 0.35f + (3.0f * wind); // ~0.35× at calm, ~3.35× at full gale
         float windAngle = (MathF.Sin(weatherT * 0.008f) * 0.9f) + (MathF.Sin((weatherT * 0.017f) + 2f) * 0.5f);
-        float windSpeed = 0.012f + (0.010f * MathF.Sin(weatherT * 0.005f));
+        float windSpeed = (0.012f + (0.010f * MathF.Sin(weatherT * 0.005f))) * windScale;
         var windVec = new Vector2(MathF.Cos(windAngle) * windSpeed, MathF.Sin(windAngle) * windSpeed);
+        // Storm darkening: high wind dims the clouds toward grey (down to ~40% brightness at gale).
+        float stormDarken = 1f - (0.60f * wind);
 
         // Cloud-layer geometry, computed once and shared by BOTH the sea-of-clouds draw and the
         // terrain's cloud-shadow lookup so the shadows on the ground register with the clouds above.
-        // Altitude = halfway between the mesh centre and its highest world-Z, so peaks poke through.
         float cloudMaxZ = float.NegativeInfinity;
         for (int i = 0; i < tiles.Count; i++)
         {
@@ -711,9 +725,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             }
         }
         TerrainMesh3D geomFrame = tiles[0];
+
+        // Cloud altitude (as a fraction of the mesh's relief height) is no longer fixed: it drifts
+        // a little at random AND tracks the sun. Low sun (dawn / dusk / night) pulls the layer DOWN
+        // into the valleys — the classic temperature-inversion "sea of clouds" hugging the floor;
+        // a high midday sun lifts it so only the highest peaks poke through. A slow weather sine adds
+        // a gentle random wander so it never sits at exactly the same height twice.
+        float sunHeight = atmosphere?.SunDirection.Z ?? 0.3f; // sin(elevation), ~-0.8..0.9
+        float altNoise = (MathF.Sin((weatherT * 0.011f) + 2.0f) * 0.6f) + (MathF.Sin((weatherT * 0.023f) + 0.5f) * 0.4f); // ~[-1,1]
+        float altFraction = Math.Clamp(0.50f + (0.20f * sunHeight) + (0.10f * altNoise), 0.28f, 0.78f);
         float cloudAltitude = float.IsNegativeInfinity(cloudMaxZ)
             ? 0f
-            : geomFrame.Center.Z + ((cloudMaxZ - geomFrame.Center.Z) * 0.5f);
+            : geomFrame.Center.Z + ((cloudMaxZ - geomFrame.Center.Z) * altFraction);
         float cloudHalfExtent = MathF.Max(geomFrame.HorizontalExtent * 4f, 20_000f);
         float cloudNoiseScale = 1f / MathF.Max(geomFrame.HorizontalExtent * 0.5f, 4_000f);
         bool cloudsActive = atmosphere is not null && effectiveCoverage > 0.001f && !float.IsNegativeInfinity(cloudMaxZ);
@@ -749,6 +772,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.Uniform3(skyHorizonLocation, hor.X, hor.Y, hor.Z);
             gl.Uniform1(skyTimeLocation, weatherT);
             gl.Uniform1(skyCloudCoverageLocation, effectiveCoverage);
+            gl.Uniform2(skyCloudDriftLocation, windVec.X, windVec.Y);
+            gl.Uniform1(skyCloudDarkLocation, stormDarken);
             gl.BindVertexArray(skyVao);
             gl.DrawArrays(PrimitiveType.Triangles, 0, 3);
             gl.BindVertexArray(0);
@@ -877,7 +902,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             float dayness = Math.Clamp(atmosphere!.SunDirection.Z + 0.1f, 0f, 1f);
             Vector3 white = new(0.97f, 0.97f, 0.99f);
             Vector3 tint = Vector3.Lerp(atmosphere.SkyHorizonColor, white, dayness);
-            Vector3 cloudCol = tint * (0.35f + (0.65f * dayness));
+            Vector3 cloudCol = tint * (0.35f + (0.65f * dayness)) * stormDarken;
 
             gl.Enable(EnableCap.Blend);
             gl.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
@@ -1189,6 +1214,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         skyHorizonLocation = g.GetUniformLocation(skyProgram, "uSkyHorizon");
         skyTimeLocation = g.GetUniformLocation(skyProgram, "uTime");
         skyCloudCoverageLocation = g.GetUniformLocation(skyProgram, "uCloudCoverage");
+        skyCloudDriftLocation = g.GetUniformLocation(skyProgram, "uCloudDrift");
+        skyCloudDarkLocation = g.GetUniformLocation(skyProgram, "uCloudDark");
 
         // Fullscreen triangle: 3 vertices, each xy in clip space, covering NDC [-1,1]^2 with one extra
         // vertex outside the rect so the rasteriser fills the full screen without re-clipping a quad.

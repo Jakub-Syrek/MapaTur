@@ -18,17 +18,17 @@
             <Style x:Key="ToolbarButton" TargetType="Button">
                 <Setter Property="FontSize">
                     <Setter.Value>
-                        <OnIdiom x:TypeArguments="x:Double" Default="14" Phone="11" />
+                        <OnIdiom x:TypeArguments="x:Double" Default="13" Phone="10" />
                     </Setter.Value>
                 </Setter>
                 <Setter Property="Padding">
                     <Setter.Value>
-                        <OnIdiom x:TypeArguments="Thickness" Default="14,7" Phone="8,4" />
+                        <OnIdiom x:TypeArguments="Thickness" Default="12,6" Phone="6,3" />
                     </Setter.Value>
                 </Setter>
                 <Setter Property="HeightRequest">
                     <Setter.Value>
-                        <OnIdiom x:TypeArguments="x:Double" Default="-1" Phone="34" />
+                        <OnIdiom x:TypeArguments="x:Double" Default="-1" Phone="30" />
                     </Setter.Value>
                 </Setter>
             </Style>
@@ -63,21 +63,6 @@
         <ScrollView Grid.Row="0" Orientation="Horizontal" HorizontalScrollBarVisibility="Never"
                     BackgroundColor="{AppThemeBinding Light=#F4F4F5, Dark=#1F1F23}">
         <HorizontalStackLayout Padding="12" Spacing="8">
-            <Button Style="{StaticResource ToolbarButton}"
-                    Text="{x:Static loc:AppStrings.OpenMBTiles}"
-                    Command="{Binding OpenMBTilesCommand}"
-                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
-                    SemanticProperties.Hint="{x:Static loc:AppStrings.OpenMBTiles}" />
-            <Button Style="{StaticResource ToolbarButton}"
-                    Text="{x:Static loc:AppStrings.OpenHillshade}"
-                    Command="{Binding OpenHillshadeCommand}"
-                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
-                    SemanticProperties.Hint="{x:Static loc:AppStrings.OpenHillshade}" />
-            <Button Style="{StaticResource ToolbarButton}"
-                    Text="{x:Static loc:AppStrings.OpenTcx}"
-                    Command="{Binding OpenTcxCommand}"
-                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
-                    SemanticProperties.Hint="{x:Static loc:AppStrings.OpenTcx}" />
             <Button Style="{StaticResource ToolbarButton}"
                     Text="{x:Static loc:AppStrings.DownloadTrails}"
                     Command="{Binding DownloadTrailsForViewportCommand}"
@@ -119,35 +104,6 @@
                     Text="{Binding IsLocationTracking, Converter={StaticResource LocationTrackingLabel}}"
                     Command="{Binding ToggleLocationTrackingCommand}"
                     SemanticProperties.Hint="{x:Static loc:AppStrings.ToggleLocationTrackingOn}" />
-            <!-- Vertical-exaggeration slider for 3D mode. Range 1..5 with snap at 0.5. -->
-            <HorizontalStackLayout Spacing="6" VerticalOptions="Center" IsVisible="{Binding Is3DMode}">
-                <Label Text="{x:Static loc:AppStrings.LabelVerticalExaggeration}"
-                       VerticalOptions="Center" />
-                <Slider Minimum="1"
-                        Maximum="5"
-                        Value="{Binding VerticalExaggeration, Mode=TwoWay}"
-                        WidthRequest="140"
-                        VerticalOptions="Center"
-                        SemanticProperties.Hint="{x:Static loc:AppStrings.LabelVerticalExaggeration}" />
-                <Label Text="{Binding VerticalExaggeration, StringFormat='{0:F1}×'}"
-                       VerticalOptions="Center"
-                       WidthRequest="42" />
-            </HorizontalStackLayout>
-            <!-- Time-of-day slider drives the Atmosphere (sky + sun position + aerial perspective).
-                 Range 0..24 hours; users sweep from midnight through sunrise / noon / sunset back to
-                 midnight with one continuous gesture. Default is afternoon (14.0). -->
-            <HorizontalStackLayout Spacing="6" VerticalOptions="Center" IsVisible="{Binding Is3DMode}">
-                <Label Text="Czas:" VerticalOptions="Center" />
-                <Slider Minimum="0"
-                        Maximum="24"
-                        Value="{Binding TimeOfDayHours, Mode=TwoWay}"
-                        WidthRequest="180"
-                        VerticalOptions="Center"
-                        SemanticProperties.Hint="Pora dnia" />
-                <Label Text="{Binding TimeOfDayHours, StringFormat='{0:F1}h'}"
-                       VerticalOptions="Center"
-                       WidthRequest="48" />
-            </HorizontalStackLayout>
             <ActivityIndicator IsRunning="{Binding IsBusy}"
                                IsVisible="{Binding IsBusy}"
                                VerticalOptions="Center" />
@@ -221,7 +177,47 @@
                              OrthoTextureCells="{Binding OrthoTextureCells}"
                              UserLocation="{Binding UserLocation}"
                              Atmosphere="{Binding Atmosphere}"
+                             CameraState="{Binding CameraState, Mode=TwoWay}"
                              IsVisible="{Binding Is3DMode}" />
+
+        <!-- 3D control sliders, overlaid on the top-left of the terrain view. Moved out of the
+             horizontal toolbar ScrollView: a horizontal slider inside a horizontal scroller fought
+             the scroll gesture, making them awkward to drag. Here there's no scroll to compete with.
+             Compact: short tracks, small fonts, semi-transparent backdrop for legibility. -->
+        <VerticalStackLayout Grid.Row="2"
+                             HorizontalOptions="Start" VerticalOptions="Start"
+                             Margin="8" Padding="8,6" Spacing="2"
+                             BackgroundColor="#A0101418"
+                             IsVisible="{Binding Is3DMode}">
+            <HorizontalStackLayout Spacing="6" VerticalOptions="Center">
+                <Label Text="Pion:" TextColor="White" FontSize="11" WidthRequest="44" VerticalOptions="Center" />
+                <Slider Minimum="1" Maximum="5" WidthRequest="120" VerticalOptions="Center"
+                        Value="{Binding VerticalExaggeration, Mode=TwoWay}"
+                        SemanticProperties.Hint="{x:Static loc:AppStrings.LabelVerticalExaggeration}" />
+                <Label Text="{Binding VerticalExaggeration, StringFormat='{0:F1}×'}" TextColor="White" FontSize="11" WidthRequest="36" VerticalOptions="Center" />
+            </HorizontalStackLayout>
+            <HorizontalStackLayout Spacing="6" VerticalOptions="Center">
+                <Label Text="Czas:" TextColor="White" FontSize="11" WidthRequest="44" VerticalOptions="Center" />
+                <Slider Minimum="0" Maximum="24" WidthRequest="120" VerticalOptions="Center"
+                        Value="{Binding TimeOfDayHours, Mode=TwoWay}"
+                        SemanticProperties.Hint="Pora dnia" />
+                <Label Text="{Binding TimeOfDayHours, StringFormat='{0:F1}h'}" TextColor="White" FontSize="11" WidthRequest="36" VerticalOptions="Center" />
+            </HorizontalStackLayout>
+            <HorizontalStackLayout Spacing="6" VerticalOptions="Center">
+                <Label Text="Chmury:" TextColor="White" FontSize="11" WidthRequest="44" VerticalOptions="Center" />
+                <Slider Minimum="0" Maximum="1" WidthRequest="120" VerticalOptions="Center"
+                        Value="{Binding Cloudiness, Mode=TwoWay}"
+                        SemanticProperties.Hint="Zachmurzenie" />
+                <Label Text="{Binding Cloudiness, StringFormat='{0:P0}'}" TextColor="White" FontSize="11" WidthRequest="36" VerticalOptions="Center" />
+            </HorizontalStackLayout>
+            <HorizontalStackLayout Spacing="6" VerticalOptions="Center">
+                <Label Text="Wiatr:" TextColor="White" FontSize="11" WidthRequest="44" VerticalOptions="Center" />
+                <Slider Minimum="0" Maximum="1" WidthRequest="120" VerticalOptions="Center"
+                        Value="{Binding Wind, Mode=TwoWay}"
+                        SemanticProperties.Hint="Siła wiatru" />
+                <Label Text="{Binding Wind, StringFormat='{0:P0}'}" TextColor="White" FontSize="11" WidthRequest="36" VerticalOptions="Center" />
+            </HorizontalStackLayout>
+        </VerticalStackLayout>
 
         <Label Grid.Row="3"
                Padding="12,8"
