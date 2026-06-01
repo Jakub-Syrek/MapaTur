@@ -711,68 +711,79 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         };
         peakPath ??= new SKPath();
 
-        // De-clutter: peaks arrive highest-first, so skip any whose marker would land within
-        // MinPeakSeparationPx of an already-drawn one (their labels would otherwise overlap into mush,
-        // e.g. the tightly-packed Orla Perć summits). The most prominent summit in a cluster wins.
+        // De-clutter: skip any peak whose marker lands within MinPeakSeparationPx of an
+        // already-drawn one (labels would overlap into mush, e.g. the tightly-packed Orla Perć
+        // summits). NAMED summits are drawn in a FIRST pass so they win every cluster — otherwise a
+        // slightly higher but unnamed detected maximum next door would suppress "Kozi Wierch" and
+        // the flight would show only bare elevations. A second pass fills the gaps with unnamed maxima.
         drawnPeakAnchors.Clear();
 
         foreach (var peak in peaks)
         {
-            var screen = peak.ScreenPosition;
-            if (screen is null)
-            {
-                continue;
-            }
-            if (depthMap is not null && depthMap.IsBehind(screen, OcclusionEpsilon))
-            {
-                continue;
-            }
-
-            float x = screen.Value.X;
-            float y = screen.Value.Y;
-
-            bool collides = false;
-            foreach (SKPoint anchor in drawnPeakAnchors)
-            {
-                float dx = anchor.X - x;
-                float dy = anchor.Y - y;
-                if ((dx * dx) + (dy * dy) < MinPeakSeparationPx * MinPeakSeparationPx)
-                {
-                    collides = true;
-                    break;
-                }
-            }
-            if (collides)
-            {
-                continue;
-            }
-            drawnPeakAnchors.Add(new SKPoint(x, y));
-
-            // Mountain glyph: base sits on the projected summit point, apex points up.
-            peakPath.Reset();
-            peakPath.MoveTo(x - PeakMarkerHalfWidthPx, y);
-            peakPath.LineTo(x, y - PeakMarkerHeightPx);
-            peakPath.LineTo(x + PeakMarkerHalfWidthPx, y);
-            peakPath.Close();
-            canvas.DrawPath(peakPath, peakFillPaint);
-            canvas.DrawPath(peakPath, peakOutlinePaint);
-
-            // Elevation label above the apex; halo first, then fill, for contrast. Prefer the
-            // authoritative (gazetteer) height when present — the DEM-sampled seat elevation
-            // under-reports sharp summits.
-            double labelElevation = peak.Source.LabelElevationMeters ?? peak.Source.ElevationMeters;
-            string label = $"{Math.Round(labelElevation)} m";
-            float labelY = y - PeakMarkerHeightPx - 4f;
-            canvas.DrawText(label, x, labelY, SKTextAlign.Center, peakFont, peakLabelHaloPaint);
-            canvas.DrawText(label, x, labelY, SKTextAlign.Center, peakFont, peakLabelFillPaint);
-
-            // Named summits get their name on the line above the elevation.
             if (!string.IsNullOrEmpty(peak.Source.Name))
             {
-                float nameY = labelY - PeakLabelSizePx - 3f;
-                canvas.DrawText(peak.Source.Name, x, nameY, SKTextAlign.Center, peakNameFont, peakLabelHaloPaint);
-                canvas.DrawText(peak.Source.Name, x, nameY, SKTextAlign.Center, peakNameFont, peakLabelFillPaint);
+                TryDrawPeak(canvas, peak, depthMap);
             }
+        }
+        foreach (var peak in peaks)
+        {
+            if (string.IsNullOrEmpty(peak.Source.Name))
+            {
+                TryDrawPeak(canvas, peak, depthMap);
+            }
+        }
+    }
+
+    private void TryDrawPeak(SKCanvas canvas, ProjectedPeak peak, ScreenDepthMap? depthMap)
+    {
+        var screen = peak.ScreenPosition;
+        if (screen is null)
+        {
+            return;
+        }
+        if (depthMap is not null && depthMap.IsBehind(screen, OcclusionEpsilon))
+        {
+            return;
+        }
+
+        float x = screen.Value.X;
+        float y = screen.Value.Y;
+
+        foreach (SKPoint anchor in drawnPeakAnchors)
+        {
+            float dx = anchor.X - x;
+            float dy = anchor.Y - y;
+            if ((dx * dx) + (dy * dy) < MinPeakSeparationPx * MinPeakSeparationPx)
+            {
+                return;
+            }
+        }
+        drawnPeakAnchors.Add(new SKPoint(x, y));
+
+        // Mountain glyph: base sits on the projected summit point, apex points up.
+        peakPath!.Reset();
+        peakPath.MoveTo(x - PeakMarkerHalfWidthPx, y);
+        peakPath.LineTo(x, y - PeakMarkerHeightPx);
+        peakPath.LineTo(x + PeakMarkerHalfWidthPx, y);
+        peakPath.Close();
+        canvas.DrawPath(peakPath, peakFillPaint!);
+        canvas.DrawPath(peakPath, peakOutlinePaint!);
+
+        // Elevation label above the apex; halo first, then fill, for contrast. Prefer the
+        // authoritative (gazetteer) height when present — the DEM-sampled seat elevation
+        // under-reports sharp summits.
+        double labelElevation = peak.Source.LabelElevationMeters ?? peak.Source.ElevationMeters;
+        string label = $"{Math.Round(labelElevation)} m";
+        float labelY = y - PeakMarkerHeightPx - 4f;
+        canvas.DrawText(label, x, labelY, SKTextAlign.Center, peakFont!, peakLabelHaloPaint!);
+        canvas.DrawText(label, x, labelY, SKTextAlign.Center, peakFont!, peakLabelFillPaint!);
+
+        // Named summits get their name on the line above the elevation.
+        if (!string.IsNullOrEmpty(peak.Source.Name))
+        {
+            float nameY = labelY - PeakLabelSizePx - 3f;
+            canvas.DrawText(peak.Source.Name, x, nameY, SKTextAlign.Center, peakNameFont!, peakLabelHaloPaint!);
+            canvas.DrawText(peak.Source.Name, x, nameY, SKTextAlign.Center, peakNameFont!, peakLabelFillPaint!);
         }
     }
 

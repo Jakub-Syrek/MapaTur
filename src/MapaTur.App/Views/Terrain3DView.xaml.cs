@@ -236,6 +236,24 @@ public partial class Terrain3DView : ContentView
         set => SetValue(CameraStateProperty, value);
     }
 
+    /// <summary>
+    /// True while a scripted fly-through is running. Two-way bound so the host page can hide the
+    /// toolbar / slider chrome for a clean cinematic shot; the view also hides its own on-screen
+    /// pads + the fly button while it's set.
+    /// </summary>
+    public static readonly BindableProperty IsFlyingProperty = BindableProperty.Create(
+        nameof(IsFlying),
+        typeof(bool),
+        typeof(Terrain3DView),
+        defaultValue: false,
+        defaultBindingMode: BindingMode.OneWayToSource);
+
+    public bool IsFlying
+    {
+        get => (bool)GetValue(IsFlyingProperty);
+        private set => SetValue(IsFlyingProperty, value);
+    }
+
     /// <summary>Camera state mutated by gestures and used by the renderer.</summary>
     public Camera3D Camera { get; } = new Camera3D();
 
@@ -431,8 +449,11 @@ public partial class Terrain3DView : ContentView
     private Action? heldAction;
     private IDispatcherTimer? holdTimer;
 
+    private void OnFlyOrlaPercClicked(object? sender, EventArgs e) => StartOrlaPercFlight();
+
     private void StartHold(Action mutate)
     {
+        StopFlight(); // any manual camera control cancels an in-progress fly-through
         mutate();
         Canvas.InvalidateSurface();
         heldAction = mutate;
@@ -526,6 +547,199 @@ public partial class Terrain3DView : ContentView
         Canvas.InvalidateSurface();
     }
 
+    // ── Cinematic fly-through: Orla Perć ────────────────────────────────────────────────────────
+    // A scripted camera flight along the Orla Perć ridge (Zawrat → Krzyżne, W→E), weaving from side
+    // to side ("slalom") over the peaks. Geo waypoints are sampled against the live DEM so the path
+    // hugs the real terrain at whatever vertical exaggeration is set; a Catmull-Rom spline smooths
+    // the ridge line and an ease-in/out keeps the start/stop gentle. Drives the camera directly
+    // (free-fly via Target + derived orbit angles), bypassing the orbit controller + its clamps.
+    private static readonly (double Lat, double Lon)[] OrlaPercWaypoints =
+    {
+        (49.2193, 20.0179), // Zawrat (pass — flight start)
+        (49.2205, 20.0233), // Mały Kozi Wierch
+        (49.2222, 20.0294), // Kozi Wierch (2291 m)
+        (49.2235, 20.0337), // Kozie Czuby
+        (49.2249, 20.0389), // Zadni Granat
+        (49.2258, 20.0436), // Skrajny Granat
+        (49.2270, 20.0506), // Buczynowe Turnie
+        (49.2283, 20.0586), // Krzyżne (flight end)
+    };
+
+    private const double FlightDurationSeconds = 24.0; // shorter = the ridge slides by faster (more sense of flight)
+    private const float FlightSlalomAmplitude = 950f;  // world-metres of side-to-side weave (large so it reads at the stand-off distance)
+    private const float FlightSlalomWeaves = 3.0f;     // number of left-right swings along the ridge
+    private const float FlightCameraHeight = 2600f;    // world-Z above the ridge — far enough above the (2.6×-exaggerated) spiky crest to never dive into a face
+    private const float FlightCameraBack = 2600f;      // big stand-off so the whole ridge frames up sharply instead of one magnified, pixelated face
+    private const double FlightCancelDragPx = 30.0;    // cumulative drag (px) before a touch cancels the fly-through
+
+    private const float FlightSunDrop = 5.5f; // hours the time-of-day advances over the flight (12.5h → 18h: midday into golden hour)
+
+    private IDispatcherTimer? flightTimer;
+    private Vector3[]? flightPath;
+    private double flightElapsedSeconds;
+    private bool flightActive;
+    // Atmosphere snapshot at flight start + the live, time-swept atmosphere used while flying so the
+    // sun visibly lowers into golden hour over the course of the flight.
+    private float flightStartTime;
+    private float flightBaseCloud;
+    private float flightBaseWind;
+    private Atmosphere? flightAtmosphere;
+
+    // The atmosphere the renderer should use: the time-swept flight atmosphere while flying, else the
+    // bound (slider-driven) one.
+    private Atmosphere? EffectiveAtmosphere => flightActive && flightAtmosphere is not null ? flightAtmosphere : Atmosphere;
+
+    /// <summary>Starts the scripted Orla Perć fly-through. No-op until a DEM + raster are loaded.</summary>
+    public void StartOrlaPercFlight()
+    {
+        if (WorldFrame is not { } frame || Raster is null)
+        {
+            return;
+        }
+
+        var pts = new Vector3[OrlaPercWaypoints.Length];
+        for (int i = 0; i < OrlaPercWaypoints.Length; i++)
+        {
+            (double lat, double lon) = OrlaPercWaypoints[i];
+            double elev = Raster.SampleBilinear(lon, lat);
+            if (double.IsNaN(elev) || elev < 200 || elev > 4000)
+            {
+                elev = 2000; // fall back if the waypoint lands on a no-data cell
+            }
+            pts[i] = frame.GeoToWorld(new GeoPoint(lat, lon), (float)elev);
+        }
+
+        flightPath = pts;
+        flightElapsedSeconds = 0;
+        flightActive = true;
+        IsFlying = true;
+        // Cinematic time arc independent of the slider: the flight always sweeps from midday into
+        // golden hour (12.5h → 18h) so the sun visibly lowers and the light warms over the flight,
+        // never tipping into night. Cloud + wind come from the user's settings.
+        Atmosphere? a = Atmosphere;
+        flightStartTime = 12.5f;
+        flightBaseCloud = a?.CloudCoverage ?? 0.35f;
+        flightBaseWind = a?.Wind ?? 0.3f;
+        flightAtmosphere = new Atmosphere(flightStartTime, flightBaseCloud, flightBaseWind);
+        SetChromeVisible(false); // clear the screen for a clean cinematic shot
+
+        if (flightTimer is null)
+        {
+            flightTimer = Dispatcher.CreateTimer();
+            flightTimer.Interval = TimeSpan.FromMilliseconds(33); // ~30 fps
+            flightTimer.Tick += OnFlightTick;
+        }
+        flightTimer.Start();
+    }
+
+    private void StopFlight()
+    {
+        bool wasFlying = flightActive || IsFlying;
+        flightActive = false;
+        flightTimer?.Stop();
+        if (wasFlying)
+        {
+            IsFlying = false;
+            SetChromeVisible(true);
+        }
+    }
+
+    // Show/hide the view's own on-screen chrome (altitude pad, pan/tilt pad, fly button) so a
+    // fly-through fills the screen. The host page hides its toolbar + sliders off the IsFlying bind.
+    private void SetChromeVisible(bool visible)
+    {
+        AltitudePad.IsVisible = visible;
+        PanTiltPad.IsVisible = visible;
+        FlightButton.IsVisible = visible;
+    }
+
+    private void OnFlightTick(object? sender, EventArgs e)
+    {
+        if (!flightActive || flightPath is null || flightPath.Length < 2)
+        {
+            StopFlight();
+            return;
+        }
+
+        flightElapsedSeconds += 0.033;
+        double raw = flightElapsedSeconds / FlightDurationSeconds;
+        bool finished = raw >= 1.0;
+        if (finished)
+        {
+            raw = 1.0;
+        }
+
+        // LINEAR progress (constant ground speed). A smoothstep ease-out made the camera crawl to a
+        // near-halt over the last third — which read as "the flight stopped in the middle". Constant
+        // speed keeps it obviously moving the whole way.
+        float p = (float)raw;
+        // Sweep the time-of-day forward so the sun lowers into golden hour as the flight progresses.
+        flightAtmosphere = new Atmosphere(flightStartTime + (FlightSunDrop * p), flightBaseCloud, flightBaseWind);
+        Vector3 here = SampleFlightPath(p);
+        Vector3 ahead = SampleFlightPath(MathF.Min(1f, p + 0.025f));
+
+        Vector3 tangent = ahead - here;
+        tangent.Z = 0f;
+        tangent = tangent.LengthSquared() > 1e-4f ? Vector3.Normalize(tangent) : new Vector3(1f, 0f, 0f);
+        var perp = new Vector3(-tangent.Y, tangent.X, 0f); // horizontal, perpendicular to the ridge
+
+        float slalom = MathF.Sin((float)(raw * Math.PI * 2.0 * FlightSlalomWeaves)) * FlightSlalomAmplitude;
+        // Trail behind the ridge point (−tangent) and ride higher so the camera frames a wider sweep
+        // of the ridge ahead — keeps named peaks in view instead of filling the screen with one face.
+        Vector3 cameraPos = here - (tangent * FlightCameraBack) + (perp * slalom) + new Vector3(0f, 0f, FlightCameraHeight);
+
+        // Look a little further along the ridge so the camera always faces the direction of travel.
+        Vector3 lookAt = SampleFlightPath(MathF.Min(1f, p + 0.06f));
+        ApplyFreeCamera(cameraPos, lookAt);
+        Canvas.InvalidateSurface();
+
+        // On reaching the end: cleanly stop AND restore the UI (the old code only flipped
+        // flightActive + stopped the timer, leaving IsFlying=true so the chrome stayed hidden and
+        // the camera sat frozen — which looked exactly like "the flight died").
+        if (finished)
+        {
+            StopFlight();
+        }
+    }
+
+    // Places the camera at an exact world position looking at a world point, by converting the
+    // pos→target offset into the orbit model (Target + Distance + Azimuth + Pitch) so Camera3D
+    // reconstructs the same position. Used by the fly-through for free-camera control.
+    private void ApplyFreeCamera(Vector3 position, Vector3 lookAt)
+    {
+        Vector3 offset = position - lookAt;
+        float dist = offset.Length();
+        if (dist < 1f)
+        {
+            dist = 1f;
+        }
+        Camera.Target = lookAt;
+        Camera.Distance = dist;
+        Camera.AzimuthRadians = MathF.Atan2(offset.Y, offset.X);
+        Camera.PitchRadians = MathF.Asin(Math.Clamp(offset.Z / dist, -1f, 1f));
+    }
+
+    private Vector3 SampleFlightPath(float s)
+    {
+        Vector3[] pts = flightPath!;
+        int n = pts.Length;
+        float u = s * (n - 1);
+        int i = Math.Clamp((int)MathF.Floor(u), 0, n - 2);
+        float f = u - i;
+        Vector3 p0 = pts[Math.Max(0, i - 1)];
+        Vector3 p1 = pts[i];
+        Vector3 p2 = pts[i + 1];
+        Vector3 p3 = pts[Math.Min(n - 1, i + 2)];
+        // Catmull-Rom spline through p1..p2.
+        float t2 = f * f;
+        float t3 = t2 * f;
+        return 0.5f * (
+            (2f * p1)
+            + ((-p0 + p2) * f)
+            + (((2f * p0) - (5f * p1) + (4f * p2) - p3) * t2)
+            + ((-p0 + (3f * p1) - (3f * p2) + p3) * t3));
+    }
+
     /// <summary>
     /// Sets up the camera for the loaded mesh: restores the saved camera if one exists for THIS DEM,
     /// otherwise frames the whole terrain. Safety bounds are applied either way.
@@ -611,6 +825,12 @@ public partial class Terrain3DView : ContentView
         // padded past the mesh half-extent covers the diagonal corners + vertical relief. Used by both
         // the GPU and Skia paths, and by overlay projection, so they stay consistent.
         var (near, far) = CameraClipPlanes.Fit(Camera.Distance, frame.HorizontalExtent * 1.25f);
+        // Keep the far/near ratio sane for 24-bit depth precision. During a fly-through the camera
+        // sits close to its look point (small Distance) while the scene radius stays huge, which
+        // collapsed `near` to 1 and far to ~48 km → ratio ~48000, destroying depth precision so the
+        // translucent sea-of-clouds z-fought the peak silhouettes (the "clouds jittering against the
+        // summits"). Capping the ratio at ~3000 pushes near up and stops the fight.
+        near = MathF.Max(near, far / 3000f);
         Camera.NearPlane = near;
         Camera.FarPlane = far;
 
@@ -694,7 +914,7 @@ public partial class Terrain3DView : ContentView
     // sun elevation and stays off entirely in daylight (zero cost: the loop early-returns).
     private void DrawNightLights(SKCanvas canvas, IReadOnlyList<ProjectedPoi>? pois)
     {
-        if (pois is null || pois.Count == 0 || Atmosphere is not { } atmo)
+        if (pois is null || pois.Count == 0 || EffectiveAtmosphere is not { } atmo)
         {
             return;
         }
@@ -782,6 +1002,16 @@ public partial class Terrain3DView : ContentView
                 lastOrbitTotalY = 0;
                 return;
             case GestureStatus.Running:
+                // During a fly-through, ignore tiny touches/jitter (a resting finger must not kill
+                // the demo); only a deliberate drag past the threshold takes manual control.
+                if (IsFlying)
+                {
+                    if (Math.Abs(e.TotalX) + Math.Abs(e.TotalY) < FlightCancelDragPx)
+                    {
+                        return;
+                    }
+                    StopFlight();
+                }
                 float dx = (float)(e.TotalX - lastOrbitTotalX);
                 float dy = (float)(e.TotalY - lastOrbitTotalY);
                 lastOrbitTotalX = e.TotalX;
@@ -836,6 +1066,7 @@ public partial class Terrain3DView : ContentView
     {
         if (e.Status == GestureStatus.Started)
         {
+            StopFlight(); // a pinch-zoom cancels an in-progress fly-through
             pinchActive = true;
             lastPinchScale = 1.0;
             return;
@@ -1194,7 +1425,7 @@ public partial class Terrain3DView : ContentView
             // into a colour texture it owns and returns the texture handle. A 0 handle means the present
             // FBO couldn't be allocated this frame; fall back to Skia. The optional Atmosphere drives the
             // sky pass and the terrain fragment shader's aerial-perspective blend; passing null skips both.
-            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, Atmosphere);
+            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere);
             if (terrainTextureId == 0)
             {
                 return false;
