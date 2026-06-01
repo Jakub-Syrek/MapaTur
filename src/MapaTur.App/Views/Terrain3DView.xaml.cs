@@ -285,6 +285,13 @@ public partial class Terrain3DView : ContentView
     private bool orthoPathDirty;
 #pragma warning restore CS0414
 
+    // Continuous-animation tick for the live atmosphere (drifting clouds / wind). The GL terrain
+    // only repaints on demand (gesture / property change), but the weather model evolves off the
+    // wall-clock, so without a heartbeat the clouds would freeze whenever the user stops touching
+    // the screen. ~15 fps is plenty for slow cloud motion and keeps the GPU/thermals modest; the
+    // tick only invalidates while the 3D view is actually visible and an atmosphere is bound.
+    private readonly IDispatcherTimer animationTimer;
+
     public Terrain3DView()
     {
         InitializeComponent();
@@ -298,6 +305,21 @@ public partial class Terrain3DView : ContentView
 #if WINDOWS
         Canvas.HandlerChanged += OnCanvasHandlerChanged;
 #endif
+
+        animationTimer = Dispatcher.CreateTimer();
+        animationTimer.Interval = TimeSpan.FromMilliseconds(66); // ~15 fps
+        animationTimer.Tick += OnAnimationTick;
+        animationTimer.Start();
+    }
+
+    private void OnAnimationTick(object? sender, EventArgs e)
+    {
+        // Repaint only when the 3D view is on screen and there's live atmosphere to animate —
+        // otherwise this is a no-op so 2D mode pays nothing.
+        if (IsVisible && Atmosphere is not null)
+        {
+            Canvas.InvalidateSurface();
+        }
     }
 
     private void OnOrbitGizmoDragged(object? sender, OrbitDragEventArgs e)
@@ -548,6 +570,7 @@ public partial class Terrain3DView : ContentView
         {
             // GL already drew the (depth-occluded) trails + route; Skia only adds the markers/labels on top.
             renderer.DrawOverlays(canvas, null, null, projectedClimbing, projectedPois, projectedPeaks, projectedUserLocation);
+            DrawNightLights(canvas, projectedPois);
             return;
         }
 #endif
@@ -555,7 +578,74 @@ public partial class Terrain3DView : ContentView
         // depthMap = null disables trail / route / climbing occlusion: trails are drawn always on top
         // of the mesh (the visual the user wants) and it drops a per-frame depth-grid fill.
         renderer.RenderTiles(canvas, e.Info.Width, e.Info.Height, tiles, Camera, frameScratch, null, projectedTrails, projectedRoute, projectedClimbing, projectedPois, projectedPeaks, projectedUserLocation);
+        DrawNightLights(canvas, projectedPois);
     }
+
+    // Warm window lights that switch on in every refuge (hut / wilderness hut / chalet / shelter)
+    // once the sun drops below the horizon — a small, atmospheric night-time touch. Drawn additively
+    // over the finished frame so they glow against the dark terrain. Fades in across dusk via the
+    // sun elevation and stays off entirely in daylight (zero cost: the loop early-returns).
+    private void DrawNightLights(SKCanvas canvas, IReadOnlyList<ProjectedPoi>? pois)
+    {
+        if (pois is null || pois.Count == 0 || Atmosphere is not { } atmo)
+        {
+            return;
+        }
+
+        // nightFactor: 0 above ~6° sun elevation, ramping to 1 once the sun is ~6° below the
+        // horizon — so lights warm up through dusk rather than snapping on at the exact sunset.
+        float sunUp = atmo.SunDirection.Z; // sin(elevation)
+        float nightFactor = Math.Clamp((0.10f - sunUp) / 0.20f, 0f, 1f);
+        if (nightFactor <= 0.01f)
+        {
+            return;
+        }
+
+        byte glowAlpha = (byte)(nightFactor * 200f);
+        byte coreAlpha = (byte)(nightFactor * 255f);
+        const float glowRadius = 7f;
+        const float coreRadius = 1.8f;
+
+        using var glowPaint = new SKPaint { IsAntialias = true, BlendMode = SKBlendMode.Plus };
+        using var corePaint = new SKPaint { IsAntialias = true, BlendMode = SKBlendMode.Plus };
+
+        foreach (ProjectedPoi poi in pois)
+        {
+            if (!IsLitRefuge(poi.Source.Kind) || poi.ScreenPosition is not { } sp)
+            {
+                continue;
+            }
+
+            float x = sp.X;
+            float y = sp.Y;
+            // Soft warm halo (radial gradient, transparent at the rim) + a near-white hot core,
+            // both additive so several nearby lights bloom together like a lit hamlet.
+            glowPaint.Shader = SKShader.CreateRadialGradient(
+                new SKPoint(x, y),
+                glowRadius,
+                new[]
+                {
+                    new SKColor(0xFF, 0xD8, 0x80, glowAlpha),
+                    new SKColor(0xFF, 0xB0, 0x40, 0),
+                },
+                null,
+                SKShaderTileMode.Clamp);
+            canvas.DrawCircle(x, y, glowRadius, glowPaint);
+
+            corePaint.Color = new SKColor(0xFF, 0xF2, 0xC8, coreAlpha);
+            canvas.DrawCircle(x, y, coreRadius, corePaint);
+        }
+
+        glowPaint.Shader = null;
+    }
+
+    // Refuges that "light up" at night: everything with a roof a hiker could be inside. Viewpoints
+    // (lookout towers / panoramas) are excluded — nobody's home to switch a lamp on.
+    private static bool IsLitRefuge(Domain.Pois.PoiKind kind) => kind is
+        Domain.Pois.PoiKind.Hut or
+        Domain.Pois.PoiKind.WildernessHut or
+        Domain.Pois.PoiKind.Chalet or
+        Domain.Pois.PoiKind.Shelter;
 
     /// <summary>
     /// 1-finger drag on the mesh = PAN. World moves under the finger (Cesium / Google Maps
