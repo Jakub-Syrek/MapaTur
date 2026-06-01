@@ -59,6 +59,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     private readonly IClimbingRepository climbingRepository;
     private readonly IPoiOverpassClient poiOverpassClient;
     private readonly IPoiLayerRenderer poiRenderer;
+    private readonly IPoiRepository poiRepository;
     private readonly IRoadOverpassClient roadOverpassClient;
     private readonly IRoadLayerRenderer roadRenderer;
     private readonly PlanRouteUseCase planRouteUseCase;
@@ -117,17 +118,44 @@ public sealed partial class MapPageViewModel : ObservableObject
     private double timeOfDayHours = 14.0;
 
     /// <summary>
-    /// Live atmospheric model derived from <see cref="TimeOfDayHours"/>. Recomputed whenever
-    /// the time changes and bound straight into <c>Terrain3DView.Atmosphere</c>. Cheap to build
-    /// (a handful of trig + lerp) so deriving per change is fine — no caching needed.
+    /// Base cloud coverage, [0,1]: 0 = clear sky, ~0.35 = scattered (default), 1 = heavy/overcast.
+    /// Sets how much cirrus + sea-of-clouds the 3D atmosphere draws; the renderer modulates this
+    /// with its own slow weather drift so the sky still evolves. Persisted in <see cref="settingsStore"/>.
     /// </summary>
-    public Atmosphere Atmosphere => new((float)TimeOfDayHours);
+    [ObservableProperty]
+    private double cloudiness = 0.35;
+
+    /// <summary>
+    /// Live atmospheric model derived from <see cref="TimeOfDayHours"/> and <see cref="Cloudiness"/>.
+    /// Recomputed whenever either changes and bound straight into <c>Terrain3DView.Atmosphere</c>.
+    /// Cheap to build (a handful of trig + lerp) so deriving per change is fine — no caching needed.
+    /// </summary>
+    public Atmosphere Atmosphere => new((float)TimeOfDayHours, (float)Cloudiness);
 
     partial void OnTimeOfDayHoursChanged(double value)
     {
         settingsStore.TimeOfDayHours = value;
         // Atmosphere is a computed property; notify so the View re-binds the new instance.
         OnPropertyChanged(nameof(Atmosphere));
+    }
+
+    partial void OnCloudinessChanged(double value)
+    {
+        settingsStore.Cloudiness = value;
+        OnPropertyChanged(nameof(Atmosphere));
+    }
+
+    /// <summary>
+    /// Serialized 3D camera state, two-way bound to <c>Terrain3DView.CameraState</c>. The view
+    /// writes its current camera here (debounced) and reads it back to restore the framing when
+    /// the matching DEM reloads. Persisted verbatim to <see cref="settingsStore"/>.
+    /// </summary>
+    [ObservableProperty]
+    private string? cameraState;
+
+    partial void OnCameraStateChanged(string? value)
+    {
+        settingsStore.CameraState = value;
     }
 
     private readonly MeshRebuildCoalescer meshRebuildCoalescer = new();
@@ -420,6 +448,31 @@ public sealed partial class MapPageViewModel : ObservableObject
         Pois3DOverlay = filtered;
     }
 
+    /// <summary>
+    /// Loads POIs cached in the local SQLite repository within <paramref name="bounds"/> and applies
+    /// them to the 2D map + 3D overlay. Best-effort and silent when the cache is empty — used at
+    /// auto-load so once-downloaded refuges survive a restart without another Overpass call.
+    /// </summary>
+    private async Task LoadCachedPoisAsync(MapBounds bounds)
+    {
+        try
+        {
+            IReadOnlyList<MapaTur.Domain.Pois.MountainPoi> cached =
+                await poiRepository.FindIntersectingAsync(bounds).ConfigureAwait(true);
+            if (cached.Count == 0)
+            {
+                return;
+            }
+            rawPois = cached;
+            ApplyPoiFilter();
+            logger.LogInformation("Loaded {Count} cached POIs for the loaded DEM footprint", cached.Count);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to load cached POIs");
+        }
+    }
+
     /// <summary>Path to an ortho-photo image draped over the 3D terrain (GPU path), or null for the hypsometric tint.</summary>
     [ObservableProperty]
     private string? orthoTexturePath;
@@ -513,6 +566,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         IClimbingRepository climbingRepository,
         IPoiOverpassClient poiOverpassClient,
         IPoiLayerRenderer poiRenderer,
+        IPoiRepository poiRepository,
         IRoadOverpassClient roadOverpassClient,
         IRoadLayerRenderer roadRenderer,
         PlanRouteUseCase planRouteUseCase,
@@ -539,6 +593,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         ArgumentNullException.ThrowIfNull(climbingRepository);
         ArgumentNullException.ThrowIfNull(poiOverpassClient);
         ArgumentNullException.ThrowIfNull(poiRenderer);
+        ArgumentNullException.ThrowIfNull(poiRepository);
         ArgumentNullException.ThrowIfNull(roadOverpassClient);
         ArgumentNullException.ThrowIfNull(roadRenderer);
         ArgumentNullException.ThrowIfNull(planRouteUseCase);
@@ -595,6 +650,11 @@ public sealed partial class MapPageViewModel : ObservableObject
             // could land the default-day visual on a midnight initial frame which is jarring.
             timeOfDayHours = Math.Clamp(savedTime, 0.0, 24.0);
         }
+        if (settingsStore.Cloudiness is { } savedCloudiness)
+        {
+            cloudiness = Math.Clamp(savedCloudiness, 0.0, 1.0);
+        }
+        cameraState = settingsStore.CameraState;
         this.trackRenderer = trackRenderer;
         this.trailRenderer = trailRenderer;
         this.routeRenderer = routeRenderer;
@@ -606,6 +666,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         this.climbingRepository = climbingRepository;
         this.poiOverpassClient = poiOverpassClient;
         this.poiRenderer = poiRenderer;
+        this.poiRepository = poiRepository;
         this.roadOverpassClient = roadOverpassClient;
         this.roadRenderer = roadRenderer;
         this.planRouteUseCase = planRouteUseCase;
@@ -927,6 +988,21 @@ public sealed partial class MapPageViewModel : ObservableObject
             var pois = await poiOverpassClient.FetchPoisAsync(bounds.Value).ConfigureAwait(true);
             rawPois = pois;
             ApplyPoiFilter();
+
+            // Cache to SQLite so the POIs (and their 3D night lights) survive a restart and
+            // re-load from disk at startup without another Overpass round-trip. Best-effort:
+            // a persistence failure must not break the in-memory result the user just got.
+            if (pois.Count > 0)
+            {
+                try
+                {
+                    await poiRepository.UpsertAsync(pois).ConfigureAwait(true);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Failed to cache {Count} downloaded POIs", pois.Count);
+                }
+            }
 
             StatusMessage = pois.Count == 0
                 ? Localization.AppStrings.StatusNoPoisFound
@@ -1408,6 +1484,13 @@ public sealed partial class MapPageViewModel : ObservableObject
                     && draping3DBasemapPath is { } basemapForDraping)
                 {
                     await TryComposite3DOrthoFromBasemapAsync(basemapForDraping).ConfigureAwait(true);
+                }
+
+                // Re-hydrate any POIs cached from a previous session within the DEM footprint, so
+                // refuges (and their 3D night lights) reappear on launch without a fresh download.
+                if (TerrainRaster is { } demRaster)
+                {
+                    await LoadCachedPoisAsync(demRaster.Bounds).ConfigureAwait(true);
                 }
             }
 

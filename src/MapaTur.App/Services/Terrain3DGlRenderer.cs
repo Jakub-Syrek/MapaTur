@@ -693,7 +693,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             (MathF.Sin(weatherT * 0.013f) * 0.5f)
             + (MathF.Sin((weatherT * 0.031f) + 1.7f) * 0.3f)
             + (MathF.Sin((weatherT * 0.057f) + 4.2f) * 0.2f); // ~[-1,1]
-        float effectiveCoverage = Math.Clamp(baseCoverage + (0.35f * weatherNoise), 0f, 1f);
+        // Multiplicative weather variation around the user's base coverage, so a base of 0 stays a
+        // dead-clear sky (an additive bump used to leave ~0.35 coverage even at the 0% slider).
+        float effectiveCoverage = Math.Clamp(baseCoverage * (1f + (0.6f * weatherNoise)), 0f, 1f);
         // Wind in noise-units/sec: slowly rotating heading + gently pulsing speed.
         float windAngle = (MathF.Sin(weatherT * 0.008f) * 0.9f) + (MathF.Sin((weatherT * 0.017f) + 2f) * 0.5f);
         float windSpeed = 0.012f + (0.010f * MathF.Sin(weatherT * 0.005f));

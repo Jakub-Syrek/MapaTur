@@ -4,6 +4,7 @@ using MapaTur.App.Services;
 using MapaTur.Application.Maps;
 using MapaTur.Application.Terrain;
 using MapaTur.Domain.Climbing;
+using MapaTur.Domain.Geography;
 using MapaTur.Domain.Location;
 using MapaTur.Domain.Pois;
 using MapaTur.Domain.Routing;
@@ -218,6 +219,23 @@ public partial class Terrain3DView : ContentView
         set => SetValue(AtmosphereProperty, value);
     }
 
+    /// <summary>
+    /// Serialized camera state (a DEM-bounds key + orbit params), two-way bound to the view-model
+    /// so it persists across restarts. The view writes its current camera here on a debounce and
+    /// restores from it in <see cref="FrameMesh"/> when the embedded key matches the loaded DEM.
+    /// </summary>
+    public static readonly BindableProperty CameraStateProperty = BindableProperty.Create(
+        nameof(CameraState),
+        typeof(string),
+        typeof(Terrain3DView),
+        defaultBindingMode: BindingMode.TwoWay);
+
+    public string? CameraState
+    {
+        get => (string?)GetValue(CameraStateProperty);
+        set => SetValue(CameraStateProperty, value);
+    }
+
     /// <summary>Camera state mutated by gestures and used by the renderer.</summary>
     public Camera3D Camera { get; } = new Camera3D();
 
@@ -310,6 +328,71 @@ public partial class Terrain3DView : ContentView
         animationTimer.Interval = TimeSpan.FromMilliseconds(66); // ~15 fps
         animationTimer.Tick += OnAnimationTick;
         animationTimer.Start();
+
+        // Camera-state autosave: a low-frequency diff against the last serialized camera. Captures
+        // any camera change (gesture, gizmo, button, keyboard) without scattering save calls across
+        // every input handler. Only writes when the serialized state actually changed.
+        cameraSaveTimer = Dispatcher.CreateTimer();
+        cameraSaveTimer.Interval = TimeSpan.FromMilliseconds(1200);
+        cameraSaveTimer.Tick += OnCameraSaveTick;
+        cameraSaveTimer.Start();
+    }
+
+    private readonly IDispatcherTimer cameraSaveTimer;
+    private string? lastSavedCameraSerialized;
+
+    private void OnCameraSaveTick(object? sender, EventArgs e)
+    {
+        if (WorldFrame is not { } frame)
+        {
+            return;
+        }
+        string serialized = SerializeCamera(frame);
+        if (serialized != lastSavedCameraSerialized)
+        {
+            lastSavedCameraSerialized = serialized;
+            CameraState = serialized; // flows to the view-model → settings store
+        }
+    }
+
+    // DEM identity key: rounded bounds, so a restored camera is only applied to the same region.
+    private static string DemKey(MapBounds b) => string.Create(
+        System.Globalization.CultureInfo.InvariantCulture,
+        $"{b.SouthWest.Latitude:F3},{b.SouthWest.Longitude:F3},{b.NorthEast.Latitude:F3},{b.NorthEast.Longitude:F3}");
+
+    private string SerializeCamera(TerrainMesh3D frame) => string.Create(
+        System.Globalization.CultureInfo.InvariantCulture,
+        $"{DemKey(frame.Bounds)};{Camera.Target.X:R};{Camera.Target.Y:R};{Camera.Target.Z:R};{Camera.Distance:R};{Camera.AzimuthRadians:R};{Camera.PitchRadians:R}");
+
+    // Applies a saved camera string IF its DEM key matches the current frame. Returns false (leaving
+    // the camera untouched) on any mismatch / parse failure so the caller can auto-frame instead.
+    private bool TryRestoreCamera(TerrainMesh3D frame)
+    {
+        if (string.IsNullOrEmpty(CameraState))
+        {
+            return false;
+        }
+        string[] parts = CameraState.Split(';');
+        if (parts.Length != 7 || parts[0] != DemKey(frame.Bounds))
+        {
+            return false;
+        }
+        var ci = System.Globalization.CultureInfo.InvariantCulture;
+        if (float.TryParse(parts[1], System.Globalization.NumberStyles.Float, ci, out float tx)
+            && float.TryParse(parts[2], System.Globalization.NumberStyles.Float, ci, out float ty)
+            && float.TryParse(parts[3], System.Globalization.NumberStyles.Float, ci, out float tz)
+            && float.TryParse(parts[4], System.Globalization.NumberStyles.Float, ci, out float dist)
+            && float.TryParse(parts[5], System.Globalization.NumberStyles.Float, ci, out float az)
+            && float.TryParse(parts[6], System.Globalization.NumberStyles.Float, ci, out float pitch))
+        {
+            Camera.Target = new Vector3(tx, ty, tz);
+            Camera.Distance = dist;
+            Camera.AzimuthRadians = az;
+            Camera.PitchRadians = pitch;
+            lastSavedCameraSerialized = CameraState; // avoid an immediate redundant re-save
+            return true;
+        }
+        return false;
     }
 
     private void OnAnimationTick(object? sender, EventArgs e)
@@ -468,18 +551,16 @@ public partial class Terrain3DView : ContentView
         Canvas.InvalidateSurface();
     }
 
-    /// <summary>Positions the camera so the entire terrain fits in view.</summary>
+    /// <summary>
+    /// Sets up the camera for the loaded mesh: restores the saved camera if one exists for THIS DEM,
+    /// otherwise frames the whole terrain. Safety bounds are applied either way.
+    /// </summary>
     public void FrameMesh()
     {
         if (WorldFrame is not { } frame)
         {
             return;
         }
-
-        Camera.Target = Vector3.Zero;
-        Camera.Distance = Math.Max(frame.HorizontalExtent * 2.5f, 5_000f);
-        Camera.AzimuthRadians = MathF.PI / 4f;
-        Camera.PitchRadians = MathF.PI / 4f;
 
         // Push safety bounds into the controller so the camera can't tunnel through the surface
         // (CameraFloorZ = highest world-Z + a 50 m clearance) and Pan can't drag the target off
@@ -502,6 +583,15 @@ public partial class Terrain3DView : ContentView
         controller.MaxTargetX = frame.Center.X + frame.HorizontalExtent;
         controller.MinTargetY = frame.Center.Y - frame.HorizontalExtent;
         controller.MaxTargetY = frame.Center.Y + frame.HorizontalExtent;
+
+        // Restore the camera saved for this DEM; if none (or a different region), auto-frame.
+        if (!TryRestoreCamera(frame))
+        {
+            Camera.Target = Vector3.Zero;
+            Camera.Distance = Math.Max(frame.HorizontalExtent * 2.5f, 5_000f);
+            Camera.AzimuthRadians = MathF.PI / 4f;
+            Camera.PitchRadians = MathF.PI / 4f;
+        }
 
         Canvas.InvalidateSurface();
     }
