@@ -13,6 +13,7 @@
 
             <converters:InverseBoolConverter x:Key="InverseBool" />
             <converters:LocationTrackingLabelConverter x:Key="LocationTrackingLabel" />
+            <converters:HoursToClockConverter x:Key="HoursToClock" />
         </ResourceDictionary>
     </Application.Resources>
 </Application>

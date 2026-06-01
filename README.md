@@ -7,7 +7,7 @@
 [![MAUI](https://img.shields.io/badge/.NET%20MAUI-Android%20%7C%20iOS%20%7C%20Windows%20%7C%20macOS-512BD4?logo=dotnet&logoColor=white)](https://learn.microsoft.com/dotnet/maui/)
 [![3D engine](https://img.shields.io/badge/3D-OpenGL%20ES%203.0%20%C2%B7%20ANGLE%20%2F%20D3D11-CC3333)](docs/3d-terrain.md)
 [![Mapsui](https://img.shields.io/badge/maps-Mapsui%20%2B%20SkiaSharp-2E7D32)](https://mapsui.com/)
-[![Tests](https://img.shields.io/badge/tests-506%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-525%20passing-brightgreen)](#testing)
 [![Architecture](https://img.shields.io/badge/architecture-Clean-success)](#architecture)
 [![Top language](https://img.shields.io/github/languages/top/Jakub-Syrek/MapaTur2)](#)
 [![Code size](https://img.shields.io/github/languages/code-size/Jakub-Syrek/MapaTur2)](#)
@@ -58,9 +58,14 @@ the ridges; named summits and mountain POIs are labelled. No telemetry, no accou
 | Orthophoto terrain drape | ✅ Verified | Aerial imagery sampled per-pixel over the DEM — GUGiK Geoportal (PL) + ÚGKK ZBGIS (SK) composited cross-border; mipmaps + anisotropic filtering |
 | Road overlay (OSM highways) | ✅ Verified | Viewport Overpass download; grey depth-tested ribbons in 3D + 2D layer, independent show/hide |
 | Hillshade base layer | ✅ Verified | Multi-layer MBTiles loader + Copernicus hillshade pipeline |
+| **Time-of-day atmosphere** | ✅ Verified | Procedural world-space sky dome, sun disc + Mie halo, aerial-perspective fog; a "Czas" slider drives a deterministic Tatra-latitude solar arc (sunrise → noon → golden hour → night), persisted |
+| **Procedural clouds + weather** | ✅ Verified | Cirrus sky layer + "sea of clouds" inversion (peaks poke through), drifting fBm with morph; cloud-coverage + wind sliders (wind speeds drift & darkens to storm-grey); cloud altitude tracks the sun + random wander; moving cloud shadows on the terrain |
+| **Night refuge lights** | ✅ Verified | Warm window glows switch on in huts / shelters / chalets after sunset, fading in through dusk |
+| **POI offline cache** | ✅ Verified | Downloaded POIs persist to SQLite and re-hydrate within the DEM footprint at startup — refuges + their lights survive a restart with no re-download |
+| **Camera state persistence** | ✅ Verified | Camera framing (target / distance / azimuth / pitch) saved per DEM and restored on reload |
+| GPS dot / live location | ✅ Verified | MAUI Geolocation; blue dot + accuracy halo on 2D & 3D, "Track me" toggle, PL/EN |
 | Elevation-aware routing (SRTM) | ⏳ Planned | Currently routes are flat (Overpass geometry lacks `ele`) |
 | Off-trail edges in graph | ⏳ Planned | Cost penalty exists; UI tagging gesture pending |
-| GPS dot / live location | ⏳ Planned | Cross-platform location permission story |
 | Signed store builds (Play / App Store / MSIX) | ⏳ Pending | Requires signing credentials |
 
 ## 3D terrain (GPU engine)
@@ -74,7 +79,8 @@ The 3D view is a **custom real-time renderer**, not an off-the-shelf 3D engine:
 - **Per-pixel lighting** (Lambert shading evaluated per fragment from interpolated normals) and **4× MSAA** for smooth slopes and ridgelines.
 - **Orthophoto drape** (optional): a high-resolution aerial image sampled per-pixel over the terrain, with mipmaps + anisotropic filtering; falls back to a hypsometric ramp + hillshade when no image is bundled.
 - **Trails, roads & route as depth-tested screen-space ribbons** (occluded by ridges, clipped to the DEM); **named summits and mountain POIs** with de-cluttered labels (2D overlay drawn by Skia over the GL terrain).
-- Camera: orbit / look-around-in-place / pan / zoom via mouse, keyboard and on-screen pads; **auto-falls-back to a Skia software renderer** on any GL failure, so the view never breaks.
+- **Procedural atmosphere** driven by a single `Atmosphere(timeOfDay, cloudiness, wind)` model: a world-space sky dome (gradient + sun disc + Mie halo), aerial-perspective distance fog, coloured sun/shadow lighting on the terrain, cirrus + a "sea of clouds" inversion layer, live weather (drifting/morphing coverage, wind speed + storm-darkening), sun-tracking cloud altitude, moving cloud shadows, and warm night lights in refuges after dusk. Time / cloud / wind sliders, all persisted.
+- Camera: in-place look-around (tilt) / pan / zoom / altitude via on-screen hold-to-repeat pads (plus mouse + keyboard on desktop); framing **persists per DEM**; **auto-falls-back to a Skia software renderer** on any GL failure, so the view never breaks.
 
 Full write-up: [`docs/3d-terrain.md`](docs/3d-terrain.md).
 
@@ -173,10 +179,10 @@ dotnet test
 | Suite | Tests | Focus |
 |---|---|---|
 | `MapaTur.Domain.Tests` | 129 | Value objects, aggregates (Route), elevation math, DEM, POI tags + colours |
-| `MapaTur.Application.Tests` | 295 | Overpass queries (trails/POI/roads), 3D terrain math, route planner + use cases |
-| `MapaTur.Infrastructure.Tests` | 60 | TCX/Overpass/POI/road parsers, MBTiles + DEM readers, SQLite, GPX |
+| `MapaTur.Application.Tests` | 310 | Overpass queries (trails/POI/roads), 3D terrain math + camera + atmosphere, route planner + use cases |
+| `MapaTur.Infrastructure.Tests` | 64 | TCX/Overpass/POI/road parsers, MBTiles + DEM readers, SQLite (trails/climbing/POI), GPX |
 | `MapaTur.Routing.Tests` | 22 | Tobler function, distance/time cost functions, graph snapping, A\* correctness |
-| **Total** | **506** | xUnit + FluentAssertions + NSubstitute + FsCheck |
+| **Total** | **525** | xUnit + FluentAssertions + NSubstitute + FsCheck |
 
 ## Roadmap
 
