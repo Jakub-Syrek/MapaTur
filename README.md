@@ -63,6 +63,7 @@ the ridges; named summits and mountain POIs are labelled. No telemetry, no accou
 | **Night refuge lights** | ✅ Verified | Warm window glows switch on in huts / shelters / chalets after sunset, fading in through dusk |
 | **POI offline cache** | ✅ Verified | Downloaded POIs persist to SQLite and re-hydrate within the DEM footprint at startup — refuges + their lights survive a restart with no re-download |
 | **Camera state persistence** | ✅ Verified | Camera framing (target / distance / azimuth / pitch) saved per DEM and restored on reload |
+| **Cinematic fly-through** | ✅ Verified | Scripted camera flight along the Orla Perć ridge (Zawrat → Krzyżne) on a Catmull-Rom spline, slalom over the peaks; the time-of-day sweeps into golden hour mid-flight; on-screen chrome auto-hides for a clean shot |
 | GPS dot / live location | ✅ Verified | MAUI Geolocation; blue dot + accuracy halo on 2D & 3D, "Track me" toggle, PL/EN |
 | Elevation-aware routing (SRTM) | ⏳ Planned | Currently routes are flat (Overpass geometry lacks `ele`) |
 | Off-trail edges in graph | ⏳ Planned | Cost penalty exists; UI tagging gesture pending |
@@ -80,7 +81,8 @@ The 3D view is a **custom real-time renderer**, not an off-the-shelf 3D engine:
 - **Orthophoto drape** (optional): a high-resolution aerial image sampled per-pixel over the terrain, with mipmaps + anisotropic filtering; falls back to a hypsometric ramp + hillshade when no image is bundled.
 - **Trails, roads & route as depth-tested screen-space ribbons** (occluded by ridges, clipped to the DEM); **named summits and mountain POIs** with de-cluttered labels (2D overlay drawn by Skia over the GL terrain).
 - **Procedural atmosphere** driven by a single `Atmosphere(timeOfDay, cloudiness, wind)` model: a world-space sky dome (gradient + sun disc + Mie halo), aerial-perspective distance fog, coloured sun/shadow lighting on the terrain, cirrus + a "sea of clouds" inversion layer, live weather (drifting/morphing coverage, wind speed + storm-darkening), sun-tracking cloud altitude, moving cloud shadows, and warm night lights in refuges after dusk. Time / cloud / wind sliders, all persisted.
-- Camera: in-place look-around (tilt) / pan / zoom / altitude via on-screen hold-to-repeat pads (plus mouse + keyboard on desktop); framing **persists per DEM**; **auto-falls-back to a Skia software renderer** on any GL failure, so the view never breaks.
+- Camera: in-place look-around (tilt) / pan / zoom / altitude via on-screen hold-to-repeat pads that fade out at rest and materialise on hover/press (plus mouse + keyboard on desktop); framing **persists per DEM**; **auto-falls-back to a Skia software renderer** on any GL failure, so the view never breaks.
+- **Cinematic fly-through**: a one-tap scripted flight along the Orla Perć ridge — a Catmull-Rom spline through DEM-sampled waypoints, weaving slalom over the summits at constant speed, with the time-of-day sweeping into golden hour and all on-screen chrome auto-hiding for a clean cinematic shot.
 
 Full write-up: [`docs/3d-terrain.md`](docs/3d-terrain.md).
 
