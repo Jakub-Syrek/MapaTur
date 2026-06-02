@@ -97,16 +97,8 @@
             </skia:SKGLView.GestureRecognizers>
         </skia:SKGLView>
 
-        <!-- Cinematic fly-through trigger, top-right (clear of the bottom pads and the top-left
-             slider overlay). Tapping runs the scripted Orla Perć ridge flight; any manual camera
-             input cancels it. -->
-        <Button x:Name="FlightButton"
-                Text="&#x2708; Orla Perć"
-                Clicked="OnFlyOrlaPercClicked"
-                HorizontalOptions="End" VerticalOptions="Start"
-                Margin="8" Padding="12,6" FontSize="12" FontAttributes="Bold"
-                BackgroundColor="#C0202830" TextColor="White"
-                CornerRadius="16" BorderColor="#90FFFFFF" BorderWidth="1" />
+        <!-- The cinematic Orla Perć fly-through button was removed from the UI; the scripted flight
+             itself is kept (Terrain3DView.StartOrlaPercFlight) for later re-exposure. -->
 
         <!-- Camera-altitude (raise / lower) pad, bottom-LEFT. Orbit + zoom live on touch gestures
              (1-finger drag = orbit, pinch = zoom), translation is on the bottom-right pad. Altitude

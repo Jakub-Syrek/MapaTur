@@ -234,5 +234,11 @@ public static class AppStrings
     /// <summary>Dismiss button label for the fly-through-saved alert.</summary>
     public static string RecordingDismiss => Get(nameof(RecordingDismiss));
 
+    /// <summary>Status shown when route-planning mode is turned on.</summary>
+    public static string StatusRoutePlanningOn => Get(nameof(StatusRoutePlanningOn));
+
+    /// <summary>Status shown when route-planning mode is turned off.</summary>
+    public static string StatusRoutePlanningOff => Get(nameof(StatusRoutePlanningOff));
+
     private static string Get(string key) => Manager.GetString(key) ?? key;
 }

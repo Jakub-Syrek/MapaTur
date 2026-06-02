@@ -233,4 +233,10 @@
   <data name="RecordingDismiss" xml:space="preserve">
     <value>OK</value>
   </data>
+  <data name="StatusRoutePlanningOn" xml:space="preserve">
+    <value>Route planning on — tap the map to add waypoints.</value>
+  </data>
+  <data name="StatusRoutePlanningOff" xml:space="preserve">
+    <value>Route planning off.</value>
+  </data>
 </root>
