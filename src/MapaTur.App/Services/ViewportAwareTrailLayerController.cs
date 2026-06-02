@@ -39,6 +39,13 @@ public sealed class ViewportAwareTrailLayerController : IDisposable
     /// </summary>
     public Func<MapaTur.Domain.Trails.Trail, bool>? Filter { get; set; }
 
+    /// <summary>
+    /// Map-coverage bounds (the union of loaded basemaps + DEM, i.e. the area the 3D view also covers).
+    /// When set, the viewport query is intersected with it so trails outside the available map aren't
+    /// pulled or rendered — no more trail "spaghetti" floating on the blank area past the basemap.
+    /// </summary>
+    public MapaTur.Domain.Geography.MapBounds? CoverageBounds { get; set; }
+
     public ViewportAwareTrailLayerController(
         Map map,
         ITrailRepository repository,
@@ -106,8 +113,29 @@ public sealed class ViewportAwareTrailLayerController : IDisposable
                 return;
             }
 
+            // Confine to the map coverage: trails beyond the loaded basemap / DEM aren't shown, so the
+            // 2D map covers the same footprint as the 3D view instead of trailing off onto blank space.
+            var queryBounds = bounds.Value;
+            if (CoverageBounds is { } coverage)
+            {
+                if (queryBounds.Intersect(coverage) is not { } clipped)
+                {
+                    // Viewport is entirely outside the mapped area — clear any stale trails and stop.
+                    await MainThread.InvokeOnMainThreadAsync(() =>
+                    {
+                        if (!token.IsCancellationRequested && !disposed)
+                        {
+                            renderer.RenderTrails(map, Array.Empty<MapaTur.Domain.Trails.Trail>());
+                        }
+                    }).ConfigureAwait(false);
+                    return;
+                }
+
+                queryBounds = clipped;
+            }
+
             double epsilon = ZoomEpsilonCalculator.EpsilonMetersForResolution(viewport.Resolution);
-            var trails = await repository.FindIntersectingAsync(bounds.Value, epsilon, token).ConfigureAwait(false);
+            var trails = await repository.FindIntersectingAsync(queryBounds, epsilon, token).ConfigureAwait(false);
             if (token.IsCancellationRequested)
             {
                 return;
@@ -125,6 +153,7 @@ public sealed class ViewportAwareTrailLayerController : IDisposable
             {
                 if (!token.IsCancellationRequested && !disposed)
                 {
+                    renderer.CoverageBounds = CoverageBounds; // clip trail geometry to the map coverage
                     renderer.RenderTrails(map, trails);
                 }
             }).ConfigureAwait(false);
