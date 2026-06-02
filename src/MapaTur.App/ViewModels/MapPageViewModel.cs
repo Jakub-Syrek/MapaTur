@@ -75,11 +75,11 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private bool isBusy;
 
-    // Default false — AutoLoadOnStartupAsync flips to 3D once the DEM finishes loading.
-    // Initial true caused a race on Android where Terrain3DView painted before AutoLoad
-    // pushed Tiles, leaving a sky-only screen the user perceived as "biała mapa".
+    // Default TRUE — 3D is the headline view and must be what the user sees first, with no flash of
+    // the 2D map while the DEM auto-loads. Terrain3DView paints a sky-blue placeholder until the tiles
+    // arrive (not the old "biała mapa"). AutoLoadOnStartupAsync falls back to 2D only when no DEM exists.
     [ObservableProperty]
-    private bool is3DMode;
+    private bool is3DMode = true;
 
     /// <summary>True while the 3D view is running a scripted fly-through (two-way bound from the
     /// view). Used to hide the toolbar / slider chrome for a clean cinematic shot.</summary>
@@ -642,6 +642,25 @@ public sealed partial class MapPageViewModel : ObservableObject
             return;
         }
         basemapBounds = basemapBounds is { } existing ? existing.Union(extent) : extent;
+        UpdateTrailCoverage();
+    }
+
+    // The 2D trail layer's coverage = the union of all loaded basemaps + the DEM footprint (the same
+    // area the 3D view covers). Trails outside it are dropped so the flat map doesn't trail off onto
+    // blank space. Called whenever a basemap or DEM loads.
+    private void UpdateTrailCoverage()
+    {
+        if (viewportTrailController is null)
+        {
+            return;
+        }
+
+        // Clip to the visible basemap footprint (the actual rendered map) so trails never trail off onto
+        // blank space. Only when there's no basemap at all do we fall back to the DEM extent.
+        MapBounds? coverage = basemapBounds ?? TerrainRaster?.Bounds;
+
+        viewportTrailController.CoverageBounds = coverage;
+        viewportTrailController.RequestRefresh();
     }
 
     /// <summary>
@@ -1373,6 +1392,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         raster = SubsampleRasterForRenderer(raster);
 
         TerrainRaster = raster;
+        UpdateTrailCoverage();
         var initialOptions = new MapaTur.Application.Terrain.TerrainMeshOptions
         {
             VerticalExaggeration = (float)Math.Clamp(VerticalExaggeration, 1.0, 5.0),
@@ -1502,6 +1522,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             Filter = trail => ShowTrails && BuildTrailFilter().IsVisible(trail),
         };
+        UpdateTrailCoverage(); // apply coverage if a basemap / DEM already loaded before activation
     }
 
     /// <summary>
@@ -1667,6 +1688,11 @@ public sealed partial class MapPageViewModel : ObservableObject
             if (TerrainTiles is not null)
             {
                 Is3DMode = true;
+            }
+            else
+            {
+                // No DEM found — 3D would be an empty sky, so fall back to the flat map.
+                Is3DMode = false;
             }
 #if ANDROID || IOS
             // Mobile-specific: explicitly prefer 3D on phones because the 2D Mapsui view is hard
