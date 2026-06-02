@@ -75,4 +75,39 @@ public sealed class CameraFocusSyncTests
 
         act.Should().Throw<ArgumentOutOfRangeException>();
     }
+
+    [Fact]
+    public void BearingFromAzimuth_NorthLookingCamera_IsZero()
+    {
+        // Azimuth −π/2 puts the camera south of the target looking north → bearing 0 (north up).
+        CameraFocusSync.BearingRadiansFromAzimuth(-Math.PI / 2.0).Should().BeApproximately(0.0, 1e-9);
+    }
+
+    [Fact]
+    public void AzimuthFromBearing_North_IsMinusHalfPi()
+    {
+        CameraFocusSync.AzimuthRadiansFromBearing(0.0).Should().BeApproximately(-Math.PI / 2.0, 1e-9);
+    }
+
+    [Fact]
+    public void BearingFromAzimuth_East()
+    {
+        // Azimuth π = camera west of target, looking east → bearing π/2 (east).
+        CameraFocusSync.BearingRadiansFromAzimuth(Math.PI).Should().BeApproximately(Math.PI / 2.0, 1e-9);
+    }
+
+    [Theory]
+    [InlineData(0.0)]
+    [InlineData(0.7)]
+    [InlineData(-1.2)]
+    [InlineData(3.0)]
+    public void AzimuthBearing_RoundTrip(double azimuth)
+    {
+        double bearing = CameraFocusSync.BearingRadiansFromAzimuth(azimuth);
+        double back = CameraFocusSync.AzimuthRadiansFromBearing(bearing);
+
+        // Compare as unit vectors so the ±2π / wrap ambiguity doesn't fail an exact equal.
+        Math.Cos(back).Should().BeApproximately(Math.Cos(azimuth), 1e-9);
+        Math.Sin(back).Should().BeApproximately(Math.Sin(azimuth), 1e-9);
+    }
 }

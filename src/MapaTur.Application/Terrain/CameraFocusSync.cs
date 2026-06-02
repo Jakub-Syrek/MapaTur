@@ -52,4 +52,21 @@ public static class CameraFocusSync
         double groundSpanMeters = groundMetersPerPixel * viewportHeightPixels;
         return groundSpanMeters / (2.0 * Math.Tan(fovYRadians / 2.0));
     }
+
+    /// <summary>
+    /// Compass bearing (radians, east-of-north) the 3D view looks toward for a given orbit
+    /// <see cref="Camera3D.AzimuthRadians"/>. The camera sits at azimuth A around the target and looks
+    /// inward, so the on-screen "up" ground direction is the forward vector (−cos A, −sin A); its bearing
+    /// is <c>atan2(forwardX, forwardY)</c>. Used to keep the 2D map's rotation aligned with the 3D heading.
+    /// </summary>
+    public static double BearingRadiansFromAzimuth(double azimuthRadians)
+        => Math.Atan2(-Math.Cos(azimuthRadians), -Math.Sin(azimuthRadians));
+
+    /// <summary>
+    /// Inverse of <see cref="BearingRadiansFromAzimuth"/>: the orbit azimuth that makes the 3D view look
+    /// toward <paramref name="bearingRadians"/> (east-of-north). It's an involution — the same mapping
+    /// both ways — so feeding a bearing back returns the matching azimuth.
+    /// </summary>
+    public static double AzimuthRadiansFromBearing(double bearingRadians)
+        => Math.Atan2(-Math.Cos(bearingRadians), -Math.Sin(bearingRadians));
 }

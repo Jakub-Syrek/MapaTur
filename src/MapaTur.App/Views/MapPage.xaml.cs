@@ -72,8 +72,8 @@ public partial class MapPage : ContentPage
         }
     }
 
-    // 2D → 3D: point the camera at whatever the flat map is centred on, matching its zoom.
-    // Orbit angle (azimuth/pitch) is left untouched so the user's chosen viewing angle persists.
+    // 2D → 3D: point the camera at whatever the flat map is centred on, matching its zoom AND its
+    // rotation (bearing) so the heading carries over. Pitch is left untouched.
     private void SyncCameraToMap()
     {
         if (viewModel.TerrainFrame is not { } mesh)
@@ -92,6 +92,10 @@ public partial class MapPage : ContentPage
             Math.Clamp(world.X, -extent, extent),
             Math.Clamp(world.Y, -extent, extent),
             TerrainView.Camera.Target.Z);
+
+        // Carry the 2D map's bearing into the orbit azimuth so the same direction faces "up" in 3D.
+        double bearing = BearingFromMapRotation(MapControl.Map.Navigator.Viewport.Rotation);
+        TerrainView.Camera.AzimuthRadians = (float)CameraFocusSync.AzimuthRadiansFromBearing(bearing);
 
         double distance = CameraFocusSync.ResolutionToDistance(
             resolution, TerrainView.Camera.FieldOfViewYRadians, viewportHeight, center.Latitude);
@@ -117,7 +121,19 @@ public partial class MapPage : ContentPage
         double resolution = CameraFocusSync.DistanceToResolution(
             camera.Distance, camera.FieldOfViewYRadians, viewportHeight, focus.Latitude);
         viewModel.CenterMapOn(focus, resolution);
+
+        // Carry the 3D heading into the 2D map rotation so switching back keeps the same bearing.
+        double bearing = CameraFocusSync.BearingRadiansFromAzimuth(camera.AzimuthRadians);
+        MapControl.Map.Navigator.RotateTo(MapRotationFromBearing(bearing));
     }
+
+    // Mapsui Viewport.Rotation (degrees) ↔ compass bearing (radians, east-of-north). The sign is set so
+    // the heading shown "up" matches between the rotated 2D map and the 3D camera; verified on device.
+    private static double BearingFromMapRotation(double mapRotationDegrees)
+        => -mapRotationDegrees * Math.PI / 180.0;
+
+    private static double MapRotationFromBearing(double bearingRadians)
+        => -bearingRadians * 180.0 / Math.PI;
 
     private async void OnRecordingSaved(object? sender, string path)
     {
