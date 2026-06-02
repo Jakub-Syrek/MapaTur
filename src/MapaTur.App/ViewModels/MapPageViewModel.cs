@@ -401,17 +401,24 @@ public sealed partial class MapPageViewModel : ObservableObject
 
     private void OnTrailFilterChanged()
     {
+        // Always refresh the viewport-aware 2D layer first: it re-queries the repository and applies the
+        // live filter (including the ShowTrails master switch), so toggling works even when no trails were
+        // loaded via ApplyTrailsAsync this session — e.g. they came straight from the SQLite cache at
+        // startup, leaving rawTrails null. (This early-returned before, so unchecking "Szlaki" did nothing.)
+        viewportTrailController?.RequestRefresh();
+
+        // The direct 2D render + 3D overlay re-filter only apply when the raw set is held in memory.
         if (rawTrails is null)
         {
             return;
         }
+
         var filter = BuildTrailFilter();
         // The master ShowTrails switch wins: when off, nothing is shown on either layer.
         var filtered = ShowTrails ? rawTrails.Where(filter.IsVisible).ToList() : new List<Trail>();
         // Filter the pre-simplified set for the 3D overlay — cheap, no re-simplification per toggle.
         Trails3DOverlay = ShowTrails ? rawTrails3D?.Where(filter.IsVisible).ToList() : null;
         trailRenderer.RenderTrails(Map, filtered);
-        viewportTrailController?.RequestRefresh();
     }
 
     // Trails feed the 3D overlay at full Overpass resolution (hundreds of polylines × hundreds of
