@@ -1,6 +1,8 @@
 using System.ComponentModel;
+using System.Globalization;
 using System.Numerics;
 
+using MapaTur.App.Localization;
 using MapaTur.App.Services;
 using MapaTur.App.ViewModels;
 using MapaTur.Application.Terrain;
@@ -38,6 +40,7 @@ public partial class MapPage : ContentPage
         this.trailControllerLogger = trailControllerLogger;
         BindingContext = viewModel;
         MapControl.Map.Tapped += OnMapTapped;
+        TerrainView.RecordingSaved += OnRecordingSaved;
         viewModel.PropertyChanged += OnViewModelPropertyChanged;
     }
 
@@ -112,6 +115,14 @@ public partial class MapPage : ContentPage
         double resolution = CameraFocusSync.DistanceToResolution(
             camera.Distance, camera.FieldOfViewYRadians, viewportHeight, focus.Latitude);
         viewModel.CenterMapOn(focus, resolution);
+    }
+
+    private async void OnRecordingSaved(object? sender, string path)
+    {
+        await DisplayAlertAsync(
+            AppStrings.RecordingSavedTitle,
+            string.Format(CultureInfo.CurrentCulture, AppStrings.RecordingSavedFormat, path),
+            AppStrings.RecordingDismiss).ConfigureAwait(true);
     }
 
     private async void OnMapTapped(object? sender, MapEventArgs eventArgs)

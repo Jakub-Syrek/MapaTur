@@ -159,5 +159,14 @@ public static class AppStrings
     /// <summary>Status line shown when the user / OS denies location permission.</summary>
     public static string StatusLocationPermissionDenied => Get(nameof(StatusLocationPermissionDenied));
 
+    /// <summary>Title of the alert shown after a fly-through MP4 is saved.</summary>
+    public static string RecordingSavedTitle => Get(nameof(RecordingSavedTitle));
+
+    /// <summary>Body format for the fly-through-saved alert; {0} is the file path.</summary>
+    public static string RecordingSavedFormat => Get(nameof(RecordingSavedFormat));
+
+    /// <summary>Dismiss button label for the fly-through-saved alert.</summary>
+    public static string RecordingDismiss => Get(nameof(RecordingDismiss));
+
     private static string Get(string key) => Manager.GetString(key) ?? key;
 }

@@ -1,7 +1,9 @@
 using System.Numerics;
 
 using MapaTur.App.Services;
+using MapaTur.App.Services.Media;
 using MapaTur.Application.Maps;
+using MapaTur.Application.Media;
 using MapaTur.Application.Terrain;
 using MapaTur.Domain.Climbing;
 using MapaTur.Domain.Geography;
@@ -332,6 +334,8 @@ public partial class Terrain3DView : ContentView
     {
         InitializeComponent();
         controller = new Terrain3DController(Camera);
+        // 100 ns Stopwatch ticks → microseconds for frame presentation timestamps.
+        videoRecorder = new FlythroughRecorder(VideoRecorderFactory.Create(), () => recordClock.Elapsed.Ticks / 10L);
 #if WINDOWS
         Canvas.HandlerChanged += OnCanvasHandlerChanged;
 #endif
@@ -585,6 +589,18 @@ public partial class Terrain3DView : ContentView
     private float flightBaseWind;
     private Atmosphere? flightAtmosphere;
 
+    // In-app MP4 recording of the cinematic fly-through. The encoder is created per platform (Android:
+    // MediaCodec; elsewhere a no-op reporting unsupported). recordClock drives presentation timestamps in
+    // microseconds (a Stopwatch tick is 100 ns). Recording is requested when the flight starts and lazily
+    // begins on the next paint (when the surface pixel size is known); it's finalized when the flight ends.
+    private readonly System.Diagnostics.Stopwatch recordClock = System.Diagnostics.Stopwatch.StartNew();
+    private readonly FlythroughRecorder? videoRecorder;
+    private bool recordingRequested;
+    private byte[]? recordBuffer;
+
+    /// <summary>Raised after a fly-through recording is finalized, with the saved MP4 file path.</summary>
+    public event EventHandler<string>? RecordingSaved;
+
     // The atmosphere the renderer should use: the time-swept flight atmosphere while flying, else the
     // bound (slider-driven) one.
     private Atmosphere? EffectiveAtmosphere => flightActive && flightAtmosphere is not null ? flightAtmosphere : Atmosphere;
@@ -622,6 +638,8 @@ public partial class Terrain3DView : ContentView
         flightBaseWind = a?.Wind ?? 0.3f;
         flightAtmosphere = new Atmosphere(flightStartTime, flightBaseCloud, flightBaseWind);
         SetChromeVisible(false); // clear the screen for a clean cinematic shot
+        // Request an MP4 capture of the flight; it starts on the next paint once the surface size is known.
+        recordingRequested = videoRecorder?.IsSupported ?? false;
 
         if (flightTimer is null)
         {
@@ -637,6 +655,18 @@ public partial class Terrain3DView : ContentView
         bool wasFlying = flightActive || IsFlying;
         flightActive = false;
         flightTimer?.Stop();
+
+        // Finalize the MP4 (if one was being captured) and surface its path to the host page.
+        recordingRequested = false;
+        if (videoRecorder is { IsRecording: true })
+        {
+            string? saved = videoRecorder.Stop();
+            if (!string.IsNullOrEmpty(saved))
+            {
+                RecordingSaved?.Invoke(this, saved);
+            }
+        }
+
         if (wasFlying)
         {
             IsFlying = false;
@@ -898,6 +928,7 @@ public partial class Terrain3DView : ContentView
             // GL already drew the (depth-occluded) trails + route; Skia only adds the markers/labels on top.
             renderer.DrawOverlays(canvas, null, null, projectedClimbing, projectedPois, projectedPeaks, projectedUserLocation);
             DrawNightLights(canvas, projectedPois);
+            ServiceRecording(e);
             return;
         }
 #endif
@@ -906,6 +937,67 @@ public partial class Terrain3DView : ContentView
         // of the mesh (the visual the user wants) and it drops a per-frame depth-grid fill.
         renderer.RenderTiles(canvas, e.Info.Width, e.Info.Height, tiles, Camera, frameScratch, null, projectedTrails, projectedRoute, projectedClimbing, projectedPois, projectedPeaks, projectedUserLocation);
         DrawNightLights(canvas, projectedPois);
+        ServiceRecording(e);
+    }
+
+    // Per-frame recording service: lazily starts the recording once the surface size is known, then
+    // reads back the freshly-composited frame and feeds it to the encoder. No-op when not recording.
+    private void ServiceRecording(SKPaintGLSurfaceEventArgs e)
+    {
+        if (videoRecorder is null)
+        {
+            return;
+        }
+
+        if (recordingRequested && !videoRecorder.IsRecording)
+        {
+            videoRecorder.TryStart(e.Info.Width, e.Info.Height, RecordingFrameRate, BuildRecordingOutputPath());
+        }
+
+        if (!videoRecorder.IsRecording)
+        {
+            return;
+        }
+
+        CaptureSurfaceFrame(e.Surface, videoRecorder.FrameWidth, videoRecorder.FrameHeight);
+    }
+
+    private const int RecordingFrameRate = 30;
+
+    // Reads the top-left width×height region of the composited surface as tightly-packed RGBA8 and hands
+    // it to the recorder. The buffer is reused across frames (the encoder copies it synchronously).
+    private void CaptureSurfaceFrame(SKSurface surface, int width, int height)
+    {
+        if (videoRecorder is null || width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        int needed = width * height * 4;
+        if (recordBuffer is null || recordBuffer.Length < needed)
+        {
+            recordBuffer = new byte[needed];
+        }
+
+        var info = new SKImageInfo(width, height, SKColorType.Rgba8888, SKAlphaType.Unpremul);
+        var handle = System.Runtime.InteropServices.GCHandle.Alloc(recordBuffer, System.Runtime.InteropServices.GCHandleType.Pinned);
+        try
+        {
+            if (surface.ReadPixels(info, handle.AddrOfPinnedObject(), width * 4, 0, 0))
+            {
+                videoRecorder.CaptureFrame(recordBuffer);
+            }
+        }
+        finally
+        {
+            handle.Free();
+        }
+    }
+
+    private static string BuildRecordingOutputPath()
+    {
+        string name = $"OrlaPerc_{DateTime.Now:yyyyMMdd_HHmmss}.mp4";
+        return System.IO.Path.Combine(FileSystem.Current.CacheDirectory, name);
     }
 
     // Warm window lights that switch on in every refuge (hut / wilderness hut / chalet / shelter)
