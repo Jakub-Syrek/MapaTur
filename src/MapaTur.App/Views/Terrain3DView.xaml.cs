@@ -472,8 +472,6 @@ public partial class Terrain3DView : ContentView
     private Action? heldAction;
     private IDispatcherTimer? holdTimer;
 
-    private void OnFlyOrlaPercClicked(object? sender, EventArgs e) => StartOrlaPercFlight();
-
     private void StartHold(Action mutate)
     {
         StopFlight(); // any manual camera control cancels an in-progress fly-through
@@ -693,13 +691,12 @@ public partial class Terrain3DView : ContentView
         }
     }
 
-    // Show/hide the view's own on-screen chrome (altitude pad, pan/tilt pad, fly button) so a
-    // fly-through fills the screen. The host page hides its toolbar + sliders off the IsFlying bind.
+    // Show/hide the view's own on-screen chrome (altitude pad, pan/tilt pad) so a fly-through fills
+    // the screen. The host page hides its toolbar + sliders off the IsFlying bind.
     private void SetChromeVisible(bool visible)
     {
         AltitudePad.IsVisible = visible;
         PanTiltPad.IsVisible = visible;
-        FlightButton.IsVisible = visible;
     }
 
     private void OnFlightTick(object? sender, EventArgs e)
