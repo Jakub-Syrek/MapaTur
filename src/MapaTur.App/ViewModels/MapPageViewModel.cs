@@ -1775,10 +1775,11 @@ public sealed partial class MapPageViewModel : ObservableObject
     }
 
     /// <summary>
-    /// Returns the bbox to use for an Overpass download: the visible viewport
-    /// intersected with any loaded basemap and DEM bounds. Returns null if the
-    /// viewport isn't ready or the intersection is empty (the user is looking
-    /// at an area entirely outside the loaded map data).
+    /// Returns the bbox to use for an Overpass download: the visible viewport intersected with the
+    /// Małopolska region (the area now covered by the online orthophoto base). Returns null if the
+    /// viewport isn't ready or it's entirely outside the region. Zooming out to the whole region and
+    /// downloading therefore fetches trails / roads / POIs across all of Małopolska, not just the Tatry
+    /// basemap footprint.
     /// </summary>
     private MapBounds? ComputeDownloadBounds()
     {
@@ -1788,16 +1789,14 @@ public sealed partial class MapPageViewModel : ObservableObject
             return null;
         }
 
-        MapBounds? clipped = viewport;
+        // Coverage = Małopolska (unioned with any larger loaded basemap), matching the render/trail clip.
+        MapBounds coverage = MalopolskaRegion;
         if (basemapBounds is { } basemap)
         {
-            clipped = clipped?.Intersect(basemap);
+            coverage = coverage.Union(basemap);
         }
-        if (TerrainRaster?.Bounds is { } demBounds)
-        {
-            clipped = clipped?.Intersect(demBounds);
-        }
-        return clipped;
+
+        return viewport.Value.Intersect(coverage);
     }
 
     private MRect? GetCurrentExtent()
