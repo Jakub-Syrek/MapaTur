@@ -118,14 +118,7 @@ public sealed class TerrainMesh3D
     /// geometry (trails, routes) sits at the same vertical scale as the rendered terrain.
     /// </summary>
     public Vector3 GeoToWorld(GeoPoint geoPoint, float elevationMeters)
-    {
-        double centerLat = (Bounds.NorthEast.Latitude + Bounds.SouthWest.Latitude) / 2.0;
-        double centerLon = (Bounds.NorthEast.Longitude + Bounds.SouthWest.Longitude) / 2.0;
-        double metersPerLonDegree = MetersPerLatDegree * Math.Cos(centerLat * Math.PI / 180.0);
-        double xMeters = (geoPoint.Longitude - centerLon) * metersPerLonDegree;
-        double yMeters = (geoPoint.Latitude - centerLat) * MetersPerLatDegree;
-        return new Vector3((float)xMeters, (float)yMeters, elevationMeters * VerticalExaggeration);
-    }
+        => LocalTangentProjection.GeoToWorld(geoPoint, elevationMeters, BoundsCenter, VerticalExaggeration);
 
     /// <summary>
     /// Inverse of <see cref="GeoToWorld"/>: maps a world-space point (X east, Y north, in metres)
@@ -134,14 +127,12 @@ public sealed class TerrainMesh3D
     /// 2D map centre so switching between 3D and 2D keeps the same place framed.
     /// </summary>
     public GeoPoint WorldToGeo(Vector3 worldPoint)
-    {
-        double centerLat = (Bounds.NorthEast.Latitude + Bounds.SouthWest.Latitude) / 2.0;
-        double centerLon = (Bounds.NorthEast.Longitude + Bounds.SouthWest.Longitude) / 2.0;
-        double metersPerLonDegree = MetersPerLatDegree * Math.Cos(centerLat * Math.PI / 180.0);
-        double longitude = centerLon + (worldPoint.X / metersPerLonDegree);
-        double latitude = centerLat + (worldPoint.Y / MetersPerLatDegree);
-        return new GeoPoint(latitude, longitude);
-    }
+        => LocalTangentProjection.WorldToGeo(worldPoint, BoundsCenter);
+
+    /// <summary>Geographic centre of the source raster's bounds — the origin of this mesh's world frame.</summary>
+    private GeoPoint BoundsCenter => new(
+        (Bounds.NorthEast.Latitude + Bounds.SouthWest.Latitude) / 2.0,
+        (Bounds.NorthEast.Longitude + Bounds.SouthWest.Longitude) / 2.0);
 
     /// <summary>Largest vertex count addressable by 16-bit (ushort) triangle indices.</summary>
     private const int MaxVerticesPerMesh = ushort.MaxValue + 1;
