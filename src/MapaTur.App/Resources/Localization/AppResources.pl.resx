@@ -222,4 +222,15 @@
   <data name="ClimbingTypeCliff" xml:space="preserve">
     <value>Skała / urwisko</value>
   </data>
+  <data name="RecordingSavedTitle" xml:space="preserve">
+    <value>Nagrano przelot</value>
+  </data>
+  <data name="RecordingSavedFormat" xml:space="preserve">
+    <value>Zapisano w:
+{0}</value>
+    <comment>{0} to ścieżka zapisanego pliku MP4.</comment>
+  </data>
+  <data name="RecordingDismiss" xml:space="preserve">
+    <value>OK</value>
+  </data>
 </root>

@@ -42,6 +42,7 @@ public partial class MapPage : ContentPage
         BindingContext = viewModel;
         MapControl.Map.Tapped += OnMapTapped;
         TerrainView.MarkerTapped += OnMarkerTapped;
+        TerrainView.RecordingSaved += OnRecordingSaved;
         viewModel.PropertyChanged += OnViewModelPropertyChanged;
     }
 
@@ -116,6 +117,14 @@ public partial class MapPage : ContentPage
         double resolution = CameraFocusSync.DistanceToResolution(
             camera.Distance, camera.FieldOfViewYRadians, viewportHeight, focus.Latitude);
         viewModel.CenterMapOn(focus, resolution);
+    }
+
+    private async void OnRecordingSaved(object? sender, string path)
+    {
+        await DisplayAlertAsync(
+            AppStrings.RecordingSavedTitle,
+            string.Format(CultureInfo.CurrentCulture, AppStrings.RecordingSavedFormat, path),
+            AppStrings.RecordingDismiss).ConfigureAwait(true);
     }
 
     private async void OnMapTapped(object? sender, MapEventArgs eventArgs)

@@ -222,4 +222,15 @@
   <data name="ClimbingTypeCliff" xml:space="preserve">
     <value>Cliff</value>
   </data>
+  <data name="RecordingSavedTitle" xml:space="preserve">
+    <value>Fly-through recorded</value>
+  </data>
+  <data name="RecordingSavedFormat" xml:space="preserve">
+    <value>Saved to:
+{0}</value>
+    <comment>{0} is the saved MP4 file path.</comment>
+  </data>
+  <data name="RecordingDismiss" xml:space="preserve">
+    <value>OK</value>
+  </data>
 </root>
