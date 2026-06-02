@@ -5,6 +5,7 @@ using MapaTur.App.Services;
 using MapaTur.Application.Climbing;
 using MapaTur.Application.Location;
 using MapaTur.Application.Maps;
+using MapaTur.Application.Markers;
 using MapaTur.Application.Pois;
 using MapaTur.Application.Roads;
 using MapaTur.Application.Routing;
@@ -99,6 +100,60 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <summary>True when the location service is actively polling for fixes. Drives the button label.</summary>
     [ObservableProperty]
     private bool isLocationTracking;
+
+    /// <summary>Whether the ☰ actions dropdown is open.</summary>
+    [ObservableProperty]
+    private bool isMenuOpen;
+
+    /// <summary>
+    /// Whether route-planning is active. When false (default), a map tap does nothing; when true, taps
+    /// drop waypoints and plan a route. Toggled from the ☰ menu so casual browsing / marker taps never
+    /// start a route by accident.
+    /// </summary>
+    [ObservableProperty]
+    private bool isRoutePlanningMode;
+
+    // Enabling planning closes the menu so the map is free to tap; the status line tells the user.
+    partial void OnIsRoutePlanningModeChanged(bool value)
+    {
+        IsMenuOpen = false;
+        StatusMessage = value
+            ? Localization.AppStrings.StatusRoutePlanningOn
+            : Localization.AppStrings.StatusRoutePlanningOff;
+    }
+
+    /// <summary>Whether the marker details card is shown.</summary>
+    [ObservableProperty]
+    private bool isMarkerPopupVisible;
+
+    /// <summary>Title of the marker details card (feature name or localized fallback).</summary>
+    [ObservableProperty]
+    private string markerPopupTitle = string.Empty;
+
+    /// <summary>Detail lines of the marker details card.</summary>
+    [ObservableProperty]
+    private IReadOnlyList<MarkerPopupLine>? markerPopupLines;
+
+    /// <summary>Opens the marker details card with the given content (from a 2D or 3D marker tap).</summary>
+    public void ShowMarkerPopup(MarkerPopupContent content)
+    {
+        ArgumentNullException.ThrowIfNull(content);
+        MarkerPopupTitle = content.Title;
+        MarkerPopupLines = content.Lines;
+        IsMarkerPopupVisible = true;
+    }
+
+    /// <summary>Toggles the ☰ actions dropdown.</summary>
+    [RelayCommand]
+    private void ToggleMenu() => IsMenuOpen = !IsMenuOpen;
+
+    /// <summary>Toggles route-planning mode (also closes the menu via the change handler).</summary>
+    [RelayCommand]
+    private void ToggleRoutePlanning() => IsRoutePlanningMode = !IsRoutePlanningMode;
+
+    /// <summary>Closes the marker details card.</summary>
+    [RelayCommand]
+    private void CloseMarkerPopup() => IsMarkerPopupVisible = false;
 
     [ObservableProperty]
     private IReadOnlyList<TerrainMesh3D>? terrainTiles;
@@ -1170,6 +1225,14 @@ public sealed partial class MapPageViewModel : ObservableObject
     public async Task HandleMapTapAsync(GeoPoint point)
     {
         if (IsBusy)
+        {
+            return;
+        }
+
+        // Route planning is an explicit mode now: a plain map tap only drops waypoints when the user has
+        // turned planning on (from the ☰ menu). Otherwise the tap does nothing — so browsing / tapping
+        // markers no longer accidentally starts a route.
+        if (!IsRoutePlanningMode)
         {
             return;
         }

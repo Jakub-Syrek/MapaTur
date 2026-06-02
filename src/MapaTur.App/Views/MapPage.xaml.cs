@@ -134,7 +134,7 @@ public partial class MapPage : ContentPage
         if (ResolveTappedMarker(eventArgs) is { } popup)
         {
             eventArgs.Handled = true;
-            await ShowMarkerPopupAsync(popup).ConfigureAwait(true);
+            viewModel.ShowMarkerPopup(popup);
             return;
         }
 
@@ -198,18 +198,9 @@ public partial class MapPage : ContentPage
         return null;
     }
 
-    private async void OnMarkerTapped(object? sender, MarkerPopupContent content)
+    private void OnMarkerTapped(object? sender, MarkerPopupContent content)
     {
-        await ShowMarkerPopupAsync(content).ConfigureAwait(true);
-    }
-
-    // Renders popup content as a simple, reliable cross-platform alert (title + "Label: value" lines).
-    private Task ShowMarkerPopupAsync(MarkerPopupContent content)
-    {
-        string body = string.Join(
-            Environment.NewLine,
-            content.Lines.Select(line => $"{line.Label}: {line.Value}"));
-        return DisplayAlertAsync(content.Title, body, AppStrings.PopupClose);
+        viewModel.ShowMarkerPopup(content);
     }
 
     /// <inheritdoc />
