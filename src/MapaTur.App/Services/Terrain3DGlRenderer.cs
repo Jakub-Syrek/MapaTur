@@ -437,6 +437,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // Old tiles whose GL textures still need deleting on the GL thread (set when textures are swapped).
     private readonly List<OrthoTile> pendingOrthoRelease = new();
     private bool orthoDirty;
+
+    // Viewport-aware ortho streaming (#39) + LRU eviction (#43). Only the ortho cells whose world AABB
+    // is inside the view frustum are uploaded; the planner caps resident-cell VRAM at OrthoVramBudgetBytes
+    // and evicts the least-recently-rendered cell when a newly-visible one pushes past the budget. CPU
+    // bytes are kept (lazy re-upload on re-entry); releasing them + re-decoding from disk is a follow-up.
+    private const long OrthoVramBudgetBytes = 1024L * 1024 * 1024; // ~1 GB resident ortho cap
+    private OrthoResidencyPlanner? orthoPlanner;
+    // Per-cell world-space AABB (keyed by OrthoTileIndex), unioned from the mesh tiles that sample it.
+    private readonly Dictionary<int, (Vector3 Min, Vector3 Max)> orthoCellBounds = new();
+    private IReadOnlyList<TerrainMesh3D>? orthoBoundsTiles;
+    private readonly List<int> visibleOrthoCells = new();
     private uint lineProgram;
     private int lineMvpLocation = -1;
     private int lineViewportLocation = -1;
@@ -645,7 +656,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             lastTiles = tiles;
         }
 
-        EnsureOrthoTextures(gl);
+        // Reclaim any GL textures retired by a previous SetOrthoTextures swap. The actual upload/eviction
+        // is viewport-aware and runs in StreamOrthoTextures once the view-projection is known (below).
+        ReclaimReleasedOrthoTextures(gl);
 
         int vpWidth = Math.Max(1, width);
         int vpHeight = Math.Max(1, height);
@@ -686,6 +699,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Clear((uint)(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit));
 
         Matrix4x4 mvp = camera.BuildViewProjection((float)width / Math.Max(1, height));
+
+        // Viewport-aware ortho streaming: upload only the cells whose AABB is in-frustum, evicting the
+        // least-recently-rendered ones past the VRAM budget. mvp is the world→clip matrix the frustum
+        // test expects (same as Camera3D.ProjectToScreen). Must run before the terrain pass binds cells.
+        StreamOrthoTextures(gl, mvp, tiles);
 
         // ── Live weather ────────────────────────────────────────────────────────────────────────
         // Clouds are not a static dial: the coverage wanders over minutes (sometimes near-clear,
@@ -1080,73 +1098,185 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     }
 
     /// <summary>Reclaims swapped-out textures and uploads any not-yet-uploaded ortho cells (GL thread).</summary>
-    private void EnsureOrthoTextures(GL g)
+    // Deletes GL textures retired by a SetOrthoTextures swap. Cheap; called every frame.
+    private void ReclaimReleasedOrthoTextures(GL g)
     {
-        // Always reclaim handles from a previous texture set, even if nothing new is pending.
-        if (pendingOrthoRelease.Count > 0)
-        {
-            foreach (OrthoTile old in pendingOrthoRelease)
-            {
-                if (old.Texture != 0)
-                {
-                    g.DeleteTexture(old.Texture);
-                    old.Texture = 0;
-                }
-            }
-            pendingOrthoRelease.Clear();
-        }
-
-        if (!orthoDirty)
+        if (pendingOrthoRelease.Count == 0)
         {
             return;
         }
-        orthoDirty = false;
 
-        // Upload beyond GL_MAX_TEXTURE_SIZE yields a garbage/black texture, so guard the size once.
-        Span<int> maxTexSize = stackalloc int[1] { 2048 };
-        g.GetInteger(GLEnum.MaxTextureSize, maxTexSize);
-        int maxSize = maxTexSize[0];
-
-        // Query the driver's max anisotropy once, outside the upload loop (a per-iteration stackalloc would
-        // risk a stack overflow — CA2014).
-        const GLEnum maxAnisotropyPName = (GLEnum)0x84FF; // GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
-        const GLEnum anisotropyPName = (GLEnum)0x84FE;    // GL_TEXTURE_MAX_ANISOTROPY_EXT
-        Span<float> maxAniso = stackalloc float[1] { 1f };
-        g.GetFloat(maxAnisotropyPName, maxAniso);
-        float aniso = Math.Clamp(16f, 1f, maxAniso[0] < 1f ? 1f : maxAniso[0]);
-
-        foreach (OrthoTile tile in orthoTiles)
+        foreach (OrthoTile old in pendingOrthoRelease)
         {
-            if (tile.Texture != 0)
+            if (old.Texture != 0)
             {
-                continue; // already uploaded
+                g.DeleteTexture(old.Texture);
+                old.Texture = 0;
             }
-            if (tile.Width > maxSize || tile.Height > maxSize)
-            {
-                Log.Information("[GL3D] ortho tile {W}x{H} exceeds GL_MAX_TEXTURE_SIZE {Max}; skipping",
-                    tile.Width, tile.Height, maxSize);
-                continue;
-            }
+        }
+        pendingOrthoRelease.Clear();
+    }
 
-            tile.Texture = g.GenTexture();
-            g.BindTexture(TextureTarget.Texture2D, tile.Texture);
-            g.TexImage2D<byte>(
-                TextureTarget.Texture2D, 0, (int)InternalFormat.Rgba8,
-                (uint)tile.Width, (uint)tile.Height, 0,
-                PixelFormat.Rgba, PixelType.UnsignedByte, tile.Rgba);
-
-            // Trilinear (mipmapped) minification + anisotropy — the ortho is seen at grazing angles where
-            // plain bilinear shimmers and smears into blocks. ClampToEdge so adjacent cell textures meet
-            // seamlessly at the shared seam.
-            g.GenerateMipmap(TextureTarget.Texture2D);
-            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
-            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
-            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
-            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
-            g.TexParameter(TextureTarget.Texture2D, (TextureParameterName)anisotropyPName, aniso);
+    // Viewport-aware ortho streaming + LRU eviction. Computes which cells are in-frustum this frame,
+    // asks the residency planner what to upload/evict within the VRAM budget, and applies the plan.
+    private void StreamOrthoTextures(GL g, Matrix4x4 viewProjection, IReadOnlyList<TerrainMesh3D> tiles)
+    {
+        if (orthoTiles.Count == 0)
+        {
+            orthoPlanner = null;
+            return;
         }
 
-        g.BindTexture(TextureTarget.Texture2D, 0);
+        // A new ortho set (or a context-loss rebuild) resets residency: every prior GL texture is gone,
+        // so the planner must start from an empty resident set.
+        if (orthoDirty)
+        {
+            orthoDirty = false;
+            orthoPlanner = null;
+        }
+
+        EnsureOrthoCellBounds(tiles);
+
+        orthoPlanner ??= new OrthoResidencyPlanner(ComputeOrthoBudgetCells());
+
+        // Which cells are potentially on screen? A cell is drawable only if some mesh tile samples it
+        // (so it has a world AABB); cull the rest against the frustum.
+        visibleOrthoCells.Clear();
+        for (int idx = 0; idx < orthoTiles.Count; idx++)
+        {
+            if (orthoCellBounds.TryGetValue(idx, out var aabb) &&
+                FrustumCuller.IsAabbVisible(viewProjection, aabb.Min, aabb.Max))
+            {
+                visibleOrthoCells.Add(idx);
+            }
+        }
+
+        OrthoResidencyPlan plan = orthoPlanner.Plan(visibleOrthoCells);
+        if (plan.ToUpload.Count == 0 && plan.ToEvict.Count == 0)
+        {
+            return;
+        }
+
+        foreach (int idx in plan.ToEvict)
+        {
+            OrthoTile tile = orthoTiles[idx];
+            if (tile.Texture != 0)
+            {
+                g.DeleteTexture(tile.Texture);
+                tile.Texture = 0;
+            }
+        }
+
+        if (plan.ToUpload.Count > 0)
+        {
+            // Upload beyond GL_MAX_TEXTURE_SIZE yields a garbage/black texture, so guard the size once.
+            Span<int> maxTexSize = stackalloc int[1] { 2048 };
+            g.GetInteger(GLEnum.MaxTextureSize, maxTexSize);
+            int maxSize = maxTexSize[0];
+
+            // Query the driver's max anisotropy once, outside the upload loop (a per-iteration stackalloc
+            // would risk a stack overflow — CA2014).
+            const GLEnum maxAnisotropyPName = (GLEnum)0x84FF; // GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
+            Span<float> maxAniso = stackalloc float[1] { 1f };
+            g.GetFloat(maxAnisotropyPName, maxAniso);
+            float aniso = Math.Clamp(16f, 1f, maxAniso[0] < 1f ? 1f : maxAniso[0]);
+
+            foreach (int idx in plan.ToUpload)
+            {
+                UploadOrthoCell(g, orthoTiles[idx], maxSize, aniso);
+            }
+
+            g.BindTexture(TextureTarget.Texture2D, 0);
+        }
+    }
+
+    private static void UploadOrthoCell(GL g, OrthoTile tile, int maxSize, float aniso)
+    {
+        if (tile.Texture != 0)
+        {
+            return; // already resident
+        }
+        if (tile.Width > maxSize || tile.Height > maxSize)
+        {
+            Log.Information("[GL3D] ortho tile {W}x{H} exceeds GL_MAX_TEXTURE_SIZE {Max}; skipping",
+                tile.Width, tile.Height, maxSize);
+            return;
+        }
+
+        const GLEnum anisotropyPName = (GLEnum)0x84FE; // GL_TEXTURE_MAX_ANISOTROPY_EXT
+        tile.Texture = g.GenTexture();
+        g.BindTexture(TextureTarget.Texture2D, tile.Texture);
+        g.TexImage2D<byte>(
+            TextureTarget.Texture2D, 0, (int)InternalFormat.Rgba8,
+            (uint)tile.Width, (uint)tile.Height, 0,
+            PixelFormat.Rgba, PixelType.UnsignedByte, tile.Rgba);
+
+        // Trilinear (mipmapped) minification + anisotropy — the ortho is seen at grazing angles where
+        // plain bilinear shimmers and smears into blocks. ClampToEdge so adjacent cell textures meet
+        // seamlessly at the shared seam.
+        g.GenerateMipmap(TextureTarget.Texture2D);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+        g.TexParameter(TextureTarget.Texture2D, (TextureParameterName)anisotropyPName, aniso);
+    }
+
+    // Resident-cell budget = VRAM budget / per-cell bytes (incl. ~33% for the mip chain), clamped to
+    // [1, cellCount]. All cells are the same size in practice, so a count budget tracks the byte budget.
+    private int ComputeOrthoBudgetCells()
+    {
+        long perCell = 0;
+        foreach (OrthoTile tile in orthoTiles)
+        {
+            long bytes = (long)Math.Max(1, tile.Width) * Math.Max(1, tile.Height) * 4L;
+            bytes += bytes / 3L; // mip chain ≈ +33%
+            if (bytes > perCell)
+            {
+                perCell = bytes;
+            }
+        }
+
+        if (perCell <= 0)
+        {
+            return orthoTiles.Count;
+        }
+
+        int budget = (int)Math.Min(orthoTiles.Count, Math.Max(1, OrthoVramBudgetBytes / perCell));
+        return Math.Max(1, budget);
+    }
+
+    // Computes the world-space AABB of each ortho cell (keyed by OrthoTileIndex) by unioning the vertex
+    // bounds of every mesh tile that samples it. Recomputed only when the tile set reference changes.
+    private void EnsureOrthoCellBounds(IReadOnlyList<TerrainMesh3D> tiles)
+    {
+        if (ReferenceEquals(orthoBoundsTiles, tiles) && orthoCellBounds.Count > 0)
+        {
+            return;
+        }
+
+        orthoCellBounds.Clear();
+        foreach (TerrainMesh3D tile in tiles)
+        {
+            int idx = tile.OrthoTileIndex;
+            Vector3 min = new(float.PositiveInfinity);
+            Vector3 max = new(float.NegativeInfinity);
+            foreach (Vector3 v in tile.Vertices)
+            {
+                min = Vector3.Min(min, v);
+                max = Vector3.Max(max, v);
+            }
+
+            if (orthoCellBounds.TryGetValue(idx, out var existing))
+            {
+                min = Vector3.Min(min, existing.Min);
+                max = Vector3.Max(max, existing.Max);
+            }
+
+            orthoCellBounds[idx] = (min, max);
+        }
+
+        orthoBoundsTiles = tiles;
     }
 
     private void EnsureProgram(GL g)
