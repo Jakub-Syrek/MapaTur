@@ -650,17 +650,19 @@ public sealed partial class MapPageViewModel : ObservableObject
     // blank space. Called whenever a basemap or DEM loads.
     private void UpdateTrailCoverage()
     {
-        if (viewportTrailController is null)
-        {
-            return;
-        }
-
-        // Clip to the visible basemap footprint (the actual rendered map) so trails never trail off onto
-        // blank space. Only when there's no basemap at all do we fall back to the DEM extent.
+        // Clip to the visible basemap footprint (the actual rendered map) so trails / roads never trail
+        // off onto blank space. Only when there's no basemap at all do we fall back to the DEM extent.
         MapBounds? coverage = basemapBounds ?? TerrainRaster?.Bounds;
 
-        viewportTrailController.CoverageBounds = coverage;
-        viewportTrailController.RequestRefresh();
+        if (viewportTrailController is not null)
+        {
+            viewportTrailController.CoverageBounds = coverage;
+            viewportTrailController.RequestRefresh();
+        }
+
+        // Roads use the same coverage clip; re-render the last-downloaded set with it applied.
+        roadRenderer.CoverageBounds = coverage;
+        ApplyRoads();
     }
 
     /// <summary>

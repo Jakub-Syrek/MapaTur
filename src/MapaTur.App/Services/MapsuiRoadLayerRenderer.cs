@@ -1,8 +1,7 @@
+using MapaTur.Domain.Geography;
 using MapaTur.Domain.Trails;
 
 using Mapsui.Layers;
-using Mapsui.Nts;
-using Mapsui.Projections;
 
 using NetTopologySuite.Geometries;
 
@@ -24,6 +23,9 @@ public sealed class MapsuiRoadLayerRenderer : IRoadLayerRenderer
     private const float StrokeWidthPixels = 2.0f;
 
     /// <inheritdoc />
+    public MapBounds? CoverageBounds { get; set; }
+
+    /// <inheritdoc />
     public void RenderRoads(Map map, IReadOnlyList<Trail> roads)
     {
         ArgumentNullException.ThrowIfNull(map);
@@ -31,10 +33,9 @@ public sealed class MapsuiRoadLayerRenderer : IRoadLayerRenderer
 
         Clear(map);
 
+        Geometry? clip = MapCoverageClipper.BuildClip(CoverageBounds);
         var features = roads
-            .Select(BuildFeature)
-            .Where(feature => feature is not null)
-            .Cast<GeometryFeature>()
+            .SelectMany(road => MapCoverageClipper.ToFeatures(road, clip))
             .ToList();
 
         if (features.Count == 0)
@@ -64,15 +65,5 @@ public sealed class MapsuiRoadLayerRenderer : IRoadLayerRenderer
         {
             map.Layers.Remove(layer);
         }
-    }
-
-    private static GeometryFeature? BuildFeature(Trail road)
-    {
-        var coordinates = road.Geometry
-            .Select(point => SphericalMercator.FromLonLat(point.Longitude, point.Latitude))
-            .Select(projected => new Coordinate(projected.x, projected.y))
-            .ToArray();
-
-        return coordinates.Length < 2 ? null : new GeometryFeature(new LineString(coordinates));
     }
 }
