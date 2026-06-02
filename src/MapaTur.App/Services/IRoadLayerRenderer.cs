@@ -1,3 +1,4 @@
+using MapaTur.Domain.Geography;
 using MapaTur.Domain.Trails;
 
 using Map = Mapsui.Map;
@@ -10,6 +11,12 @@ namespace MapaTur.App.Services;
 /// </summary>
 public interface IRoadLayerRenderer
 {
+    /// <summary>
+    /// When set, road geometry is clipped to these bounds (the loaded map coverage) so roads don't
+    /// trail off onto blank space past the basemap. Null draws full geometry.
+    /// </summary>
+    MapBounds? CoverageBounds { get; set; }
+
     /// <summary>Draws road polylines on the map, replacing any previously drawn road layer.</summary>
     void RenderRoads(Map map, IReadOnlyList<Trail> roads);
 

@@ -2,8 +2,6 @@ using MapaTur.Domain.Geography;
 using MapaTur.Domain.Trails;
 
 using Mapsui.Layers;
-using Mapsui.Nts;
-using Mapsui.Projections;
 
 using NetTopologySuite.Geometries;
 
@@ -34,12 +32,12 @@ public sealed class MapsuiTrailLayerRenderer : ITrailLayerRenderer
 
         RemoveExistingTrailLayers(map);
 
-        Geometry? clip = BuildCoverageClip();
+        Geometry? clip = MapCoverageClipper.BuildClip(CoverageBounds);
 
         foreach (var group in trails.GroupBy(trail => trail.PrimaryColor))
         {
             var features = group
-                .SelectMany(trail => BuildFeatures(trail, clip))
+                .SelectMany(trail => MapCoverageClipper.ToFeatures(trail, clip))
                 .ToList();
 
             if (features.Count == 0)
@@ -58,83 +56,6 @@ public sealed class MapsuiTrailLayerRenderer : ITrailLayerRenderer
             };
 
             map.Layers.Add(layer);
-        }
-    }
-
-    // The coverage rectangle in Spherical-Mercator (or null when no coverage is set).
-    private Geometry? BuildCoverageClip()
-    {
-        if (CoverageBounds is not { } b)
-        {
-            return null;
-        }
-
-        var (minX, minY) = SphericalMercator.FromLonLat(b.SouthWest.Longitude, b.SouthWest.Latitude);
-        var (maxX, maxY) = SphericalMercator.FromLonLat(b.NorthEast.Longitude, b.NorthEast.Latitude);
-        return new GeometryFactory().ToGeometry(new Envelope(minX, maxX, minY, maxY));
-    }
-
-    private static IEnumerable<GeometryFeature> BuildFeatures(Trail trail, Geometry? clip)
-    {
-        var coordinates = trail.Geometry
-            .Select(point => SphericalMercator.FromLonLat(point.Longitude, point.Latitude))
-            .Select(projected => new Coordinate(projected.x, projected.y))
-            .ToArray();
-
-        if (coordinates.Length < 2)
-        {
-            yield break;
-        }
-
-        Geometry line = new LineString(coordinates);
-
-        if (clip is null)
-        {
-            yield return new GeometryFeature(line);
-            yield break;
-        }
-
-        // Clip the polyline to the map coverage so nothing draws past the basemap. Intersection can
-        // split a trail into several pieces (a MultiLineString) where it crosses the boundary. On the
-        // rare NTS robustness error, fall back to the unclipped line.
-        Geometry intersection;
-        try
-        {
-            intersection = line.Intersection(clip);
-        }
-        catch (NetTopologySuite.Geometries.TopologyException)
-        {
-            intersection = line;
-        }
-
-        foreach (LineString piece in ExtractLineStrings(intersection))
-        {
-            yield return new GeometryFeature(piece);
-        }
-    }
-
-    private static IEnumerable<LineString> ExtractLineStrings(Geometry geometry)
-    {
-        if (geometry.IsEmpty)
-        {
-            yield break;
-        }
-
-        switch (geometry)
-        {
-            case LineString ls when ls.NumPoints >= 2:
-                yield return ls;
-                break;
-            case MultiLineString or GeometryCollection:
-                for (int i = 0; i < geometry.NumGeometries; i++)
-                {
-                    foreach (LineString inner in ExtractLineStrings(geometry.GetGeometryN(i)))
-                    {
-                        yield return inner;
-                    }
-                }
-
-                break;
         }
     }
 
