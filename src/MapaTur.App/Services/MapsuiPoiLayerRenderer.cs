@@ -19,7 +19,8 @@ namespace MapaTur.App.Services;
 /// </summary>
 public sealed class MapsuiPoiLayerRenderer : IPoiLayerRenderer
 {
-    private const string PoiLayerPrefix = "mountain-pois-";
+    /// <summary>Prefix shared by every per-kind POI layer; used to find/remove them and to identify a tapped POI feature.</summary>
+    public const string PoiLayerPrefix = "mountain-pois-";
 
     /// <inheritdoc />
     public void RenderPois(Map map, IReadOnlyList<MountainPoi> pois)
@@ -41,6 +42,7 @@ public sealed class MapsuiPoiLayerRenderer : IPoiLayerRenderer
             {
                 var projected = SphericalMercator.FromLonLat(poi.Position.Longitude, poi.Position.Latitude);
                 var feature = new PointFeature(projected.x, projected.y);
+                feature["id"] = poi.Id;
                 feature["kind"] = (int)poi.Kind;
                 feature["name"] = poi.Name;
                 features.Add(feature);

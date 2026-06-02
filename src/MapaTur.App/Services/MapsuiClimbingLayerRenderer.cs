@@ -19,7 +19,8 @@ namespace MapaTur.App.Services;
 /// </summary>
 public sealed class MapsuiClimbingLayerRenderer : IClimbingLayerRenderer
 {
-    private const string ClimbingLayerPrefix = "climbing-areas-";
+    /// <summary>Prefix shared by every per-type climbing layer; used to find/remove them and to identify a tapped climbing feature.</summary>
+    public const string ClimbingLayerPrefix = "climbing-areas-";
 
     /// <inheritdoc />
     public void RenderClimbingAreas(Map map, IReadOnlyList<ClimbingArea> areas)
@@ -41,6 +42,7 @@ public sealed class MapsuiClimbingLayerRenderer : IClimbingLayerRenderer
             {
                 var projected = SphericalMercator.FromLonLat(area.Position.Longitude, area.Position.Latitude);
                 var feature = new PointFeature(projected.x, projected.y);
+                feature["id"] = area.Id;
                 feature["type"] = (int)area.Type;
                 feature["name"] = area.Name;
                 features.Add(feature);

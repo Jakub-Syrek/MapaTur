@@ -1,7 +1,9 @@
 using System.Numerics;
 
+using MapaTur.App.Localization;
 using MapaTur.App.Services;
 using MapaTur.Application.Maps;
+using MapaTur.Application.Markers;
 using MapaTur.Application.Terrain;
 using MapaTur.Domain.Climbing;
 using MapaTur.Domain.Geography;
@@ -302,6 +304,23 @@ public partial class Terrain3DView : ContentView
     // Reused one-element buffer so a fix update doesn't allocate a fresh list per frame; the
     // projector compares by reference so we only swap the contained UserLocation when it changes.
     private readonly UserLocation[] userLocationBuffer = new UserLocation[1];
+
+    // Cached projected markers + surface size from the last paint, so a screen tap can be mapped back
+    // to the marker under it (the projectors own the per-frame buffers; we only keep references).
+    private IReadOnlyList<ProjectedClimbingArea>? lastProjectedClimbing;
+    private IReadOnlyList<ProjectedPoi>? lastProjectedPois;
+    private int lastSurfacePixelWidth;
+    private int lastSurfacePixelHeight;
+
+    // Touch target radius in device-independent units; scaled to surface pixels at hit-test time so a
+    // finger tap near a small marker glyph still selects it.
+    private const float MarkerTapRadiusDiu = 26f;
+
+    /// <summary>
+    /// Raised when the user taps a POI or climbing marker in the 3D view. The argument is ready-to-show
+    /// popup content (title + localized detail lines) for the front-most marker under the tap.
+    /// </summary>
+    public event EventHandler<MarkerPopupContent>? MarkerTapped;
 
     private double lastOrbitTotalX;
     private double lastOrbitTotalY;
@@ -888,6 +907,12 @@ public partial class Terrain3DView : ContentView
             }
         }
 
+        // Remember the projected markers + surface pixel size so a tap can hit-test against them.
+        lastProjectedClimbing = projectedClimbing;
+        lastProjectedPois = projectedPois;
+        lastSurfacePixelWidth = e.Info.Width;
+        lastSurfacePixelHeight = e.Info.Height;
+
 #if WINDOWS || ANDROID
         // GPU engine: GL draws the depth-buffered terrain into a colour TEXTURE we own, which Skia then
         // composes into the surface via DrawImage. Sidesteps the FBO-0 collision on Android (where Skia
@@ -1107,6 +1132,102 @@ public partial class Terrain3DView : ContentView
         double boosted = Math.Pow(perFrame, 2.5);
         controller.ApplyZoom((float)boosted);
         Canvas.InvalidateSurface();
+    }
+
+    /// <summary>
+    /// A single tap on the terrain: hit-test the cached projected markers and, if one is under the
+    /// finger, raise <see cref="MarkerTapped"/> with its popup content. Taps that miss every marker do
+    /// nothing (the 3D view has no tap-to-plan, unlike the 2D map).
+    /// </summary>
+    private void OnCanvasTapped(object? sender, TappedEventArgs e)
+    {
+        if (MarkerTapped is null || IsFlying)
+        {
+            return;
+        }
+
+        if (lastSurfacePixelWidth <= 0 || lastSurfacePixelHeight <= 0)
+        {
+            return;
+        }
+
+        Point? position = e.GetPosition(Canvas);
+        if (position is not { } pt)
+        {
+            return;
+        }
+
+        // GetPosition reports device-independent units; the projected screen positions are in surface
+        // pixels. Scale the tap up by the per-axis pixel density and use the same scale for the radius.
+        double diuWidth = Canvas.Width;
+        double diuHeight = Canvas.Height;
+        if (diuWidth <= 0 || diuHeight <= 0)
+        {
+            return;
+        }
+
+        float scaleX = (float)(lastSurfacePixelWidth / diuWidth);
+        float scaleY = (float)(lastSurfacePixelHeight / diuHeight);
+        float tapX = (float)pt.X * scaleX;
+        float tapY = (float)pt.Y * scaleY;
+        float radiusPx = MarkerTapRadiusDiu * MathF.Max(scaleX, scaleY);
+
+        MarkerPopupContent? content = HitTestMarkers(tapX, tapY, radiusPx);
+        if (content is { } popup)
+        {
+            MarkerTapped.Invoke(this, popup);
+        }
+    }
+
+    // Hit-tests climbing areas and POIs independently, then returns popup content for whichever winner
+    // is front-most (closest to the camera). Null when nothing is within the radius.
+    private MarkerPopupContent? HitTestMarkers(float tapX, float tapY, float radiusPx)
+    {
+        ClimbingArea? climbing = null;
+        float climbingDepth = float.PositiveInfinity;
+        if (lastProjectedClimbing is { Count: > 0 } climbingList)
+        {
+            var positions = new Vector3?[climbingList.Count];
+            for (int i = 0; i < climbingList.Count; i++)
+            {
+                positions[i] = climbingList[i].ScreenPosition;
+            }
+
+            if (MarkerHitTester.HitTest(positions, tapX, tapY, radiusPx) is { } hit)
+            {
+                climbing = climbingList[hit].Source;
+                climbingDepth = climbingList[hit].ScreenPosition!.Value.Z;
+            }
+        }
+
+        MountainPoi? poi = null;
+        float poiDepth = float.PositiveInfinity;
+        if (lastProjectedPois is { Count: > 0 } poiList)
+        {
+            var positions = new Vector3?[poiList.Count];
+            for (int i = 0; i < poiList.Count; i++)
+            {
+                positions[i] = poiList[i].ScreenPosition;
+            }
+
+            if (MarkerHitTester.HitTest(positions, tapX, tapY, radiusPx) is { } hit)
+            {
+                poi = poiList[hit].Source;
+                poiDepth = poiList[hit].ScreenPosition!.Value.Z;
+            }
+        }
+
+        if (poi is not null && (climbing is null || poiDepth <= climbingDepth))
+        {
+            return MarkerPopupFormatter.ForPoi(poi, MarkerPopupLabels.Instance);
+        }
+
+        if (climbing is not null)
+        {
+            return MarkerPopupFormatter.ForClimbing(climbing, MarkerPopupLabels.Instance);
+        }
+
+        return null;
     }
 
     /// <summary>

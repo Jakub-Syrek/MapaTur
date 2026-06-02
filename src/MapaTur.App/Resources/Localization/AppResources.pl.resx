@@ -156,4 +156,70 @@
   <data name="StatusLocationPermissionDenied" xml:space="preserve">
     <value>Brak zgody na lokalizację — włącz w ustawieniach systemu, aby śledzić pozycję.</value>
   </data>
+  <data name="PopupClose" xml:space="preserve">
+    <value>Zamknij</value>
+  </data>
+  <data name="PopupCategory" xml:space="preserve">
+    <value>Typ</value>
+  </data>
+  <data name="PopupElevation" xml:space="preserve">
+    <value>Wysokość</value>
+  </data>
+  <data name="PopupGrade" xml:space="preserve">
+    <value>Trudność</value>
+  </data>
+  <data name="PopupLength" xml:space="preserve">
+    <value>Długość</value>
+  </data>
+  <data name="PopupProtection" xml:space="preserve">
+    <value>Asekuracja</value>
+  </data>
+  <data name="PopupBolted" xml:space="preserve">
+    <value>ubezpieczona (spity)</value>
+  </data>
+  <data name="PopupTrad" xml:space="preserve">
+    <value>własna (trad)</value>
+  </data>
+  <data name="PopupUnnamedPoi" xml:space="preserve">
+    <value>Punkt</value>
+  </data>
+  <data name="PopupUnnamedClimbing" xml:space="preserve">
+    <value>Rejon wspinaczkowy</value>
+  </data>
+  <data name="PoiKindHut" xml:space="preserve">
+    <value>Schronisko</value>
+  </data>
+  <data name="PoiKindWildernessHut" xml:space="preserve">
+    <value>Bacówka / szałas</value>
+  </data>
+  <data name="PoiKindChalet" xml:space="preserve">
+    <value>Chatka</value>
+  </data>
+  <data name="PoiKindShelter" xml:space="preserve">
+    <value>Wiata / schron</value>
+  </data>
+  <data name="PoiKindViewpoint" xml:space="preserve">
+    <value>Punkt widokowy</value>
+  </data>
+  <data name="ClimbingTypeUnspecified" xml:space="preserve">
+    <value>Wspinaczka</value>
+  </data>
+  <data name="ClimbingTypeSportRoute" xml:space="preserve">
+    <value>Droga sportowa</value>
+  </data>
+  <data name="ClimbingTypeTradRoute" xml:space="preserve">
+    <value>Droga trad</value>
+  </data>
+  <data name="ClimbingTypeMultiPitch" xml:space="preserve">
+    <value>Droga wielowyciągowa</value>
+  </data>
+  <data name="ClimbingTypeBoulder" xml:space="preserve">
+    <value>Bulder</value>
+  </data>
+  <data name="ClimbingTypeCrag" xml:space="preserve">
+    <value>Rejon</value>
+  </data>
+  <data name="ClimbingTypeCliff" xml:space="preserve">
+    <value>Skała / urwisko</value>
+  </data>
 </root>

@@ -159,5 +159,71 @@ public static class AppStrings
     /// <summary>Status line shown when the user / OS denies location permission.</summary>
     public static string StatusLocationPermissionDenied => Get(nameof(StatusLocationPermissionDenied));
 
+    /// <summary>Dismiss button label on a marker detail popup.</summary>
+    public static string PopupClose => Get(nameof(PopupClose));
+
+    /// <summary>Label for the category/type line in a marker popup.</summary>
+    public static string PopupCategory => Get(nameof(PopupCategory));
+
+    /// <summary>Label for the elevation line in a marker popup.</summary>
+    public static string PopupElevation => Get(nameof(PopupElevation));
+
+    /// <summary>Label for the climbing grade line in a marker popup.</summary>
+    public static string PopupGrade => Get(nameof(PopupGrade));
+
+    /// <summary>Label for the route length line in a marker popup.</summary>
+    public static string PopupLength => Get(nameof(PopupLength));
+
+    /// <summary>Label for the protection line in a marker popup.</summary>
+    public static string PopupProtection => Get(nameof(PopupProtection));
+
+    /// <summary>Popup value shown for a bolted route.</summary>
+    public static string PopupBolted => Get(nameof(PopupBolted));
+
+    /// <summary>Popup value shown for a trad route.</summary>
+    public static string PopupTrad => Get(nameof(PopupTrad));
+
+    /// <summary>Popup title fallback for an unnamed POI.</summary>
+    public static string PopupUnnamedPoi => Get(nameof(PopupUnnamedPoi));
+
+    /// <summary>Popup title fallback for an unnamed climbing area.</summary>
+    public static string PopupUnnamedClimbing => Get(nameof(PopupUnnamedClimbing));
+
+    /// <summary>Display name for the "mountain hut" POI kind.</summary>
+    public static string PoiKindHut => Get(nameof(PoiKindHut));
+
+    /// <summary>Display name for the "wilderness hut" POI kind.</summary>
+    public static string PoiKindWildernessHut => Get(nameof(PoiKindWildernessHut));
+
+    /// <summary>Display name for the "chalet" POI kind.</summary>
+    public static string PoiKindChalet => Get(nameof(PoiKindChalet));
+
+    /// <summary>Display name for the "shelter" POI kind.</summary>
+    public static string PoiKindShelter => Get(nameof(PoiKindShelter));
+
+    /// <summary>Display name for the "viewpoint" POI kind.</summary>
+    public static string PoiKindViewpoint => Get(nameof(PoiKindViewpoint));
+
+    /// <summary>Display name for an unspecified climbing type.</summary>
+    public static string ClimbingTypeUnspecified => Get(nameof(ClimbingTypeUnspecified));
+
+    /// <summary>Display name for a sport-climbing route.</summary>
+    public static string ClimbingTypeSportRoute => Get(nameof(ClimbingTypeSportRoute));
+
+    /// <summary>Display name for a trad route.</summary>
+    public static string ClimbingTypeTradRoute => Get(nameof(ClimbingTypeTradRoute));
+
+    /// <summary>Display name for a multi-pitch route.</summary>
+    public static string ClimbingTypeMultiPitch => Get(nameof(ClimbingTypeMultiPitch));
+
+    /// <summary>Display name for a bouldering problem.</summary>
+    public static string ClimbingTypeBoulder => Get(nameof(ClimbingTypeBoulder));
+
+    /// <summary>Display name for a crag / sector.</summary>
+    public static string ClimbingTypeCrag => Get(nameof(ClimbingTypeCrag));
+
+    /// <summary>Display name for a natural cliff feature.</summary>
+    public static string ClimbingTypeCliff => Get(nameof(ClimbingTypeCliff));
+
     private static string Get(string key) => Manager.GetString(key) ?? key;
 }

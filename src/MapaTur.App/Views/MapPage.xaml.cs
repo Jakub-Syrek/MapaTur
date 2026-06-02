@@ -1,8 +1,11 @@
 using System.ComponentModel;
+using System.Globalization;
 using System.Numerics;
 
+using MapaTur.App.Localization;
 using MapaTur.App.Services;
 using MapaTur.App.ViewModels;
+using MapaTur.Application.Markers;
 using MapaTur.Application.Terrain;
 using MapaTur.Domain.Geography;
 
@@ -38,6 +41,7 @@ public partial class MapPage : ContentPage
         this.trailControllerLogger = trailControllerLogger;
         BindingContext = viewModel;
         MapControl.Map.Tapped += OnMapTapped;
+        TerrainView.MarkerTapped += OnMarkerTapped;
         viewModel.PropertyChanged += OnViewModelPropertyChanged;
     }
 
@@ -116,6 +120,15 @@ public partial class MapPage : ContentPage
 
     private async void OnMapTapped(object? sender, MapEventArgs eventArgs)
     {
+        // A tap landing on a POI / climbing marker shows its details popup and is consumed there, so it
+        // doesn't also drop a route waypoint.
+        if (ResolveTappedMarker(eventArgs) is { } popup)
+        {
+            eventArgs.Handled = true;
+            await ShowMarkerPopupAsync(popup).ConfigureAwait(true);
+            return;
+        }
+
         var worldPosition = eventArgs.WorldPosition;
         var (longitude, latitude) = SphericalMercator.ToLonLat(worldPosition.X, worldPosition.Y);
 
@@ -127,6 +140,67 @@ public partial class MapPage : ContentPage
         {
             // Tap fell outside the valid Mercator latitude band; ignore.
         }
+    }
+
+    // Resolves a 2D map tap to popup content when it hits a POI / climbing marker. The Mapsui feature
+    // only carries the id, so we look the full domain object back up from the view model.
+    private MarkerPopupContent? ResolveTappedMarker(MapEventArgs eventArgs)
+    {
+        if (eventArgs.GetMapInfo is null)
+        {
+            return null;
+        }
+
+        var markerLayers = MapControl.Map.Layers
+            .Where(layer => layer.Name is string name &&
+                (name.StartsWith(MapsuiPoiLayerRenderer.PoiLayerPrefix, StringComparison.Ordinal) ||
+                 name.StartsWith(MapsuiClimbingLayerRenderer.ClimbingLayerPrefix, StringComparison.Ordinal)))
+            .ToList();
+        if (markerLayers.Count == 0)
+        {
+            return null;
+        }
+
+        var info = eventArgs.GetMapInfo(markerLayers);
+        if (info?.Feature is not { } feature || info.Layer?.Name is not { } layerName)
+        {
+            return null;
+        }
+
+        if (feature["id"] is not { } idValue)
+        {
+            return null;
+        }
+
+        long id = Convert.ToInt64(idValue, CultureInfo.InvariantCulture);
+
+        if (layerName.StartsWith(MapsuiClimbingLayerRenderer.ClimbingLayerPrefix, StringComparison.Ordinal) &&
+            viewModel.TryFindClimbingById(id, out var area))
+        {
+            return MarkerPopupFormatter.ForClimbing(area, MarkerPopupLabels.Instance);
+        }
+
+        if (layerName.StartsWith(MapsuiPoiLayerRenderer.PoiLayerPrefix, StringComparison.Ordinal) &&
+            viewModel.TryFindPoiById(id, out var poi))
+        {
+            return MarkerPopupFormatter.ForPoi(poi, MarkerPopupLabels.Instance);
+        }
+
+        return null;
+    }
+
+    private async void OnMarkerTapped(object? sender, MarkerPopupContent content)
+    {
+        await ShowMarkerPopupAsync(content).ConfigureAwait(true);
+    }
+
+    // Renders popup content as a simple, reliable cross-platform alert (title + "Label: value" lines).
+    private Task ShowMarkerPopupAsync(MarkerPopupContent content)
+    {
+        string body = string.Join(
+            Environment.NewLine,
+            content.Lines.Select(line => $"{line.Label}: {line.Value}"));
+        return DisplayAlertAsync(content.Title, body, AppStrings.PopupClose);
     }
 
     /// <inheritdoc />

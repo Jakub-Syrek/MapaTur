@@ -474,6 +474,50 @@ public sealed partial class MapPageViewModel : ObservableObject
     }
 
     /// <summary>
+    /// Finds a loaded POI by its (OSM) id so a tapped 2D marker — which only carries the id — can be
+    /// resolved back to the full domain object for the details popup. Returns false when not loaded.
+    /// </summary>
+    public bool TryFindPoiById(long id, out MapaTur.Domain.Pois.MountainPoi poi)
+    {
+        if (rawPois is not null)
+        {
+            foreach (var candidate in rawPois)
+            {
+                if (candidate.Id == id)
+                {
+                    poi = candidate;
+                    return true;
+                }
+            }
+        }
+
+        poi = null!;
+        return false;
+    }
+
+    /// <summary>
+    /// Finds a loaded climbing area by its (OSM) id so a tapped 2D marker can be resolved back to the
+    /// full domain object for the details popup. Returns false when not loaded.
+    /// </summary>
+    public bool TryFindClimbingById(long id, out MapaTur.Domain.Climbing.ClimbingArea area)
+    {
+        if (Climbing3DOverlay is { } areas)
+        {
+            foreach (var candidate in areas)
+            {
+                if (candidate.Id == id)
+                {
+                    area = candidate;
+                    return true;
+                }
+            }
+        }
+
+        area = null!;
+        return false;
+    }
+
+    /// <summary>
     /// Loads POIs cached in the local SQLite repository within <paramref name="bounds"/> and applies
     /// them to the 2D map + 3D overlay. Best-effort and silent when the cache is empty — used at
     /// auto-load so once-downloaded refuges survive a restart without another Overpass call.

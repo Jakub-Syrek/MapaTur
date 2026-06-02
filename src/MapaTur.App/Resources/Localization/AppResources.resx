@@ -156,4 +156,70 @@
   <data name="StatusLocationPermissionDenied" xml:space="preserve">
     <value>Location permission denied — enable it in system settings to track your position.</value>
   </data>
+  <data name="PopupClose" xml:space="preserve">
+    <value>Close</value>
+  </data>
+  <data name="PopupCategory" xml:space="preserve">
+    <value>Type</value>
+  </data>
+  <data name="PopupElevation" xml:space="preserve">
+    <value>Elevation</value>
+  </data>
+  <data name="PopupGrade" xml:space="preserve">
+    <value>Grade</value>
+  </data>
+  <data name="PopupLength" xml:space="preserve">
+    <value>Length</value>
+  </data>
+  <data name="PopupProtection" xml:space="preserve">
+    <value>Protection</value>
+  </data>
+  <data name="PopupBolted" xml:space="preserve">
+    <value>bolted</value>
+  </data>
+  <data name="PopupTrad" xml:space="preserve">
+    <value>trad (bring gear)</value>
+  </data>
+  <data name="PopupUnnamedPoi" xml:space="preserve">
+    <value>Point of interest</value>
+  </data>
+  <data name="PopupUnnamedClimbing" xml:space="preserve">
+    <value>Climbing area</value>
+  </data>
+  <data name="PoiKindHut" xml:space="preserve">
+    <value>Mountain hut</value>
+  </data>
+  <data name="PoiKindWildernessHut" xml:space="preserve">
+    <value>Wilderness hut</value>
+  </data>
+  <data name="PoiKindChalet" xml:space="preserve">
+    <value>Chalet</value>
+  </data>
+  <data name="PoiKindShelter" xml:space="preserve">
+    <value>Shelter</value>
+  </data>
+  <data name="PoiKindViewpoint" xml:space="preserve">
+    <value>Viewpoint</value>
+  </data>
+  <data name="ClimbingTypeUnspecified" xml:space="preserve">
+    <value>Climbing</value>
+  </data>
+  <data name="ClimbingTypeSportRoute" xml:space="preserve">
+    <value>Sport route</value>
+  </data>
+  <data name="ClimbingTypeTradRoute" xml:space="preserve">
+    <value>Trad route</value>
+  </data>
+  <data name="ClimbingTypeMultiPitch" xml:space="preserve">
+    <value>Multi-pitch route</value>
+  </data>
+  <data name="ClimbingTypeBoulder" xml:space="preserve">
+    <value>Boulder</value>
+  </data>
+  <data name="ClimbingTypeCrag" xml:space="preserve">
+    <value>Crag</value>
+  </data>
+  <data name="ClimbingTypeCliff" xml:space="preserve">
+    <value>Cliff</value>
+  </data>
 </root>

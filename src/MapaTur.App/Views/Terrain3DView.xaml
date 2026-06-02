@@ -91,6 +91,9 @@
                        cause the dead-pinch / surprise-pan bugs we already fixed once.  -->
                 <PanGestureRecognizer TouchPoints="1" PanUpdated="OnMeshPan" />
                 <PinchGestureRecognizer PinchUpdated="OnPinch" />
+                <!-- A discrete tap (distinct from the pan drag) selects a POI / climbing marker and
+                     raises MarkerTapped so the host page can show a details popup. -->
+                <TapGestureRecognizer Tapped="OnCanvasTapped" />
             </skia:SKGLView.GestureRecognizers>
         </skia:SKGLView>
 
