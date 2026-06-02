@@ -32,6 +32,27 @@ Status legend: `[ ]` planned · `[~]` in progress · `[x]` done
 - [x] **#22 Camera state persistence** — camera (target / distance / azimuth /
       pitch) is saved per DEM (keyed by bounds) and restored on reload; falls
       back to auto-framing for a different region.
+- [x] **Wind control** — "Wiatr" slider scales cloud drift speed and darkens
+      the clouds toward storm-grey; cloud-layer altitude tracks the sun + a slow
+      random wander.
+- [x] **Cinematic fly-through** — one-tap scripted flight along the Orla Perć
+      ridge (Zawrat → Krzyżne): Catmull-Rom spline through DEM-sampled waypoints,
+      slalom over the peaks at constant speed, the time-of-day sweeping 12.5 h →
+      18 h into golden hour, and all on-screen chrome auto-hiding for a clean
+      cinematic shot (restored on completion; stray touches ignored).
+- [x] **In-place tilt + fade-out pads** — tilt buttons rotate the view in place
+      (look-around) with a wider pitch range; orbit gizmo removed; camera pad
+      buttons fade out at rest and materialise on hover/press.
+- [x] **Cloud z-fight fix** — clip-plane far/near ratio capped so the translucent
+      sea-of-clouds no longer jitters against the peak silhouettes.
+
+### Recommended next (new session)
+
+- [ ] **In-app MP4 export of the fly-through** — currently captured externally
+      via `adb screenrecord`; an in-app "record & save" would be the headline.
+- [ ] **M11 #39 + #43** — viewport-aware ortho streaming + LRU eviction, the
+      real unlock for mid-range phones (1.9 GB resident texture today).
+- [ ] **POI tap → details popup** (name / elevation / kind) on 2D + 3D.
 
 ## M11 — Mobile-class production rendering
 
@@ -145,22 +166,23 @@ tier on a flagship matches the current visual fidelity.
 - [x] CLAUDE.md TDD rules — added mid-milestone; all subsequent code is
       test-first
 
+### Done (originally "not yet")
+
+- [x] **Smoke verification by user** — confirmed live on a Samsung S25 Ultra.
+- [x] **Drape MBTiles / ortho as mesh texture** — full ortho drape (Esri z17 +
+      MBTiles composite) sampled per-pixel over the mesh; UV-mapped per vertex.
+- [x] **Proper trail occlusion** — migrated to `SKGLView` + a 24-bit GL depth
+      buffer; trails/route/roads are depth-tested ribbons hidden behind ridges.
+- [x] **Large-DEM support** — DEM split into ≤65 536-vertex tiles, each its own
+      GL draw; the Tatra LiDAR DEM (4320×2200) renders fine.
+- [x] **3D mode persistence** — camera state saved per DEM and restored on reload.
+
 ### Not yet
 
-- [ ] **Smoke verification by user** — mouse wheel zoom + trail overlay end-to-end
-      (build green, awaiting in-app confirmation)
-- [ ] **Drape MBTiles tiles as mesh texture** instead of (or alongside) hypsometric
-      colouring. Requires UV mapping per vertex + sampling tile pixels at world
-      coords. Biggest remaining UX win.
-- [ ] **Proper trail occlusion** — trails currently render *over* mountains
-      (no depth buffer). Either per-vertex world-distance depth test against mesh
-      front-faces, or migrate to `SKGLView` for hardware Z-buffer.
-- [ ] **Large-DEM support** — for rasters >65k vertices, split into mesh tiles
-      and render each as a separate `DrawVertices` call.
-- [ ] **Keyboard shortcuts** on desktop — arrow keys orbit, +/- zoom, WASD pan.
-- [ ] **Settings UI** for `VerticalExaggeration` (currently fixed at 2×) and
-      sun direction.
-- [ ] **3D mode persistence** — remember last camera state per DEM file.
+- [ ] **Keyboard shortcuts** on desktop — arrow keys + WASD partly wired on
+      Windows; round out +/- zoom + Q/E altitude and document them.
+- [ ] **Settings page** for vertical exaggeration + atmosphere defaults
+      (exaggeration is a live slider now; a dedicated settings screen is pending).
 
 **DoD:** user loads `tatry.dem`, sees a 3D mesh with hypsometric shading,
 orbits/pans/zooms smoothly, sees downloaded OSM trails rendered as PTTK-coloured
