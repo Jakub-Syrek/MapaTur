@@ -191,7 +191,31 @@
                              HorizontalOptions="Start" VerticalOptions="Start"
                              Margin="8" Padding="8,6" Spacing="2"
                              BackgroundColor="#A0101418"
+                             Opacity="0.20"
                              IsVisible="{Binding Show3DChrome}">
+            <!-- Nearly invisible at rest like the camera-pad buttons, materialising to full opacity
+                 on hover (desktop) or press (touch) so it doesn't cover the terrain when unused. -->
+            <VisualStateManager.VisualStateGroups>
+                <VisualStateGroupList>
+                    <VisualStateGroup x:Name="CommonStates">
+                        <VisualState x:Name="Normal">
+                            <VisualState.Setters>
+                                <Setter Property="Opacity" Value="0.20" />
+                            </VisualState.Setters>
+                        </VisualState>
+                        <VisualState x:Name="PointerOver">
+                            <VisualState.Setters>
+                                <Setter Property="Opacity" Value="1" />
+                            </VisualState.Setters>
+                        </VisualState>
+                        <VisualState x:Name="Pressed">
+                            <VisualState.Setters>
+                                <Setter Property="Opacity" Value="1" />
+                            </VisualState.Setters>
+                        </VisualState>
+                    </VisualStateGroup>
+                </VisualStateGroupList>
+            </VisualStateManager.VisualStateGroups>
             <HorizontalStackLayout Spacing="6" VerticalOptions="Center">
                 <Label Text="Pion:" TextColor="White" FontSize="11" WidthRequest="44" VerticalOptions="Center" />
                 <Slider Minimum="1" Maximum="5" WidthRequest="120" VerticalOptions="Center"

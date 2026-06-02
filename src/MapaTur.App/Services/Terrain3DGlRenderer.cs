@@ -467,6 +467,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int presentWidth;
     private int presentHeight;
     private bool presentUnsupported;
+    private byte[]? flipRow; // scratch row for the vertical flip during framebuffer readback
 
     private readonly Dictionary<TerrainMesh3D, TileBuffers> tileBuffers = new();
     private IReadOnlyList<TerrainMesh3D>? lastTiles;
@@ -943,6 +944,60 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // expects (via GRContext.ResetContext) before sampling the texture we just produced.
         gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
         return presentColorTex;
+    }
+
+    /// <summary>Width of the last rendered frame (the present colour texture); 0 before the first render.</summary>
+    public int PresentWidth => presentWidth;
+
+    /// <summary>Height of the last rendered frame.</summary>
+    public int PresentHeight => presentHeight;
+
+    /// <summary>
+    /// Reads back the freshly-rendered frame (the MSAA-resolved, single-sample present FBO) into
+    /// <paramref name="dst"/> as tightly-packed top-row-first RGBA8 of <paramref name="width"/> ×
+    /// <paramref name="height"/>. Use this — not a Skia surface snapshot — to capture frames for video:
+    /// it reads the exact GL output, sidestepping the SKGLView back-buffer staleness that returned a
+    /// cleared buffer for every frame after the first. Must be called on the GL thread with the context
+    /// current and the present FBO still allocated (i.e. right after <see cref="Render"/>). GL's origin is
+    /// bottom-left, so rows are flipped to top-first here. Returns false when readback isn't possible.
+    /// </summary>
+    public bool TryReadPresentFrame(byte[] dst, int width, int height)
+    {
+        ArgumentNullException.ThrowIfNull(dst);
+        GL? g = gl;
+        if (g is null || presentFbo == 0 || presentColorTex == 0 || width <= 0 || height <= 0)
+        {
+            return false;
+        }
+
+        int stride = width * 4;
+        int needed = stride * height;
+        if (dst.Length < needed)
+        {
+            return false;
+        }
+
+        g.BindFramebuffer(FramebufferTarget.ReadFramebuffer, presentFbo);
+        g.ReadBuffer(ReadBufferMode.ColorAttachment0);
+        g.PixelStore(PixelStoreParameter.PackAlignment, 1);
+        g.ReadPixels<byte>(0, 0, (uint)width, (uint)height, PixelFormat.Rgba, PixelType.UnsignedByte, dst.AsSpan(0, needed));
+        g.BindFramebuffer(FramebufferTarget.ReadFramebuffer, 0);
+
+        // glReadPixels returns bottom-row-first; flip to top-first so the encoder sees an upright frame.
+        if (flipRow is null || flipRow.Length < stride)
+        {
+            flipRow = new byte[stride];
+        }
+        for (int y = 0; y < height / 2; y++)
+        {
+            int top = y * stride;
+            int bottom = (height - 1 - y) * stride;
+            Array.Copy(dst, top, flipRow, 0, stride);
+            Array.Copy(dst, bottom, dst, top, stride);
+            Array.Copy(flipRow, 0, dst, bottom, stride);
+        }
+
+        return true;
     }
 
     /// <summary>

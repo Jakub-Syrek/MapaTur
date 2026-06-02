@@ -223,7 +223,8 @@ public sealed class AndroidVideoRecorder : IVideoRecorder
                 row[x * pixelStride] = luma;
             }
 
-            buffer.Put(row, 0, rowStride);
+            // The last plane row carries no trailing stride padding, so never write past what's left.
+            buffer.Put(row, 0, Math.Min(rowStride, buffer.Remaining()));
         }
     }
 
@@ -237,13 +238,17 @@ public sealed class AndroidVideoRecorder : IVideoRecorder
         int vRowStride = vPlane.RowStride;
         int vPixelStride = vPlane.PixelStride;
 
-        byte[] uRow = new byte[uRowStride];
-        byte[] vRow = new byte[vRowStride];
-
         Java.Nio.ByteBuffer uBuffer = uPlane.Buffer!;
         Java.Nio.ByteBuffer vBuffer = vPlane.Buffer!;
         uBuffer.Rewind();
         vBuffer.Rewind();
+
+        // Semi-planar (NV12): U and V are interleaved in a single buffer (pixelStride 2). Writing each
+        // plane as a separate full row would clobber the other's bytes, so build one interleaved U/V row
+        // and write it through the U-plane buffer only. Planar (I420, pixelStride 1) writes each separately.
+        bool semiPlanar = uPixelStride == 2 || vPixelStride == 2;
+        byte[] uRow = new byte[uRowStride];
+        byte[] vRow = semiPlanar ? System.Array.Empty<byte>() : new byte[vRowStride];
 
         for (int cy = 0; cy < chromaH; cy++)
         {
@@ -258,12 +263,25 @@ public sealed class AndroidVideoRecorder : IVideoRecorder
 
                 byte u = Clamp(((-38 * r) - (74 * g) + (112 * b) + 128 >> 8) + 128);
                 byte v = Clamp(((112 * r) - (94 * g) - (18 * b) + 128 >> 8) + 128);
-                uRow[cx * uPixelStride] = u;
-                vRow[cx * vPixelStride] = v;
+
+                if (semiPlanar)
+                {
+                    // NV12 layout: U at the even byte, V at the following odd byte.
+                    uRow[cx * uPixelStride] = u;
+                    uRow[(cx * uPixelStride) + 1] = v;
+                }
+                else
+                {
+                    uRow[cx * uPixelStride] = u;
+                    vRow[cx * vPixelStride] = v;
+                }
             }
 
-            uBuffer.Put(uRow, 0, uRowStride);
-            vBuffer.Put(vRow, 0, vRowStride);
+            uBuffer.Put(uRow, 0, Math.Min(uRowStride, uBuffer.Remaining()));
+            if (!semiPlanar)
+            {
+                vBuffer.Put(vRow, 0, Math.Min(vRowStride, vBuffer.Remaining()));
+            }
         }
     }
 

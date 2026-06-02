@@ -928,7 +928,7 @@ public partial class Terrain3DView : ContentView
             // GL already drew the (depth-occluded) trails + route; Skia only adds the markers/labels on top.
             renderer.DrawOverlays(canvas, null, null, projectedClimbing, projectedPois, projectedPeaks, projectedUserLocation);
             DrawNightLights(canvas, projectedPois);
-            ServiceRecording(e);
+            // Recording capture for this path happens inside TryRenderTerrainGl (GL FBO readback), not here.
             return;
         }
 #endif
@@ -964,8 +964,45 @@ public partial class Terrain3DView : ContentView
 
     private const int RecordingFrameRate = 30;
 
-    // Reads the top-left width×height region of the composited surface as tightly-packed RGBA8 and hands
-    // it to the recorder. The buffer is reused across frames (the encoder copies it synchronously).
+    // GL-path recording capture: lazily starts the recording, then reads the just-rendered frame straight
+    // from the GL renderer's present FBO (reliable, unlike a Skia surface snapshot which returned a stale
+    // back-buffer for every frame after the first). Terrain + GL-drawn trails/route are captured; Skia
+    // overlays (peak labels, markers) are not part of this readback.
+    private void CaptureGlFrameForRecording(int width, int height)
+    {
+#if WINDOWS || ANDROID
+        if (videoRecorder is null || glRenderer is null)
+        {
+            return;
+        }
+
+        if (recordingRequested && !videoRecorder.IsRecording)
+        {
+            videoRecorder.TryStart(width, height, RecordingFrameRate, BuildRecordingOutputPath());
+        }
+
+        if (!videoRecorder.IsRecording)
+        {
+            return;
+        }
+
+        int w = videoRecorder.FrameWidth;
+        int h = videoRecorder.FrameHeight;
+        int needed = w * h * 4;
+        if (recordBuffer is null || recordBuffer.Length < needed)
+        {
+            recordBuffer = new byte[needed];
+        }
+
+        if (glRenderer.TryReadPresentFrame(recordBuffer, w, h))
+        {
+            videoRecorder.CaptureFrame(recordBuffer);
+        }
+#endif
+    }
+
+    // CPU (Skia) fallback capture: snapshot the composited surface and read it back. Used only when the
+    // GL renderer isn't active (rare); the GL path uses CaptureGlFrameForRecording instead.
     private void CaptureSurfaceFrame(SKSurface surface, int width, int height)
     {
         if (videoRecorder is null || width <= 0 || height <= 0)
@@ -979,11 +1016,12 @@ public partial class Terrain3DView : ContentView
             recordBuffer = new byte[needed];
         }
 
-        var info = new SKImageInfo(width, height, SKColorType.Rgba8888, SKAlphaType.Unpremul);
+        var info = new SKImageInfo(width, height, SKColorType.Rgba8888, SKAlphaType.Premul);
         var handle = System.Runtime.InteropServices.GCHandle.Alloc(recordBuffer, System.Runtime.InteropServices.GCHandleType.Pinned);
         try
         {
-            if (surface.ReadPixels(info, handle.AddrOfPinnedObject(), width * 4, 0, 0))
+            using SKImage image = surface.Snapshot();
+            if (image.ReadPixels(info, handle.AddrOfPinnedObject(), width * 4, 0, 0))
             {
                 videoRecorder.CaptureFrame(recordBuffer);
             }
@@ -1522,6 +1560,11 @@ public partial class Terrain3DView : ContentView
             {
                 return false;
             }
+
+            // Capture the freshly-rendered frame for video recording directly from the GL renderer's
+            // present FBO — BEFORE Skia touches GL state below. Reading the GL output (not a Skia surface
+            // snapshot) avoids the back-buffer staleness that blacked out every frame after the first.
+            CaptureGlFrameForRecording(width, height);
 
             // Tell Skia we touched GL state, then wrap our texture as an SKImage and let Skia compose it.
             // BottomLeft origin: GL textures have their origin at the bottom-left of the image. RGBA8 +
