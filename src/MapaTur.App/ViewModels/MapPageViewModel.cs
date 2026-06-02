@@ -645,14 +645,22 @@ public sealed partial class MapPageViewModel : ObservableObject
         UpdateTrailCoverage();
     }
 
-    // The 2D trail layer's coverage = the union of all loaded basemaps + the DEM footprint (the same
-    // area the 3D view covers). Trails outside it are dropped so the flat map doesn't trail off onto
-    // blank space. Called whenever a basemap or DEM loads.
+    // Małopolska voivodeship bounding box (generous). Now that the online ortho base covers the whole
+    // region, trails/roads clip to this instead of the small Tatry basemap — so they show across all of
+    // Małopolska on the imagery, not just over the bundled Tatra rectangle.
+    private static readonly MapBounds MalopolskaRegion = new(
+        new GeoPoint(48.95, 19.0),
+        new GeoPoint(50.6, 21.6));
+
+    // The 2D trail/road coverage. With the online ortho base present, that's the whole Małopolska region
+    // (unioned with any larger loaded basemap). Called whenever a basemap or DEM loads.
     private void UpdateTrailCoverage()
     {
-        // Clip to the visible basemap footprint (the actual rendered map) so trails / roads never trail
-        // off onto blank space. Only when there's no basemap at all do we fall back to the DEM extent.
-        MapBounds? coverage = basemapBounds ?? TerrainRaster?.Bounds;
+        MapBounds coverage = MalopolskaRegion;
+        if (basemapBounds is { } basemap)
+        {
+            coverage = coverage.Union(basemap);
+        }
 
         if (viewportTrailController is not null)
         {
@@ -1578,6 +1586,11 @@ public sealed partial class MapPageViewModel : ObservableObject
 
         try
         {
+            // Global online orthophoto base (Esri) at the very bottom — gives the whole voivodeship
+            // satellite imagery even where there's no offline basemap; tiles cache locally on view.
+            // The detailed Tatry MBTiles (loaded below) stacks on top where it exists.
+            OnlineOrthoBaseLayer.EnsureAdded(Map, Microsoft.Maui.Storage.FileSystem.Current.CacheDirectory);
+
             var discovery = autoLoader.Discover();
             logger.LogInformation(
                 "Auto-load discovery: basemaps=[{Basemaps}], hillshade={Hillshade}, dem={Dem}, trails={Trails}, ortho={Ortho}",
