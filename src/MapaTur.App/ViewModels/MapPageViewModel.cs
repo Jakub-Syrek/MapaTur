@@ -306,13 +306,20 @@ public sealed partial class MapPageViewModel : ObservableObject
         // Fire-and-forget rebuild — the slider drives many small changes; a single rebuild that
         // lands one frame later is plenty smooth at 360x180 meshes. On completion, replay the
         // trailing value if the user moved the slider again while this build was running.
+        //
+        // CRITICAL: pass the SAME ortho grid (orthoGridCols/Rows) the initial load used. Omitting them
+        // defaulted the rebuild to a 1×1 grid, so every mesh tile sampled ortho cell 0 (the NW quadrant)
+        // with UVs spanning the whole raster — the lowland NW image smeared across the peaks ("villages
+        // on the summits"). Capturing the fields into locals keeps the background Task off the instance.
+        int gridCols = orthoGridCols;
+        int gridRows = orthoGridRows;
         _ = Task.Run(() =>
         {
             var options = new MapaTur.Application.Terrain.TerrainMeshOptions
             {
                 VerticalExaggeration = (float)Math.Clamp(value, 1.0, 5.0),
             };
-            var rebuilt = TerrainMesh3D.BuildTiles(raster, options);
+            var rebuilt = TerrainMesh3D.BuildTiles(raster, options, orthoGridCols: gridCols, orthoGridRows: gridRows);
             MainThread.BeginInvokeOnMainThread(() =>
             {
                 TerrainTiles = rebuilt;

@@ -45,6 +45,15 @@ public sealed class Terrain3DController
     /// <summary>Upper bound on <see cref="Camera3D.Distance"/>.</summary>
     public float MaxDistance { get; set; } = 500_000f;
 
+    /// <summary>
+    /// Floor on the camera distance used to scale the <see cref="ApplyVertical"/> step. The vertical
+    /// step is normally proportional to <see cref="Camera3D.Distance"/> (far view → coarse, close view →
+    /// fine), but a pinch-zoomed-in camera has a tiny Distance, which shrank the step to almost nothing —
+    /// the raise/lower arrows "stopped working" once you zoomed in. Clamping the distance factor to at
+    /// least this keeps a usable vertical step at any zoom while still scaling up for far-out views.
+    /// </summary>
+    public float VerticalStepMinDistance { get; set; } = 4_000f;
+
     public Terrain3DController(Camera3D camera)
     {
         ArgumentNullException.ThrowIfNull(camera);
@@ -102,6 +111,14 @@ public sealed class Terrain3DController
     /// orbit can plunge the camera through the highest peak and out the bottom of the world.
     /// </summary>
     public float CameraFloorZ { get; set; } = float.NaN;
+
+    /// <summary>
+    /// Maximum world-Z the camera EYE (<see cref="Camera3D.Position"/>) is allowed to reach — a hard
+    /// altitude ceiling. Default <see cref="float.NaN"/> disables it. Set to <c>ceilingAltitudeMeters ×
+    /// exaggeration</c> so "raise" / zoom-out can't fly the camera off above the scene; the rig is lowered
+    /// (Target.Z) until the eye sits back at the ceiling.
+    /// </summary>
+    public float CameraCeilingZ { get; set; } = float.NaN;
 
     /// <summary>
     /// World-space footprint the camera EYE (<see cref="Camera3D.Position"/>) is kept inside — set to the
@@ -167,13 +184,35 @@ public sealed class Terrain3DController
     }
 
     /// <summary>
-    /// Re-applies the distance, floor and over-map bounds to the CURRENT camera. Call after framing a mesh
-    /// or restoring a saved camera so a stale state can't start the view off / under the map.
+    /// Stops the camera EYE from rising above <see cref="CameraCeilingZ"/> — a hard altitude ceiling so
+    /// "raise" / zoom-out can't fly the camera off above the scene. Lowers the look-point (Target.Z) just
+    /// enough that Position.Z = ceiling. No-op while the ceiling is unset (NaN).
+    /// </summary>
+    private void ClampCameraCeiling()
+    {
+        if (float.IsNaN(CameraCeilingZ))
+        {
+            return;
+        }
+
+        float posZ = Camera.Position.Z;
+        if (posZ <= CameraCeilingZ)
+        {
+            return;
+        }
+
+        Camera.Target = new Vector3(Camera.Target.X, Camera.Target.Y, Camera.Target.Z - (posZ - CameraCeilingZ));
+    }
+
+    /// <summary>
+    /// Re-applies the distance, floor, ceiling and over-map bounds to the CURRENT camera. Call after framing
+    /// a mesh or restoring a saved camera so a stale state can't start the view off / under / above the map.
     /// </summary>
     public void ClampToBounds()
     {
         Camera.Distance = Math.Clamp(Camera.Distance, MinDistance, MaxDistance);
         ClampCameraFloor();
+        ClampCameraCeiling();
         ClampCameraOverMap();
     }
 
@@ -231,7 +270,9 @@ public sealed class Terrain3DController
     /// </summary>
     public void ApplyVertical(float dPixels)
     {
-        float scale = PanSensitivity * Camera.Distance;
+        // Scale the step by distance, but never below VerticalStepMinDistance, so the arrows keep moving
+        // the camera a usable amount even when pinch-zoomed right in (where Camera.Distance is tiny).
+        float scale = PanSensitivity * MathF.Max(Camera.Distance, VerticalStepMinDistance);
         float newZ = Camera.Target.Z + (dPixels * scale);
         newZ = Math.Clamp(newZ, MinTargetElevation, MaxTargetElevation);
         Camera.Target = new Vector3(Camera.Target.X, Camera.Target.Y, newZ);

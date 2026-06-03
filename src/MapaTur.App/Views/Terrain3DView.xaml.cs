@@ -455,15 +455,17 @@ public partial class Terrain3DView : ContentView
     // (OrbitSensitivity 0.005 rad/px → 28 px ≈ 8°).
     // Per-tap step sizes, kept deliberately SMALL so each repeat tick (the buttons hold-to-repeat
     // at ~25 Hz) moves only a little — the camera glides smoothly while held and a single tap is a
-    // fine nudge for precise framing, rather than a coarse jump.
-    private const float ButtonOrbitStep = 14f;
-    private const float ButtonPanStep = 22f;
-    private const float ButtonVerticalStep = 22f;
-    private const float ButtonZoomFactor = 1.08f;
+    // fine nudge for precise framing, rather than a coarse jump. Pan / vertical / zoom / tilt are
+    // halved from the originals (pan/vertical 22, zoom 1.08, tilt 5) to slow them down at the same
+    // 25 Hz cadence; ORBIT is kept fast (a touch above the original 14) per the "make turning faster".
+    private const float ButtonOrbitStep = 16f;
+    private const float ButtonPanStep = 11f;
+    private const float ButtonVerticalStep = 11f;
+    private const float ButtonZoomFactor = 1.04f;
 
-    // Tilt + slow-rotate steps are smaller still (≈1.4° per tap) for the finest control of pitch
-    // and heading while looking around the sky / ridgeline.
-    private const float ButtonTiltStep = 5f;
+    // Tilt + slow-rotate steps are smaller still for the finest control of pitch and heading while
+    // looking around the sky / ridgeline.
+    private const float ButtonTiltStep = 2.5f;
 
     // Hold-to-repeat for the on-screen camera pad. A tap fires the action once (immediately on
     // press); holding the button down repeats it at a fixed cadence so the camera glides smoothly
@@ -586,6 +588,15 @@ public partial class Terrain3DView : ContentView
         (49.2270, 20.0506), // Buczynowe Turnie
         (49.2283, 20.0586), // Krzyżne (flight end)
     };
+
+    // Real-metre clearance the LOCAL camera floor keeps the eye above the terrain directly beneath it.
+    // Added inside the vertical exaggeration so it stays a true 100 m at any Pion setting.
+    private const double CameraClearanceMeters = 100.0;
+
+    // Hard altitude ceiling (metres above sea level) the camera EYE can rise to. Multiplied by the
+    // exaggeration to world-Z, so it is a fixed real altitude at any Pion. The camera cannot ascend
+    // above this (raise / zoom-out is capped), keeping the view over the terrain rather than in space.
+    private const double CameraCeilingMeters = 8_000.0;
 
     private const double FlightDurationSeconds = 24.0; // shorter = the ridge slides by faster (more sense of flight)
     private const float FlightSlalomAmplitude = 950f;  // world-metres of side-to-side weave (large so it reads at the stand-off distance)
@@ -867,28 +878,64 @@ public partial class Terrain3DView : ContentView
         // padded past the mesh half-extent covers the diagonal corners + vertical relief. Used by both
         // the GPU and Skia paths, and by overlay projection, so they stay consistent.
         var (near, far) = CameraClipPlanes.Fit(Camera.Distance, frame.HorizontalExtent * 1.25f);
-        // Keep the far/near ratio sane for 24-bit depth precision. During a fly-through the camera
-        // sits close to its look point (small Distance) while the scene radius stays huge, which
-        // collapsed `near` to 1 and far to ~48 km → ratio ~48000, destroying depth precision so the
-        // translucent sea-of-clouds z-fought the peak silhouettes (the "clouds jittering against the
-        // summits"). Capping the ratio at ~3000 pushes near up and stops the fight.
-        near = MathF.Max(near, far / 3000f);
+        // NEAR PLANE — pin it close to the eye, independent of `far`/`distance`. CameraClipPlanes.Fit
+        // derives near from (distance − sceneRadius); since sceneRadius is the WHOLE mesh (~22 km), a
+        // camera orbiting far from the scene centre gets a near of hundreds of metres → it clips every
+        // bit of terrain near the camera. At low altitude the whole scene is close, so ALL of it falls
+        // in front of that near plane and the view goes grey, leaving only distant peaks (the reported
+        // altitude-dependent "close terrain vanishes into grey"). Capping near to a few metres makes
+        // low-altitude flight render the ground under the camera at any distance/altitude.
+        const float MaxNearMeters = 5f;
+        near = MathF.Min(near, MaxNearMeters);
+        // The far/near ratio only matters for the translucent sea-of-clouds layer, which z-fights the
+        // peak silhouettes when depth precision collapses at huge ratios. Apply the precision-preserving
+        // floor ONLY when the cloud layer is actually drawn; with clouds off keep near tight so the
+        // foreground always renders. (far/3000 ≈ 8–16 m, i.e. larger than MaxNearMeters, so this only
+        // ever pushes near OUT for the cloud case — never re-introduces the low-altitude clipping.)
+        bool cloudsActiveForClip = (EffectiveAtmosphere?.CloudCoverage ?? 0f) > 0.001f;
+        if (cloudsActiveForClip)
+        {
+            near = MathF.Max(near, far / 3000f);
+        }
         Camera.NearPlane = near;
         Camera.FarPlane = far;
 
-        // LOCAL camera floor: keep the eye at least 50 m above the terrain DIRECTLY BENEATH IT (sampled from
-        // the DEM at the eye's ground position), NOT above the highest distant peak. A single global floor
-        // tied to the tallest summit held the camera ~2 km up over the valleys; sampling locally lets it
-        // descend into a valley while still never tunnelling under the surface. Refreshed every frame.
+        // LOCAL camera floor — kept CameraClearanceMeters (real) above the terrain DIRECTLY UNDER THE EYE,
+        // sampled live from the DEM at the eye's own ground position. Sampling under the EYE (not the look
+        // target) is a HARD no-tunnelling guarantee: the camera can never drop below the ground it is
+        // physically over. (Sampling under the target let the eye sink below a ridge between it and the
+        // valley it was aimed at — "I can go under the map".) To sit 100 m above a particular valley, move
+        // the camera OVER that valley (zoom / pan); the floor then follows that terrain. Clearance is added
+        // in REAL metres (inside the exaggeration) so it stays a true 100 m at any Pion. Refreshed per frame.
         if (Raster is { } floorRaster)
         {
             GeoPoint eyeGeo = frame.WorldToGeo(Camera.Position);
             double groundElev = floorRaster.SampleBilinear(eyeGeo.Longitude, eyeGeo.Latitude);
             if (groundElev > floorRaster.NoDataValue)
             {
-                controller.CameraFloorZ = (float)(groundElev * frame.VerticalExaggeration) + 50f;
+                controller.CameraFloorZ = (float)((groundElev + CameraClearanceMeters) * frame.VerticalExaggeration);
             }
         }
+
+        // Hard altitude ceiling: the eye may not rise above CameraCeilingMeters of REAL altitude (× Pion to
+        // world-Z), so raise / zoom-out can't fly the camera off above the scene. Combined with the floor it
+        // pins the camera into a sane vertical band over the map.
+        controller.CameraCeilingZ = (float)(CameraCeilingMeters * frame.VerticalExaggeration);
+
+        // The legacy MaxTargetElevation was a FIXED 8000 *world units* — at Pion 3.4× that is only ~2353 m of
+        // REAL altitude, BELOW the peaks, so "raise"/zoom-out hit it long before the ceiling and the camera
+        // couldn't even climb above the mountains ("4 km is very low"). Scale the look-point cap with the
+        // exaggeration too, with headroom above the ceiling, so the eye-ceiling above is the real limiter.
+        controller.MaxTargetElevation = (float)((CameraCeilingMeters + 2_000.0) * frame.VerticalExaggeration);
+
+        // ENFORCE the dynamic floor + bounds EVERY frame, not just on the gestures that opt in. ApplyOrbit
+        // deliberately skips the floor (to avoid juddering the distance on small pitch changes), so a rotation
+        // — especially orbiting to the far side — used to swing the eye UNDER the terrain, where the
+        // (un-culled, double-sided) surface shows its textured underside ("mountains textured from inside,
+        // from both sides"). Re-applying the limit here, after the floor is sampled for the current eye
+        // position, keeps the eye above the map however it got there (orbit, a restored stale camera, …), so
+        // the camera can never see the inside of the terrain and there is nothing in there to render.
+        controller.ClampToBounds();
 
         // Project the overlays once — needed by both the GPU and Skia paths. The stateful projectors reuse
         // their world cache + screen buffers, so during a gesture this is just the per-frame screen

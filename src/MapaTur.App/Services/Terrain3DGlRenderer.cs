@@ -183,10 +183,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // top of the screen". h in [-1,1]: +1 straight up, 0 at the horizon, -1 straight down.
         "  float h = viewDir.z;\n" +
         "  vec3 skyUp = mix(uSkyHorizon, uSkyZenith, pow(clamp(h, 0.0, 1.0), 0.45));\n" +
-        // Below horizon (looking down past the terrain edge / into a top-down view's corners):
-        // a darkened horizon tone reading as distant ground haze, NOT blue sky and NOT clouds.
+        // Below horizon (looking down past the finite terrain edge / into a top-down view's corners):
+        // distant land seen through aerial HAZE, not a flat grey void. The old flat uSkyHorizon*0.72
+        // read as a dull grey wall filling most of the screen whenever the camera looked down at the
+        // finite DEM patch. Keep it bright right at the horizon line (where haze piles up) and let it
+        // deepen only gently further down, so the area beyond the terrain reads as luminous distance.
         // Cross-faded across the horizon line so there's no hard seam.
-        "  vec3 skyDown = uSkyHorizon * 0.72;\n" +
+        "  float below = clamp(-h, 0.0, 1.0);\n" +            // 0 at the horizon, 1 straight down
+        "  vec3 skyDown = mix(uSkyHorizon, uSkyHorizon * 0.82, smoothstep(0.0, 0.5, below));\n" +
         "  vec3 sky = mix(skyDown, skyUp, smoothstep(-0.12, 0.06, h));\n" +
         // Cirrus on an INFINITE horizontal layer overhead: perspective-project the view ray
         // onto a constant-world-Z plane by dividing xy by the up component. Classic skybox
@@ -442,7 +446,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // is inside the view frustum are uploaded; the planner caps resident-cell VRAM at OrthoVramBudgetBytes
     // and evicts the least-recently-rendered cell when a newly-visible one pushes past the budget. CPU
     // bytes are kept (lazy re-upload on re-entry); releasing them + re-decoding from disk is a follow-up.
-    private const long OrthoVramBudgetBytes = 1024L * 1024 * 1024; // ~1 GB resident ortho cap
+    //
+    // Budget sized to hold the ENTIRE bundled finite-DEM ortho set resident: the 8 Tatry cells are
+    // 8192×5462 ≈ 238 MB each (with mips) ≈ 1.9 GB total. A 1 GB budget held only 4 of the 8, so the
+    // others were evicted/frustum-culled and drew the un-textured hypsometric GREEN tint. Streaming +
+    // eviction only earns its keep for a set far larger than VRAM (future online whole-voivodeship
+    // tiles); for a small bundled set StreamOrthoTextures keeps every cell resident (see below).
+    private const long OrthoVramBudgetBytes = 3L * 1024 * 1024 * 1024; // ~3 GB resident ortho cap
     private OrthoResidencyPlanner? orthoPlanner;
     // Per-cell world-space AABB (keyed by OrthoTileIndex), unioned from the mesh tiles that sample it.
     private readonly Dictionary<int, (Vector3 Min, Vector3 Max)> orthoCellBounds = new();
@@ -1192,15 +1202,26 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         EnsureOrthoCellBounds(tiles);
 
-        orthoPlanner ??= new OrthoResidencyPlanner(ComputeOrthoBudgetCells());
+        int budgetCells = ComputeOrthoBudgetCells();
+        orthoPlanner ??= new OrthoResidencyPlanner(budgetCells);
 
-        // Which cells are potentially on screen? A cell is drawable only if some mesh tile samples it
-        // (so it has a world AABB); cull the rest against the frustum.
+        // When the whole ortho set fits in the resident budget (the bundled finite-DEM case — the 8
+        // Tatry cells now all fit), keep EVERY cell resident: feed them all as "visible" so they upload
+        // up front and the planner never evicts. Frustum-culling a small set was the cause of the
+        // "light-green" tiles — a cell that briefly left the frustum was dropped (or never uploaded) and
+        // its mesh tiles fell back to the un-textured hypsometric green. Viewport streaming + eviction is
+        // only needed for a set too large to all fit (future online whole-voivodeship tiles), where this
+        // branch is skipped and the frustum/LRU path below runs.
+        bool keepAllResident = orthoTiles.Count <= budgetCells;
+
+        // Which cells are drawable this frame? A cell is drawable only if some mesh tile samples it (so
+        // it has a world AABB). With keepAllResident every such cell counts as visible; otherwise cull
+        // against the view frustum so only on-screen cells are uploaded.
         visibleOrthoCells.Clear();
         for (int idx = 0; idx < orthoTiles.Count; idx++)
         {
             if (orthoCellBounds.TryGetValue(idx, out var aabb) &&
-                FrustumCuller.IsAabbVisible(viewProjection, aabb.Min, aabb.Max))
+                (keepAllResident || FrustumCuller.IsAabbVisible(viewProjection, aabb.Min, aabb.Max)))
             {
                 visibleOrthoCells.Add(idx);
             }
@@ -1284,21 +1305,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         long perCell = 0;
         foreach (OrthoTile tile in orthoTiles)
         {
-            long bytes = (long)Math.Max(1, tile.Width) * Math.Max(1, tile.Height) * 4L;
-            bytes += bytes / 3L; // mip chain ≈ +33%
+            long bytes = OrthoVramBudget.CellResidentBytes(tile.Width, tile.Height);
             if (bytes > perCell)
             {
                 perCell = bytes;
             }
         }
 
-        if (perCell <= 0)
-        {
-            return orthoTiles.Count;
-        }
-
-        int budget = (int)Math.Min(orthoTiles.Count, Math.Max(1, OrthoVramBudgetBytes / perCell));
-        return Math.Max(1, budget);
+        return OrthoVramBudget.MaxResidentCells(perCell, orthoTiles.Count, OrthoVramBudgetBytes);
     }
 
     // Computes the world-space AABB of each ortho cell (keyed by OrthoTileIndex) by unioning the vertex

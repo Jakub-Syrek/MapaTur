@@ -49,6 +49,23 @@ public sealed class Terrain3DControllerSafetyBoundsTests
     }
 
     [Fact]
+    public void ApplyVertical_StepStaysUsableWhenPinchedIn()
+    {
+        // Pinched all the way in, the vertical step used to shrink with Distance to almost nothing
+        // (the raise/lower arrows "stopped working" once you zoomed in). VerticalStepMinDistance floors
+        // the distance factor so a tap still moves the camera a usable amount at any zoom.
+        var ctrl = BuildController();
+        ctrl.Camera.Distance = 150f; // pinched right in
+
+        ctrl.ApplyVertical(100f); // one raise step
+
+        // Step = dPixels * PanSensitivity * max(Distance, VerticalStepMinDistance)
+        //      = 100 * 0.001 * 4000 = 400  (NOT 100 * 0.001 * 150 = 15, the old vanishing step).
+        ctrl.Camera.Target.Z.Should().BeApproximately(
+            100f * ctrl.PanSensitivity * ctrl.VerticalStepMinDistance, 0.5f);
+    }
+
+    [Fact]
     public void ApplyPan_OutsideTargetBounds_ClampsToBox()
     {
         var ctrl = BuildController();
@@ -141,6 +158,31 @@ public sealed class Terrain3DControllerSafetyBoundsTests
         }
 
         ctrl.Camera.Position.Z.Should().BeGreaterThanOrEqualTo(5_000f - 1f);
+    }
+
+    [Fact]
+    public void ClampToBounds_LowersEyeToTheCeiling()
+    {
+        // Hard altitude ceiling (set to 4 km × Pion in the app): raising / zooming out can't fly the eye
+        // above it. ClampToBounds — run every frame by the view — lowers the rig until eye.Z == ceiling.
+        var ctrl = BuildController(); // distance 10k, 45° → eye.Z ≈ 7071, above the ceiling
+        ctrl.CameraCeilingZ = 3_000f;
+
+        ctrl.ClampToBounds();
+
+        ctrl.Camera.Position.Z.Should().BeApproximately(3_000f, 1f);
+    }
+
+    [Fact]
+    public void ClampToBounds_LeavesEyeBelowTheCeilingUntouched()
+    {
+        var ctrl = BuildController(); // eye.Z ≈ 7071
+        ctrl.CameraCeilingZ = 20_000f; // ceiling well above the eye
+        float before = ctrl.Camera.Position.Z;
+
+        ctrl.ClampToBounds();
+
+        ctrl.Camera.Position.Z.Should().BeApproximately(before, 1f);
     }
 
     [Fact]
