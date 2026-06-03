@@ -36,11 +36,11 @@ public sealed class Terrain3DController
     /// <summary>World-metres per input-pixel, per unit camera distance.</summary>
     public float PanSensitivity { get; set; } = 0.001f;
 
-    /// <summary>Lower bound on <see cref="Camera3D.Distance"/>. Raised to 800 m so a pinch-in
-    /// can't drive the camera through the surface of a typical mountain mesh (Tatra peaks reach
-    /// ~5 km world-Z after vertical exaggeration; with the 20° pitch minimum, an 800 m distance
-    /// keeps the camera safely outside the surface envelope at typical Target elevations).</summary>
-    public float MinDistance { get; set; } = 800f;
+    /// <summary>Lower bound on <see cref="Camera3D.Distance"/>. Low (150 m) so the camera can descend close
+    /// to the ground; tunnelling under the surface is prevented by the per-frame LOCAL floor
+    /// (<see cref="CameraFloorZ"/>) instead of a blanket large min-distance, which used to strand the camera
+    /// ~500 m up.</summary>
+    public float MinDistance { get; set; } = 150f;
 
     /// <summary>Upper bound on <see cref="Camera3D.Distance"/>.</summary>
     public float MaxDistance { get; set; } = 500_000f;
@@ -62,6 +62,7 @@ public sealed class Terrain3DController
         // produce visible distance jumps as the lift kicked in/out, which felt like the camera
         // was juddering. The MinDistance + clamped Target.Z together keep the camera safely above
         // ground for sane mesh + user input combinations.
+        ClampCameraOverMap();
     }
 
     /// <summary>
@@ -78,6 +79,7 @@ public sealed class Terrain3DController
         Camera.AzimuthRadians -= dxPixels * OrbitSensitivity;
         Camera.PitchRadians = Math.Clamp(Camera.PitchRadians + (dyPixels * OrbitSensitivity), LookAroundMinPitchRadians, MaxPitch);
         Camera.Target = position - OrbitOffset();
+        ClampCameraOverMap();
     }
 
     // Offset from target to camera position for the current orbit angles (mirrors Camera3D.Position).
@@ -102,9 +104,11 @@ public sealed class Terrain3DController
     public float CameraFloorZ { get; set; } = float.NaN;
 
     /// <summary>
-    /// Allowed horizontal extent of <see cref="Camera3D.Target"/>. Defaults are wide-open
-    /// (±infinity); set them to the mesh footprint so panning can't drag the focal point off the
-    /// terrain and into empty space. <see cref="ApplyPan"/> clamps after every move.
+    /// World-space footprint the camera EYE (<see cref="Camera3D.Position"/>) is kept inside — set to the
+    /// mesh's actual rectangle so the camera can never fly off the terrain into empty space. Defaults are
+    /// wide-open (±infinity = no clamp). Every gesture re-applies <see cref="ClampCameraOverMap"/>.
+    /// NOTE: this bounds the EYE, not the look-target. Clamping the target instead leaves the eye free to
+    /// swing a full orbit-radius past the edge; clamping BOTH makes the far side unreachable.
     /// </summary>
     public float MinTargetX { get; set; } = float.NegativeInfinity;
 
@@ -117,6 +121,62 @@ public sealed class Terrain3DController
     /// <inheritdoc cref="MinTargetX" />
     public float MaxTargetY { get; set; } = float.PositiveInfinity;
 
+    /// <summary>
+    /// Keeps the camera EYE over the map footprint by translating the whole rig (eye + target together)
+    /// back inside when an orbit / zoom / pan / tilt would carry it off the terrain. Translating the target
+    /// (Position = Target + orbit offset) preserves the look direction, distance and pitch, so the boundary
+    /// reads as a soft wall rather than a snap. No-op while the footprint is unbounded.
+    /// </summary>
+    private void ClampCameraOverMap()
+    {
+        if (float.IsInfinity(MinTargetX) || float.IsInfinity(MaxTargetX)
+            || float.IsInfinity(MinTargetY) || float.IsInfinity(MaxTargetY))
+        {
+            return;
+        }
+
+        Vector3 pos = Camera.Position;
+        float dx = Math.Clamp(pos.X, MinTargetX, MaxTargetX) - pos.X;
+        float dy = Math.Clamp(pos.Y, MinTargetY, MaxTargetY) - pos.Y;
+        if (dx != 0f || dy != 0f)
+        {
+            Camera.Target = new Vector3(Camera.Target.X + dx, Camera.Target.Y + dy, Camera.Target.Z);
+        }
+    }
+
+    /// <summary>
+    /// Stops the camera EYE from dropping below <see cref="CameraFloorZ"/> (set above the highest terrain),
+    /// i.e. from going UNDER the map. Lifts the look-point (Target.Z) just enough that Position.Z = floor.
+    /// Applied on the altitude controls (zoom, vertical), not orbit — a per-pitch lift there would judder
+    /// the distance. No-op while the floor is unset (NaN).
+    /// </summary>
+    private void ClampCameraFloor()
+    {
+        if (float.IsNaN(CameraFloorZ))
+        {
+            return;
+        }
+
+        float posZ = Camera.Position.Z;
+        if (posZ >= CameraFloorZ)
+        {
+            return;
+        }
+
+        Camera.Target = new Vector3(Camera.Target.X, Camera.Target.Y, Camera.Target.Z + (CameraFloorZ - posZ));
+    }
+
+    /// <summary>
+    /// Re-applies the distance, floor and over-map bounds to the CURRENT camera. Call after framing a mesh
+    /// or restoring a saved camera so a stale state can't start the view off / under the map.
+    /// </summary>
+    public void ClampToBounds()
+    {
+        Camera.Distance = Math.Clamp(Camera.Distance, MinDistance, MaxDistance);
+        ClampCameraFloor();
+        ClampCameraOverMap();
+    }
+
     /// <summary>Pinch-zoom: <paramref name="scale"/> &gt; 1 brings the camera closer (divides distance).</summary>
     public void ApplyZoom(float scale)
     {
@@ -126,13 +186,15 @@ public sealed class Terrain3DController
         }
 
         Camera.Distance = Math.Clamp(Camera.Distance / scale, MinDistance, MaxDistance);
+        ClampCameraFloor();
+        ClampCameraOverMap();
     }
 
     /// <summary>
-    /// Two-finger pan: translates <see cref="Camera3D.Target"/> in the ground plane,
-    /// with magnitude proportional to current distance so far-zoom pans cover more ground.
-    /// Result is clamped into the [Min..MaxTargetX × Min..MaxTargetY] footprint so the camera
-    /// target can never wander off the loaded mesh.
+    /// Two-finger pan: translates <see cref="Camera3D.Target"/> in the ground plane, with magnitude
+    /// proportional to current distance so far-zoom pans cover more ground. The EYE is then clamped into
+    /// the footprint (<see cref="ClampCameraOverMap"/>); the target itself is left unclamped so a low-pitch
+    /// / far-zoom view can still reach the far side of the map.
     /// </summary>
     public void ApplyPan(float dxPixels, float dyPixels)
     {
@@ -141,12 +203,8 @@ public sealed class Terrain3DController
         float sinA = MathF.Sin(Camera.AzimuthRadians);
         Vector3 right = new(-sinA, cosA, 0f);
         Vector3 forward = new(-cosA, -sinA, 0f);
-        Vector3 newTarget = Camera.Target + (((right * dxPixels) + (forward * dyPixels)) * scale);
-        newTarget = new Vector3(
-            Math.Clamp(newTarget.X, MinTargetX, MaxTargetX),
-            Math.Clamp(newTarget.Y, MinTargetY, MaxTargetY),
-            newTarget.Z);
-        Camera.Target = newTarget;
+        Camera.Target += ((right * dxPixels) + (forward * dyPixels)) * scale;
+        ClampCameraOverMap();
     }
 
     /// <summary>
@@ -177,5 +235,7 @@ public sealed class Terrain3DController
         float newZ = Camera.Target.Z + (dPixels * scale);
         newZ = Math.Clamp(newZ, MinTargetElevation, MaxTargetElevation);
         Camera.Target = new Vector3(Camera.Target.X, Camera.Target.Y, newZ);
+        ClampCameraFloor();
+        ClampCameraOverMap();
     }
 }

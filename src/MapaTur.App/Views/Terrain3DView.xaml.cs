@@ -565,6 +565,7 @@ public partial class Terrain3DView : ContentView
     {
         Camera.Target = target;
         Camera.Distance = Math.Clamp(distance, controller.MinDistance, controller.MaxDistance);
+        controller.ClampToBounds(); // keep the eye over the map even if the 2D map was centred off the DEM
         Canvas.InvalidateSurface();
     }
 
@@ -797,33 +798,25 @@ public partial class Terrain3DView : ContentView
             return;
         }
 
-        // Push safety bounds into the controller so the camera can't tunnel through the surface
-        // (CameraFloorZ = highest world-Z + a 50 m clearance) and Pan can't drag the target off
-        // the mesh footprint (Target X/Y clamped to ±HorizontalExtent around the mesh centre).
-        // Find the global max elevation across ALL loaded tiles, not just the WorldFrame one —
-        // each tile holds its own subset of vertices.
-        float globalMaxZ = float.NegativeInfinity;
-        if (Tiles is { Count: > 0 } tiles)
-        {
-            for (int i = 0; i < tiles.Count; i++)
-            {
-                if (tiles[i].MaxElevationZ > globalMaxZ)
-                {
-                    globalMaxZ = tiles[i].MaxElevationZ;
-                }
-            }
-        }
-        controller.CameraFloorZ = float.IsNegativeInfinity(globalMaxZ) ? float.NaN : globalMaxZ + 50f;
-        // Generous focal-point bounds. The clamp only exists to stop the target wandering far into
-        // empty space — it must NOT bite mid-mesh. In-place tilt (ApplyLookAround) legitimately
-        // swings the target a long way toward the horizon/sky, so a tight footprint box made forward
-        // pan "hit an invisible wall" in the middle of the map. A 3× margin keeps panning free across
-        // the whole terrain and only catches a genuinely runaway target.
-        float targetMargin = frame.HorizontalExtent * 3f;
-        controller.MinTargetX = frame.Center.X - targetMargin;
-        controller.MaxTargetX = frame.Center.X + targetMargin;
-        controller.MinTargetY = frame.Center.Y - targetMargin;
-        controller.MaxTargetY = frame.Center.Y + targetMargin;
+        // The camera floor is set per-frame from the LOCAL terrain under the eye (see OnPaintSurface), so a
+        // single global "above the tallest peak" value is no longer used — it held the camera too high over
+        // the valleys. Leave it unset here; the first paint installs the local floor.
+        controller.CameraFloorZ = float.NaN;
+
+        // Lock the camera EYE over the map. The box is the mesh's ACTUAL world rectangle (per-axis, from
+        // the bounds corners) — not a square of side 2·HorizontalExtent, which (HorizontalExtent = max of
+        // the two half-spans) overshot the short axis and let the camera start off the map. The eye-clamp
+        // (Terrain3DController.ClampCameraOverMap) keeps Camera.Position inside this box so an orbit / pan /
+        // zoom / tilt can't fly the camera off the terrain into empty grey space.
+        Vector3 cornerSw = frame.GeoToWorld(frame.Bounds.SouthWest, 0f);
+        Vector3 cornerNe = frame.GeoToWorld(frame.Bounds.NorthEast, 0f);
+        controller.MinTargetX = MathF.Min(cornerSw.X, cornerNe.X);
+        controller.MaxTargetX = MathF.Max(cornerSw.X, cornerNe.X);
+        controller.MinTargetY = MathF.Min(cornerSw.Y, cornerNe.Y);
+        controller.MaxTargetY = MathF.Max(cornerSw.Y, cornerNe.Y);
+
+        // Cap zoom-out so pinching out can't fly the camera kilometres past the map edge into grey space.
+        controller.MaxDistance = Math.Max(frame.HorizontalExtent * 3f, 12_000f);
 
         // Restore the camera saved for this DEM; if none (or a different region), auto-frame.
         if (!TryRestoreCamera(frame))
@@ -833,6 +826,9 @@ public partial class Terrain3DView : ContentView
             Camera.AzimuthRadians = MathF.PI / 4f;
             Camera.PitchRadians = MathF.PI / 4f;
         }
+
+        // A restored / freshly-framed camera may sit outside the new bounds — pull the eye back over the map.
+        controller.ClampToBounds();
 
         Canvas.InvalidateSurface();
     }
@@ -879,6 +875,20 @@ public partial class Terrain3DView : ContentView
         near = MathF.Max(near, far / 3000f);
         Camera.NearPlane = near;
         Camera.FarPlane = far;
+
+        // LOCAL camera floor: keep the eye at least 50 m above the terrain DIRECTLY BENEATH IT (sampled from
+        // the DEM at the eye's ground position), NOT above the highest distant peak. A single global floor
+        // tied to the tallest summit held the camera ~2 km up over the valleys; sampling locally lets it
+        // descend into a valley while still never tunnelling under the surface. Refreshed every frame.
+        if (Raster is { } floorRaster)
+        {
+            GeoPoint eyeGeo = frame.WorldToGeo(Camera.Position);
+            double groundElev = floorRaster.SampleBilinear(eyeGeo.Longitude, eyeGeo.Latitude);
+            if (groundElev > floorRaster.NoDataValue)
+            {
+                controller.CameraFloorZ = (float)(groundElev * frame.VerticalExaggeration) + 50f;
+            }
+        }
 
         // Project the overlays once — needed by both the GPU and Skia paths. The stateful projectors reuse
         // their world cache + screen buffers, so during a gesture this is just the per-frame screen
@@ -1253,10 +1263,9 @@ public partial class Terrain3DView : ContentView
         lastPinchScale = e.Scale;
 #endif
 
-        // Power-2.5 boost so a tiny finger-spread (perFrame ~ 1.02) produces a visible zoom step
-        // on a phone screen — without it pinch barely moved because two-finger spread between
-        // 60 Hz update frames is only a couple of pixels.
-        double boosted = Math.Pow(perFrame, 2.5);
+        // Small boost so a tiny finger-spread (perFrame ~ 1.02) still produces a visible zoom step on a
+        // phone screen, without making pinch lurch. 2.5 was too fast ("zoom shoots off"); 1.5 is gentle.
+        double boosted = Math.Pow(perFrame, 1.5);
         controller.ApplyZoom((float)boosted);
         Canvas.InvalidateSurface();
     }

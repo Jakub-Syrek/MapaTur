@@ -71,9 +71,11 @@
                     Text="&#x2630; Menu"
                     Command="{Binding ToggleMenuCommand}"
                     SemanticProperties.Hint="Menu" />
+            <!-- 3D-only app: the 2D-map toggle is hidden so the view is always the 3D terrain. -->
             <Button Style="{StaticResource ToolbarButton}"
                     Text="{x:Static loc:AppStrings.Toggle3D}"
                     Command="{Binding Toggle3DCommand}"
+                    IsVisible="False"
                     IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
                     SemanticProperties.Hint="{x:Static loc:AppStrings.Toggle3D}" />
             <!-- Live GPS dot toggle: label flips between "Track me" / "Stop tracking" via the

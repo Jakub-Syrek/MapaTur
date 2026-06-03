@@ -57,19 +57,13 @@ public partial class MapPage : ContentPage
 
         if (viewModel.Is3DMode)
         {
-            // Defer so this runs after any mesh-change FrameMesh() the binding may dispatch,
-            // otherwise the auto-frame would clobber the focus we just synced from the 2D map.
-            Dispatcher.Dispatch(() =>
-            {
-                SyncCameraToMap();
-                // Grab keyboard focus so the arrow keys / WASD work immediately without a click first.
-                TerrainView.FocusForKeyboard();
-            });
+            // The 2D map covers the whole voivodeship while the 3D DEM is just one region, so syncing the
+            // 3D camera FROM the 2D centre kept parking it off the terrain (grey, mis-framed). Decoupled:
+            // entering 3D keeps the 3D view's own framing (FrameMesh default / the last 3D position). Just
+            // grab keyboard focus so the arrow keys work immediately.
+            Dispatcher.Dispatch(TerrainView.FocusForKeyboard);
         }
-        else
-        {
-            SyncMapToCamera();
-        }
+        // 3D → 2D no longer drags the flat map either; the two views are independent.
     }
 
     // 2D → 3D: point the camera at whatever the flat map is centred on, matching its zoom AND its
