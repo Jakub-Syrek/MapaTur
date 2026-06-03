@@ -170,7 +170,7 @@
                              HorizontalOptions="Start" VerticalOptions="Start"
                              Margin="8" Padding="8,6" Spacing="2"
                              BackgroundColor="#A0101418"
-                             Opacity="0.20"
+                             Opacity="0.35"
                              IsVisible="{Binding Show3DChrome}">
             <!-- Nearly invisible at rest like the camera-pad buttons, materialising to full opacity
                  on hover (desktop) or press (touch) so it doesn't cover the terrain when unused. -->
@@ -179,7 +179,7 @@
                     <VisualStateGroup x:Name="CommonStates">
                         <VisualState x:Name="Normal">
                             <VisualState.Setters>
-                                <Setter Property="Opacity" Value="0.20" />
+                                <Setter Property="Opacity" Value="0.35" />
                             </VisualState.Setters>
                         </VisualState>
                         <VisualState x:Name="PointerOver">
@@ -222,6 +222,13 @@
                         Value="{Binding Wind, Mode=TwoWay}"
                         SemanticProperties.Hint="Siła wiatru" />
                 <Label Text="{Binding Wind, StringFormat='{0:P0}'}" TextColor="White" FontSize="11" WidthRequest="36" VerticalOptions="Center" />
+            </HorizontalStackLayout>
+            <HorizontalStackLayout Spacing="6" VerticalOptions="Center">
+                <Label Text="Śnieg:" TextColor="White" FontSize="11" WidthRequest="44" VerticalOptions="Center" />
+                <Slider Minimum="0" Maximum="1" WidthRequest="120" VerticalOptions="Center"
+                        Value="{Binding Snow, Mode=TwoWay}"
+                        SemanticProperties.Hint="Pokrywa śnieżna" />
+                <Label Text="{Binding Snow, StringFormat='{0:P0}'}" TextColor="White" FontSize="11" WidthRequest="36" VerticalOptions="Center" />
             </HorizontalStackLayout>
         </VerticalStackLayout>
 

@@ -33,6 +33,13 @@ public interface I3DSettingsStore
     double? Wind { get; set; }
 
     /// <summary>
+    /// Last-used snow-cover amount, [0,1]; drives the terrain shader's snow blend (snowline lowers
+    /// as it rises). Null until the user moves the slider, in which case the view-model keeps its
+    /// default (0 = no snow).
+    /// </summary>
+    double? Snow { get; set; }
+
+    /// <summary>
     /// Serialized 3D camera state for the most-recently-viewed DEM. Opaque string owned by the
     /// view (a DEM-bounds key + orbit params); null until the user has viewed a DEM in 3D. The
     /// view only restores it when its embedded key matches the currently loaded DEM, so switching

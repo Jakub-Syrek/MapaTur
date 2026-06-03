@@ -72,6 +72,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform float uCloudTime;\n" +
         "uniform float uCloudCoverage;\n" +
         "uniform float uCloudShadow;\n" + // strength 0..1; 0 disables
+        // Snow cover: whiten the surface above uSnowLineZ (world-Z), softened over uSnowBandZ, and only
+        // on flatter slopes; uSnowStrength (0..1) gates + scales it. The line/band/strength are derived on
+        // the CPU from the snow slider + the mesh's Z range, so the snowline lowers as the slider rises.
+        "uniform float uSnowStrength;\n" +
+        "uniform float uSnowLineZ;\n" +
+        "uniform float uSnowBandZ;\n" +
         "out vec4 fragColor;\n" +
         "float hashT(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n" +
         "float noiseT(vec2 p){\n" +
@@ -122,7 +128,24 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  } else {\n" +
         "    base = vColor.rgb;\n" +
         "  }\n" +
+        // Snow on top of the base colour, driven PRIMARILY BY ELEVATION: full above the snowline,
+        // fading out over the band just below it. The snowline (uSnowLineZ) sits at the highest peak when
+        // the slider is just on and drops to the valley floor at full — so snow always appears on the
+        // TOP first and recedes top-LAST. Slope only GENTLY thins it on the sheerest rock faces (mix
+        // 0.65..1.0), so steep summits still hold snow (they were wrongly stripped before). Blended toward
+        // a cool white; the lighting below shades it (sunlit bright, shadowed cool). NO per-pixel fBm —
+        // a 5-octave fbmT per fragment tanked the framerate ("zarywa"); the band already softens the edge.
+        "  float snowMix = 0.0;\n" +
+        "  if (uSnowStrength > 0.001) {\n" +
+        "    float snowH = smoothstep(uSnowLineZ, uSnowLineZ + uSnowBandZ, vWorldPos.z);\n" +
+        "    float slope = mix(0.65, 1.0, smoothstep(0.10, 0.50, normalize(vNormal).z));\n" +
+        "    snowMix = clamp(snowH * slope, 0.0, 1.0) * uSnowStrength;\n" +
+        "    base = mix(base, vec3(0.99, 0.99, 1.0), snowMix);\n" +
+        "  }\n" +
         "  vec3 lit = base * lightSum;\n" +
+        // Snow stays bright white even in shadow (very high albedo + sky/multiple scattering): lift the
+        // lit colour toward white by the snow amount, so ambient-only (shadowed) snow doesn't read grey.
+        "  lit = mix(lit, vec3(1.0), snowMix * 0.6);\n" +
         "  float dist = length(vWorldPos - uCameraPos);\n" +
         "  float fogAmount = 1.0 - exp(-dist * uFogDensity);\n" +
         "  fragColor = vec4(mix(lit, uFogColor, fogAmount), 1.0);\n" +
@@ -387,6 +410,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int terrainCloudTimeLocation = -1;
     private int terrainCloudCoverageLocation = -1;
     private int terrainCloudShadowLocation = -1;
+    private int terrainSnowStrengthLocation = -1;
+    private int terrainSnowLineZLocation = -1;
+    private int terrainSnowBandZLocation = -1;
 
     // Sky / atmospheric program: drawn as a fullscreen triangle BEFORE the terrain pass, with the
     // depth-write disabled so the depth-tested terrain composes on top. Owns its own program +
@@ -604,6 +630,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             terrainCloudTimeLocation = -1;
             terrainCloudCoverageLocation = -1;
             terrainCloudShadowLocation = -1;
+            terrainSnowStrengthLocation = -1;
+            terrainSnowLineZLocation = -1;
+            terrainSnowBandZLocation = -1;
             // Sky program + fullscreen triangle VAO belonged to the dead context too.
             skyProgram = 0;
             skyInvViewProjLocation = -1;
@@ -746,11 +775,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Cloud-layer geometry, computed once and shared by BOTH the sea-of-clouds draw and the
         // terrain's cloud-shadow lookup so the shadows on the ground register with the clouds above.
         float cloudMaxZ = float.NegativeInfinity;
+        float terrainMinZ = float.PositiveInfinity;
         for (int i = 0; i < tiles.Count; i++)
         {
             if (tiles[i].MaxElevationZ > cloudMaxZ)
             {
                 cloudMaxZ = tiles[i].MaxElevationZ;
+            }
+            if (tiles[i].MinElevationZ < terrainMinZ)
+            {
+                terrainMinZ = tiles[i].MinElevationZ;
             }
         }
         TerrainMesh3D geomFrame = tiles[0];
@@ -859,6 +893,22 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform1(terrainCloudTimeLocation, weatherT);
         gl.Uniform1(terrainCloudCoverageLocation, cloudsActive ? effectiveCoverage : 0f);
         gl.Uniform1(terrainCloudShadowLocation, cloudsActive ? CloudShadowStrength : 0f);
+
+        // Snow cover: derive the snowline (world-Z) from the slider + the mesh Z range so it scales with
+        // Pion. At snow=0 the line sits ABOVE every peak (no snow); at snow=1 it drops BELOW the valley
+        // floor (full snow). The shader whitens above the line, over a soft band, on flat-ish slopes.
+        float snowAmount = atmosphere?.SnowAmount ?? 0f;
+        float snowMaxZ = float.IsNegativeInfinity(cloudMaxZ) ? 0f : cloudMaxZ;
+        float snowMinZ = float.IsPositiveInfinity(terrainMinZ) ? 0f : terrainMinZ;
+        float snowRelief = MathF.Max(1f, snowMaxZ - snowMinZ);
+        float snowBandZ = snowRelief * 0.15f;
+        // Snowline = highest peak when the slider is just on (snow appears on the TOP first), dropping to
+        // one band below the valley floor at full (everything covered, floor included). Highest-first,
+        // top-last — exactly "the most snow where it's highest".
+        float snowLineZ = (snowMaxZ * (1f - snowAmount)) + ((snowMinZ - snowBandZ) * snowAmount);
+        gl.Uniform1(terrainSnowStrengthLocation, snowAmount);
+        gl.Uniform1(terrainSnowLineZLocation, snowLineZ);
+        gl.Uniform1(terrainSnowBandZLocation, snowBandZ);
 
         // Aerial perspective: when the atmosphere is bound, distant fragments blend toward
         // uFogColor with an exponential ramp. uFogDensity = 0 disables the blend (legacy path).
@@ -1387,6 +1437,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         terrainCloudTimeLocation = g.GetUniformLocation(program, "uCloudTime");
         terrainCloudCoverageLocation = g.GetUniformLocation(program, "uCloudCoverage");
         terrainCloudShadowLocation = g.GetUniformLocation(program, "uCloudShadow");
+        terrainSnowStrengthLocation = g.GetUniformLocation(program, "uSnowStrength");
+        terrainSnowLineZLocation = g.GetUniformLocation(program, "uSnowLineZ");
+        terrainSnowBandZLocation = g.GetUniformLocation(program, "uSnowBandZ");
 
         // Sky program — single triangle covering the screen, fragment-shader-only atmospheric model.
         uint sks = CompileShader(g, ShaderType.VertexShader, SkyVertexShaderSource);

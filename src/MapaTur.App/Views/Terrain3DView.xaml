@@ -19,13 +19,13 @@
             <Setter Property="TextColor" Value="White" />
             <Setter Property="BorderColor" Value="#90FFFFFF" />
             <Setter Property="BorderWidth" Value="1" />
-            <Setter Property="Opacity" Value="0.20" />
+            <Setter Property="Opacity" Value="0.35" />
             <Setter Property="VisualStateManager.VisualStateGroups">
                 <VisualStateGroupList>
                     <VisualStateGroup x:Name="CommonStates">
                         <VisualState x:Name="Normal">
                             <VisualState.Setters>
-                                <Setter Property="Opacity" Value="0.20" />
+                                <Setter Property="Opacity" Value="0.35" />
                             </VisualState.Setters>
                         </VisualState>
                         <VisualState x:Name="PointerOver">

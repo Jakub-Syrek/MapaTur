@@ -200,11 +200,18 @@ public sealed partial class MapPageViewModel : ObservableObject
     private double wind = 0.3;
 
     /// <summary>
-    /// Live atmospheric model derived from <see cref="TimeOfDayHours"/>, <see cref="Cloudiness"/>
-    /// and <see cref="Wind"/>. Recomputed whenever any change and bound straight into
-    /// <c>Terrain3DView.Atmosphere</c>. Cheap to build so deriving per change is fine.
+    /// Snow-cover amount, [0,1]: 0 = no snow (default), 1 = full snow (the snowline drops to the
+    /// valley floor). Drives the terrain shader's snow blend in the 3D renderer. Persisted.
     /// </summary>
-    public Atmosphere Atmosphere => new((float)TimeOfDayHours, (float)Cloudiness, (float)Wind);
+    [ObservableProperty]
+    private double snow;
+
+    /// <summary>
+    /// Live atmospheric model derived from <see cref="TimeOfDayHours"/>, <see cref="Cloudiness"/>,
+    /// <see cref="Wind"/> and <see cref="Snow"/>. Recomputed whenever any change and bound straight
+    /// into <c>Terrain3DView.Atmosphere</c>. Cheap to build so deriving per change is fine.
+    /// </summary>
+    public Atmosphere Atmosphere => new((float)TimeOfDayHours, (float)Cloudiness, (float)Wind, (float)Snow);
 
     partial void OnTimeOfDayHoursChanged(double value)
     {
@@ -222,6 +229,12 @@ public sealed partial class MapPageViewModel : ObservableObject
     partial void OnWindChanged(double value)
     {
         settingsStore.Wind = value;
+        OnPropertyChanged(nameof(Atmosphere));
+    }
+
+    partial void OnSnowChanged(double value)
+    {
+        settingsStore.Snow = value;
         OnPropertyChanged(nameof(Atmosphere));
     }
 
@@ -825,6 +838,10 @@ public sealed partial class MapPageViewModel : ObservableObject
         if (settingsStore.Wind is { } savedWind)
         {
             wind = Math.Clamp(savedWind, 0.0, 1.0);
+        }
+        if (settingsStore.Snow is { } savedSnow)
+        {
+            snow = Math.Clamp(savedSnow, 0.0, 1.0);
         }
         cameraState = settingsStore.CameraState;
         this.trackRenderer = trackRenderer;
