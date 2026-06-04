@@ -2161,14 +2161,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  vec2 cell = clamp(floor(cellUv * uGrid), 0.0, uGrid - 1.0);\n" +
         "  vec2 uv = (cell + vCardUv) / uGrid;\n" +
         "  vec4 t = texture(uAtlas, uv);\n" +
-        "  if (t.a < 0.5) discard;\n" + // alpha-tested silhouette (no sorting needed — trees are opaque)
-        // LOD crossfade: screen-door dither the impostor IN as it approaches the band (mirror of the mesh
-        // dithering out), so the swap near→far is a dissolve, not a pop.
-        "  float dth = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);\n" +
-        "  if (dth > vLodAlpha) discard;\n" +
+        // Alpha-to-coverage: the silhouette mask (t.a) and the LOD crossfade (vLodAlpha) both feed the
+        // output alpha, which the MSAA stage turns into a smooth coverage mask — soft conifer edges (no
+        // alpha-test stair-stepping) AND a dithered-free LOD dissolve. The colour-mask keeps the
+        // framebuffer alpha opaque so this never makes the trees translucent in the Skia composite.
+        "  float a = t.a * vLodAlpha;\n" +
+        "  if (a < 0.02) discard;\n" + // skip fully-transparent fragments (saves depth writes)
         "  float d = length(vToEye);\n" + // distance eye→tree, for aerial-perspective fog
         "  float fog = 1.0 - exp(-d * uFogDensity);\n" +
-        "  fragColor = vec4(mix(t.rgb, uFogColor, fog), 1.0);\n" +
+        "  fragColor = vec4(mix(t.rgb, uFogColor, fog), a);\n" +
         "}\n";
 
     private uint forestImpostorProgram;
@@ -2319,7 +2320,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             TextureTarget.Texture2D, 0, (int)InternalFormat.Rgba8,
             ForestAtlasSize, ForestAtlasSize, 0,
             PixelFormat.Rgba, PixelType.UnsignedByte, null);
-        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+        // Trilinear minification (mips generated after the bake) so distant impostors don't shimmer/alias;
+        // MAX_LEVEL is capped after the bake to keep cells from merging into their neighbours at high mips.
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
         g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
         g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
         g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
@@ -2427,11 +2430,24 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
         g.BindVertexArray(0);
 
+        // Quality: mipmap + anisotropy the baked atlas so distant impostors don't shimmer. The atlas is a
+        // grid, so high mips would merge neighbouring cells — cap MAX_LEVEL so the smallest sampled cell
+        // stays ~16 px (atlas 2048 → level 4 = 128 px → 16 px/cell), where cells are still distinct.
+        g.BindTexture(TextureTarget.Texture2D, forestAtlasTex);
+        g.GenerateMipmap(TextureTarget.Texture2D);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMaxLevel, 4);
+        const GLEnum maxAnisoPName = (GLEnum)0x84FF;   // GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
+        const GLEnum anisoPName = (GLEnum)0x84FE;      // GL_TEXTURE_MAX_ANISOTROPY_EXT
+        Span<float> maxAniso = stackalloc float[1] { 1f };
+        g.GetFloat(maxAnisoPName, maxAniso);
+        g.TexParameter(TextureTarget.Texture2D, (TextureParameterName)anisoPName, Math.Clamp(8f, 1f, maxAniso[0] < 1f ? 1f : maxAniso[0]));
+        g.BindTexture(TextureTarget.Texture2D, 0);
+
         // Restore the scene's framebuffer + viewport (and clear colour) so the rest of the frame is normal.
         g.BindFramebuffer(FramebufferTarget.Framebuffer, (uint)prevFbo[0]);
         g.Viewport(prevVp[0], prevVp[1], (uint)prevVp[2], (uint)prevVp[3]);
         g.ClearColor(SkyR, SkyG, SkyB, 1f);
-        Log.Information("[GL3D] forest impostor atlas baked: {Grid}×{Grid} views @ {Cell}px", ForestAtlasGrid, ForestAtlasGrid, ForestAtlasCell);
+        Log.Information("[GL3D] forest impostor atlas baked: {Grid}×{Grid} views @ {Cell}px (mipmapped)", ForestAtlasGrid, ForestAtlasGrid, ForestAtlasCell);
     }
 
     private unsafe void EnsureForestImpostorProgram(GL g)
@@ -2512,9 +2528,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.BindTexture(TextureTarget.Texture2D, forestAtlasTex);
         g.Uniform1(forestImpostorAtlasLocation, 0);
 
+        // Alpha-to-coverage smooths the alpha-tested silhouette edges (and the LOD fade) via MSAA. Keep the
+        // framebuffer alpha channel masked off so the partial fragment alpha doesn't make trees translucent
+        // when Skia composites the present texture.
+        g.Enable(EnableCap.SampleAlphaToCoverage);
+        g.ColorMask(true, true, true, false);
         g.BindVertexArray(forestImpostorVao);
         g.DrawArraysInstanced(PrimitiveType.TriangleStrip, 0, 4, (uint)forestInstanceCount);
         g.BindVertexArray(0);
+        g.ColorMask(true, true, true, true);
+        g.Disable(EnableCap.SampleAlphaToCoverage);
     }
 
     // Uploads the per-tree instance buffer when the forest list reference changes (placement is rebuilt
