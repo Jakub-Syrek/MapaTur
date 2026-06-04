@@ -138,8 +138,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  float snowMix = 0.0;\n" +
         "  if (uSnowStrength > 0.001) {\n" +
         "    float snowH = smoothstep(uSnowLineZ, uSnowLineZ + uSnowBandZ, vWorldPos.z);\n" +
-        "    float slope = mix(0.65, 1.0, smoothstep(0.10, 0.50, normalize(vNormal).z));\n" +
-        "    snowMix = clamp(snowH * slope, 0.0, 1.0) * uSnowStrength;\n" +
+        "    vec3 nrm = normalize(vNormal);\n" +
+        "    float slope = mix(0.65, 1.0, smoothstep(0.10, 0.50, nrm.z));\n" +
+        // Aspect: sunny SOUTH-facing slopes (+Y is north, so south = -Y) melt off first. The melt is
+        // strongest when there's only a little snow and fades to nothing at full cover — so a thin
+        // dusting clings to the shaded north faces while a deep pack still blankets every aspect.
+        "    float southFacing = max(0.0, -nrm.y);\n" +
+        "    float aspectMelt = southFacing * (1.0 - uSnowStrength);\n" +
+        "    snowMix = clamp(snowH * slope * (1.0 - aspectMelt), 0.0, 1.0) * uSnowStrength;\n" +
         "    base = mix(base, vec3(0.99, 0.99, 1.0), snowMix);\n" +
         "  }\n" +
         "  vec3 lit = base * lightSum;\n" +
@@ -666,6 +672,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             forestMvpLocation = -1;
             forestTrunkLocation = -1;
             forestFoliageColorLocation = -1;
+            forestLightDirLocation = -1;
             forestSunColorLocation = -1;
             forestSkyAmbientLocation = -1;
             forestAmbientLocation = -1;
@@ -673,10 +680,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             forestFogDensityLocation = -1;
             forestCameraPosLocation = -1;
             forestFadeEndLocation = -1;
+            forestSnowLocation = -1;
+            forestWindDirLocation = -1;
+            forestWindAmpLocation = -1;
+            forestWindTimeLocation = -1;
             forestVao = 0;
             forestBaseVbo = 0;
             forestInstanceVbo = 0;
             forestInstanceCount = 0;
+            forestVertexCount = 0;
             lastForest = null;
             // The ortho texture IDs belonged to the dead context; drop the handles (don't GL-delete the
             // stale ones) but keep the CPU bytes so they re-upload on the next EnsureOrthoTextures.
@@ -983,7 +995,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             EnsureForestProgram(gl);
             EnsureForestInstances(gl, forest);
-            DrawForest(gl, m, camera, atmosphere);
+            DrawForest(gl, m, camera, atmosphere, windVec, weatherT);
         }
 
         // Trails + route as depth-tested screen-space ribbons (occluded by the terrain). Switch to the line
@@ -1922,30 +1934,46 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // spruce mesh + octahedral impostors (near=mesh, far=impostor).
     private const string ForestVertexShaderSource =
         "#version 300 es\n" +
-        "layout(location=0) in vec3 aPos;\n" +          // model space: base at z=0, apex at z=h
-        "layout(location=1) in float aFoliage;\n" +     // 0 at base, 1 at apex
-        "layout(location=2) in vec3 aInstPos;\n" +      // per-instance world position
-        "layout(location=3) in vec2 aInstScaleRot;\n" + // per-instance x=scale, y=yaw
+        "layout(location=0) in vec3 aPos;\n" +          // model space: base at z=0, apex up
+        "layout(location=1) in vec3 aNormal;\n" +       // outward horizontal normal (for lighting)
+        "layout(location=2) in float aFoliage;\n" +     // 0 = trunk-ish, 1 = foliage
+        "layout(location=3) in vec3 aInstPos;\n" +      // per-instance world position
+        "layout(location=4) in vec2 aInstScaleRot;\n" + // per-instance x=scale, y=yaw
         "uniform mat4 uMvp;\n" +
+        "uniform vec2 uWindDir;\n" +   // normalized sway direction (world XY)
+        "uniform float uWindAmp;\n" +  // metres of apex sway
+        "uniform float uWindTime;\n" +
+        "out vec3 vNormal;\n" +
         "out float vFoliage;\n" +
         "out vec3 vWorldPos;\n" +
+        "out float vHeight;\n" +
         "void main(){\n" +
         "  float s = aInstScaleRot.x; float yaw = aInstScaleRot.y;\n" +
         "  float cs = cos(yaw); float sn = sin(yaw);\n" +
         "  vec3 p = aPos * s;\n" +
         "  vec3 rp = vec3((p.x * cs) - (p.y * sn), (p.x * sn) + (p.y * cs), p.z);\n" + // yaw about world-up
         "  vec3 world = aInstPos + rp;\n" +
-        "  vWorldPos = world; vFoliage = aFoliage;\n" +
+        // Wind: sway scales with height (apex moves, base stays), phase offset per tree so they don't
+        // all wave in lock-step. uWindAmp/uWindDir/uWindTime come from the live weather.
+        "  float heightF = clamp(aPos.z / 28.0, 0.0, 1.0);\n" +
+        "  float sway = uWindAmp * heightF * sin(uWindTime + ((aInstPos.x + aInstPos.y) * 0.05));\n" +
+        "  world.xy += uWindDir * sway;\n" +
+        "  vec3 n = vec3((aNormal.x * cs) - (aNormal.y * sn), (aNormal.x * sn) + (aNormal.y * cs), aNormal.z);\n" +
+        "  vNormal = n; vFoliage = aFoliage; vWorldPos = world; vHeight = heightF;\n" +
         "  gl_Position = uMvp * vec4(world, 1.0);\n" +
         "}\n";
 
     private const string ForestFragmentShaderSource =
         "#version 300 es\n" +
         "precision highp float;\n" +
+        "in vec3 vNormal;\n" +
         "in float vFoliage;\n" +
         "in vec3 vWorldPos;\n" +
+        "in float vHeight;\n" +
+        "uniform float uSnow;\n" +     // snow amount 0..1 — dusts the foliage white toward the top
         "uniform vec3 uTrunk;\n" +
         "uniform vec3 uFoliageColor;\n" +
+        "uniform vec3 uLightDir;\n" +   // unit direction toward the sun
         "uniform vec3 uSunColor;\n" +
         "uniform vec3 uSkyAmbient;\n" +
         "uniform float uAmbient;\n" +
@@ -1957,8 +1985,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "void main(){\n" +
         "  float dist = length(vWorldPos - uCameraPos);\n" +
         "  if (dist > uFadeEnd) discard;\n" +
-        "  vec3 base = mix(uTrunk, uFoliageColor, smoothstep(0.0, 0.22, vFoliage));\n" +
-        "  vec3 light = (uSkyAmbient * uAmbient) + (uSunColor * (1.0 - uAmbient) * 0.85);\n" +
+        "  vec3 base = mix(uTrunk, uFoliageColor, smoothstep(0.0, 0.15, vFoliage));\n" +
+        // Snow-laden conifer: dust the foliage toward white as snow rises, more toward the top (where
+        // it settles) so the forest reads as a natural winter scene rather than green trees on white.
+        "  if (uSnow > 0.001) {\n" +
+        "    float dust = clamp(uSnow * (0.25 + (0.55 * vHeight)), 0.0, 0.8);\n" +
+        "    base = mix(base, vec3(0.93, 0.95, 0.98), dust);\n" +
+        "  }\n" +
+        // Wrap lighting: the cross-cards are 2-sided, so use a half-Lambert so the shaded side stays a
+        // dimmer green rather than crushing to black. Gives the tree a sunlit/shadow side = volume.
+        "  float ndl = dot(normalize(vNormal), uLightDir);\n" +
+        "  float wrap = clamp((ndl * 0.5) + 0.5, 0.0, 1.0);\n" +
+        "  vec3 light = (uSkyAmbient * uAmbient) + (uSunColor * (1.0 - uAmbient) * (0.35 + (0.65 * wrap)));\n" +
         "  vec3 lit = base * light;\n" +
         "  float fog = 1.0 - exp(-dist * uFogDensity);\n" +
         "  fragColor = vec4(mix(lit, uFogColor, fog), 1.0);\n" +
@@ -1966,12 +2004,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
     // Trees fade out (hard cutoff for Phase 1) past this distance from the eye, in WORLD units (≈ real
     // metres horizontally). Keeps the per-fragment tree cost bounded to the near field.
-    private const float ForestFadeEndMeters = 7000f;
+    private const float ForestFadeEndMeters = 20000f;
 
     private uint forestProgram;
     private int forestMvpLocation = -1;
     private int forestTrunkLocation = -1;
     private int forestFoliageColorLocation = -1;
+    private int forestLightDirLocation = -1;
     private int forestSunColorLocation = -1;
     private int forestSkyAmbientLocation = -1;
     private int forestAmbientLocation = -1;
@@ -1979,10 +2018,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int forestFogDensityLocation = -1;
     private int forestCameraPosLocation = -1;
     private int forestFadeEndLocation = -1;
+    private int forestSnowLocation = -1;
+    private int forestWindDirLocation = -1;
+    private int forestWindAmpLocation = -1;
+    private int forestWindTimeLocation = -1;
     private uint forestVao;
     private uint forestBaseVbo;
     private uint forestInstanceVbo;
     private int forestInstanceCount;
+    private int forestVertexCount;
     private IReadOnlyList<TreeInstance>? lastForest;
 
     private void EnsureForestProgram(GL g)
@@ -2011,6 +2055,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         forestMvpLocation = g.GetUniformLocation(forestProgram, "uMvp");
         forestTrunkLocation = g.GetUniformLocation(forestProgram, "uTrunk");
         forestFoliageColorLocation = g.GetUniformLocation(forestProgram, "uFoliageColor");
+        forestLightDirLocation = g.GetUniformLocation(forestProgram, "uLightDir");
         forestSunColorLocation = g.GetUniformLocation(forestProgram, "uSunColor");
         forestSkyAmbientLocation = g.GetUniformLocation(forestProgram, "uSkyAmbient");
         forestAmbientLocation = g.GetUniformLocation(forestProgram, "uAmbient");
@@ -2018,35 +2063,61 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         forestFogDensityLocation = g.GetUniformLocation(forestProgram, "uFogDensity");
         forestCameraPosLocation = g.GetUniformLocation(forestProgram, "uCameraPos");
         forestFadeEndLocation = g.GetUniformLocation(forestProgram, "uFadeEnd");
+        forestSnowLocation = g.GetUniformLocation(forestProgram, "uSnow");
+        forestWindDirLocation = g.GetUniformLocation(forestProgram, "uWindDir");
+        forestWindAmpLocation = g.GetUniformLocation(forestProgram, "uWindAmp");
+        forestWindTimeLocation = g.GetUniformLocation(forestProgram, "uWindTime");
 
-        // Base cross-triangle conifer: XZ + YZ vertical triangles, base ±w at z=0, apex at z=h.
-        // Interleaved [x, y, z, foliage] × 6 vertices.
-        const float w = 4f;
-        const float h = 20f;
-        Span<float> verts = stackalloc float[24]
+        // 3-tier conifer: each tier is two crossed vertical triangles (XZ + YZ) of decreasing width going
+        // up, so it reads as a tiered spruce from any orbit angle. Interleaved [pos(3), normal(3), foliage].
+        // The normal is the card's outward horizontal direction, used for the half-Lambert side shading.
+        (float BaseZ, float ApexZ, float HalfWidth)[] tiers =
         {
-            -w, 0f, 0f, 0f,    w, 0f, 0f, 0f,    0f, 0f, h, 1f, // XZ triangle
-            0f, -w, 0f, 0f,    0f, w, 0f, 0f,    0f, 0f, h, 1f, // YZ triangle
+            (1.5f, 13f, 7.0f),
+            (10f, 21f, 5.0f),
+            (18f, 28f, 3.0f),
         };
+        var vlist = new List<float>(tiers.Length * 2 * 3 * 7);
+        void AddVert(float x, float y, float z, float nx, float ny, float nz)
+        {
+            vlist.Add(x); vlist.Add(y); vlist.Add(z);
+            vlist.Add(nx); vlist.Add(ny); vlist.Add(nz);
+            vlist.Add(1f); // foliage
+        }
+        foreach ((float baseZ, float apexZ, float hw) in tiers)
+        {
+            AddVert(-hw, 0f, baseZ, 0f, 1f, 0f); // XZ triangle (faces ±Y)
+            AddVert(hw, 0f, baseZ, 0f, 1f, 0f);
+            AddVert(0f, 0f, apexZ, 0f, 1f, 0f);
+            AddVert(0f, -hw, baseZ, 1f, 0f, 0f); // YZ triangle (faces ±X)
+            AddVert(0f, hw, baseZ, 1f, 0f, 0f);
+            AddVert(0f, 0f, apexZ, 1f, 0f, 0f);
+        }
+        float[] verts = vlist.ToArray();
+        forestVertexCount = verts.Length / 7;
+
+        const int stride = 7 * sizeof(float);
         forestVao = g.GenVertexArray();
         g.BindVertexArray(forestVao);
         forestBaseVbo = g.GenBuffer();
         g.BindBuffer(BufferTargetARB.ArrayBuffer, forestBaseVbo);
         g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(verts.Length * sizeof(float)), verts, BufferUsageARB.StaticDraw);
-        g.EnableVertexAttribArray(0);
-        g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 4 * sizeof(float), (void*)0);
-        g.EnableVertexAttribArray(1);
-        g.VertexAttribPointer(1, 1, VertexAttribPointerType.Float, false, 4 * sizeof(float), (void*)(3 * sizeof(float)));
+        g.EnableVertexAttribArray(0); // aPos
+        g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, stride, (void*)0);
+        g.EnableVertexAttribArray(1); // aNormal
+        g.VertexAttribPointer(1, 3, VertexAttribPointerType.Float, false, stride, (void*)(3 * sizeof(float)));
+        g.EnableVertexAttribArray(2); // aFoliage
+        g.VertexAttribPointer(2, 1, VertexAttribPointerType.Float, false, stride, (void*)(6 * sizeof(float)));
 
         // Per-instance buffer (filled in EnsureForestInstances) — (posX,posY,posZ, scale, yaw), divisor 1.
         forestInstanceVbo = g.GenBuffer();
         g.BindBuffer(BufferTargetARB.ArrayBuffer, forestInstanceVbo);
-        g.EnableVertexAttribArray(2);
-        g.VertexAttribPointer(2, 3, VertexAttribPointerType.Float, false, 5 * sizeof(float), (void*)0);
-        g.VertexAttribDivisor(2, 1);
-        g.EnableVertexAttribArray(3);
-        g.VertexAttribPointer(3, 2, VertexAttribPointerType.Float, false, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+        g.EnableVertexAttribArray(3); // aInstPos
+        g.VertexAttribPointer(3, 3, VertexAttribPointerType.Float, false, 5 * sizeof(float), (void*)0);
         g.VertexAttribDivisor(3, 1);
+        g.EnableVertexAttribArray(4); // aInstScaleRot
+        g.VertexAttribPointer(4, 2, VertexAttribPointerType.Float, false, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+        g.VertexAttribDivisor(4, 1);
         g.BindVertexArray(0);
     }
 
@@ -2081,9 +2152,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
     }
 
-    private void DrawForest(GL g, ReadOnlySpan<float> mvp, Camera3D camera, Atmosphere? atmosphere)
+    private void DrawForest(GL g, ReadOnlySpan<float> mvp, Camera3D camera, Atmosphere? atmosphere, Vector2 windVec, float weatherT)
     {
-        if (forestInstanceCount == 0)
+        if (forestInstanceCount == 0 || forestVertexCount == 0)
         {
             return;
         }
@@ -2091,8 +2162,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.UseProgram(forestProgram);
         g.UniformMatrix4(forestMvpLocation, 1, false, mvp);
         g.Uniform3(forestTrunkLocation, 0.30f, 0.21f, 0.13f);
-        g.Uniform3(forestFoliageColorLocation, 0.12f, 0.26f, 0.13f); // dark spruce green
+        g.Uniform3(forestFoliageColorLocation, 0.10f, 0.24f, 0.12f); // dark spruce green
 
+        Vector3 light = atmosphere?.SunDirection ?? new Vector3(0f, 0f, 1f);
         Vector3 sun = Vector3.One;
         Vector3 sky = Vector3.One;
         float ambient = 0.5f;
@@ -2102,6 +2174,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             sky = Vector3.Lerp(atmosphere.SkyZenithColor, Vector3.One, 0.5f);
             ambient = atmosphere.AmbientFactor;
         }
+        g.Uniform3(forestLightDirLocation, light.X, light.Y, light.Z);
         g.Uniform3(forestSunColorLocation, sun.X, sun.Y, sun.Z);
         g.Uniform3(forestSkyAmbientLocation, sky.X, sky.Y, sky.Z);
         g.Uniform1(forestAmbientLocation, ambient);
@@ -2112,9 +2185,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         Vector3 cam = camera.Position;
         g.Uniform3(forestCameraPosLocation, cam.X, cam.Y, cam.Z);
         g.Uniform1(forestFadeEndLocation, ForestFadeEndMeters);
+        g.Uniform1(forestSnowLocation, atmosphere?.SnowAmount ?? 0f);
+
+        // Wind: direction from the live drift vector (fallback +X), amplitude from the wind strength.
+        Vector2 dir = windVec.LengthSquared() > 1e-9f ? Vector2.Normalize(windVec) : new Vector2(1f, 0f);
+        float amp = (atmosphere?.Wind ?? 0.3f) * 2.0f; // metres of apex sway at full gale
+        g.Uniform2(forestWindDirLocation, dir.X, dir.Y);
+        g.Uniform1(forestWindAmpLocation, amp);
+        g.Uniform1(forestWindTimeLocation, weatherT);
 
         g.BindVertexArray(forestVao);
-        g.DrawArraysInstanced(PrimitiveType.Triangles, 0, 6, (uint)forestInstanceCount);
+        g.DrawArraysInstanced(PrimitiveType.Triangles, 0, (uint)forestVertexCount, (uint)forestInstanceCount);
         g.BindVertexArray(0);
     }
 

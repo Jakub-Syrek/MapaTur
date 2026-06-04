@@ -224,6 +224,34 @@ public partial class Terrain3DView : ContentView
     }
 
     /// <summary>
+    /// Forest density [0,1] bound from the "Las" slider. Changing it rebuilds the tree placement
+    /// (a different tree count) and repaints.
+    /// </summary>
+    public static readonly BindableProperty ForestDensityProperty = BindableProperty.Create(
+        nameof(ForestDensity),
+        typeof(double),
+        typeof(Terrain3DView),
+        0.6,
+        propertyChanged: OnForestDensityChanged);
+
+    public double ForestDensity
+    {
+        get => (double)GetValue(ForestDensityProperty);
+        set => SetValue(ForestDensityProperty, value);
+    }
+
+    private static void OnForestDensityChanged(BindableObject bindable, object oldValue, object newValue)
+    {
+        if (bindable is Terrain3DView view)
+        {
+            // Force the forest to be re-placed at the new density on the next paint.
+            view.cachedForest = null;
+            view.cachedForestTiles = null;
+            view.Canvas.InvalidateSurface();
+        }
+    }
+
+    /// <summary>
     /// Serialized camera state (a DEM-bounds key + orbit params), two-way bound to the view-model
     /// so it persists across restarts. The view writes its current camera here on a debounce and
     /// restores from it in <see cref="FrameMesh"/> when the embedded key matches the loaded DEM.
@@ -423,7 +451,13 @@ public partial class Terrain3DView : ContentView
             Camera.Target = new Vector3(tx, ty, tz);
             Camera.Distance = dist;
             Camera.AzimuthRadians = az;
-            Camera.PitchRadians = pitch;
+            // Clamp the restored PITCH into the downward orbit range. A saved look-around pose can leave
+            // pitch pointing up at the sky, so the camera would restore into a grey void with no terrain in
+            // view (the recurring "szara pustka na starcie"). Forcing it back to [MinPitch, ~89°] means
+            // every launch lands looking DOWN at the terrain. (Azimuth/target/distance are kept; the
+            // per-frame ClampToBounds then pins the eye over the map at a sane altitude.)
+            float maxPitch = (MathF.PI / 2f) - 0.02f;
+            Camera.PitchRadians = Math.Clamp(pitch, controller.MinPitchRadians, maxPitch);
             lastSavedCameraSerialized = CameraState; // avoid an immediate redundant re-save
             return true;
         }
@@ -1704,12 +1738,26 @@ public partial class Terrain3DView : ContentView
             return cachedForest;
         }
 
+        float density = (float)Math.Clamp(ForestDensity, 0.0, 1.0);
+        if (density <= 0.001f)
+        {
+            cachedForest = System.Array.Empty<TreeInstance>();
+            cachedForestTiles = tiles;
+            return cachedForest;
+        }
+
+        // Quadratic density curve so the slider's LOW end is genuinely sparse (a few trees) and only the
+        // top end is a dense forest — the old linear mapping made even 30% a full carpet, so the slider
+        // looked like it "did little". Stride 4 keeps the max count sane now that trees are larger.
+        float curved = density * density;
         var options = new ForestOptions(
             StrideCells: 4,
             MinElevationMeters: 0.0,
             TreelineMeters: 1500.0,
             MaxSlope: 1.1f,
-            Density: 0.6f);
+            Density: curved,
+            MinScale: 0.8f,
+            MaxScale: 1.7f);
         cachedForest = ForestPlacement.Generate(raster, tiles[0], options);
         cachedForestTiles = tiles;
         return cachedForest;

@@ -207,6 +207,13 @@ public sealed partial class MapPageViewModel : ObservableObject
     private double snow;
 
     /// <summary>
+    /// Forest density, [0,1]: 0 = no trees, 1 = densest. Drives how many trees the 3D renderer scatters
+    /// over the terrain below the treeline (bound into <c>Terrain3DView.ForestDensity</c>). Persisted.
+    /// </summary>
+    [ObservableProperty]
+    private double forestDensity = 0.6;
+
+    /// <summary>
     /// Live atmospheric model derived from <see cref="TimeOfDayHours"/>, <see cref="Cloudiness"/>,
     /// <see cref="Wind"/> and <see cref="Snow"/>. Recomputed whenever any change and bound straight
     /// into <c>Terrain3DView.Atmosphere</c>. Cheap to build so deriving per change is fine.
@@ -236,6 +243,13 @@ public sealed partial class MapPageViewModel : ObservableObject
     {
         settingsStore.Snow = value;
         OnPropertyChanged(nameof(Atmosphere));
+    }
+
+    partial void OnForestDensityChanged(double value)
+    {
+        // Forest density is NOT part of the Atmosphere — the view binds ForestDensity directly and
+        // rebuilds the tree placement when it changes. Just persist here.
+        settingsStore.Forest = value;
     }
 
     /// <summary>
@@ -842,6 +856,10 @@ public sealed partial class MapPageViewModel : ObservableObject
         if (settingsStore.Snow is { } savedSnow)
         {
             snow = Math.Clamp(savedSnow, 0.0, 1.0);
+        }
+        if (settingsStore.Forest is { } savedForest)
+        {
+            forestDensity = Math.Clamp(savedForest, 0.0, 1.0);
         }
         cameraState = settingsStore.CameraState;
         this.trackRenderer = trackRenderer;

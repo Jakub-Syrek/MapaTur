@@ -158,6 +158,7 @@
                              OrthoTextureCells="{Binding OrthoTextureCells}"
                              UserLocation="{Binding UserLocation}"
                              Atmosphere="{Binding Atmosphere}"
+                             ForestDensity="{Binding ForestDensity}"
                              CameraState="{Binding CameraState, Mode=TwoWay}"
                              IsFlying="{Binding Is3DFlying}"
                              IsVisible="{Binding Is3DMode}" />
@@ -229,6 +230,13 @@
                         Value="{Binding Snow, Mode=TwoWay}"
                         SemanticProperties.Hint="Pokrywa śnieżna" />
                 <Label Text="{Binding Snow, StringFormat='{0:P0}'}" TextColor="White" FontSize="11" WidthRequest="36" VerticalOptions="Center" />
+            </HorizontalStackLayout>
+            <HorizontalStackLayout Spacing="6" VerticalOptions="Center">
+                <Label Text="Las:" TextColor="White" FontSize="11" WidthRequest="44" VerticalOptions="Center" />
+                <Slider Minimum="0" Maximum="1" WidthRequest="120" VerticalOptions="Center"
+                        Value="{Binding ForestDensity, Mode=TwoWay}"
+                        SemanticProperties.Hint="Gęstość lasu" />
+                <Label Text="{Binding ForestDensity, StringFormat='{0:P0}'}" TextColor="White" FontSize="11" WidthRequest="36" VerticalOptions="Center" />
             </HorizontalStackLayout>
         </VerticalStackLayout>
 

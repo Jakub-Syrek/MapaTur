@@ -40,6 +40,12 @@ public interface I3DSettingsStore
     double? Snow { get; set; }
 
     /// <summary>
+    /// Last-used forest density, [0,1]; drives how many trees the 3D renderer scatters over the
+    /// terrain (below the treeline). Null until the user moves the slider (view-model default ~0.6).
+    /// </summary>
+    double? Forest { get; set; }
+
+    /// <summary>
     /// Serialized 3D camera state for the most-recently-viewed DEM. Opaque string owned by the
     /// view (a DEM-bounds key + orbit params); null until the user has viewed a DEM in 3D. The
     /// view only restores it when its embedded key matches the currently loaded DEM, so switching
