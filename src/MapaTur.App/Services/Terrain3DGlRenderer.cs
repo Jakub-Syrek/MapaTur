@@ -684,6 +684,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             forestWindDirLocation = -1;
             forestWindAmpLocation = -1;
             forestWindTimeLocation = -1;
+            forestLodNearLocation = -1;
+            forestLodFarLocation = -1;
             forestVao = 0;
             forestBaseVbo = 0;
             forestInstanceVbo = 0;
@@ -704,6 +706,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             forestImpostorGridLocation = -1;
             forestImpostorFogColorLocation = -1;
             forestImpostorFogDensityLocation = -1;
+            forestImpostorLodNearLocation = -1;
+            forestImpostorLodFarLocation = -1;
+            forestImpostorImpFarLocation = -1;
             forestImpostorVao = 0;
             forestImpostorQuadVbo = 0;
             // The ortho texture IDs belonged to the dead context; drop the handles (don't GL-delete the
@@ -1015,8 +1020,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         if (forest is { Count: > 0 })
         {
             EnsureForestInstances(gl, forest);
-            // Phase 3 step 2: draw the WHOLE forest as impostors so the billboard pass can be verified in
-            // isolation. (Step 3 splits by distance: near = mesh via DrawForest, far = impostor.)
+            // Phase 3 LOD: near trees as the full instanced mesh, far trees as cheap atlas impostors, with
+            // a dithered crossfade band between (each pass collapses the instances outside its range, so the
+            // expensive mesh fragments never run for distant trees). Both depth-tested + alpha-tested.
+            DrawForest(gl, m, camera, atmosphere, windVec, weatherT);
             DrawForestImpostors(gl, m, camera, atmosphere);
         }
 
@@ -1965,10 +1972,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform vec2 uWindDir;\n" +   // normalized sway direction (world XY)
         "uniform float uWindAmp;\n" +  // metres of apex sway
         "uniform float uWindTime;\n" +
+        "uniform vec3 uCameraPos;\n" +  // for the LOD crossfade distance
+        "uniform float uLodNear;\n" +   // below: full mesh
+        "uniform float uLodFar;\n" +    // above: collapsed (impostor takes over); band crossfades
         "out vec3 vNormal;\n" +
         "out float vFoliage;\n" +
         "out vec3 vWorldPos;\n" +
         "out float vHeight;\n" +
+        "out float vLodAlpha;\n" + // 1 near → 0 at uLodFar (dithered out across the band)
         "void main(){\n" +
         "  float s = aInstScaleRot.x; float yaw = aInstScaleRot.y;\n" +
         "  float cs = cos(yaw); float sn = sin(yaw);\n" +
@@ -1982,7 +1993,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  world.xy += uWindDir * sway;\n" +
         "  vec3 n = vec3((aNormal.x * cs) - (aNormal.y * sn), (aNormal.x * sn) + (aNormal.y * cs), aNormal.z);\n" +
         "  vNormal = n; vFoliage = aFoliage; vWorldPos = world; vHeight = heightF;\n" +
+        // LOD: full mesh below uLodNear, crossfaded to nothing by uLodFar. Collapse far instances to a
+        // clipped point so their (expensive, overdrawing) fragments never run — that's the impostor's job.
+        "  float lodDist = length(aInstPos - uCameraPos);\n" +
+        "  vLodAlpha = 1.0 - smoothstep(uLodNear, uLodFar, lodDist);\n" +
         "  gl_Position = uMvp * vec4(world, 1.0);\n" +
+        "  if (lodDist > uLodFar) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); }\n" + // NDC z>w ⇒ clipped
         "}\n";
 
     private const string ForestFragmentShaderSource =
@@ -1992,6 +2008,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "in float vFoliage;\n" +
         "in vec3 vWorldPos;\n" +
         "in float vHeight;\n" +
+        "in float vLodAlpha;\n" +
         "uniform float uSnow;\n" +     // snow amount 0..1 — dusts the foliage white toward the top
         "uniform vec3 uTrunk;\n" +
         "uniform vec3 uFoliageColor;\n" +
@@ -2007,6 +2024,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "void main(){\n" +
         "  float dist = length(vWorldPos - uCameraPos);\n" +
         "  if (dist > uFadeEnd) discard;\n" +
+        // LOD crossfade: screen-door dither out the mesh as it recedes (vLodAlpha 1→0), so it dissolves
+        // into the impostor over the band instead of popping. Hash threshold on the pixel coord.
+        "  float dth = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);\n" +
+        "  if (dth > vLodAlpha) discard;\n" +
         "  vec3 base = mix(uTrunk, uFoliageColor, smoothstep(0.0, 0.15, vFoliage));\n" +
         // Snow-laden conifer: dust the foliage toward white as snow rises, more toward the top (where
         // it settles) so the forest reads as a natural winter scene rather than green trees on white.
@@ -2028,6 +2049,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // metres horizontally). Keeps the per-fragment tree cost bounded to the near field.
     private const float ForestFadeEndMeters = 20000f;
 
+    // Phase 3 LOD: full instanced MESH below ForestLodNearMeters, full IMPOSTOR billboards past
+    // ForestLodFarMeters, dithered crossfade across the band (no pop). Impostors collapse past
+    // ForestFadeEndMeters (sub-pixel — not worth a quad). The mesh's per-fragment overdraw is the
+    // expensive part, so collapsing far mesh instances to a clipped point is where the perf win comes from.
+    private const float ForestLodNearMeters = 2500f;
+    private const float ForestLodFarMeters = 5500f;
+
     private uint forestProgram;
     private int forestMvpLocation = -1;
     private int forestTrunkLocation = -1;
@@ -2044,6 +2072,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int forestWindDirLocation = -1;
     private int forestWindAmpLocation = -1;
     private int forestWindTimeLocation = -1;
+    private int forestLodNearLocation = -1;
+    private int forestLodFarLocation = -1;
     private uint forestVao;
     private uint forestBaseVbo;
     private uint forestInstanceVbo;
@@ -2076,8 +2106,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "layout(location=2) in vec2 aInstScaleRot;\n" +  // x=scale (yaw unused)
         "uniform mat4 uMvp;\n" +
         "uniform vec3 uCameraPos;\n" +
+        "uniform float uLodNear;\n" +  // below: collapsed (mesh takes over)
+        "uniform float uLodFar;\n" +   // crossfade band upper edge (impostor fully in past it)
+        "uniform float uImpostorFar;\n" + // hard far cutoff (beyond it trees are sub-pixel — collapse)
         "out vec2 vCardUv;\n" +   // 0..1 within the card → sub-cell uv
         "out vec3 vToEye;\n" +    // tree→eye direction (world) → cell selection
+        "out float vLodAlpha;\n" + // 0 near → 1 past uLodFar (dithered in across the band)
         "void main(){\n" +
         "  float s = aInstScaleRot.x;\n" +
         "  vec3 center = aInstPos + vec3(0.0, 0.0, 14.0 * s);\n" + // atlas framed the tree centred at z=14
@@ -2093,7 +2127,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  vec3 world = center + (right * (aCard.x * halfSize)) + (up * (aCard.y * halfSize));\n" +
         "  vCardUv = (aCard * 0.5) + 0.5;\n" +
         "  vToEye = toEye;\n" +
+        // LOD: fade impostors IN across [uLodNear,uLodFar] (mirror of the mesh's fade-out), then collapse
+        // the near ones (mesh's job) and the very-far ones (sub-pixel — not worth the quad).
+        "  float lodDist = length(toEye);\n" +
+        "  vLodAlpha = smoothstep(uLodNear, uLodFar, lodDist);\n" +
         "  gl_Position = uMvp * vec4(world, 1.0);\n" +
+        "  if (lodDist < uLodNear || lodDist > uImpostorFar) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); }\n" +
         "}\n";
 
     private const string ForestImpostorFragmentShaderSource =
@@ -2101,6 +2140,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "precision highp float;\n" +
         "in vec2 vCardUv;\n" +
         "in vec3 vToEye;\n" +
+        "in float vLodAlpha;\n" +
         "uniform sampler2D uAtlas;\n" +
         "uniform float uGrid;\n" +       // ForestAtlasGrid as float
         "uniform vec3 uFogColor;\n" +
@@ -2122,6 +2162,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  vec2 uv = (cell + vCardUv) / uGrid;\n" +
         "  vec4 t = texture(uAtlas, uv);\n" +
         "  if (t.a < 0.5) discard;\n" + // alpha-tested silhouette (no sorting needed — trees are opaque)
+        // LOD crossfade: screen-door dither the impostor IN as it approaches the band (mirror of the mesh
+        // dithering out), so the swap near→far is a dissolve, not a pop.
+        "  float dth = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);\n" +
+        "  if (dth > vLodAlpha) discard;\n" +
         "  float d = length(vToEye);\n" + // distance eye→tree, for aerial-perspective fog
         "  float fog = 1.0 - exp(-d * uFogDensity);\n" +
         "  fragColor = vec4(mix(t.rgb, uFogColor, fog), 1.0);\n" +
@@ -2134,6 +2178,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int forestImpostorGridLocation = -1;
     private int forestImpostorFogColorLocation = -1;
     private int forestImpostorFogDensityLocation = -1;
+    private int forestImpostorLodNearLocation = -1;
+    private int forestImpostorLodFarLocation = -1;
+    private int forestImpostorImpFarLocation = -1;
     private uint forestImpostorVao;
     private uint forestImpostorQuadVbo;
 
@@ -2175,6 +2222,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         forestWindDirLocation = g.GetUniformLocation(forestProgram, "uWindDir");
         forestWindAmpLocation = g.GetUniformLocation(forestProgram, "uWindAmp");
         forestWindTimeLocation = g.GetUniformLocation(forestProgram, "uWindTime");
+        forestLodNearLocation = g.GetUniformLocation(forestProgram, "uLodNear");
+        forestLodFarLocation = g.GetUniformLocation(forestProgram, "uLodFar");
 
         // 3-tier conifer: each tier is two crossed vertical triangles (XZ + YZ) of decreasing width going
         // up, so it reads as a tiered spruce from any orbit angle. Interleaved [pos(3), normal(3), foliage].
@@ -2414,6 +2463,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         forestImpostorGridLocation = g.GetUniformLocation(forestImpostorProgram, "uGrid");
         forestImpostorFogColorLocation = g.GetUniformLocation(forestImpostorProgram, "uFogColor");
         forestImpostorFogDensityLocation = g.GetUniformLocation(forestImpostorProgram, "uFogDensity");
+        forestImpostorLodNearLocation = g.GetUniformLocation(forestImpostorProgram, "uLodNear");
+        forestImpostorLodFarLocation = g.GetUniformLocation(forestImpostorProgram, "uLodFar");
+        forestImpostorImpFarLocation = g.GetUniformLocation(forestImpostorProgram, "uImpostorFar");
 
         // Base quad (triangle strip, [-1,1]²) shared by every instance; the instance attribs come from the
         // existing per-tree buffer with divisor 1.
@@ -2449,6 +2501,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         Vector3 cam = camera.Position;
         g.Uniform3(forestImpostorCameraPosLocation, cam.X, cam.Y, cam.Z);
         g.Uniform1(forestImpostorGridLocation, (float)ForestAtlasGrid); // float uniform — int overload (glUniform1i) silently no-ops it to 0
+        g.Uniform1(forestImpostorLodNearLocation, ForestLodNearMeters);
+        g.Uniform1(forestImpostorLodFarLocation, ForestLodFarMeters);
+        g.Uniform1(forestImpostorImpFarLocation, ForestFadeEndMeters);
         Vector3 fog = atmosphere?.FogColor ?? Vector3.Zero;
         g.Uniform3(forestImpostorFogColorLocation, fog.X, fog.Y, fog.Z);
         g.Uniform1(forestImpostorFogDensityLocation, atmosphere?.FogDensity ?? 0f);
@@ -2493,9 +2548,6 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
     }
 
-    // Temporarily unused while Phase 3 step 2 draws the forest as impostors only; step 3 (LOD) restores the
-    // call for near trees. Suppress IDE0051 so EnforceCodeStyleInBuild doesn't fail the build in the gap.
-#pragma warning disable IDE0051
     private void DrawForest(GL g, ReadOnlySpan<float> mvp, Camera3D camera, Atmosphere? atmosphere, Vector2 windVec, float weatherT)
     {
         if (forestInstanceCount == 0 || forestVertexCount == 0)
@@ -2529,6 +2581,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         Vector3 cam = camera.Position;
         g.Uniform3(forestCameraPosLocation, cam.X, cam.Y, cam.Z);
         g.Uniform1(forestFadeEndLocation, ForestFadeEndMeters);
+        g.Uniform1(forestLodNearLocation, ForestLodNearMeters);
+        g.Uniform1(forestLodFarLocation, ForestLodFarMeters);
         g.Uniform1(forestSnowLocation, atmosphere?.SnowAmount ?? 0f);
 
         // Wind: direction from the live drift vector (fallback +X), amplitude from the wind strength.
@@ -2542,7 +2596,6 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.DrawArraysInstanced(PrimitiveType.Triangles, 0, (uint)forestVertexCount, (uint)forestInstanceCount);
         g.BindVertexArray(0);
     }
-#pragma warning restore IDE0051
 
     public void Dispose()
     {
