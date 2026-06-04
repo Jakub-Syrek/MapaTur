@@ -1687,6 +1687,34 @@ public partial class Terrain3DView : ContentView
     private string? cachedOrthoSignature;
     private List<(byte[] Rgba, int Width, int Height)>? cachedOrthoDecoded;
 
+    // Forest (instanced trees) placed once per mesh from the DEM + ortho frame, cached by the tiles
+    // reference (the placement is a CPU scan — don't redo it every frame). Phase 1: fixed density; a
+    // "Las" slider will drive it next.
+    private IReadOnlyList<TreeInstance>? cachedForest;
+    private IReadOnlyList<TerrainMesh3D>? cachedForestTiles;
+
+    private IReadOnlyList<TreeInstance>? EnsureForest(IReadOnlyList<TerrainMesh3D> tiles)
+    {
+        if (Raster is not { } raster || tiles.Count == 0)
+        {
+            return null;
+        }
+        if (ReferenceEquals(cachedForestTiles, tiles) && cachedForest is not null)
+        {
+            return cachedForest;
+        }
+
+        var options = new ForestOptions(
+            StrideCells: 4,
+            MinElevationMeters: 0.0,
+            TreelineMeters: 1500.0,
+            MaxSlope: 1.1f,
+            Density: 0.6f);
+        cachedForest = ForestPlacement.Generate(raster, tiles[0], options);
+        cachedForestTiles = tiles;
+        return cachedForest;
+    }
+
     private bool TryRenderTerrainGl(SKCanvas canvas, IReadOnlyList<TerrainMesh3D> tiles, int width, int height)
     {
         if (glDisabled)
@@ -1729,7 +1757,8 @@ public partial class Terrain3DView : ContentView
             // into a colour texture it owns and returns the texture handle. A 0 handle means the present
             // FBO couldn't be allocated this frame; fall back to Skia. The optional Atmosphere drives the
             // sky pass and the terrain fragment shader's aerial-perspective blend; passing null skips both.
-            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere);
+            IReadOnlyList<TreeInstance>? forest = EnsureForest(tiles);
+            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere, forest);
             if (terrainTextureId == 0)
             {
                 return false;

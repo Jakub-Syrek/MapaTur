@@ -586,7 +586,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         DemRaster? raster,
         Route? route,
         IReadOnlyList<Trail>? roads = null,
-        Atmosphere? atmosphere = null)
+        Atmosphere? atmosphere = null,
+        IReadOnlyList<TreeInstance>? forest = null)
     {
         gl ??= PlatformGl.Get();
 
@@ -659,6 +660,24 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             cloudWindLocation = -1;
             cloudVao = 0;
             cloudVbo = 0;
+            // Forest program + buffers belonged to the dead context too; drop the IDs and force a rebuild
+            // + instance re-upload on the next forest pass.
+            forestProgram = 0;
+            forestMvpLocation = -1;
+            forestTrunkLocation = -1;
+            forestFoliageColorLocation = -1;
+            forestSunColorLocation = -1;
+            forestSkyAmbientLocation = -1;
+            forestAmbientLocation = -1;
+            forestFogColorLocation = -1;
+            forestFogDensityLocation = -1;
+            forestCameraPosLocation = -1;
+            forestFadeEndLocation = -1;
+            forestVao = 0;
+            forestBaseVbo = 0;
+            forestInstanceVbo = 0;
+            forestInstanceCount = 0;
+            lastForest = null;
             // The ortho texture IDs belonged to the dead context; drop the handles (don't GL-delete the
             // stale ones) but keep the CPU bytes so they re-upload on the next EnsureOrthoTextures.
             pendingOrthoRelease.Clear();
@@ -956,6 +975,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
             gl.BindVertexArray(tile.Vao);
             gl.DrawElements(PrimitiveType.Triangles, (uint)tile.IndexCount, DrawElementsType.UnsignedShort, (void*)0);
+        }
+
+        // Forest: instanced trees, opaque + depth-tested (terrain in front occludes them, they occlude each
+        // other). Drawn after the terrain and BEFORE the overlays so trails/route stay readable on top.
+        if (forest is { Count: > 0 })
+        {
+            EnsureForestProgram(gl);
+            EnsureForestInstances(gl, forest);
+            DrawForest(gl, m, camera, atmosphere);
         }
 
         // Trails + route as depth-tested screen-space ribbons (occluded by the terrain). Switch to the line
@@ -1883,6 +1911,211 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             return (r, g, b);
         }
         return (0x94, 0xA3, 0xB8); // slate fallback (matches the Skia renderer)
+    }
+
+    // ── Forest (instanced trees) ─────────────────────────────────────────────────────────────────
+    // Phase 1: opaque "cross-triangle" conifers — two perpendicular vertical triangles per tree, so each
+    // reads as a 3D-ish spruce from any orbit angle without per-frame camera-facing maths. One 6-vertex
+    // base mesh is drawn INSTANCED (glDrawArraysInstanced) against a per-tree (position, scale, yaw)
+    // buffer, so tens of thousands of trees cost a single draw call. Lit cheaply from the atmosphere,
+    // fogged, and cut off past a fade radius. Later phases swap the placeholder triangles for a baked
+    // spruce mesh + octahedral impostors (near=mesh, far=impostor).
+    private const string ForestVertexShaderSource =
+        "#version 300 es\n" +
+        "layout(location=0) in vec3 aPos;\n" +          // model space: base at z=0, apex at z=h
+        "layout(location=1) in float aFoliage;\n" +     // 0 at base, 1 at apex
+        "layout(location=2) in vec3 aInstPos;\n" +      // per-instance world position
+        "layout(location=3) in vec2 aInstScaleRot;\n" + // per-instance x=scale, y=yaw
+        "uniform mat4 uMvp;\n" +
+        "out float vFoliage;\n" +
+        "out vec3 vWorldPos;\n" +
+        "void main(){\n" +
+        "  float s = aInstScaleRot.x; float yaw = aInstScaleRot.y;\n" +
+        "  float cs = cos(yaw); float sn = sin(yaw);\n" +
+        "  vec3 p = aPos * s;\n" +
+        "  vec3 rp = vec3((p.x * cs) - (p.y * sn), (p.x * sn) + (p.y * cs), p.z);\n" + // yaw about world-up
+        "  vec3 world = aInstPos + rp;\n" +
+        "  vWorldPos = world; vFoliage = aFoliage;\n" +
+        "  gl_Position = uMvp * vec4(world, 1.0);\n" +
+        "}\n";
+
+    private const string ForestFragmentShaderSource =
+        "#version 300 es\n" +
+        "precision highp float;\n" +
+        "in float vFoliage;\n" +
+        "in vec3 vWorldPos;\n" +
+        "uniform vec3 uTrunk;\n" +
+        "uniform vec3 uFoliageColor;\n" +
+        "uniform vec3 uSunColor;\n" +
+        "uniform vec3 uSkyAmbient;\n" +
+        "uniform float uAmbient;\n" +
+        "uniform vec3 uFogColor;\n" +
+        "uniform float uFogDensity;\n" +
+        "uniform vec3 uCameraPos;\n" +
+        "uniform float uFadeEnd;\n" + // discard past this view distance (world units)
+        "out vec4 fragColor;\n" +
+        "void main(){\n" +
+        "  float dist = length(vWorldPos - uCameraPos);\n" +
+        "  if (dist > uFadeEnd) discard;\n" +
+        "  vec3 base = mix(uTrunk, uFoliageColor, smoothstep(0.0, 0.22, vFoliage));\n" +
+        "  vec3 light = (uSkyAmbient * uAmbient) + (uSunColor * (1.0 - uAmbient) * 0.85);\n" +
+        "  vec3 lit = base * light;\n" +
+        "  float fog = 1.0 - exp(-dist * uFogDensity);\n" +
+        "  fragColor = vec4(mix(lit, uFogColor, fog), 1.0);\n" +
+        "}\n";
+
+    // Trees fade out (hard cutoff for Phase 1) past this distance from the eye, in WORLD units (≈ real
+    // metres horizontally). Keeps the per-fragment tree cost bounded to the near field.
+    private const float ForestFadeEndMeters = 7000f;
+
+    private uint forestProgram;
+    private int forestMvpLocation = -1;
+    private int forestTrunkLocation = -1;
+    private int forestFoliageColorLocation = -1;
+    private int forestSunColorLocation = -1;
+    private int forestSkyAmbientLocation = -1;
+    private int forestAmbientLocation = -1;
+    private int forestFogColorLocation = -1;
+    private int forestFogDensityLocation = -1;
+    private int forestCameraPosLocation = -1;
+    private int forestFadeEndLocation = -1;
+    private uint forestVao;
+    private uint forestBaseVbo;
+    private uint forestInstanceVbo;
+    private int forestInstanceCount;
+    private IReadOnlyList<TreeInstance>? lastForest;
+
+    private void EnsureForestProgram(GL g)
+    {
+        if (forestProgram != 0)
+        {
+            return;
+        }
+
+        uint vs = CompileShader(g, ShaderType.VertexShader, ForestVertexShaderSource);
+        uint fs = CompileShader(g, ShaderType.FragmentShader, ForestFragmentShaderSource);
+        forestProgram = g.CreateProgram();
+        g.AttachShader(forestProgram, vs);
+        g.AttachShader(forestProgram, fs);
+        g.LinkProgram(forestProgram);
+        g.GetProgram(forestProgram, ProgramPropertyARB.LinkStatus, out int linked);
+        if (linked == 0)
+        {
+            string log = g.GetProgramInfoLog(forestProgram);
+            throw new InvalidOperationException("Forest shader link failed: " + log);
+        }
+        g.DetachShader(forestProgram, vs);
+        g.DetachShader(forestProgram, fs);
+        g.DeleteShader(vs);
+        g.DeleteShader(fs);
+        forestMvpLocation = g.GetUniformLocation(forestProgram, "uMvp");
+        forestTrunkLocation = g.GetUniformLocation(forestProgram, "uTrunk");
+        forestFoliageColorLocation = g.GetUniformLocation(forestProgram, "uFoliageColor");
+        forestSunColorLocation = g.GetUniformLocation(forestProgram, "uSunColor");
+        forestSkyAmbientLocation = g.GetUniformLocation(forestProgram, "uSkyAmbient");
+        forestAmbientLocation = g.GetUniformLocation(forestProgram, "uAmbient");
+        forestFogColorLocation = g.GetUniformLocation(forestProgram, "uFogColor");
+        forestFogDensityLocation = g.GetUniformLocation(forestProgram, "uFogDensity");
+        forestCameraPosLocation = g.GetUniformLocation(forestProgram, "uCameraPos");
+        forestFadeEndLocation = g.GetUniformLocation(forestProgram, "uFadeEnd");
+
+        // Base cross-triangle conifer: XZ + YZ vertical triangles, base ±w at z=0, apex at z=h.
+        // Interleaved [x, y, z, foliage] × 6 vertices.
+        const float w = 4f;
+        const float h = 20f;
+        Span<float> verts = stackalloc float[24]
+        {
+            -w, 0f, 0f, 0f,    w, 0f, 0f, 0f,    0f, 0f, h, 1f, // XZ triangle
+            0f, -w, 0f, 0f,    0f, w, 0f, 0f,    0f, 0f, h, 1f, // YZ triangle
+        };
+        forestVao = g.GenVertexArray();
+        g.BindVertexArray(forestVao);
+        forestBaseVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, forestBaseVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(verts.Length * sizeof(float)), verts, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(0);
+        g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 4 * sizeof(float), (void*)0);
+        g.EnableVertexAttribArray(1);
+        g.VertexAttribPointer(1, 1, VertexAttribPointerType.Float, false, 4 * sizeof(float), (void*)(3 * sizeof(float)));
+
+        // Per-instance buffer (filled in EnsureForestInstances) — (posX,posY,posZ, scale, yaw), divisor 1.
+        forestInstanceVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, forestInstanceVbo);
+        g.EnableVertexAttribArray(2);
+        g.VertexAttribPointer(2, 3, VertexAttribPointerType.Float, false, 5 * sizeof(float), (void*)0);
+        g.VertexAttribDivisor(2, 1);
+        g.EnableVertexAttribArray(3);
+        g.VertexAttribPointer(3, 2, VertexAttribPointerType.Float, false, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+        g.VertexAttribDivisor(3, 1);
+        g.BindVertexArray(0);
+    }
+
+    // Uploads the per-tree instance buffer when the forest list reference changes (placement is rebuilt
+    // by the view only on DEM / density change, so this is a rare upload, not per-frame).
+    private void EnsureForestInstances(GL g, IReadOnlyList<TreeInstance> forest)
+    {
+        if (ReferenceEquals(lastForest, forest))
+        {
+            return;
+        }
+        lastForest = forest;
+        forestInstanceCount = forest.Count;
+        if (forestInstanceCount == 0)
+        {
+            return;
+        }
+
+        var data = new float[forestInstanceCount * 5];
+        for (int i = 0; i < forestInstanceCount; i++)
+        {
+            TreeInstance t = forest[i];
+            int o = i * 5;
+            data[o] = t.Position.X;
+            data[o + 1] = t.Position.Y;
+            data[o + 2] = t.Position.Z;
+            data[o + 3] = t.Scale;
+            data[o + 4] = t.RotationRadians;
+        }
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, forestInstanceVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(data.Length * sizeof(float)), data, BufferUsageARB.StaticDraw);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
+    }
+
+    private void DrawForest(GL g, ReadOnlySpan<float> mvp, Camera3D camera, Atmosphere? atmosphere)
+    {
+        if (forestInstanceCount == 0)
+        {
+            return;
+        }
+
+        g.UseProgram(forestProgram);
+        g.UniformMatrix4(forestMvpLocation, 1, false, mvp);
+        g.Uniform3(forestTrunkLocation, 0.30f, 0.21f, 0.13f);
+        g.Uniform3(forestFoliageColorLocation, 0.12f, 0.26f, 0.13f); // dark spruce green
+
+        Vector3 sun = Vector3.One;
+        Vector3 sky = Vector3.One;
+        float ambient = 0.5f;
+        if (atmosphere is not null)
+        {
+            sun = Vector3.Lerp(atmosphere.SunColor, Vector3.One, 0.25f) * 1.1f;
+            sky = Vector3.Lerp(atmosphere.SkyZenithColor, Vector3.One, 0.5f);
+            ambient = atmosphere.AmbientFactor;
+        }
+        g.Uniform3(forestSunColorLocation, sun.X, sun.Y, sun.Z);
+        g.Uniform3(forestSkyAmbientLocation, sky.X, sky.Y, sky.Z);
+        g.Uniform1(forestAmbientLocation, ambient);
+
+        Vector3 fog = atmosphere?.FogColor ?? Vector3.Zero;
+        g.Uniform3(forestFogColorLocation, fog.X, fog.Y, fog.Z);
+        g.Uniform1(forestFogDensityLocation, atmosphere?.FogDensity ?? 0f);
+        Vector3 cam = camera.Position;
+        g.Uniform3(forestCameraPosLocation, cam.X, cam.Y, cam.Z);
+        g.Uniform1(forestFadeEndLocation, ForestFadeEndMeters);
+
+        g.BindVertexArray(forestVao);
+        g.DrawArraysInstanced(PrimitiveType.Triangles, 0, 6, (uint)forestInstanceCount);
+        g.BindVertexArray(0);
     }
 
     public void Dispose()
