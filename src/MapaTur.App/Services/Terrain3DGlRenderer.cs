@@ -558,6 +558,19 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     }
 
     /// <summary>
+    /// When <c>false</c>, the orthophoto drape is suppressed even if cells are uploaded — the terrain falls
+    /// back to its hypsometric (elevation-tinted) shading. The textures stay resident so toggling back on is
+    /// instant. Driven by the premium menu's "Ortofoto" switch.
+    /// </summary>
+    public bool OrthoEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Whether MSAA anti-aliasing is used. <c>false</c> (the "Wydajność" quality profile) draws straight
+    /// into the present FBO — jaggier edges, but skips the multisample resolve for more headroom.
+    /// </summary>
+    public bool MsaaEnabled { get; set; } = true;
+
+    /// <summary>
     /// Sets the ortho textures, one per mesh ortho-cell (order = OrthoTileIndex). An empty list clears the
     /// ortho (terrain falls back to the hypsometric tint). Each entry is tightly-packed top-row-first RGBA8.
     /// Upload happens on the next <see cref="Render"/> call, on the GL thread.
@@ -973,7 +986,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         // Drape the ortho: bind each mesh tile's own cell texture (OrthoTileIndex) so a multi-cell ortho
         // stays sharp. Without textures the shader uses the hypsometric tint.
-        bool anyOrtho = orthoTiles.Count > 0;
+        bool anyOrtho = orthoTiles.Count > 0 && OrthoEnabled;
         gl.ActiveTexture(TextureUnit.Texture0);
         gl.Uniform1(orthoSamplerLocation, 0);
         uint boundTexture = 0;
@@ -1220,9 +1233,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// </summary>
     private bool EnsureMsaaTarget(GL g, int width, int height)
     {
-        if (msaaUnsupported)
+        if (msaaUnsupported || !MsaaEnabled)
         {
-            return false;
+            return false; // quality profile turned anti-aliasing off → draw straight into the present FBO
         }
 
         if (msaaSamples == 0)

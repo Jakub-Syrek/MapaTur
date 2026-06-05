@@ -9,11 +9,15 @@
             <ResourceDictionary.MergedDictionaries>
                 <ResourceDictionary Source="Resources/Styles/Colors.xaml" />
                 <ResourceDictionary Source="Resources/Styles/Styles.xaml" />
+                <ResourceDictionary Source="Resources/Styles/GlassStyles.xaml" />
             </ResourceDictionary.MergedDictionaries>
 
             <converters:InverseBoolConverter x:Key="InverseBool" />
             <converters:LocationTrackingLabelConverter x:Key="LocationTrackingLabel" />
             <converters:HoursToClockConverter x:Key="HoursToClock" />
+            <converters:IntEqualsConverter x:Key="IntEquals" />
+            <converters:IntToBoolConverter x:Key="IntToBool" />
+            <converters:BoolToBrushConverter x:Key="BoolToBrush" />
         </ResourceDictionary>
     </Application.Resources>
 </Application>

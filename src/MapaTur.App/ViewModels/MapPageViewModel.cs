@@ -143,6 +143,58 @@ public sealed partial class MapPageViewModel : ObservableObject
         IsMarkerPopupVisible = true;
     }
 
+    /// <summary>
+    /// Which premium-menu section is open: 0 = none (bar only), 1 = Mapa, 2 = Pogoda, 3 = Widok,
+    /// 4 = Dane, 5 = Ustawienia. Drives the top-bar chip highlight + which frosted glass panel is shown.
+    /// </summary>
+    [ObservableProperty]
+    private int activeSection;
+
+    /// <summary>
+    /// Top-bar chip handler: opens the given section, or closes it if it's already open (tap-again to
+    /// dismiss). Accepts the index as a string so the XAML <c>CommandParameter</c> needs no typed literal.
+    /// </summary>
+    [RelayCommand]
+    private void SelectSection(string? index)
+    {
+        if (!int.TryParse(index, out int target))
+        {
+            return;
+        }
+        ActiveSection = ActiveSection == target ? 0 : target;
+    }
+
+    /// <summary>Closes any open section panel (scrim tap / explicit close).</summary>
+    [RelayCommand]
+    private void CloseSection() => ActiveSection = 0;
+
+    /// <summary>
+    /// Flips one of the multi-select filter flags by name — the premium menu's "pill" toggles tap this so
+    /// each pill needs no per-flag command or two-way plumbing. Explicit switch (no reflection) keeps it
+    /// AOT-safe and obvious.
+    /// </summary>
+    [RelayCommand]
+    private void ToggleFlag(string? name)
+    {
+        switch (name)
+        {
+            case "TrailRed": TrailColourRedEnabled = !TrailColourRedEnabled; break;
+            case "TrailBlue": TrailColourBlueEnabled = !TrailColourBlueEnabled; break;
+            case "TrailGreen": TrailColourGreenEnabled = !TrailColourGreenEnabled; break;
+            case "TrailYellow": TrailColourYellowEnabled = !TrailColourYellowEnabled; break;
+            case "TrailBlack": TrailColourBlackEnabled = !TrailColourBlackEnabled; break;
+            case "RegionTatry": RegionTatryEnabled = !RegionTatryEnabled; break;
+            case "RegionBeskidy": RegionBeskidyEnabled = !RegionBeskidyEnabled; break;
+            case "RegionPieniny": RegionPieninyEnabled = !RegionPieninyEnabled; break;
+            case "RegionBieszczady": RegionBieszczadyEnabled = !RegionBieszczadyEnabled; break;
+            case "PoiHuts": ShowHuts = !ShowHuts; break;
+            case "PoiWilderness": ShowWildernessHuts = !ShowWildernessHuts; break;
+            case "PoiChalets": ShowChalets = !ShowChalets; break;
+            case "PoiShelters": ShowShelters = !ShowShelters; break;
+            case "PoiViewpoints": ShowViewpoints = !ShowViewpoints; break;
+        }
+    }
+
     /// <summary>Toggles the ☰ actions dropdown.</summary>
     [RelayCommand]
     private void ToggleMenu() => IsMenuOpen = !IsMenuOpen;
@@ -250,6 +302,44 @@ public sealed partial class MapPageViewModel : ObservableObject
         // Forest density is NOT part of the Atmosphere — the view binds ForestDensity directly and
         // rebuilds the tree placement when it changes. Just persist here.
         settingsStore.Forest = value;
+        OnPropertyChanged(nameof(EffectiveForestDensity));
+    }
+
+    /// <summary>
+    /// Render-quality profile: 0 = Wydajność, 1 = Zbalansowana, 2 = Wysoka. Scales the real cost levers
+    /// (anti-aliasing + forest density) so the user trades fidelity for framerate. Default = Zbalansowana.
+    /// </summary>
+    [ObservableProperty]
+    private int renderQuality = 1;
+
+    partial void OnRenderQualityChanged(int value)
+    {
+        OnPropertyChanged(nameof(EffectiveForestDensity));
+        OnPropertyChanged(nameof(AntiAliasingOn));
+    }
+
+    /// <summary>Anti-aliasing (MSAA) is on for Zbalansowana/Wysoka, off for Wydajność. Bound to the view.</summary>
+    public bool AntiAliasingOn => RenderQuality > 0;
+
+    /// <summary>
+    /// The forest density actually rendered: the user's "Las" slider value scaled by the quality profile
+    /// (Wydajność thins the forest for headroom; Wysoka renders it in full). Bound to the 3D view.
+    /// </summary>
+    public double EffectiveForestDensity => ForestDensity * RenderQuality switch
+    {
+        0 => 0.4,
+        2 => 1.0,
+        _ => 0.75,
+    };
+
+    /// <summary>Sets the render-quality profile from the Ustawienia segmented control (index as string).</summary>
+    [RelayCommand]
+    private void SelectQuality(string? index)
+    {
+        if (int.TryParse(index, out int q))
+        {
+            RenderQuality = Math.Clamp(q, 0, 2);
+        }
     }
 
     /// <summary>
@@ -396,6 +486,12 @@ public sealed partial class MapPageViewModel : ObservableObject
     }
 
     /// <summary>Master show/hide for all trails; when off, no trail renders regardless of the colour/region filter.</summary>
+    /// <summary>Whether the orthophoto drape is shown on the 3D terrain (else hypsometric shading).</summary>
+    [ObservableProperty] private bool showOrtho = true;
+
+    /// <summary>Whether summit glyphs + elevation labels are drawn over the 3D terrain.</summary>
+    [ObservableProperty] private bool showPeakNames = true;
+
     [ObservableProperty] private bool showTrails = true;
 
     partial void OnShowTrailsChanged(bool value) => OnTrailFilterChanged();

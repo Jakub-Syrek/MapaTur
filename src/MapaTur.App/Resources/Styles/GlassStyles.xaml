@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  Premium "frosted glass" design system for the immersive 3D map UI (Apple Vision Pro / Fluent / Tesla
+  inspired). MAUI has no true backdrop blur, so the frosted look is built from: a dark translucent
+  gradient body (the busy 3D map shows through dimly), a 1px light rim highlight, a soft top gloss, and a
+  drop shadow for depth. A cyan accent supplies the active glow. The dark base keeps text legible over the
+  map at any time of day.
+-->
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml">
+
+    <!-- ── Palette ─────────────────────────────────────────────────────────────────────────────── -->
+    <Color x:Key="GlassInk">#F2F6FF</Color>          <!-- primary text -->
+    <Color x:Key="GlassInkDim">#9FB0C9</Color>       <!-- secondary text / captions -->
+    <Color x:Key="GlassAccent">#36E2FF</Color>       <!-- cyan accent -->
+    <Color x:Key="GlassAccentSoft">#5536E2FF</Color> <!-- accent @ ~33% for fills -->
+    <Color x:Key="GlassTrack">#30FFFFFF</Color>      <!-- inactive slider track -->
+    <Color x:Key="GlassRim">#45FFFFFF</Color>        <!-- light edge highlight -->
+
+    <SolidColorBrush x:Key="GlassRimBrush" Color="#45FFFFFF" />
+    <SolidColorBrush x:Key="GlassAccentBrush" Color="{StaticResource GlassAccent}" />
+
+    <!-- Dark translucent body — the frosted base. Slight vertical gradient for depth. -->
+    <LinearGradientBrush x:Key="GlassFill" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Offset="0.0" Color="#66141B2A" />
+        <GradientStop Offset="1.0" Color="#520B1018" />
+    </LinearGradientBrush>
+
+    <!-- A denser base for the always-on top bar so it stays crisp over bright daytime terrain. -->
+    <LinearGradientBrush x:Key="GlassBarFill" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Offset="0.0" Color="#7A18202F" />
+        <GradientStop Offset="1.0" Color="#660C121C" />
+    </LinearGradientBrush>
+
+    <!-- Top gloss: a bright sliver of reflected light fading away over ~24px. Layered at a panel's top. -->
+    <LinearGradientBrush x:Key="GlassGloss" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Offset="0.0" Color="#3CFFFFFF" />
+        <GradientStop Offset="1.0" Color="#00FFFFFF" />
+    </LinearGradientBrush>
+
+    <!-- Soft accent wash for active chips / highlighted controls. -->
+    <LinearGradientBrush x:Key="GlassAccentFill" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Offset="0.0" Color="#5536E2FF" />
+        <GradientStop Offset="1.0" Color="#2236E2FF" />
+    </LinearGradientBrush>
+
+    <!-- ── Surfaces ────────────────────────────────────────────────────────────────────────────── -->
+    <!-- Floating section panel. Rounded, frosted, rimmed, shadowed for depth/layering. -->
+    <Style x:Key="GlassSurface" TargetType="Border">
+        <Setter Property="Background" Value="{StaticResource GlassFill}" />
+        <Setter Property="Stroke" Value="{StaticResource GlassRimBrush}" />
+        <Setter Property="StrokeThickness" Value="1" />
+        <Setter Property="StrokeShape">
+            <Setter.Value>
+                <RoundRectangle CornerRadius="26" />
+            </Setter.Value>
+        </Setter>
+        <Setter Property="Shadow">
+            <Setter.Value>
+                <Shadow Brush="#000000" Offset="0,14" Radius="34" Opacity="0.45" />
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- The always-on top command bar (pill). Denser fill, big radius. -->
+    <Style x:Key="GlassBar" TargetType="Border">
+        <Setter Property="Background" Value="{StaticResource GlassBarFill}" />
+        <Setter Property="Stroke" Value="{StaticResource GlassRimBrush}" />
+        <Setter Property="StrokeThickness" Value="1" />
+        <Setter Property="StrokeShape">
+            <Setter.Value>
+                <RoundRectangle CornerRadius="30" />
+            </Setter.Value>
+        </Setter>
+        <Setter Property="Shadow">
+            <Setter.Value>
+                <Shadow Brush="#000000" Offset="0,8" Radius="22" Opacity="0.40" />
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ── Text ────────────────────────────────────────────────────────────────────────────────── -->
+    <Style x:Key="GlassTitle" TargetType="Label">
+        <Setter Property="TextColor" Value="{StaticResource GlassInk}" />
+        <Setter Property="FontSize" Value="15" />
+        <Setter Property="FontAttributes" Value="Bold" />
+        <Setter Property="VerticalOptions" Value="Center" />
+    </Style>
+    <Style x:Key="GlassLabel" TargetType="Label">
+        <Setter Property="TextColor" Value="{StaticResource GlassInk}" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="VerticalOptions" Value="Center" />
+    </Style>
+    <Style x:Key="GlassCaption" TargetType="Label">
+        <Setter Property="TextColor" Value="{StaticResource GlassInkDim}" />
+        <Setter Property="FontSize" Value="11" />
+        <Setter Property="VerticalOptions" Value="Center" />
+    </Style>
+    <Style x:Key="GlassValue" TargetType="Label">
+        <Setter Property="TextColor" Value="{StaticResource GlassAccent}" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="FontAttributes" Value="Bold" />
+        <Setter Property="HorizontalTextAlignment" Value="End" />
+        <Setter Property="VerticalOptions" Value="Center" />
+    </Style>
+
+    <!-- ── Controls ────────────────────────────────────────────────────────────────────────────── -->
+    <!-- Premium slider: glowing accent fill, translucent track, white thumb. -->
+    <Style x:Key="GlassSlider" TargetType="Slider">
+        <Setter Property="MinimumTrackColor" Value="{StaticResource GlassAccent}" />
+        <Setter Property="MaximumTrackColor" Value="{StaticResource GlassTrack}" />
+        <Setter Property="ThumbColor" Value="#FFFFFF" />
+    </Style>
+
+    <!-- Premium on/off switch. -->
+    <Style x:Key="GlassSwitch" TargetType="Switch">
+        <Setter Property="OnColor" Value="{StaticResource GlassAccent}" />
+        <Setter Property="ThumbColor" Value="#FFFFFF" />
+        <Setter Property="Scale" Value="0.85" />
+    </Style>
+
+    <!-- Glass action button (downloads / export / reset). Translucent, rimmed, rounded. -->
+    <Style x:Key="GlassButton" TargetType="Button">
+        <Setter Property="BackgroundColor" Value="#1FFFFFFF" />
+        <Setter Property="TextColor" Value="{StaticResource GlassInk}" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="FontAttributes" Value="Bold" />
+        <Setter Property="CornerRadius" Value="14" />
+        <Setter Property="BorderColor" Value="{StaticResource GlassRim}" />
+        <Setter Property="BorderWidth" Value="1" />
+        <Setter Property="Padding" Value="14,10" />
+        <Setter Property="VisualStateManager.VisualStateGroups">
+            <VisualStateGroupList>
+                <VisualStateGroup x:Name="CommonStates">
+                    <VisualState x:Name="Normal">
+                        <VisualState.Setters>
+                            <Setter Property="BackgroundColor" Value="#1FFFFFFF" />
+                            <Setter Property="Scale" Value="1.0" />
+                        </VisualState.Setters>
+                    </VisualState>
+                    <VisualState x:Name="PointerOver">
+                        <VisualState.Setters>
+                            <Setter Property="BackgroundColor" Value="#3336E2FF" />
+                        </VisualState.Setters>
+                    </VisualState>
+                    <VisualState x:Name="Pressed">
+                        <VisualState.Setters>
+                            <Setter Property="BackgroundColor" Value="#4436E2FF" />
+                            <Setter Property="Scale" Value="0.97" />
+                        </VisualState.Setters>
+                    </VisualState>
+                </VisualStateGroup>
+            </VisualStateGroupList>
+        </Setter>
+    </Style>
+
+    <!-- Accent (primary) glass button — for the headline action in a section. -->
+    <Style x:Key="GlassButtonAccent" TargetType="Button" BasedOn="{StaticResource GlassButton}">
+        <Setter Property="BackgroundColor" Value="#3336E2FF" />
+        <Setter Property="TextColor" Value="#EAFBFF" />
+    </Style>
+
+</ResourceDictionary>

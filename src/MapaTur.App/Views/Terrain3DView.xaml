@@ -106,7 +106,6 @@
              keeps its own tappable column. -->
         <VerticalStackLayout x:Name="AltitudePad" HorizontalOptions="Start" VerticalOptions="End"
                              Margin="12" Spacing="4" InputTransparent="False">
-            <Label Text="Wys." Style="{StaticResource Cam3DCaption}" />
             <Button Text="&#x25B2;" Pressed="OnRaiseClicked" Released="OnPadReleased" Style="{StaticResource Cam3DButton}" />
             <Button Text="&#x25BC;" Pressed="OnLowerClicked" Released="OnPadReleased" Style="{StaticResource Cam3DButton}" />
         </VerticalStackLayout>

@@ -139,6 +139,42 @@ public partial class Terrain3DView : ContentView
         set => SetValue(PeaksProperty, value);
     }
 
+    /// <summary>Whether summit glyphs + elevation labels are drawn (premium menu "Nazwy szczytów").</summary>
+    public static readonly BindableProperty ShowPeakNamesProperty = BindableProperty.Create(
+        nameof(ShowPeakNames), typeof(bool), typeof(Terrain3DView), true,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
+
+    public bool ShowPeakNames
+    {
+        get => (bool)GetValue(ShowPeakNamesProperty);
+        set => SetValue(ShowPeakNamesProperty, value);
+    }
+
+    /// <summary>
+    /// Whether the orthophoto drape is shown. When false the terrain falls back to hypsometric shading
+    /// (premium menu "Ortofoto"). Applied to the GL renderer each frame; textures stay resident.
+    /// </summary>
+    public static readonly BindableProperty ShowOrthoProperty = BindableProperty.Create(
+        nameof(ShowOrtho), typeof(bool), typeof(Terrain3DView), true,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
+
+    public bool ShowOrtho
+    {
+        get => (bool)GetValue(ShowOrthoProperty);
+        set => SetValue(ShowOrthoProperty, value);
+    }
+
+    /// <summary>Whether MSAA anti-aliasing is used (premium menu render-quality profile).</summary>
+    public static readonly BindableProperty MsaaEnabledProperty = BindableProperty.Create(
+        nameof(MsaaEnabled), typeof(bool), typeof(Terrain3DView), true,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
+
+    public bool MsaaEnabled
+    {
+        get => (bool)GetValue(MsaaEnabledProperty);
+        set => SetValue(MsaaEnabledProperty, value);
+    }
+
     /// <summary>
     /// Bindable current GPS fix of the device. A null value hides the marker. The view wraps the
     /// fix in a one-element list internally so the existing <c>Marker3DOverlayProjector</c> caching
@@ -1005,7 +1041,7 @@ public partial class Terrain3DView : ContentView
 
         // Peaks carry their own DEM elevation, so projection needs no raster lookup.
         IReadOnlyList<ProjectedPeak>? projectedPeaks = null;
-        if (Peaks is { Count: > 0 } peaks)
+        if (ShowPeakNames && Peaks is { Count: > 0 } peaks)
         {
             projectedPeaks = peakProjector.Project(
                 peaks, null, frame, Camera, e.Info.Width, e.Info.Height, PeakMarkerLiftMeters);
@@ -1782,6 +1818,8 @@ public partial class Terrain3DView : ContentView
         try
         {
             glRenderer ??= new Services.Terrain3DGlRenderer();
+            glRenderer.OrthoEnabled = ShowOrtho; // premium menu "Ortofoto" toggle (textures stay resident)
+            glRenderer.MsaaEnabled = MsaaEnabled; // premium menu render-quality profile (AA on/off)
 
             // Push a changed ortho image to the GL renderer once (it uploads on the GL thread next Render).
             if (orthoPathDirty)
