@@ -34,4 +34,10 @@ public interface ITrailRepository
     /// <param name="simplificationEpsilonMeters">Tolerance, in metres. 0 means no read-time simplification.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     Task<IReadOnlyList<Trail>> FindIntersectingAsync(MapBounds bounds, double simplificationEpsilonMeters, CancellationToken cancellationToken = default);
+
+    /// <summary>Number of cached trail records (for the settings cache summary).</summary>
+    Task<int> CountAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>Deletes every cached trail (premium menu "Wyczyść pobrane dane").</summary>
+    Task ClearAsync(CancellationToken cancellationToken = default);
 }

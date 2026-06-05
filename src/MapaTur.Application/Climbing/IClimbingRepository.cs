@@ -25,4 +25,10 @@ public interface IClimbingRepository
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>Matching climbing areas.</returns>
     Task<IReadOnlyList<ClimbingArea>> FindIntersectingAsync(MapBounds bounds, CancellationToken cancellationToken = default);
+
+    /// <summary>Number of cached climbing-area records (for the settings cache summary).</summary>
+    Task<int> CountAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>Deletes every cached climbing area (premium menu "Wyczyść pobrane dane").</summary>
+    Task ClearAsync(CancellationToken cancellationToken = default);
 }

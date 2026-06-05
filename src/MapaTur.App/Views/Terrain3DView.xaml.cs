@@ -175,6 +175,50 @@ public partial class Terrain3DView : ContentView
         set => SetValue(MsaaEnabledProperty, value);
     }
 
+    /// <summary>Whether the per-frame debug stats string is computed (premium menu debug overlay).</summary>
+    public static readonly BindableProperty DebugEnabledProperty = BindableProperty.Create(
+        nameof(DebugEnabled), typeof(bool), typeof(Terrain3DView), false);
+
+    public bool DebugEnabled
+    {
+        get => (bool)GetValue(DebugEnabledProperty);
+        set => SetValue(DebugEnabledProperty, value);
+    }
+
+    /// <summary>Live one-line render stats (FPS · tiles · trees · camera distance) shown by the debug HUD.</summary>
+    public static readonly BindableProperty DebugStatsProperty = BindableProperty.Create(
+        nameof(DebugStats), typeof(string), typeof(Terrain3DView), string.Empty);
+
+    public string DebugStats
+    {
+        get => (string)GetValue(DebugStatsProperty);
+        set => SetValue(DebugStatsProperty, value);
+    }
+
+    private readonly System.Diagnostics.Stopwatch frameClock = System.Diagnostics.Stopwatch.StartNew();
+    private long lastFrameMs;
+    private double smoothedFps;
+    private int debugStatCounter;
+
+    // Smoothed FPS + scene counts, refreshed a few times a second while the debug HUD is on.
+    private void UpdateDebugStats(int tileCount)
+    {
+        long now = frameClock.ElapsedMilliseconds;
+        long dt = now - lastFrameMs;
+        lastFrameMs = now;
+        if (dt is > 0 and < 1000)
+        {
+            double fps = 1000.0 / dt;
+            smoothedFps = smoothedFps <= 0 ? fps : (smoothedFps * 0.9) + (fps * 0.1);
+        }
+        if (++debugStatCounter >= 12)
+        {
+            debugStatCounter = 0;
+            int trees = cachedForest?.Count ?? 0;
+            DebugStats = $"{smoothedFps:F0} FPS · kafle {tileCount} · drzewa {trees} · cam {Camera.Distance / 1000.0:F1} km";
+        }
+    }
+
     /// <summary>
     /// Bindable current GPS fix of the device. A null value hides the marker. The view wraps the
     /// fix in a one-element list internally so the existing <c>Marker3DOverlayProjector</c> caching
@@ -942,6 +986,11 @@ public partial class Terrain3DView : ContentView
             // looks like a placeholder rather than a blank page.
             canvas.Clear(new SkiaSharp.SKColor(0x6C, 0x8E, 0xB0));
             return;
+        }
+
+        if (DebugEnabled)
+        {
+            UpdateDebugStats(tiles.Count);
         }
 
         // Fit the clip planes to the scene each frame (distance changes with zoom). A scene radius

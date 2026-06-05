@@ -342,6 +342,75 @@ public sealed partial class MapPageViewModel : ObservableObject
         }
     }
 
+    /// <summary>Human-readable summary of cached record counts, shown in the Ustawienia "Cache" block.</summary>
+    [ObservableProperty]
+    private string cacheSummary = "—";
+
+    // Refresh the cache counts whenever the Ustawienia panel (section 5) opens, so the figure is live.
+    partial void OnActiveSectionChanged(int value)
+    {
+        if (value == 5)
+        {
+            _ = RefreshCacheSummaryAsync();
+        }
+    }
+
+    private async Task RefreshCacheSummaryAsync()
+    {
+        try
+        {
+            int trails = await trailRepository.CountAsync().ConfigureAwait(true);
+            int pois = await poiRepository.CountAsync().ConfigureAwait(true);
+            int climbing = await climbingRepository.CountAsync().ConfigureAwait(true);
+            CacheSummary = $"Szlaki: {trails} · POI: {pois} · Wspinaczka: {climbing}";
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to read cache counts");
+            CacheSummary = "—";
+        }
+    }
+
+    /// <summary>Deletes all downloaded data (trails, POIs, climbing areas) from the local cache.</summary>
+    [RelayCommand]
+    private async Task ClearCacheAsync()
+    {
+        try
+        {
+            IsBusy = true;
+            await trailRepository.ClearAsync().ConfigureAwait(true);
+            await poiRepository.ClearAsync().ConfigureAwait(true);
+            await climbingRepository.ClearAsync().ConfigureAwait(true);
+            StatusMessage = "Wyczyszczono pobrane dane.";
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to clear cache");
+            StatusMessage = "Nie udało się wyczyścić cache.";
+        }
+        finally
+        {
+            IsBusy = false;
+            await RefreshCacheSummaryAsync().ConfigureAwait(true);
+        }
+    }
+
+    /// <summary>Whether the live FPS/scene-stats debug HUD is shown over the 3D view.</summary>
+    [ObservableProperty]
+    private bool showDebugOverlay;
+
+    /// <summary>Whether verbose (Serilog Verbose) logging is enabled for in-field diagnostics.</summary>
+    [ObservableProperty]
+    private bool verboseLogging;
+
+    partial void OnVerboseLoggingChanged(bool value)
+    {
+        MauiProgram.LogLevelSwitch.MinimumLevel = value
+            ? Serilog.Events.LogEventLevel.Verbose
+            : Serilog.Events.LogEventLevel.Information;
+        logger.LogInformation("Verbose logging {State}", value ? "ON" : "OFF");
+    }
+
     /// <summary>
     /// Serialized 3D camera state, two-way bound to <c>Terrain3DView.CameraState</c>. The view
     /// writes its current camera here (debounced) and reads it back to restore the framing when

@@ -39,6 +39,7 @@
                              ShowOrtho="{Binding ShowOrtho}"
                              ShowPeakNames="{Binding ShowPeakNames}"
                              MsaaEnabled="{Binding AntiAliasingOn}"
+                             DebugEnabled="{Binding ShowDebugOverlay}"
                              CameraState="{Binding CameraState, Mode=TwoWay}"
                              IsFlying="{Binding Is3DFlying}"
                              IsVisible="{Binding Is3DMode}" />
@@ -59,6 +60,13 @@
                              VerticalOptions="Start" HorizontalOptions="Fill"
                              Margin="10,48,10,0" Spacing="10"
                              IsVisible="{Binding Is3DFlying, Converter={StaticResource InverseBool}}">
+
+            <!-- Debug HUD: live render stats, shown above the bar when the debug toggle is on. -->
+            <Border Style="{StaticResource GlassBar}" Padding="12,6" HorizontalOptions="Center"
+                    IsVisible="{Binding ShowDebugOverlay}">
+                <Label Text="{Binding Source={x:Reference TerrainView}, Path=DebugStats}"
+                       Style="{StaticResource GlassCaption}" FontSize="12" TextColor="{StaticResource GlassAccent}" />
+            </Border>
 
             <!-- ── Top command bar: 5 section chips ── -->
             <Border Style="{StaticResource GlassBar}" Padding="6,5" HorizontalOptions="Fill">
@@ -398,7 +406,23 @@
                            Style="{StaticResource GlassCaption}" />
 
                     <BoxView HeightRequest="1" Color="#1AFFFFFF" Margin="0,2" />
-                    <Label Text="Cache i tryb debugowania — w kolejnym kroku." Style="{StaticResource GlassCaption}" />
+
+                    <Label Text="PAMIĘĆ PODRĘCZNA" Style="{StaticResource GlassCaption}" />
+                    <Label Text="{Binding CacheSummary}" Style="{StaticResource GlassLabel}" FontSize="12" />
+                    <Button Style="{StaticResource GlassButton}" Text="🗑  Wyczyść pobrane dane"
+                            Command="{Binding ClearCacheCommand}" IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
+
+                    <BoxView HeightRequest="1" Color="#1AFFFFFF" Margin="0,2" />
+
+                    <Label Text="DEBUG" Style="{StaticResource GlassCaption}" />
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <Label Grid.Column="0" Text="Nakładka FPS / statystyki" Style="{StaticResource GlassLabel}" />
+                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowDebugOverlay}" />
+                    </Grid>
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <Label Grid.Column="0" Text="Szczegółowe logi" Style="{StaticResource GlassLabel}" />
+                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding VerboseLogging}" />
+                    </Grid>
                 </VerticalStackLayout>
             </Border>
 
