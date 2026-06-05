@@ -72,6 +72,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform float uCloudTime;\n" +
         "uniform float uCloudCoverage;\n" +
         "uniform float uCloudShadow;\n" + // strength 0..1; 0 disables
+        // Snow cover: whiten the surface above uSnowLineZ (world-Z), softened over uSnowBandZ, and only
+        // on flatter slopes; uSnowStrength (0..1) gates + scales it. The line/band/strength are derived on
+        // the CPU from the snow slider + the mesh's Z range, so the snowline lowers as the slider rises.
+        "uniform float uSnowStrength;\n" +
+        "uniform float uSnowLineZ;\n" +
+        "uniform float uSnowBandZ;\n" +
         "out vec4 fragColor;\n" +
         "float hashT(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n" +
         "float noiseT(vec2 p){\n" +
@@ -122,7 +128,30 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  } else {\n" +
         "    base = vColor.rgb;\n" +
         "  }\n" +
+        // Snow on top of the base colour, driven PRIMARILY BY ELEVATION: full above the snowline,
+        // fading out over the band just below it. The snowline (uSnowLineZ) sits at the highest peak when
+        // the slider is just on and drops to the valley floor at full — so snow always appears on the
+        // TOP first and recedes top-LAST. Slope only GENTLY thins it on the sheerest rock faces (mix
+        // 0.65..1.0), so steep summits still hold snow (they were wrongly stripped before). Blended toward
+        // a cool white; the lighting below shades it (sunlit bright, shadowed cool). NO per-pixel fBm —
+        // a 5-octave fbmT per fragment tanked the framerate ("zarywa"); the band already softens the edge.
+        "  float snowMix = 0.0;\n" +
+        "  if (uSnowStrength > 0.001) {\n" +
+        "    float snowH = smoothstep(uSnowLineZ, uSnowLineZ + uSnowBandZ, vWorldPos.z);\n" +
+        "    vec3 nrm = normalize(vNormal);\n" +
+        "    float slope = mix(0.65, 1.0, smoothstep(0.10, 0.50, nrm.z));\n" +
+        // Aspect: sunny SOUTH-facing slopes (+Y is north, so south = -Y) melt off first. The melt is
+        // strongest when there's only a little snow and fades to nothing at full cover — so a thin
+        // dusting clings to the shaded north faces while a deep pack still blankets every aspect.
+        "    float southFacing = max(0.0, -nrm.y);\n" +
+        "    float aspectMelt = southFacing * (1.0 - uSnowStrength);\n" +
+        "    snowMix = clamp(snowH * slope * (1.0 - aspectMelt), 0.0, 1.0) * uSnowStrength;\n" +
+        "    base = mix(base, vec3(0.99, 0.99, 1.0), snowMix);\n" +
+        "  }\n" +
         "  vec3 lit = base * lightSum;\n" +
+        // Snow stays bright white even in shadow (very high albedo + sky/multiple scattering): lift the
+        // lit colour toward white by the snow amount, so ambient-only (shadowed) snow doesn't read grey.
+        "  lit = mix(lit, vec3(1.0), snowMix * 0.6);\n" +
         "  float dist = length(vWorldPos - uCameraPos);\n" +
         "  float fogAmount = 1.0 - exp(-dist * uFogDensity);\n" +
         "  fragColor = vec4(mix(lit, uFogColor, fogAmount), 1.0);\n" +
@@ -183,10 +212,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // top of the screen". h in [-1,1]: +1 straight up, 0 at the horizon, -1 straight down.
         "  float h = viewDir.z;\n" +
         "  vec3 skyUp = mix(uSkyHorizon, uSkyZenith, pow(clamp(h, 0.0, 1.0), 0.45));\n" +
-        // Below horizon (looking down past the terrain edge / into a top-down view's corners):
-        // a darkened horizon tone reading as distant ground haze, NOT blue sky and NOT clouds.
+        // Below horizon (looking down past the finite terrain edge / into a top-down view's corners):
+        // distant land seen through aerial HAZE, not a flat grey void. The old flat uSkyHorizon*0.72
+        // read as a dull grey wall filling most of the screen whenever the camera looked down at the
+        // finite DEM patch. Keep it bright right at the horizon line (where haze piles up) and let it
+        // deepen only gently further down, so the area beyond the terrain reads as luminous distance.
         // Cross-faded across the horizon line so there's no hard seam.
-        "  vec3 skyDown = uSkyHorizon * 0.72;\n" +
+        "  float below = clamp(-h, 0.0, 1.0);\n" +            // 0 at the horizon, 1 straight down
+        "  vec3 skyDown = mix(uSkyHorizon, uSkyHorizon * 0.82, smoothstep(0.0, 0.5, below));\n" +
         "  vec3 sky = mix(skyDown, skyUp, smoothstep(-0.12, 0.06, h));\n" +
         // Cirrus on an INFINITE horizontal layer overhead: perspective-project the view ray
         // onto a constant-world-Z plane by dividing xy by the up component. Classic skybox
@@ -230,18 +263,37 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // and drifts smoothly — the iconic Tatra temperature-inversion look, peaks poking through fog.
     private const string CloudLayerVertexShaderSource =
         "#version 300 es\n" +
-        "layout(location=0) in vec2 aCorner;\n" + // unit quad corner in [-1,1]
+        "layout(location=0) in vec2 aCorner;\n" + // tessellated grid vertex in [-1,1]
         "uniform mat4 uMvp;\n" +
         "uniform vec2 uCenter;\n" +    // world XY centre of the layer
         "uniform float uHalfExtent;\n" + // world half-size of the quad
-        "uniform float uAltitude;\n" + // world Z of the layer
+        "uniform float uAltitude;\n" + // base world Z of the layer
+        "uniform float uDispScale;\n" + // 1/metres — wavelength of the surface undulation
+        "uniform float uDispAmp;\n" +   // metres of vertical lap (grows with wind)
+        "uniform vec2 uWind;\n" +       // drift (waves slide downwind)
+        "uniform float uTime;\n" +
         "out vec2 vWorldXY;\n" +
         "out vec2 vLocal;\n" +
+        "out float vCrest;\n" + // signed surface height (−1 trough … +1 crest) for billow shading
+        "float hashV(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n" +
+        "float noiseV(vec2 p){\n" +
+        "  vec2 i = floor(p); vec2 f = fract(p);\n" +
+        "  f = f * f * (3.0 - 2.0 * f);\n" +
+        "  return mix(mix(hashV(i), hashV(i + vec2(1.0,0.0)), f.x),\n" +
+        "             mix(hashV(i + vec2(0.0,1.0)), hashV(i + vec2(1.0,1.0)), f.x), f.y);\n" +
+        "}\n" +
+        "float fbmV(vec2 p){ float v=0.0,a=0.5; for(int i=0;i<4;i++){ v+=a*noiseV(p); p*=2.04; a*=0.5;} return v; }\n" +
         "void main(){\n" +
         "  vLocal = aCorner;\n" +
         "  vec2 world = uCenter + (aCorner * uHalfExtent);\n" +
         "  vWorldXY = world;\n" +
-        "  gl_Position = uMvp * vec4(world, uAltitude, 1.0);\n" +
+        // Undulate the cloud surface vertically with a wind-drifting fBm. The amplitude grows with the
+        // wind, so a calm day is a near-flat sea while a gale heaves the cloud crests up the slopes — the
+        // perfectly level waterline becomes a living, wind-driven boundary that laps onto the terrain.
+        "  vec2 q = (world * uDispScale) + (uWind * uTime * 0.6);\n" +
+        "  float n = (fbmV(q) - 0.5) * 2.0;\n" + // ~[-1,1]
+        "  vCrest = n;\n" +
+        "  gl_Position = uMvp * vec4(world, uAltitude + (n * uDispAmp), 1.0);\n" +
         "}\n";
 
     private const string CloudLayerFragmentShaderSource =
@@ -249,6 +301,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "precision highp float;\n" +
         "in vec2 vWorldXY;\n" +
         "in vec2 vLocal;\n" +
+        "in float vCrest;\n" +
         "uniform float uTime;\n" +
         "uniform float uCoverage;\n" +
         "uniform vec3 uCloudColor;\n" +
@@ -278,7 +331,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // edge out toward the horizon.
         "  float edge = smoothstep(1.0, 0.65, max(abs(vLocal.x), abs(vLocal.y)));\n" +
         "  a *= edge * 0.55;\n" + // lower peak opacity so the sheet is lighter / less obtrusive
-        "  fragColor = vec4(uCloudColor, a);\n" +
+        // Billow shading from the surface height: crests catch the light (brighter, a touch denser),
+        // troughs fall into shade — turns the flat veil into a rolling 3D sea of clouds.
+        "  a = clamp(a * (0.88 + (0.34 * max(vCrest, 0.0))), 0.0, 1.0);\n" +
+        "  vec3 lit = uCloudColor * (0.80 + (0.28 * clamp(vCrest, -1.0, 1.0)));\n" +
+        "  fragColor = vec4(lit, a);\n" +
         "}\n";
 
     // Flat fragment shader for the line/ribbon program (trails/route): no lighting, just the vertex colour.
@@ -383,6 +440,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int terrainCloudTimeLocation = -1;
     private int terrainCloudCoverageLocation = -1;
     private int terrainCloudShadowLocation = -1;
+    private int terrainSnowStrengthLocation = -1;
+    private int terrainSnowLineZLocation = -1;
+    private int terrainSnowBandZLocation = -1;
 
     // Sky / atmospheric program: drawn as a fullscreen triangle BEFORE the terrain pass, with the
     // depth-write disabled so the depth-tested terrain composes on top. Owns its own program +
@@ -412,8 +472,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int cloudColorLocation = -1;
     private int cloudNoiseScaleLocation = -1;
     private int cloudWindLocation = -1;
+    private int cloudDispScaleLocation = -1;
+    private int cloudDispAmpLocation = -1;
     private uint cloudVao;
     private uint cloudVbo;
+    private uint cloudIbo;
+    private int cloudIndexCount;
 
     // Wall-clock seconds since the renderer was constructed; drives the cirrus drift in the sky
     // shader. Started lazily so a Disposed renderer doesn't leak the stopwatch into the next one.
@@ -442,7 +506,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // is inside the view frustum are uploaded; the planner caps resident-cell VRAM at OrthoVramBudgetBytes
     // and evicts the least-recently-rendered cell when a newly-visible one pushes past the budget. CPU
     // bytes are kept (lazy re-upload on re-entry); releasing them + re-decoding from disk is a follow-up.
-    private const long OrthoVramBudgetBytes = 1024L * 1024 * 1024; // ~1 GB resident ortho cap
+    //
+    // Budget sized to hold the ENTIRE bundled finite-DEM ortho set resident: the 8 Tatry cells are
+    // 8192×5462 ≈ 238 MB each (with mips) ≈ 1.9 GB total. A 1 GB budget held only 4 of the 8, so the
+    // others were evicted/frustum-culled and drew the un-textured hypsometric GREEN tint. Streaming +
+    // eviction only earns its keep for a set far larger than VRAM (future online whole-voivodeship
+    // tiles); for a small bundled set StreamOrthoTextures keeps every cell resident (see below).
+    private const long OrthoVramBudgetBytes = 3L * 1024 * 1024 * 1024; // ~3 GB resident ortho cap
     private OrthoResidencyPlanner? orthoPlanner;
     // Per-cell world-space AABB (keyed by OrthoTileIndex), unioned from the mesh tiles that sample it.
     private readonly Dictionary<int, (Vector3 Min, Vector3 Max)> orthoCellBounds = new();
@@ -516,6 +586,19 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     }
 
     /// <summary>
+    /// When <c>false</c>, the orthophoto drape is suppressed even if cells are uploaded — the terrain falls
+    /// back to its hypsometric (elevation-tinted) shading. The textures stay resident so toggling back on is
+    /// instant. Driven by the premium menu's "Ortofoto" switch.
+    /// </summary>
+    public bool OrthoEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Whether MSAA anti-aliasing is used. <c>false</c> (the "Wydajność" quality profile) draws straight
+    /// into the present FBO — jaggier edges, but skips the multisample resolve for more headroom.
+    /// </summary>
+    public bool MsaaEnabled { get; set; } = true;
+
+    /// <summary>
     /// Sets the ortho textures, one per mesh ortho-cell (order = OrthoTileIndex). An empty list clears the
     /// ortho (terrain falls back to the hypsometric tint). Each entry is tightly-packed top-row-first RGBA8.
     /// Upload happens on the next <see cref="Render"/> call, on the GL thread.
@@ -550,7 +633,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         DemRaster? raster,
         Route? route,
         IReadOnlyList<Trail>? roads = null,
-        Atmosphere? atmosphere = null)
+        Atmosphere? atmosphere = null,
+        IReadOnlyList<TreeInstance>? forest = null)
     {
         gl ??= PlatformGl.Get();
 
@@ -594,6 +678,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             terrainCloudTimeLocation = -1;
             terrainCloudCoverageLocation = -1;
             terrainCloudShadowLocation = -1;
+            terrainSnowStrengthLocation = -1;
+            terrainSnowLineZLocation = -1;
+            terrainSnowBandZLocation = -1;
             // Sky program + fullscreen triangle VAO belonged to the dead context too.
             skyProgram = 0;
             skyInvViewProjLocation = -1;
@@ -618,8 +705,57 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             cloudColorLocation = -1;
             cloudNoiseScaleLocation = -1;
             cloudWindLocation = -1;
+            cloudDispScaleLocation = -1;
+            cloudDispAmpLocation = -1;
             cloudVao = 0;
             cloudVbo = 0;
+            cloudIbo = 0;
+            cloudIndexCount = 0;
+            // Forest program + buffers belonged to the dead context too; drop the IDs and force a rebuild
+            // + instance re-upload on the next forest pass.
+            forestProgram = 0;
+            forestMvpLocation = -1;
+            forestTrunkLocation = -1;
+            forestFoliageColorLocation = -1;
+            forestLightDirLocation = -1;
+            forestSunColorLocation = -1;
+            forestSkyAmbientLocation = -1;
+            forestAmbientLocation = -1;
+            forestFogColorLocation = -1;
+            forestFogDensityLocation = -1;
+            forestCameraPosLocation = -1;
+            forestFadeEndLocation = -1;
+            forestSnowLocation = -1;
+            forestWindDirLocation = -1;
+            forestWindAmpLocation = -1;
+            forestWindTimeLocation = -1;
+            forestLodNearLocation = -1;
+            forestLodFarLocation = -1;
+            forestVao = 0;
+            forestBaseVbo = 0;
+            forestInstanceVbo = 0;
+            forestInstanceCount = 0;
+            forestVertexCount = 0;
+            lastForest = null;
+            // Impostor atlas (texture + FBO + depth RB + bake VAO) belonged to the dead context too; drop
+            // the IDs and re-bake on the next forest pass. (Unsupported flag is intentionally NOT reset —
+            // if the FBO was incomplete once, the fresh context will likely be the same.)
+            forestAtlasTex = 0;
+            forestAtlasFbo = 0;
+            forestAtlasDepthRb = 0;
+            forestBakeVao = 0;
+            forestImpostorProgram = 0;
+            forestImpostorMvpLocation = -1;
+            forestImpostorCameraPosLocation = -1;
+            forestImpostorAtlasLocation = -1;
+            forestImpostorGridLocation = -1;
+            forestImpostorFogColorLocation = -1;
+            forestImpostorFogDensityLocation = -1;
+            forestImpostorLodNearLocation = -1;
+            forestImpostorLodFarLocation = -1;
+            forestImpostorImpFarLocation = -1;
+            forestImpostorVao = 0;
+            forestImpostorQuadVbo = 0;
             // The ortho texture IDs belonged to the dead context; drop the handles (don't GL-delete the
             // stale ones) but keep the CPU bytes so they re-upload on the next EnsureOrthoTextures.
             pendingOrthoRelease.Clear();
@@ -736,11 +872,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Cloud-layer geometry, computed once and shared by BOTH the sea-of-clouds draw and the
         // terrain's cloud-shadow lookup so the shadows on the ground register with the clouds above.
         float cloudMaxZ = float.NegativeInfinity;
+        float terrainMinZ = float.PositiveInfinity;
         for (int i = 0; i < tiles.Count; i++)
         {
             if (tiles[i].MaxElevationZ > cloudMaxZ)
             {
                 cloudMaxZ = tiles[i].MaxElevationZ;
+            }
+            if (tiles[i].MinElevationZ < terrainMinZ)
+            {
+                terrainMinZ = tiles[i].MinElevationZ;
             }
         }
         TerrainMesh3D geomFrame = tiles[0];
@@ -850,6 +991,22 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform1(terrainCloudCoverageLocation, cloudsActive ? effectiveCoverage : 0f);
         gl.Uniform1(terrainCloudShadowLocation, cloudsActive ? CloudShadowStrength : 0f);
 
+        // Snow cover: derive the snowline (world-Z) from the slider + the mesh Z range so it scales with
+        // Pion. At snow=0 the line sits ABOVE every peak (no snow); at snow=1 it drops BELOW the valley
+        // floor (full snow). The shader whitens above the line, over a soft band, on flat-ish slopes.
+        float snowAmount = atmosphere?.SnowAmount ?? 0f;
+        float snowMaxZ = float.IsNegativeInfinity(cloudMaxZ) ? 0f : cloudMaxZ;
+        float snowMinZ = float.IsPositiveInfinity(terrainMinZ) ? 0f : terrainMinZ;
+        float snowRelief = MathF.Max(1f, snowMaxZ - snowMinZ);
+        float snowBandZ = snowRelief * 0.15f;
+        // Snowline = highest peak when the slider is just on (snow appears on the TOP first), dropping to
+        // one band below the valley floor at full (everything covered, floor included). Highest-first,
+        // top-last — exactly "the most snow where it's highest".
+        float snowLineZ = (snowMaxZ * (1f - snowAmount)) + ((snowMinZ - snowBandZ) * snowAmount);
+        gl.Uniform1(terrainSnowStrengthLocation, snowAmount);
+        gl.Uniform1(terrainSnowLineZLocation, snowLineZ);
+        gl.Uniform1(terrainSnowBandZLocation, snowBandZ);
+
         // Aerial perspective: when the atmosphere is bound, distant fragments blend toward
         // uFogColor with an exponential ramp. uFogDensity = 0 disables the blend (legacy path).
         Vector3 fogColor = atmosphere?.FogColor ?? Vector3.Zero;
@@ -861,7 +1018,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         // Drape the ortho: bind each mesh tile's own cell texture (OrthoTileIndex) so a multi-cell ortho
         // stays sharp. Without textures the shader uses the hypsometric tint.
-        bool anyOrtho = orthoTiles.Count > 0;
+        bool anyOrtho = orthoTiles.Count > 0 && OrthoEnabled;
         gl.ActiveTexture(TextureUnit.Texture0);
         gl.Uniform1(orthoSamplerLocation, 0);
         uint boundTexture = 0;
@@ -896,6 +1053,23 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
             gl.BindVertexArray(tile.Vao);
             gl.DrawElements(PrimitiveType.Triangles, (uint)tile.IndexCount, DrawElementsType.UnsignedShort, (void*)0);
+        }
+
+        // Forest: instanced trees, opaque + depth-tested (terrain in front occludes them, they occlude each
+        // other). Drawn after the terrain and BEFORE the overlays so trails/route stay readable on top.
+        // Phase 3: bake the impostor atlas once up front — independent of the live density (a persisted
+        // Forest=0 must not stop the bake), so the atlas is ready the first frame.
+        EnsureForestProgram(gl);
+        BakeForestAtlas(gl);
+        EnsureForestImpostorProgram(gl);
+        if (forest is { Count: > 0 })
+        {
+            EnsureForestInstances(gl, forest);
+            // Phase 3 LOD: near trees as the full instanced mesh, far trees as cheap atlas impostors, with
+            // a dithered crossfade band between (each pass collapses the instances outside its range, so the
+            // expensive mesh fragments never run for distant trees). Both depth-tested + alpha-tested.
+            DrawForest(gl, m, camera, atmosphere, windVec, weatherT);
+            DrawForestImpostors(gl, m, camera, atmosphere);
         }
 
         // Trails + route as depth-tested screen-space ribbons (occluded by the terrain). Switch to the line
@@ -936,8 +1110,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.Uniform3(cloudColorLocation, cloudCol.X, cloudCol.Y, cloudCol.Z);
             gl.Uniform1(cloudNoiseScaleLocation, cloudNoiseScale);
             gl.Uniform2(cloudWindLocation, windVec.X, windVec.Y);
+            // Surface undulation: ~2.8 km wavelength; amplitude grows from a gentle calm-day swell to a
+            // gale that heaves crests hundreds of metres up the slopes.
+            gl.Uniform1(cloudDispScaleLocation, 1f / 2800f);
+            gl.Uniform1(cloudDispAmpLocation, 70f + (340f * wind));
             gl.BindVertexArray(cloudVao);
-            gl.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
+            gl.DrawElements(PrimitiveType.Triangles, (uint)cloudIndexCount, DrawElementsType.UnsignedInt, (void*)0);
             gl.BindVertexArray(0);
             gl.DepthMask(true);
             gl.Disable(EnableCap.Blend);
@@ -1091,9 +1269,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// </summary>
     private bool EnsureMsaaTarget(GL g, int width, int height)
     {
-        if (msaaUnsupported)
+        if (msaaUnsupported || !MsaaEnabled)
         {
-            return false;
+            return false; // quality profile turned anti-aliasing off → draw straight into the present FBO
         }
 
         if (msaaSamples == 0)
@@ -1192,15 +1370,26 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         EnsureOrthoCellBounds(tiles);
 
-        orthoPlanner ??= new OrthoResidencyPlanner(ComputeOrthoBudgetCells());
+        int budgetCells = ComputeOrthoBudgetCells();
+        orthoPlanner ??= new OrthoResidencyPlanner(budgetCells);
 
-        // Which cells are potentially on screen? A cell is drawable only if some mesh tile samples it
-        // (so it has a world AABB); cull the rest against the frustum.
+        // When the whole ortho set fits in the resident budget (the bundled finite-DEM case — the 8
+        // Tatry cells now all fit), keep EVERY cell resident: feed them all as "visible" so they upload
+        // up front and the planner never evicts. Frustum-culling a small set was the cause of the
+        // "light-green" tiles — a cell that briefly left the frustum was dropped (or never uploaded) and
+        // its mesh tiles fell back to the un-textured hypsometric green. Viewport streaming + eviction is
+        // only needed for a set too large to all fit (future online whole-voivodeship tiles), where this
+        // branch is skipped and the frustum/LRU path below runs.
+        bool keepAllResident = orthoTiles.Count <= budgetCells;
+
+        // Which cells are drawable this frame? A cell is drawable only if some mesh tile samples it (so
+        // it has a world AABB). With keepAllResident every such cell counts as visible; otherwise cull
+        // against the view frustum so only on-screen cells are uploaded.
         visibleOrthoCells.Clear();
         for (int idx = 0; idx < orthoTiles.Count; idx++)
         {
             if (orthoCellBounds.TryGetValue(idx, out var aabb) &&
-                FrustumCuller.IsAabbVisible(viewProjection, aabb.Min, aabb.Max))
+                (keepAllResident || FrustumCuller.IsAabbVisible(viewProjection, aabb.Min, aabb.Max)))
             {
                 visibleOrthoCells.Add(idx);
             }
@@ -1284,21 +1473,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         long perCell = 0;
         foreach (OrthoTile tile in orthoTiles)
         {
-            long bytes = (long)Math.Max(1, tile.Width) * Math.Max(1, tile.Height) * 4L;
-            bytes += bytes / 3L; // mip chain ≈ +33%
+            long bytes = OrthoVramBudget.CellResidentBytes(tile.Width, tile.Height);
             if (bytes > perCell)
             {
                 perCell = bytes;
             }
         }
 
-        if (perCell <= 0)
-        {
-            return orthoTiles.Count;
-        }
-
-        int budget = (int)Math.Min(orthoTiles.Count, Math.Max(1, OrthoVramBudgetBytes / perCell));
-        return Math.Max(1, budget);
+        return OrthoVramBudget.MaxResidentCells(perCell, orthoTiles.Count, OrthoVramBudgetBytes);
     }
 
     // Computes the world-space AABB of each ortho cell (keyed by OrthoTileIndex) by unioning the vertex
@@ -1373,6 +1555,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         terrainCloudTimeLocation = g.GetUniformLocation(program, "uCloudTime");
         terrainCloudCoverageLocation = g.GetUniformLocation(program, "uCloudCoverage");
         terrainCloudShadowLocation = g.GetUniformLocation(program, "uCloudShadow");
+        terrainSnowStrengthLocation = g.GetUniformLocation(program, "uSnowStrength");
+        terrainSnowLineZLocation = g.GetUniformLocation(program, "uSnowLineZ");
+        terrainSnowBandZLocation = g.GetUniformLocation(program, "uSnowBandZ");
 
         // Sky program — single triangle covering the screen, fragment-shader-only atmospheric model.
         uint sks = CompileShader(g, ShaderType.VertexShader, SkyVertexShaderSource);
@@ -1440,16 +1625,51 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         cloudColorLocation = g.GetUniformLocation(cloudProgram, "uCloudColor");
         cloudNoiseScaleLocation = g.GetUniformLocation(cloudProgram, "uNoiseScale");
         cloudWindLocation = g.GetUniformLocation(cloudProgram, "uWind");
+        cloudDispScaleLocation = g.GetUniformLocation(cloudProgram, "uDispScale");
+        cloudDispAmpLocation = g.GetUniformLocation(cloudProgram, "uDispAmp");
 
-        // Unit quad as a triangle strip: (-1,-1) (1,-1) (-1,1) (1,1).
-        Span<float> quad = stackalloc float[8] { -1f, -1f,  1f, -1f,  -1f, 1f,  1f, 1f };
+        // Tessellated grid (was a flat 4-vertex quad) so the vertex shader can heave the cloud surface
+        // vertically into a rolling, wind-drifting sea — the depth test then carves a living, wavy
+        // waterline against the peaks instead of a perfectly level one.
+        const int cloudRes = 128;                 // cells per side
+        const int cloudVpr = cloudRes + 1;        // vertices per row
+        var cloudVerts = new float[cloudVpr * cloudVpr * 2];
+        int vi = 0;
+        for (int j = 0; j < cloudVpr; j++)
+        {
+            float v = ((j / (float)cloudRes) * 2f) - 1f;
+            for (int i = 0; i < cloudVpr; i++)
+            {
+                cloudVerts[vi++] = ((i / (float)cloudRes) * 2f) - 1f;
+                cloudVerts[vi++] = v;
+            }
+        }
+        var cloudIndices = new uint[cloudRes * cloudRes * 6];
+        int ii = 0;
+        for (int j = 0; j < cloudRes; j++)
+        {
+            for (int i = 0; i < cloudRes; i++)
+            {
+                uint a = (uint)((j * cloudVpr) + i);
+                uint b = a + 1;
+                uint c = a + (uint)cloudVpr;
+                uint d = c + 1;
+                cloudIndices[ii++] = a; cloudIndices[ii++] = c; cloudIndices[ii++] = b;
+                cloudIndices[ii++] = b; cloudIndices[ii++] = c; cloudIndices[ii++] = d;
+            }
+        }
+        cloudIndexCount = cloudIndices.Length;
+
         cloudVao = g.GenVertexArray();
         g.BindVertexArray(cloudVao);
         cloudVbo = g.GenBuffer();
         g.BindBuffer(BufferTargetARB.ArrayBuffer, cloudVbo);
-        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(quad.Length * sizeof(float)), quad, BufferUsageARB.StaticDraw);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(cloudVerts.Length * sizeof(float)), cloudVerts, BufferUsageARB.StaticDraw);
         g.EnableVertexAttribArray(0);
         g.VertexAttribPointer(0, 2, VertexAttribPointerType.Float, false, 2 * sizeof(float), (void*)0);
+        cloudIbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ElementArrayBuffer, cloudIbo);
+        g.BufferData<uint>(BufferTargetARB.ElementArrayBuffer, (nuint)(cloudIndices.Length * sizeof(uint)), cloudIndices, BufferUsageARB.StaticDraw);
         g.BindVertexArray(0);
 
         // Line ribbon program (reuses the same fragment shader).
@@ -1818,6 +2038,672 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         return (0x94, 0xA3, 0xB8); // slate fallback (matches the Skia renderer)
     }
 
+    // ── Forest (instanced trees) ─────────────────────────────────────────────────────────────────
+    // Phase 1: opaque "cross-triangle" conifers — two perpendicular vertical triangles per tree, so each
+    // reads as a 3D-ish spruce from any orbit angle without per-frame camera-facing maths. One 6-vertex
+    // base mesh is drawn INSTANCED (glDrawArraysInstanced) against a per-tree (position, scale, yaw)
+    // buffer, so tens of thousands of trees cost a single draw call. Lit cheaply from the atmosphere,
+    // fogged, and cut off past a fade radius. Later phases swap the placeholder triangles for a baked
+    // spruce mesh + octahedral impostors (near=mesh, far=impostor).
+    private const string ForestVertexShaderSource =
+        "#version 300 es\n" +
+        "layout(location=0) in vec3 aPos;\n" +          // model space: base at z=0, apex up
+        "layout(location=1) in vec3 aNormal;\n" +       // outward horizontal normal (for lighting)
+        "layout(location=2) in float aFoliage;\n" +     // 0 = trunk-ish, 1 = foliage
+        "layout(location=3) in vec3 aInstPos;\n" +      // per-instance world position
+        "layout(location=4) in vec2 aInstScaleRot;\n" + // per-instance x=scale, y=yaw
+        "uniform mat4 uMvp;\n" +
+        "uniform vec2 uWindDir;\n" +   // normalized sway direction (world XY)
+        "uniform float uWindAmp;\n" +  // metres of apex sway
+        "uniform float uWindTime;\n" +
+        "uniform vec3 uCameraPos;\n" +  // for the LOD crossfade distance
+        "uniform float uLodNear;\n" +   // below: full mesh
+        "uniform float uLodFar;\n" +    // above: collapsed (impostor takes over); band crossfades
+        "out vec3 vNormal;\n" +
+        "out float vFoliage;\n" +
+        "out vec3 vWorldPos;\n" +
+        "out float vHeight;\n" +
+        "out float vLodAlpha;\n" + // 1 near → 0 at uLodFar (dithered out across the band)
+        "void main(){\n" +
+        "  float s = aInstScaleRot.x; float yaw = aInstScaleRot.y;\n" +
+        "  float cs = cos(yaw); float sn = sin(yaw);\n" +
+        "  vec3 p = aPos * s;\n" +
+        "  vec3 rp = vec3((p.x * cs) - (p.y * sn), (p.x * sn) + (p.y * cs), p.z);\n" + // yaw about world-up
+        "  vec3 world = aInstPos + rp;\n" +
+        // Wind: sway scales with height (apex moves, base stays), phase offset per tree so they don't
+        // all wave in lock-step. uWindAmp/uWindDir/uWindTime come from the live weather.
+        "  float heightF = clamp(aPos.z / 28.0, 0.0, 1.0);\n" +
+        "  float sway = uWindAmp * heightF * sin(uWindTime + ((aInstPos.x + aInstPos.y) * 0.05));\n" +
+        "  world.xy += uWindDir * sway;\n" +
+        "  vec3 n = vec3((aNormal.x * cs) - (aNormal.y * sn), (aNormal.x * sn) + (aNormal.y * cs), aNormal.z);\n" +
+        "  vNormal = n; vFoliage = aFoliage; vWorldPos = world; vHeight = heightF;\n" +
+        // LOD: full mesh below uLodNear, crossfaded to nothing by uLodFar. Collapse far instances to a
+        // clipped point so their (expensive, overdrawing) fragments never run — that's the impostor's job.
+        "  float lodDist = length(aInstPos - uCameraPos);\n" +
+        "  vLodAlpha = 1.0 - smoothstep(uLodNear, uLodFar, lodDist);\n" +
+        "  gl_Position = uMvp * vec4(world, 1.0);\n" +
+        "  if (lodDist > uLodFar) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); }\n" + // NDC z>w ⇒ clipped
+        "}\n";
+
+    private const string ForestFragmentShaderSource =
+        "#version 300 es\n" +
+        "precision highp float;\n" +
+        "in vec3 vNormal;\n" +
+        "in float vFoliage;\n" +
+        "in vec3 vWorldPos;\n" +
+        "in float vHeight;\n" +
+        "in float vLodAlpha;\n" +
+        "uniform float uSnow;\n" +     // snow amount 0..1 — dusts the foliage white toward the top
+        "uniform vec3 uTrunk;\n" +
+        "uniform vec3 uFoliageColor;\n" +
+        "uniform vec3 uLightDir;\n" +   // unit direction toward the sun
+        "uniform vec3 uSunColor;\n" +
+        "uniform vec3 uSkyAmbient;\n" +
+        "uniform float uAmbient;\n" +
+        "uniform vec3 uFogColor;\n" +
+        "uniform float uFogDensity;\n" +
+        "uniform vec3 uCameraPos;\n" +
+        "uniform float uFadeEnd;\n" + // discard past this view distance (world units)
+        "out vec4 fragColor;\n" +
+        "void main(){\n" +
+        "  float dist = length(vWorldPos - uCameraPos);\n" +
+        "  if (dist > uFadeEnd) discard;\n" +
+        // LOD crossfade: screen-door dither out the mesh as it recedes (vLodAlpha 1→0), so it dissolves
+        // into the impostor over the band instead of popping. Hash threshold on the pixel coord.
+        "  float dth = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);\n" +
+        "  if (dth > vLodAlpha) discard;\n" +
+        "  vec3 base = mix(uTrunk, uFoliageColor, smoothstep(0.0, 0.15, vFoliage));\n" +
+        // Snow-laden conifer: dust the foliage toward white as snow rises, more toward the top (where
+        // it settles) so the forest reads as a natural winter scene rather than green trees on white.
+        "  if (uSnow > 0.001) {\n" +
+        "    float dust = clamp(uSnow * (0.25 + (0.55 * vHeight)), 0.0, 0.8);\n" +
+        "    base = mix(base, vec3(0.93, 0.95, 0.98), dust);\n" +
+        "  }\n" +
+        // Wrap lighting: the cross-cards are 2-sided, so use a half-Lambert so the shaded side stays a
+        // dimmer green rather than crushing to black. Gives the tree a sunlit/shadow side = volume.
+        "  float ndl = dot(normalize(vNormal), uLightDir);\n" +
+        "  float wrap = clamp((ndl * 0.5) + 0.5, 0.0, 1.0);\n" +
+        "  vec3 light = (uSkyAmbient * uAmbient) + (uSunColor * (1.0 - uAmbient) * (0.35 + (0.65 * wrap)));\n" +
+        "  vec3 lit = base * light;\n" +
+        "  float fog = 1.0 - exp(-dist * uFogDensity);\n" +
+        "  fragColor = vec4(mix(lit, uFogColor, fog), 1.0);\n" +
+        "}\n";
+
+    // Trees fade out (hard cutoff for Phase 1) past this distance from the eye, in WORLD units (≈ real
+    // metres horizontally). Keeps the per-fragment tree cost bounded to the near field.
+    private const float ForestFadeEndMeters = 20000f;
+
+    // Phase 3 LOD: full instanced MESH below ForestLodNearMeters, full IMPOSTOR billboards past
+    // ForestLodFarMeters, dithered crossfade across the band (no pop). Impostors collapse past
+    // ForestFadeEndMeters (sub-pixel — not worth a quad). The mesh's per-fragment overdraw is the
+    // expensive part, so collapsing far mesh instances to a clipped point is where the perf win comes from.
+    private const float ForestLodNearMeters = 2500f;
+    private const float ForestLodFarMeters = 5500f;
+
+    private uint forestProgram;
+    private int forestMvpLocation = -1;
+    private int forestTrunkLocation = -1;
+    private int forestFoliageColorLocation = -1;
+    private int forestLightDirLocation = -1;
+    private int forestSunColorLocation = -1;
+    private int forestSkyAmbientLocation = -1;
+    private int forestAmbientLocation = -1;
+    private int forestFogColorLocation = -1;
+    private int forestFogDensityLocation = -1;
+    private int forestCameraPosLocation = -1;
+    private int forestFadeEndLocation = -1;
+    private int forestSnowLocation = -1;
+    private int forestWindDirLocation = -1;
+    private int forestWindAmpLocation = -1;
+    private int forestWindTimeLocation = -1;
+    private int forestLodNearLocation = -1;
+    private int forestLodFarLocation = -1;
+    private uint forestVao;
+    private uint forestBaseVbo;
+    private uint forestInstanceVbo;
+    private int forestInstanceCount;
+    private int forestVertexCount;
+    private IReadOnlyList<TreeInstance>? lastForest;
+
+    // ── Forest impostor atlas (Phase 3) ──────────────────────────────────────────────────────────
+    // Baked ONCE at the first forest pass: the conifer mesh rendered into one RGBA texture from a grid
+    // of hemi-octahedral view directions (upper dome — trees are seen from above-ish). Far trees can
+    // then be drawn as cheap camera-facing billboards that sample the cell matching the eye→tree angle,
+    // instead of paying for the full instanced tiered mesh. Step 1 = bake + debug-blit the atlas to a
+    // screen corner to eyeball the silhouettes; the draw/LOD passes come in steps 2–3.
+    private const int ForestAtlasGrid = 8;                                  // 8×8 = 64 baked view dirs
+    private const int ForestAtlasCell = 256;                               // px per baked view
+    private const int ForestAtlasSize = ForestAtlasGrid * ForestAtlasCell; // 2048² atlas
+    private uint forestAtlasTex;
+    private uint forestAtlasFbo;
+    private uint forestAtlasDepthRb;
+    private uint forestBakeVao;
+    private bool forestAtlasUnsupported;
+
+    // Impostor billboards: one camera-facing quad per tree, sampling the baked atlas cell that matches the
+    // eye→tree direction (hemi-octahedral encode in the fragment shader). Reuses the per-tree instance
+    // buffer (posX,posY,posZ,scale,yaw) — yaw is ignored (the quad faces the camera).
+    private const string ForestImpostorVertexShaderSource =
+        "#version 300 es\n" +
+        "layout(location=0) in vec2 aCard;\n" +          // base quad corner in [-1,1]
+        "layout(location=1) in vec3 aInstPos;\n" +       // per-instance world base
+        "layout(location=2) in vec2 aInstScaleRot;\n" +  // x=scale (yaw unused)
+        "uniform mat4 uMvp;\n" +
+        "uniform vec3 uCameraPos;\n" +
+        "uniform float uLodNear;\n" +  // below: collapsed (mesh takes over)
+        "uniform float uLodFar;\n" +   // crossfade band upper edge (impostor fully in past it)
+        "uniform float uImpostorFar;\n" + // hard far cutoff (beyond it trees are sub-pixel — collapse)
+        "out vec2 vCardUv;\n" +   // 0..1 within the card → sub-cell uv
+        "out vec3 vToEye;\n" +    // tree→eye direction (world) → cell selection
+        "out float vLodAlpha;\n" + // 0 near → 1 past uLodFar (dithered in across the band)
+        "void main(){\n" +
+        "  float s = aInstScaleRot.x;\n" +
+        "  vec3 center = aInstPos + vec3(0.0, 0.0, 14.0 * s);\n" + // atlas framed the tree centred at z=14
+        "  vec3 toEye = uCameraPos - center;\n" +
+        // Vertical billboard: up = world Z, right = horizontal, perpendicular to the view azimuth, so the
+        // tree stays standing and only rotates about Z to face the camera. The atlas cell (chosen per
+        // fragment from the full eye direction) supplies the apparent elevation/tilt.
+        "  vec3 horiz = vec3(toEye.xy, 0.0);\n" +
+        "  float hl = length(horiz);\n" +
+        "  vec3 right = hl > 1e-4 ? normalize(vec3(-horiz.y, horiz.x, 0.0)) : vec3(1.0, 0.0, 0.0);\n" +
+        "  vec3 up = vec3(0.0, 0.0, 1.0);\n" +
+        "  float halfSize = 16.0 * s;\n" + // matches the atlas ortho half-extent
+        "  vec3 world = center + (right * (aCard.x * halfSize)) + (up * (aCard.y * halfSize));\n" +
+        "  vCardUv = (aCard * 0.5) + 0.5;\n" +
+        "  vToEye = toEye;\n" +
+        // LOD: fade impostors IN across [uLodNear,uLodFar] (mirror of the mesh's fade-out), then collapse
+        // the near ones (mesh's job) and the very-far ones (sub-pixel — not worth the quad).
+        "  float lodDist = length(toEye);\n" +
+        "  vLodAlpha = smoothstep(uLodNear, uLodFar, lodDist);\n" +
+        "  gl_Position = uMvp * vec4(world, 1.0);\n" +
+        "  if (lodDist < uLodNear || lodDist > uImpostorFar) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); }\n" +
+        "}\n";
+
+    private const string ForestImpostorFragmentShaderSource =
+        "#version 300 es\n" +
+        "precision highp float;\n" +
+        "in vec2 vCardUv;\n" +
+        "in vec3 vToEye;\n" +
+        "in float vLodAlpha;\n" +
+        "uniform sampler2D uAtlas;\n" +
+        "uniform float uGrid;\n" +       // ForestAtlasGrid as float
+        "uniform vec3 uFogColor;\n" +
+        "uniform float uFogDensity;\n" +
+        "out vec4 fragColor;\n" +
+        // hemi-octahedral encode: a tree→eye direction (z up) → continuous atlas uv∈[0,1]². Inverse of the
+        // bake's HemioctDecode, so the chosen cell matches the view the bake rendered.
+        "vec2 hemioctEncode(vec3 v){\n" +
+        "  v = normalize(v);\n" +
+        "  v.z = max(v.z, 0.0);\n" + // clamp to the upper dome (camera dipping below the tree)
+        "  float denom = max(abs(v.x) + abs(v.y) + v.z, 1e-6);\n" +
+        "  vec2 o = v.xy / denom;\n" +
+        "  vec2 e = vec2(o.x + o.y, o.x - o.y);\n" + // [-1,1]
+        "  return (e * 0.5) + 0.5;\n" +
+        "}\n" +
+        "void main(){\n" +
+        "  vec2 cellUv = hemioctEncode(vToEye);\n" +
+        "  vec2 cell = clamp(floor(cellUv * uGrid), 0.0, uGrid - 1.0);\n" +
+        "  vec2 uv = (cell + vCardUv) / uGrid;\n" +
+        "  vec4 t = texture(uAtlas, uv);\n" +
+        // Alpha-to-coverage: the silhouette mask (t.a) and the LOD crossfade (vLodAlpha) both feed the
+        // output alpha, which the MSAA stage turns into a smooth coverage mask — soft conifer edges (no
+        // alpha-test stair-stepping) AND a dithered-free LOD dissolve. The colour-mask keeps the
+        // framebuffer alpha opaque so this never makes the trees translucent in the Skia composite.
+        "  float a = t.a * vLodAlpha;\n" +
+        "  if (a < 0.02) discard;\n" + // skip fully-transparent fragments (saves depth writes)
+        "  float d = length(vToEye);\n" + // distance eye→tree, for aerial-perspective fog
+        "  float fog = 1.0 - exp(-d * uFogDensity);\n" +
+        "  fragColor = vec4(mix(t.rgb, uFogColor, fog), a);\n" +
+        "}\n";
+
+    private uint forestImpostorProgram;
+    private int forestImpostorMvpLocation = -1;
+    private int forestImpostorCameraPosLocation = -1;
+    private int forestImpostorAtlasLocation = -1;
+    private int forestImpostorGridLocation = -1;
+    private int forestImpostorFogColorLocation = -1;
+    private int forestImpostorFogDensityLocation = -1;
+    private int forestImpostorLodNearLocation = -1;
+    private int forestImpostorLodFarLocation = -1;
+    private int forestImpostorImpFarLocation = -1;
+    private uint forestImpostorVao;
+    private uint forestImpostorQuadVbo;
+
+    private void EnsureForestProgram(GL g)
+    {
+        if (forestProgram != 0)
+        {
+            return;
+        }
+
+        uint vs = CompileShader(g, ShaderType.VertexShader, ForestVertexShaderSource);
+        uint fs = CompileShader(g, ShaderType.FragmentShader, ForestFragmentShaderSource);
+        forestProgram = g.CreateProgram();
+        g.AttachShader(forestProgram, vs);
+        g.AttachShader(forestProgram, fs);
+        g.LinkProgram(forestProgram);
+        g.GetProgram(forestProgram, ProgramPropertyARB.LinkStatus, out int linked);
+        if (linked == 0)
+        {
+            string log = g.GetProgramInfoLog(forestProgram);
+            throw new InvalidOperationException("Forest shader link failed: " + log);
+        }
+        g.DetachShader(forestProgram, vs);
+        g.DetachShader(forestProgram, fs);
+        g.DeleteShader(vs);
+        g.DeleteShader(fs);
+        forestMvpLocation = g.GetUniformLocation(forestProgram, "uMvp");
+        forestTrunkLocation = g.GetUniformLocation(forestProgram, "uTrunk");
+        forestFoliageColorLocation = g.GetUniformLocation(forestProgram, "uFoliageColor");
+        forestLightDirLocation = g.GetUniformLocation(forestProgram, "uLightDir");
+        forestSunColorLocation = g.GetUniformLocation(forestProgram, "uSunColor");
+        forestSkyAmbientLocation = g.GetUniformLocation(forestProgram, "uSkyAmbient");
+        forestAmbientLocation = g.GetUniformLocation(forestProgram, "uAmbient");
+        forestFogColorLocation = g.GetUniformLocation(forestProgram, "uFogColor");
+        forestFogDensityLocation = g.GetUniformLocation(forestProgram, "uFogDensity");
+        forestCameraPosLocation = g.GetUniformLocation(forestProgram, "uCameraPos");
+        forestFadeEndLocation = g.GetUniformLocation(forestProgram, "uFadeEnd");
+        forestSnowLocation = g.GetUniformLocation(forestProgram, "uSnow");
+        forestWindDirLocation = g.GetUniformLocation(forestProgram, "uWindDir");
+        forestWindAmpLocation = g.GetUniformLocation(forestProgram, "uWindAmp");
+        forestWindTimeLocation = g.GetUniformLocation(forestProgram, "uWindTime");
+        forestLodNearLocation = g.GetUniformLocation(forestProgram, "uLodNear");
+        forestLodFarLocation = g.GetUniformLocation(forestProgram, "uLodFar");
+
+        // 3-tier conifer: each tier is two crossed vertical triangles (XZ + YZ) of decreasing width going
+        // up, so it reads as a tiered spruce from any orbit angle. Interleaved [pos(3), normal(3), foliage].
+        // The normal is the card's outward horizontal direction, used for the half-Lambert side shading.
+        (float BaseZ, float ApexZ, float HalfWidth)[] tiers =
+        {
+            (1.5f, 13f, 7.0f),
+            (10f, 21f, 5.0f),
+            (18f, 28f, 3.0f),
+        };
+        var vlist = new List<float>(tiers.Length * 2 * 3 * 7);
+        void AddVert(float x, float y, float z, float nx, float ny, float nz)
+        {
+            vlist.Add(x); vlist.Add(y); vlist.Add(z);
+            vlist.Add(nx); vlist.Add(ny); vlist.Add(nz);
+            vlist.Add(1f); // foliage
+        }
+        foreach ((float baseZ, float apexZ, float hw) in tiers)
+        {
+            AddVert(-hw, 0f, baseZ, 0f, 1f, 0f); // XZ triangle (faces ±Y)
+            AddVert(hw, 0f, baseZ, 0f, 1f, 0f);
+            AddVert(0f, 0f, apexZ, 0f, 1f, 0f);
+            AddVert(0f, -hw, baseZ, 1f, 0f, 0f); // YZ triangle (faces ±X)
+            AddVert(0f, hw, baseZ, 1f, 0f, 0f);
+            AddVert(0f, 0f, apexZ, 1f, 0f, 0f);
+        }
+        float[] verts = vlist.ToArray();
+        forestVertexCount = verts.Length / 7;
+
+        const int stride = 7 * sizeof(float);
+        forestVao = g.GenVertexArray();
+        g.BindVertexArray(forestVao);
+        forestBaseVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, forestBaseVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(verts.Length * sizeof(float)), verts, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(0); // aPos
+        g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, stride, (void*)0);
+        g.EnableVertexAttribArray(1); // aNormal
+        g.VertexAttribPointer(1, 3, VertexAttribPointerType.Float, false, stride, (void*)(3 * sizeof(float)));
+        g.EnableVertexAttribArray(2); // aFoliage
+        g.VertexAttribPointer(2, 1, VertexAttribPointerType.Float, false, stride, (void*)(6 * sizeof(float)));
+
+        // Per-instance buffer (filled in EnsureForestInstances) — (posX,posY,posZ, scale, yaw), divisor 1.
+        forestInstanceVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, forestInstanceVbo);
+        g.EnableVertexAttribArray(3); // aInstPos
+        g.VertexAttribPointer(3, 3, VertexAttribPointerType.Float, false, 5 * sizeof(float), (void*)0);
+        g.VertexAttribDivisor(3, 1);
+        g.EnableVertexAttribArray(4); // aInstScaleRot
+        g.VertexAttribPointer(4, 2, VertexAttribPointerType.Float, false, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+        g.VertexAttribDivisor(4, 1);
+        g.BindVertexArray(0);
+    }
+
+    // Hemi-octahedral decode: a cell-centre uv∈[0,1]² → a unit direction on the upper (+Z) hemisphere.
+    // Paired with the matching encode used by the impostor draw (step 2); the four uv corners map to
+    // horizon directions and the centre maps straight up, so encode∘decode round-trips on cell centres.
+    private static Vector3 HemioctDecode(float u, float v)
+    {
+        float ex = (u * 2f) - 1f;
+        float ey = (v * 2f) - 1f;
+        float tx = (ex + ey) * 0.5f;
+        float ty = (ex - ey) * 0.5f;
+        var d = new Vector3(tx, ty, 1f - MathF.Abs(tx) - MathF.Abs(ty)); // +Z up
+        return Vector3.Normalize(d);
+    }
+
+    // Bakes the conifer mesh into the impostor atlas ONCE (no-op after the first success / on failure).
+    // Renders one upright unit tree per hemi-octahedral cell through an orthographic camera into an owned
+    // FBO, then restores the scene's framebuffer + viewport. Reuses the forest program (wind off, fog/fade
+    // off, neutral lighting) so the baked silhouette matches the live mesh.
+    private unsafe void BakeForestAtlas(GL g)
+    {
+        if (forestAtlasUnsupported || forestAtlasTex != 0)
+        {
+            return; // bake once (or never, if the FBO was incomplete)
+        }
+        if (forestProgram == 0 || forestBaseVbo == 0 || forestVertexCount == 0)
+        {
+            return; // program/mesh not ready yet — try again next frame
+        }
+
+        // Remember what we interrupt: the scene's bound framebuffer + viewport, restored before returning.
+        Span<int> prevFbo = stackalloc int[1];
+        g.GetInteger(GLEnum.FramebufferBinding, prevFbo);
+        Span<int> prevVp = stackalloc int[4];
+        g.GetInteger(GLEnum.Viewport, prevVp);
+
+        // Atlas colour texture (RGBA8) + a depth RB so the conifer's three tiers occlude correctly.
+        forestAtlasTex = g.GenTexture();
+        g.BindTexture(TextureTarget.Texture2D, forestAtlasTex);
+        g.TexImage2D(
+            TextureTarget.Texture2D, 0, (int)InternalFormat.Rgba8,
+            ForestAtlasSize, ForestAtlasSize, 0,
+            PixelFormat.Rgba, PixelType.UnsignedByte, null);
+        // Trilinear minification (mips generated after the bake) so distant impostors don't shimmer/alias;
+        // MAX_LEVEL is capped after the bake to keep cells from merging into their neighbours at high mips.
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+        g.BindTexture(TextureTarget.Texture2D, 0);
+
+        forestAtlasDepthRb = g.GenRenderbuffer();
+        g.BindRenderbuffer(RenderbufferTarget.Renderbuffer, forestAtlasDepthRb);
+        g.RenderbufferStorage(RenderbufferTarget.Renderbuffer, InternalFormat.DepthComponent16, ForestAtlasSize, ForestAtlasSize);
+        g.BindRenderbuffer(RenderbufferTarget.Renderbuffer, 0);
+
+        forestAtlasFbo = g.GenFramebuffer();
+        g.BindFramebuffer(FramebufferTarget.Framebuffer, forestAtlasFbo);
+        g.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, forestAtlasTex, 0);
+        g.FramebufferRenderbuffer(FramebufferTarget.Framebuffer, FramebufferAttachment.DepthAttachment, RenderbufferTarget.Renderbuffer, forestAtlasDepthRb);
+        GLEnum status = g.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
+        if (status != GLEnum.FramebufferComplete)
+        {
+            Log.Information("[GL3D] forest atlas FBO incomplete ({Status}) — impostor bake disabled", status);
+            g.BindFramebuffer(FramebufferTarget.Framebuffer, (uint)prevFbo[0]);
+            g.DeleteFramebuffer(forestAtlasFbo);
+            g.DeleteTexture(forestAtlasTex);
+            g.DeleteRenderbuffer(forestAtlasDepthRb);
+            forestAtlasFbo = 0;
+            forestAtlasTex = 0;
+            forestAtlasDepthRb = 0;
+            forestAtlasUnsupported = true;
+            return;
+        }
+
+        // Bake VAO: the conifer mesh (loc 0,1,2) with the per-instance attrs (loc 3,4) left DISABLED, so a
+        // plain (non-instanced) DrawArrays reads their generic constant values — one upright tree at the
+        // origin, unit scale, no yaw.
+        forestBakeVao = g.GenVertexArray();
+        g.BindVertexArray(forestBakeVao);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, forestBaseVbo);
+        const int stride = 7 * sizeof(float);
+        g.EnableVertexAttribArray(0);
+        g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, stride, (void*)0);
+        g.EnableVertexAttribArray(1);
+        g.VertexAttribPointer(1, 3, VertexAttribPointerType.Float, false, stride, (void*)(3 * sizeof(float)));
+        g.EnableVertexAttribArray(2);
+        g.VertexAttribPointer(2, 1, VertexAttribPointerType.Float, false, stride, (void*)(6 * sizeof(float)));
+
+        // Draw state for the bake: depth-tested, opaque, double-sided (the cross-cards face both ways).
+        g.Enable(EnableCap.DepthTest);
+        g.DepthMask(true);
+        g.Disable(EnableCap.Blend);
+        g.Disable(EnableCap.CullFace);
+
+        g.UseProgram(forestProgram);
+        // Generic constants for the disabled instance attribs: one tree at origin, unit scale, no yaw.
+        g.VertexAttrib3(3, 0f, 0f, 0f);
+        g.VertexAttrib2(4, 1f, 0f);
+        // Neutral, fully-lit silhouette: no fog, no fade, no snow, no wind.
+        var bakeLight = Vector3.Normalize(new Vector3(0.3f, 0.3f, 0.9f));
+        g.Uniform3(forestTrunkLocation, 0.30f, 0.21f, 0.13f);
+        g.Uniform3(forestFoliageColorLocation, 0.10f, 0.24f, 0.12f);
+        g.Uniform3(forestLightDirLocation, bakeLight.X, bakeLight.Y, bakeLight.Z);
+        g.Uniform3(forestSunColorLocation, 1f, 1f, 1f);
+        g.Uniform3(forestSkyAmbientLocation, 1f, 1f, 1f);
+        g.Uniform1(forestAmbientLocation, 0.5f);
+        g.Uniform3(forestFogColorLocation, 0f, 0f, 0f);
+        g.Uniform1(forestFogDensityLocation, 0f);
+        g.Uniform3(forestCameraPosLocation, 0f, 0f, 0f);
+        g.Uniform1(forestFadeEndLocation, 1e9f);
+        g.Uniform1(forestSnowLocation, 0f);
+        g.Uniform2(forestWindDirLocation, 1f, 0f);
+        g.Uniform1(forestWindAmpLocation, 0f);
+        g.Uniform1(forestWindTimeLocation, 0f);
+
+        // Clear the whole atlas to TRANSPARENT: the forest fragment shader writes alpha=1 on every tree
+        // fragment, so the cleared background stays alpha=0 and the foliage's alpha=1 becomes the silhouette
+        // mask the impostor billboards alpha-test against.
+        g.Viewport(0, 0, (uint)ForestAtlasSize, (uint)ForestAtlasSize);
+        g.ClearColor(0f, 0f, 0f, 0f);
+        g.Clear((uint)(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit));
+
+        // One orthographic view per cell, from the cell's hemi-octahedral direction toward the tree.
+        var center = new Vector3(0f, 0f, 14f); // mid-height of the ~28 m tree
+        const float halfExtent = 16f;          // ortho box framing the tree (bounding radius ≈ 17)
+        const float eyeDist = 80f;
+        g.BindVertexArray(forestBakeVao);
+        Span<float> mm = stackalloc float[16]; // reused each cell (CA2014: no stackalloc inside the loop)
+        for (int jy = 0; jy < ForestAtlasGrid; jy++)
+        {
+            for (int ix = 0; ix < ForestAtlasGrid; ix++)
+            {
+                float u = (ix + 0.5f) / ForestAtlasGrid;
+                float vv = (jy + 0.5f) / ForestAtlasGrid;
+                Vector3 dir = HemioctDecode(u, vv);
+                Vector3 eye = center + (dir * eyeDist);
+                Vector3 up = MathF.Abs(dir.Z) > 0.99f ? new Vector3(0f, 1f, 0f) : new Vector3(0f, 0f, 1f);
+                Matrix4x4 view = Matrix4x4.CreateLookAt(eye, center, up);
+                Matrix4x4 proj = Matrix4x4.CreateOrthographic(2f * halfExtent, 2f * halfExtent, 1f, 160f);
+                Matrix4x4 mvp = view * proj;
+                // Same row-major upload trick as the scene MVP (transpose=false → GL reads column-major).
+                mm[0] = mvp.M11; mm[1] = mvp.M12; mm[2] = mvp.M13; mm[3] = mvp.M14;
+                mm[4] = mvp.M21; mm[5] = mvp.M22; mm[6] = mvp.M23; mm[7] = mvp.M24;
+                mm[8] = mvp.M31; mm[9] = mvp.M32; mm[10] = mvp.M33; mm[11] = mvp.M34;
+                mm[12] = mvp.M41; mm[13] = mvp.M42; mm[14] = mvp.M43; mm[15] = mvp.M44;
+                g.UniformMatrix4(forestMvpLocation, 1, false, mm);
+                g.Viewport(ix * ForestAtlasCell, jy * ForestAtlasCell, (uint)ForestAtlasCell, (uint)ForestAtlasCell);
+                g.DrawArrays(PrimitiveType.Triangles, 0, (uint)forestVertexCount);
+            }
+        }
+        g.BindVertexArray(0);
+
+        // Quality: mipmap + anisotropy the baked atlas so distant impostors don't shimmer. The atlas is a
+        // grid, so high mips would merge neighbouring cells — cap MAX_LEVEL so the smallest sampled cell
+        // stays ~16 px (atlas 2048 → level 4 = 128 px → 16 px/cell), where cells are still distinct.
+        g.BindTexture(TextureTarget.Texture2D, forestAtlasTex);
+        g.GenerateMipmap(TextureTarget.Texture2D);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMaxLevel, 4);
+        const GLEnum maxAnisoPName = (GLEnum)0x84FF;   // GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
+        const GLEnum anisoPName = (GLEnum)0x84FE;      // GL_TEXTURE_MAX_ANISOTROPY_EXT
+        Span<float> maxAniso = stackalloc float[1] { 1f };
+        g.GetFloat(maxAnisoPName, maxAniso);
+        g.TexParameter(TextureTarget.Texture2D, (TextureParameterName)anisoPName, Math.Clamp(8f, 1f, maxAniso[0] < 1f ? 1f : maxAniso[0]));
+        g.BindTexture(TextureTarget.Texture2D, 0);
+
+        // Restore the scene's framebuffer + viewport (and clear colour) so the rest of the frame is normal.
+        g.BindFramebuffer(FramebufferTarget.Framebuffer, (uint)prevFbo[0]);
+        g.Viewport(prevVp[0], prevVp[1], (uint)prevVp[2], (uint)prevVp[3]);
+        g.ClearColor(SkyR, SkyG, SkyB, 1f);
+        Log.Information("[GL3D] forest impostor atlas baked: {Grid}×{Grid} views @ {Cell}px (mipmapped)", ForestAtlasGrid, ForestAtlasGrid, ForestAtlasCell);
+    }
+
+    private unsafe void EnsureForestImpostorProgram(GL g)
+    {
+        if (forestImpostorProgram != 0)
+        {
+            return;
+        }
+
+        uint vs = CompileShader(g, ShaderType.VertexShader, ForestImpostorVertexShaderSource);
+        uint fs = CompileShader(g, ShaderType.FragmentShader, ForestImpostorFragmentShaderSource);
+        forestImpostorProgram = g.CreateProgram();
+        g.AttachShader(forestImpostorProgram, vs);
+        g.AttachShader(forestImpostorProgram, fs);
+        g.LinkProgram(forestImpostorProgram);
+        g.GetProgram(forestImpostorProgram, ProgramPropertyARB.LinkStatus, out int linked);
+        if (linked == 0)
+        {
+            string log = g.GetProgramInfoLog(forestImpostorProgram);
+            throw new InvalidOperationException("Forest impostor shader link failed: " + log);
+        }
+        g.DetachShader(forestImpostorProgram, vs);
+        g.DetachShader(forestImpostorProgram, fs);
+        g.DeleteShader(vs);
+        g.DeleteShader(fs);
+        forestImpostorMvpLocation = g.GetUniformLocation(forestImpostorProgram, "uMvp");
+        forestImpostorCameraPosLocation = g.GetUniformLocation(forestImpostorProgram, "uCameraPos");
+        forestImpostorAtlasLocation = g.GetUniformLocation(forestImpostorProgram, "uAtlas");
+        forestImpostorGridLocation = g.GetUniformLocation(forestImpostorProgram, "uGrid");
+        forestImpostorFogColorLocation = g.GetUniformLocation(forestImpostorProgram, "uFogColor");
+        forestImpostorFogDensityLocation = g.GetUniformLocation(forestImpostorProgram, "uFogDensity");
+        forestImpostorLodNearLocation = g.GetUniformLocation(forestImpostorProgram, "uLodNear");
+        forestImpostorLodFarLocation = g.GetUniformLocation(forestImpostorProgram, "uLodFar");
+        forestImpostorImpFarLocation = g.GetUniformLocation(forestImpostorProgram, "uImpostorFar");
+
+        // Base quad (triangle strip, [-1,1]²) shared by every instance; the instance attribs come from the
+        // existing per-tree buffer with divisor 1.
+        float[] quad = { -1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f };
+        forestImpostorVao = g.GenVertexArray();
+        g.BindVertexArray(forestImpostorVao);
+        forestImpostorQuadVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, forestImpostorQuadVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(quad.Length * sizeof(float)), quad, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(0); // aCard
+        g.VertexAttribPointer(0, 2, VertexAttribPointerType.Float, false, 2 * sizeof(float), (void*)0);
+
+        // Per-instance (posX,posY,posZ, scale, yaw) — same buffer as the mesh pass, divisor 1.
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, forestInstanceVbo);
+        g.EnableVertexAttribArray(1); // aInstPos
+        g.VertexAttribPointer(1, 3, VertexAttribPointerType.Float, false, 5 * sizeof(float), (void*)0);
+        g.VertexAttribDivisor(1, 1);
+        g.EnableVertexAttribArray(2); // aInstScaleRot
+        g.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+        g.VertexAttribDivisor(2, 1);
+        g.BindVertexArray(0);
+    }
+
+    private void DrawForestImpostors(GL g, ReadOnlySpan<float> mvp, Camera3D camera, Atmosphere? atmosphere)
+    {
+        if (forestInstanceCount == 0 || forestImpostorProgram == 0 || forestAtlasTex == 0)
+        {
+            return;
+        }
+
+        g.UseProgram(forestImpostorProgram);
+        g.UniformMatrix4(forestImpostorMvpLocation, 1, false, mvp);
+        Vector3 cam = camera.Position;
+        g.Uniform3(forestImpostorCameraPosLocation, cam.X, cam.Y, cam.Z);
+        g.Uniform1(forestImpostorGridLocation, (float)ForestAtlasGrid); // float uniform — int overload (glUniform1i) silently no-ops it to 0
+        g.Uniform1(forestImpostorLodNearLocation, ForestLodNearMeters);
+        g.Uniform1(forestImpostorLodFarLocation, ForestLodFarMeters);
+        g.Uniform1(forestImpostorImpFarLocation, ForestFadeEndMeters);
+        Vector3 fog = atmosphere?.FogColor ?? Vector3.Zero;
+        g.Uniform3(forestImpostorFogColorLocation, fog.X, fog.Y, fog.Z);
+        g.Uniform1(forestImpostorFogDensityLocation, atmosphere?.FogDensity ?? 0f);
+
+        g.ActiveTexture(TextureUnit.Texture0);
+        g.BindTexture(TextureTarget.Texture2D, forestAtlasTex);
+        g.Uniform1(forestImpostorAtlasLocation, 0);
+
+        // Alpha-to-coverage smooths the alpha-tested silhouette edges (and the LOD fade) via MSAA. Keep the
+        // framebuffer alpha channel masked off so the partial fragment alpha doesn't make trees translucent
+        // when Skia composites the present texture.
+        g.Enable(EnableCap.SampleAlphaToCoverage);
+        g.ColorMask(true, true, true, false);
+        g.BindVertexArray(forestImpostorVao);
+        g.DrawArraysInstanced(PrimitiveType.TriangleStrip, 0, 4, (uint)forestInstanceCount);
+        g.BindVertexArray(0);
+        g.ColorMask(true, true, true, true);
+        g.Disable(EnableCap.SampleAlphaToCoverage);
+    }
+
+    // Uploads the per-tree instance buffer when the forest list reference changes (placement is rebuilt
+    // by the view only on DEM / density change, so this is a rare upload, not per-frame).
+    private void EnsureForestInstances(GL g, IReadOnlyList<TreeInstance> forest)
+    {
+        if (ReferenceEquals(lastForest, forest))
+        {
+            return;
+        }
+        lastForest = forest;
+        forestInstanceCount = forest.Count;
+        if (forestInstanceCount == 0)
+        {
+            return;
+        }
+
+        var data = new float[forestInstanceCount * 5];
+        for (int i = 0; i < forestInstanceCount; i++)
+        {
+            TreeInstance t = forest[i];
+            int o = i * 5;
+            data[o] = t.Position.X;
+            data[o + 1] = t.Position.Y;
+            data[o + 2] = t.Position.Z;
+            data[o + 3] = t.Scale;
+            data[o + 4] = t.RotationRadians;
+        }
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, forestInstanceVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(data.Length * sizeof(float)), data, BufferUsageARB.StaticDraw);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
+    }
+
+    private void DrawForest(GL g, ReadOnlySpan<float> mvp, Camera3D camera, Atmosphere? atmosphere, Vector2 windVec, float weatherT)
+    {
+        if (forestInstanceCount == 0 || forestVertexCount == 0)
+        {
+            return;
+        }
+
+        g.UseProgram(forestProgram);
+        g.UniformMatrix4(forestMvpLocation, 1, false, mvp);
+        g.Uniform3(forestTrunkLocation, 0.30f, 0.21f, 0.13f);
+        g.Uniform3(forestFoliageColorLocation, 0.10f, 0.24f, 0.12f); // dark spruce green
+
+        Vector3 light = atmosphere?.SunDirection ?? new Vector3(0f, 0f, 1f);
+        Vector3 sun = Vector3.One;
+        Vector3 sky = Vector3.One;
+        float ambient = 0.5f;
+        if (atmosphere is not null)
+        {
+            sun = Vector3.Lerp(atmosphere.SunColor, Vector3.One, 0.25f) * 1.1f;
+            sky = Vector3.Lerp(atmosphere.SkyZenithColor, Vector3.One, 0.5f);
+            ambient = atmosphere.AmbientFactor;
+        }
+        g.Uniform3(forestLightDirLocation, light.X, light.Y, light.Z);
+        g.Uniform3(forestSunColorLocation, sun.X, sun.Y, sun.Z);
+        g.Uniform3(forestSkyAmbientLocation, sky.X, sky.Y, sky.Z);
+        g.Uniform1(forestAmbientLocation, ambient);
+
+        Vector3 fog = atmosphere?.FogColor ?? Vector3.Zero;
+        g.Uniform3(forestFogColorLocation, fog.X, fog.Y, fog.Z);
+        g.Uniform1(forestFogDensityLocation, atmosphere?.FogDensity ?? 0f);
+        Vector3 cam = camera.Position;
+        g.Uniform3(forestCameraPosLocation, cam.X, cam.Y, cam.Z);
+        g.Uniform1(forestFadeEndLocation, ForestFadeEndMeters);
+        g.Uniform1(forestLodNearLocation, ForestLodNearMeters);
+        g.Uniform1(forestLodFarLocation, ForestLodFarMeters);
+        g.Uniform1(forestSnowLocation, atmosphere?.SnowAmount ?? 0f);
+
+        // Wind: direction from the live drift vector (fallback +X), amplitude from the wind strength.
+        Vector2 dir = windVec.LengthSquared() > 1e-9f ? Vector2.Normalize(windVec) : new Vector2(1f, 0f);
+        float amp = (atmosphere?.Wind ?? 0.3f) * 2.0f; // metres of apex sway at full gale
+        g.Uniform2(forestWindDirLocation, dir.X, dir.Y);
+        g.Uniform1(forestWindAmpLocation, amp);
+        g.Uniform1(forestWindTimeLocation, weatherT);
+
+        g.BindVertexArray(forestVao);
+        g.DrawArraysInstanced(PrimitiveType.Triangles, 0, (uint)forestVertexCount, (uint)forestInstanceCount);
+        g.BindVertexArray(0);
+    }
+
     public void Dispose()
     {
         if (gl is null)
@@ -1868,13 +2754,46 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.DeleteProgram(cloudProgram);
             gl.DeleteVertexArray(cloudVao);
             gl.DeleteBuffer(cloudVbo);
+            gl.DeleteBuffer(cloudIbo);
             skyProgram = 0;
             skyVao = 0;
             skyVbo = 0;
             cloudProgram = 0;
             cloudVao = 0;
             cloudVbo = 0;
+            cloudIbo = 0;
             programReady = false;
+        }
+        if (forestProgram != 0)
+        {
+            gl.DeleteProgram(forestProgram);
+            gl.DeleteVertexArray(forestVao);
+            gl.DeleteBuffer(forestBaseVbo);
+            gl.DeleteBuffer(forestInstanceVbo);
+            forestProgram = 0;
+            forestVao = 0;
+            forestBaseVbo = 0;
+            forestInstanceVbo = 0;
+        }
+        if (forestAtlasTex != 0)
+        {
+            gl.DeleteFramebuffer(forestAtlasFbo);
+            gl.DeleteTexture(forestAtlasTex);
+            gl.DeleteRenderbuffer(forestAtlasDepthRb);
+            gl.DeleteVertexArray(forestBakeVao);
+            forestAtlasFbo = 0;
+            forestAtlasTex = 0;
+            forestAtlasDepthRb = 0;
+            forestBakeVao = 0;
+        }
+        if (forestImpostorProgram != 0)
+        {
+            gl.DeleteProgram(forestImpostorProgram);
+            gl.DeleteVertexArray(forestImpostorVao);
+            gl.DeleteBuffer(forestImpostorQuadVbo);
+            forestImpostorProgram = 0;
+            forestImpostorVao = 0;
+            forestImpostorQuadVbo = 0;
         }
     }
 }

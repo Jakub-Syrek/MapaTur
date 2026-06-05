@@ -58,6 +58,17 @@
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 	</PropertyGroup>
 
+	<!-- ── Release Android packaging ──────────────────────────────────────────────────────────────
+	     A signed, single-architecture (arm64) APK for sideload distribution from the website /
+	     GitHub Releases. Signing turns on ONLY when a keystore path is passed at build time
+	     (-p:AndroidSigningKeyStore=… plus the alias/passwords), so the repo never stores the signing
+	     key or its passwords. Debug builds are untouched (multi-abi fast deploy). See RELEASE.md. -->
+	<PropertyGroup Condition="'$(TargetFramework)' == 'net10.0-android' and '$(Configuration)' == 'Release'">
+		<AndroidPackageFormat>apk</AndroidPackageFormat>
+		<RuntimeIdentifiers>android-arm64</RuntimeIdentifiers>
+		<AndroidKeyStore Condition="'$(AndroidSigningKeyStore)' != ''">true</AndroidKeyStore>
+	</PropertyGroup>
+
 	<ItemGroup>
 		<!-- App Icon -->
 		<MauiIcon Include="Resources\AppIcon\appicon.svg" ForegroundFile="Resources\AppIcon\appiconfg.svg" Color="#512BD4" />

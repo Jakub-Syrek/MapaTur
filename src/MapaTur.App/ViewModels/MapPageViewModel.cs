@@ -143,6 +143,58 @@ public sealed partial class MapPageViewModel : ObservableObject
         IsMarkerPopupVisible = true;
     }
 
+    /// <summary>
+    /// Which premium-menu section is open: 0 = none (bar only), 1 = Mapa, 2 = Pogoda, 3 = Widok,
+    /// 4 = Dane, 5 = Ustawienia. Drives the top-bar chip highlight + which frosted glass panel is shown.
+    /// </summary>
+    [ObservableProperty]
+    private int activeSection;
+
+    /// <summary>
+    /// Top-bar chip handler: opens the given section, or closes it if it's already open (tap-again to
+    /// dismiss). Accepts the index as a string so the XAML <c>CommandParameter</c> needs no typed literal.
+    /// </summary>
+    [RelayCommand]
+    private void SelectSection(string? index)
+    {
+        if (!int.TryParse(index, out int target))
+        {
+            return;
+        }
+        ActiveSection = ActiveSection == target ? 0 : target;
+    }
+
+    /// <summary>Closes any open section panel (scrim tap / explicit close).</summary>
+    [RelayCommand]
+    private void CloseSection() => ActiveSection = 0;
+
+    /// <summary>
+    /// Flips one of the multi-select filter flags by name — the premium menu's "pill" toggles tap this so
+    /// each pill needs no per-flag command or two-way plumbing. Explicit switch (no reflection) keeps it
+    /// AOT-safe and obvious.
+    /// </summary>
+    [RelayCommand]
+    private void ToggleFlag(string? name)
+    {
+        switch (name)
+        {
+            case "TrailRed": TrailColourRedEnabled = !TrailColourRedEnabled; break;
+            case "TrailBlue": TrailColourBlueEnabled = !TrailColourBlueEnabled; break;
+            case "TrailGreen": TrailColourGreenEnabled = !TrailColourGreenEnabled; break;
+            case "TrailYellow": TrailColourYellowEnabled = !TrailColourYellowEnabled; break;
+            case "TrailBlack": TrailColourBlackEnabled = !TrailColourBlackEnabled; break;
+            case "RegionTatry": RegionTatryEnabled = !RegionTatryEnabled; break;
+            case "RegionBeskidy": RegionBeskidyEnabled = !RegionBeskidyEnabled; break;
+            case "RegionPieniny": RegionPieninyEnabled = !RegionPieninyEnabled; break;
+            case "RegionBieszczady": RegionBieszczadyEnabled = !RegionBieszczadyEnabled; break;
+            case "PoiHuts": ShowHuts = !ShowHuts; break;
+            case "PoiWilderness": ShowWildernessHuts = !ShowWildernessHuts; break;
+            case "PoiChalets": ShowChalets = !ShowChalets; break;
+            case "PoiShelters": ShowShelters = !ShowShelters; break;
+            case "PoiViewpoints": ShowViewpoints = !ShowViewpoints; break;
+        }
+    }
+
     /// <summary>Toggles the ☰ actions dropdown.</summary>
     [RelayCommand]
     private void ToggleMenu() => IsMenuOpen = !IsMenuOpen;
@@ -200,11 +252,25 @@ public sealed partial class MapPageViewModel : ObservableObject
     private double wind = 0.3;
 
     /// <summary>
-    /// Live atmospheric model derived from <see cref="TimeOfDayHours"/>, <see cref="Cloudiness"/>
-    /// and <see cref="Wind"/>. Recomputed whenever any change and bound straight into
-    /// <c>Terrain3DView.Atmosphere</c>. Cheap to build so deriving per change is fine.
+    /// Snow-cover amount, [0,1]: 0 = no snow (default), 1 = full snow (the snowline drops to the
+    /// valley floor). Drives the terrain shader's snow blend in the 3D renderer. Persisted.
     /// </summary>
-    public Atmosphere Atmosphere => new((float)TimeOfDayHours, (float)Cloudiness, (float)Wind);
+    [ObservableProperty]
+    private double snow;
+
+    /// <summary>
+    /// Forest density, [0,1]: 0 = no trees, 1 = densest. Drives how many trees the 3D renderer scatters
+    /// over the terrain below the treeline (bound into <c>Terrain3DView.ForestDensity</c>). Persisted.
+    /// </summary>
+    [ObservableProperty]
+    private double forestDensity = 0.6;
+
+    /// <summary>
+    /// Live atmospheric model derived from <see cref="TimeOfDayHours"/>, <see cref="Cloudiness"/>,
+    /// <see cref="Wind"/> and <see cref="Snow"/>. Recomputed whenever any change and bound straight
+    /// into <c>Terrain3DView.Atmosphere</c>. Cheap to build so deriving per change is fine.
+    /// </summary>
+    public Atmosphere Atmosphere => new((float)TimeOfDayHours, (float)Cloudiness, (float)Wind, (float)Snow);
 
     partial void OnTimeOfDayHoursChanged(double value)
     {
@@ -223,6 +289,126 @@ public sealed partial class MapPageViewModel : ObservableObject
     {
         settingsStore.Wind = value;
         OnPropertyChanged(nameof(Atmosphere));
+    }
+
+    partial void OnSnowChanged(double value)
+    {
+        settingsStore.Snow = value;
+        OnPropertyChanged(nameof(Atmosphere));
+    }
+
+    partial void OnForestDensityChanged(double value)
+    {
+        // Forest density is NOT part of the Atmosphere — the view binds ForestDensity directly and
+        // rebuilds the tree placement when it changes. Just persist here.
+        settingsStore.Forest = value;
+        OnPropertyChanged(nameof(EffectiveForestDensity));
+    }
+
+    /// <summary>
+    /// Render-quality profile: 0 = Wydajność, 1 = Zbalansowana, 2 = Wysoka. Scales the real cost levers
+    /// (anti-aliasing + forest density) so the user trades fidelity for framerate. Default = Zbalansowana.
+    /// </summary>
+    [ObservableProperty]
+    private int renderQuality = 1;
+
+    partial void OnRenderQualityChanged(int value)
+    {
+        OnPropertyChanged(nameof(EffectiveForestDensity));
+        OnPropertyChanged(nameof(AntiAliasingOn));
+    }
+
+    /// <summary>Anti-aliasing (MSAA) is on for Zbalansowana/Wysoka, off for Wydajność. Bound to the view.</summary>
+    public bool AntiAliasingOn => RenderQuality > 0;
+
+    /// <summary>
+    /// The forest density actually rendered: the user's "Las" slider value scaled by the quality profile
+    /// (Wydajność thins the forest for headroom; Wysoka renders it in full). Bound to the 3D view.
+    /// </summary>
+    public double EffectiveForestDensity => ForestDensity * RenderQuality switch
+    {
+        0 => 0.4,
+        2 => 1.0,
+        _ => 0.75,
+    };
+
+    /// <summary>Sets the render-quality profile from the Ustawienia segmented control (index as string).</summary>
+    [RelayCommand]
+    private void SelectQuality(string? index)
+    {
+        if (int.TryParse(index, out int q))
+        {
+            RenderQuality = Math.Clamp(q, 0, 2);
+        }
+    }
+
+    /// <summary>Human-readable summary of cached record counts, shown in the Ustawienia "Cache" block.</summary>
+    [ObservableProperty]
+    private string cacheSummary = "—";
+
+    // Refresh the cache counts whenever the Ustawienia panel (section 5) opens, so the figure is live.
+    partial void OnActiveSectionChanged(int value)
+    {
+        if (value == 5)
+        {
+            _ = RefreshCacheSummaryAsync();
+        }
+    }
+
+    private async Task RefreshCacheSummaryAsync()
+    {
+        try
+        {
+            int trails = await trailRepository.CountAsync().ConfigureAwait(true);
+            int pois = await poiRepository.CountAsync().ConfigureAwait(true);
+            int climbing = await climbingRepository.CountAsync().ConfigureAwait(true);
+            CacheSummary = $"Szlaki: {trails} · POI: {pois} · Wspinaczka: {climbing}";
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to read cache counts");
+            CacheSummary = "—";
+        }
+    }
+
+    /// <summary>Deletes all downloaded data (trails, POIs, climbing areas) from the local cache.</summary>
+    [RelayCommand]
+    private async Task ClearCacheAsync()
+    {
+        try
+        {
+            IsBusy = true;
+            await trailRepository.ClearAsync().ConfigureAwait(true);
+            await poiRepository.ClearAsync().ConfigureAwait(true);
+            await climbingRepository.ClearAsync().ConfigureAwait(true);
+            StatusMessage = "Wyczyszczono pobrane dane.";
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to clear cache");
+            StatusMessage = "Nie udało się wyczyścić cache.";
+        }
+        finally
+        {
+            IsBusy = false;
+            await RefreshCacheSummaryAsync().ConfigureAwait(true);
+        }
+    }
+
+    /// <summary>Whether the live FPS/scene-stats debug HUD is shown over the 3D view.</summary>
+    [ObservableProperty]
+    private bool showDebugOverlay;
+
+    /// <summary>Whether verbose (Serilog Verbose) logging is enabled for in-field diagnostics.</summary>
+    [ObservableProperty]
+    private bool verboseLogging;
+
+    partial void OnVerboseLoggingChanged(bool value)
+    {
+        MauiProgram.LogLevelSwitch.MinimumLevel = value
+            ? Serilog.Events.LogEventLevel.Verbose
+            : Serilog.Events.LogEventLevel.Information;
+        logger.LogInformation("Verbose logging {State}", value ? "ON" : "OFF");
     }
 
     /// <summary>
@@ -306,13 +492,20 @@ public sealed partial class MapPageViewModel : ObservableObject
         // Fire-and-forget rebuild — the slider drives many small changes; a single rebuild that
         // lands one frame later is plenty smooth at 360x180 meshes. On completion, replay the
         // trailing value if the user moved the slider again while this build was running.
+        //
+        // CRITICAL: pass the SAME ortho grid (orthoGridCols/Rows) the initial load used. Omitting them
+        // defaulted the rebuild to a 1×1 grid, so every mesh tile sampled ortho cell 0 (the NW quadrant)
+        // with UVs spanning the whole raster — the lowland NW image smeared across the peaks ("villages
+        // on the summits"). Capturing the fields into locals keeps the background Task off the instance.
+        int gridCols = orthoGridCols;
+        int gridRows = orthoGridRows;
         _ = Task.Run(() =>
         {
             var options = new MapaTur.Application.Terrain.TerrainMeshOptions
             {
                 VerticalExaggeration = (float)Math.Clamp(value, 1.0, 5.0),
             };
-            var rebuilt = TerrainMesh3D.BuildTiles(raster, options);
+            var rebuilt = TerrainMesh3D.BuildTiles(raster, options, orthoGridCols: gridCols, orthoGridRows: gridRows);
             MainThread.BeginInvokeOnMainThread(() =>
             {
                 TerrainTiles = rebuilt;
@@ -362,6 +555,12 @@ public sealed partial class MapPageViewModel : ObservableObject
     }
 
     /// <summary>Master show/hide for all trails; when off, no trail renders regardless of the colour/region filter.</summary>
+    /// <summary>Whether the orthophoto drape is shown on the 3D terrain (else hypsometric shading).</summary>
+    [ObservableProperty] private bool showOrtho = true;
+
+    /// <summary>Whether summit glyphs + elevation labels are drawn over the 3D terrain.</summary>
+    [ObservableProperty] private bool showPeakNames = true;
+
     [ObservableProperty] private bool showTrails = true;
 
     partial void OnShowTrailsChanged(bool value) => OnTrailFilterChanged();
@@ -818,6 +1017,14 @@ public sealed partial class MapPageViewModel : ObservableObject
         if (settingsStore.Wind is { } savedWind)
         {
             wind = Math.Clamp(savedWind, 0.0, 1.0);
+        }
+        if (settingsStore.Snow is { } savedSnow)
+        {
+            snow = Math.Clamp(savedSnow, 0.0, 1.0);
+        }
+        if (settingsStore.Forest is { } savedForest)
+        {
+            forestDensity = Math.Clamp(savedForest, 0.0, 1.0);
         }
         cameraState = settingsStore.CameraState;
         this.trackRenderer = trackRenderer;

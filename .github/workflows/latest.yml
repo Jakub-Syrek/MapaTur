@@ -1,0 +1,104 @@
+name: Latest APK (auto build)
+
+# Every push to main auto-builds the Android APK and publishes it to a rolling "latest" pre-release,
+# so the website can link a STABLE url to the newest build:
+#   https://github.com/<owner>/<repo>/releases/download/latest/MapaTur.apk
+# Each run also keeps the APK as a workflow artifact (build history, ~90 days).
+#
+# Signing: when the four ANDROID_* secrets are set (see RELEASE.md) the APK is signed and published to
+# the rolling release. WITHOUT the secrets the build still runs and uploads an UNSIGNED artifact (so the
+# pipeline is green before you set up the keystore), but does NOT publish a release (an unsigned APK can't
+# be installed).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write          # update the rolling "latest" pre-release
+
+concurrency:               # a newer push supersedes an in-flight build
+  group: latest-apk
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  apk:
+    name: Build APK + update latest
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Install MAUI Android workload
+        run: dotnet workload install maui-android
+
+      - name: Decode keystore (if configured)
+        id: ks
+        shell: pwsh
+        run: |
+          $b64 = "${{ secrets.ANDROID_KEYSTORE_BASE64 }}"
+          if ([string]::IsNullOrWhiteSpace($b64)) {
+            "path=" | Out-File $env:GITHUB_OUTPUT -Append
+            Write-Host "::warning::No ANDROID_KEYSTORE_BASE64 secret — building UNSIGNED (no release published). See RELEASE.md."
+          } else {
+            $p = Join-Path $env:RUNNER_TEMP "mapatur.keystore"
+            [IO.File]::WriteAllBytes($p, [Convert]::FromBase64String($b64))
+            "path=$p" | Out-File $env:GITHUB_OUTPUT -Append
+          }
+
+      - name: Publish APK
+        shell: pwsh
+        run: >
+          dotnet publish src/MapaTur.App/MapaTur.App.csproj
+          -c Release -f net10.0-android
+          -p:ApplicationDisplayVersion=0.0.${{ github.run_number }}
+          -p:ApplicationVersion=${{ github.run_number }}
+          -p:AndroidSigningKeyStore="${{ steps.ks.outputs.path }}"
+          -p:AndroidSigningKeyAlias="${{ secrets.ANDROID_KEY_ALIAS }}"
+          -p:AndroidSigningStorePass="${{ secrets.ANDROID_KEYSTORE_PASSWORD }}"
+          -p:AndroidSigningKeyPass="${{ secrets.ANDROID_KEY_PASSWORD }}"
+
+      - name: Collect APK
+        id: apk
+        shell: pwsh
+        run: |
+          $signed = Get-ChildItem -Recurse -Path src/MapaTur.App/bin/Release -Filter *-Signed.apk -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($signed) {
+            $src = $signed.FullName; "signed=true" | Out-File $env:GITHUB_OUTPUT -Append
+          } else {
+            $src = (Get-ChildItem -Recurse -Path src/MapaTur.App/bin/Release -Filter *.apk -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+            "signed=false" | Out-File $env:GITHUB_OUTPUT -Append
+          }
+          if (-not $src) { throw "No APK produced under src/MapaTur.App/bin/Release." }
+          $dest = Join-Path $env:RUNNER_TEMP "MapaTur.apk"
+          Copy-Item $src $dest
+          "path=$dest" | Out-File $env:GITHUB_OUTPUT -Append
+          Write-Host "APK: $src -> $dest (signed=$((Test-Path $dest)))"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MapaTur-apk
+          path: ${{ steps.apk.outputs.path }}
+
+      - name: Update rolling 'latest' pre-release
+        if: steps.apk.outputs.signed == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest (auto)
+          prerelease: true
+          files: ${{ steps.apk.outputs.path }}
+          body: >
+            Najnowszy automatyczny build z `main` (commit ${{ github.sha }}).
+            Stały link: `releases/download/latest/MapaTur.apk`.

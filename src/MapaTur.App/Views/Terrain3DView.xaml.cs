@@ -139,6 +139,86 @@ public partial class Terrain3DView : ContentView
         set => SetValue(PeaksProperty, value);
     }
 
+    /// <summary>Whether summit glyphs + elevation labels are drawn (premium menu "Nazwy szczytów").</summary>
+    public static readonly BindableProperty ShowPeakNamesProperty = BindableProperty.Create(
+        nameof(ShowPeakNames), typeof(bool), typeof(Terrain3DView), true,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
+
+    public bool ShowPeakNames
+    {
+        get => (bool)GetValue(ShowPeakNamesProperty);
+        set => SetValue(ShowPeakNamesProperty, value);
+    }
+
+    /// <summary>
+    /// Whether the orthophoto drape is shown. When false the terrain falls back to hypsometric shading
+    /// (premium menu "Ortofoto"). Applied to the GL renderer each frame; textures stay resident.
+    /// </summary>
+    public static readonly BindableProperty ShowOrthoProperty = BindableProperty.Create(
+        nameof(ShowOrtho), typeof(bool), typeof(Terrain3DView), true,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
+
+    public bool ShowOrtho
+    {
+        get => (bool)GetValue(ShowOrthoProperty);
+        set => SetValue(ShowOrthoProperty, value);
+    }
+
+    /// <summary>Whether MSAA anti-aliasing is used (premium menu render-quality profile).</summary>
+    public static readonly BindableProperty MsaaEnabledProperty = BindableProperty.Create(
+        nameof(MsaaEnabled), typeof(bool), typeof(Terrain3DView), true,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
+
+    public bool MsaaEnabled
+    {
+        get => (bool)GetValue(MsaaEnabledProperty);
+        set => SetValue(MsaaEnabledProperty, value);
+    }
+
+    /// <summary>Whether the per-frame debug stats string is computed (premium menu debug overlay).</summary>
+    public static readonly BindableProperty DebugEnabledProperty = BindableProperty.Create(
+        nameof(DebugEnabled), typeof(bool), typeof(Terrain3DView), false);
+
+    public bool DebugEnabled
+    {
+        get => (bool)GetValue(DebugEnabledProperty);
+        set => SetValue(DebugEnabledProperty, value);
+    }
+
+    /// <summary>Live one-line render stats (FPS · tiles · trees · camera distance) shown by the debug HUD.</summary>
+    public static readonly BindableProperty DebugStatsProperty = BindableProperty.Create(
+        nameof(DebugStats), typeof(string), typeof(Terrain3DView), string.Empty);
+
+    public string DebugStats
+    {
+        get => (string)GetValue(DebugStatsProperty);
+        set => SetValue(DebugStatsProperty, value);
+    }
+
+    private readonly System.Diagnostics.Stopwatch frameClock = System.Diagnostics.Stopwatch.StartNew();
+    private long lastFrameMs;
+    private double smoothedFps;
+    private int debugStatCounter;
+
+    // Smoothed FPS + scene counts, refreshed a few times a second while the debug HUD is on.
+    private void UpdateDebugStats(int tileCount)
+    {
+        long now = frameClock.ElapsedMilliseconds;
+        long dt = now - lastFrameMs;
+        lastFrameMs = now;
+        if (dt is > 0 and < 1000)
+        {
+            double fps = 1000.0 / dt;
+            smoothedFps = smoothedFps <= 0 ? fps : (smoothedFps * 0.9) + (fps * 0.1);
+        }
+        if (++debugStatCounter >= 12)
+        {
+            debugStatCounter = 0;
+            int trees = cachedForest?.Count ?? 0;
+            DebugStats = $"{smoothedFps:F0} FPS · kafle {tileCount} · drzewa {trees} · cam {Camera.Distance / 1000.0:F1} km";
+        }
+    }
+
     /// <summary>
     /// Bindable current GPS fix of the device. A null value hides the marker. The view wraps the
     /// fix in a one-element list internally so the existing <c>Marker3DOverlayProjector</c> caching
@@ -221,6 +301,34 @@ public partial class Terrain3DView : ContentView
     {
         get => (Atmosphere?)GetValue(AtmosphereProperty);
         set => SetValue(AtmosphereProperty, value);
+    }
+
+    /// <summary>
+    /// Forest density [0,1] bound from the "Las" slider. Changing it rebuilds the tree placement
+    /// (a different tree count) and repaints.
+    /// </summary>
+    public static readonly BindableProperty ForestDensityProperty = BindableProperty.Create(
+        nameof(ForestDensity),
+        typeof(double),
+        typeof(Terrain3DView),
+        0.6,
+        propertyChanged: OnForestDensityChanged);
+
+    public double ForestDensity
+    {
+        get => (double)GetValue(ForestDensityProperty);
+        set => SetValue(ForestDensityProperty, value);
+    }
+
+    private static void OnForestDensityChanged(BindableObject bindable, object oldValue, object newValue)
+    {
+        if (bindable is Terrain3DView view)
+        {
+            // Force the forest to be re-placed at the new density on the next paint.
+            view.cachedForest = null;
+            view.cachedForestTiles = null;
+            view.Canvas.InvalidateSurface();
+        }
     }
 
     /// <summary>
@@ -423,7 +531,13 @@ public partial class Terrain3DView : ContentView
             Camera.Target = new Vector3(tx, ty, tz);
             Camera.Distance = dist;
             Camera.AzimuthRadians = az;
-            Camera.PitchRadians = pitch;
+            // Clamp the restored PITCH into the downward orbit range. A saved look-around pose can leave
+            // pitch pointing up at the sky, so the camera would restore into a grey void with no terrain in
+            // view (the recurring "szara pustka na starcie"). Forcing it back to [MinPitch, ~89°] means
+            // every launch lands looking DOWN at the terrain. (Azimuth/target/distance are kept; the
+            // per-frame ClampToBounds then pins the eye over the map at a sane altitude.)
+            float maxPitch = (MathF.PI / 2f) - 0.02f;
+            Camera.PitchRadians = Math.Clamp(pitch, controller.MinPitchRadians, maxPitch);
             lastSavedCameraSerialized = CameraState; // avoid an immediate redundant re-save
             return true;
         }
@@ -455,15 +569,17 @@ public partial class Terrain3DView : ContentView
     // (OrbitSensitivity 0.005 rad/px → 28 px ≈ 8°).
     // Per-tap step sizes, kept deliberately SMALL so each repeat tick (the buttons hold-to-repeat
     // at ~25 Hz) moves only a little — the camera glides smoothly while held and a single tap is a
-    // fine nudge for precise framing, rather than a coarse jump.
-    private const float ButtonOrbitStep = 14f;
-    private const float ButtonPanStep = 22f;
-    private const float ButtonVerticalStep = 22f;
-    private const float ButtonZoomFactor = 1.08f;
+    // fine nudge for precise framing, rather than a coarse jump. Pan / vertical / zoom / tilt are
+    // halved from the originals (pan/vertical 22, zoom 1.08, tilt 5) to slow them down at the same
+    // 25 Hz cadence; ORBIT is kept fast (a touch above the original 14) per the "make turning faster".
+    private const float ButtonOrbitStep = 16f;
+    private const float ButtonPanStep = 11f;
+    private const float ButtonVerticalStep = 11f;
+    private const float ButtonZoomFactor = 1.04f;
 
-    // Tilt + slow-rotate steps are smaller still (≈1.4° per tap) for the finest control of pitch
-    // and heading while looking around the sky / ridgeline.
-    private const float ButtonTiltStep = 5f;
+    // Tilt + slow-rotate steps are smaller still for the finest control of pitch and heading while
+    // looking around the sky / ridgeline.
+    private const float ButtonTiltStep = 2.5f;
 
     // Hold-to-repeat for the on-screen camera pad. A tap fires the action once (immediately on
     // press); holding the button down repeats it at a fixed cadence so the camera glides smoothly
@@ -565,6 +681,7 @@ public partial class Terrain3DView : ContentView
     {
         Camera.Target = target;
         Camera.Distance = Math.Clamp(distance, controller.MinDistance, controller.MaxDistance);
+        controller.ClampToBounds(); // keep the eye over the map even if the 2D map was centred off the DEM
         Canvas.InvalidateSurface();
     }
 
@@ -585,6 +702,15 @@ public partial class Terrain3DView : ContentView
         (49.2270, 20.0506), // Buczynowe Turnie
         (49.2283, 20.0586), // Krzyżne (flight end)
     };
+
+    // Real-metre clearance the LOCAL camera floor keeps the eye above the terrain directly beneath it.
+    // Added inside the vertical exaggeration so it stays a true 100 m at any Pion setting.
+    private const double CameraClearanceMeters = 100.0;
+
+    // Hard altitude ceiling (metres above sea level) the camera EYE can rise to. Multiplied by the
+    // exaggeration to world-Z, so it is a fixed real altitude at any Pion. The camera cannot ascend
+    // above this (raise / zoom-out is capped), keeping the view over the terrain rather than in space.
+    private const double CameraCeilingMeters = 8_000.0;
 
     private const double FlightDurationSeconds = 24.0; // shorter = the ridge slides by faster (more sense of flight)
     private const float FlightSlalomAmplitude = 950f;  // world-metres of side-to-side weave (large so it reads at the stand-off distance)
@@ -797,33 +923,25 @@ public partial class Terrain3DView : ContentView
             return;
         }
 
-        // Push safety bounds into the controller so the camera can't tunnel through the surface
-        // (CameraFloorZ = highest world-Z + a 50 m clearance) and Pan can't drag the target off
-        // the mesh footprint (Target X/Y clamped to ±HorizontalExtent around the mesh centre).
-        // Find the global max elevation across ALL loaded tiles, not just the WorldFrame one —
-        // each tile holds its own subset of vertices.
-        float globalMaxZ = float.NegativeInfinity;
-        if (Tiles is { Count: > 0 } tiles)
-        {
-            for (int i = 0; i < tiles.Count; i++)
-            {
-                if (tiles[i].MaxElevationZ > globalMaxZ)
-                {
-                    globalMaxZ = tiles[i].MaxElevationZ;
-                }
-            }
-        }
-        controller.CameraFloorZ = float.IsNegativeInfinity(globalMaxZ) ? float.NaN : globalMaxZ + 50f;
-        // Generous focal-point bounds. The clamp only exists to stop the target wandering far into
-        // empty space — it must NOT bite mid-mesh. In-place tilt (ApplyLookAround) legitimately
-        // swings the target a long way toward the horizon/sky, so a tight footprint box made forward
-        // pan "hit an invisible wall" in the middle of the map. A 3× margin keeps panning free across
-        // the whole terrain and only catches a genuinely runaway target.
-        float targetMargin = frame.HorizontalExtent * 3f;
-        controller.MinTargetX = frame.Center.X - targetMargin;
-        controller.MaxTargetX = frame.Center.X + targetMargin;
-        controller.MinTargetY = frame.Center.Y - targetMargin;
-        controller.MaxTargetY = frame.Center.Y + targetMargin;
+        // The camera floor is set per-frame from the LOCAL terrain under the eye (see OnPaintSurface), so a
+        // single global "above the tallest peak" value is no longer used — it held the camera too high over
+        // the valleys. Leave it unset here; the first paint installs the local floor.
+        controller.CameraFloorZ = float.NaN;
+
+        // Lock the camera EYE over the map. The box is the mesh's ACTUAL world rectangle (per-axis, from
+        // the bounds corners) — not a square of side 2·HorizontalExtent, which (HorizontalExtent = max of
+        // the two half-spans) overshot the short axis and let the camera start off the map. The eye-clamp
+        // (Terrain3DController.ClampCameraOverMap) keeps Camera.Position inside this box so an orbit / pan /
+        // zoom / tilt can't fly the camera off the terrain into empty grey space.
+        Vector3 cornerSw = frame.GeoToWorld(frame.Bounds.SouthWest, 0f);
+        Vector3 cornerNe = frame.GeoToWorld(frame.Bounds.NorthEast, 0f);
+        controller.MinTargetX = MathF.Min(cornerSw.X, cornerNe.X);
+        controller.MaxTargetX = MathF.Max(cornerSw.X, cornerNe.X);
+        controller.MinTargetY = MathF.Min(cornerSw.Y, cornerNe.Y);
+        controller.MaxTargetY = MathF.Max(cornerSw.Y, cornerNe.Y);
+
+        // Cap zoom-out so pinching out can't fly the camera kilometres past the map edge into grey space.
+        controller.MaxDistance = Math.Max(frame.HorizontalExtent * 3f, 12_000f);
 
         // Restore the camera saved for this DEM; if none (or a different region), auto-frame.
         if (!TryRestoreCamera(frame))
@@ -833,6 +951,9 @@ public partial class Terrain3DView : ContentView
             Camera.AzimuthRadians = MathF.PI / 4f;
             Camera.PitchRadians = MathF.PI / 4f;
         }
+
+        // A restored / freshly-framed camera may sit outside the new bounds — pull the eye back over the map.
+        controller.ClampToBounds();
 
         Canvas.InvalidateSurface();
     }
@@ -867,18 +988,73 @@ public partial class Terrain3DView : ContentView
             return;
         }
 
+        if (DebugEnabled)
+        {
+            UpdateDebugStats(tiles.Count);
+        }
+
         // Fit the clip planes to the scene each frame (distance changes with zoom). A scene radius
         // padded past the mesh half-extent covers the diagonal corners + vertical relief. Used by both
         // the GPU and Skia paths, and by overlay projection, so they stay consistent.
         var (near, far) = CameraClipPlanes.Fit(Camera.Distance, frame.HorizontalExtent * 1.25f);
-        // Keep the far/near ratio sane for 24-bit depth precision. During a fly-through the camera
-        // sits close to its look point (small Distance) while the scene radius stays huge, which
-        // collapsed `near` to 1 and far to ~48 km → ratio ~48000, destroying depth precision so the
-        // translucent sea-of-clouds z-fought the peak silhouettes (the "clouds jittering against the
-        // summits"). Capping the ratio at ~3000 pushes near up and stops the fight.
-        near = MathF.Max(near, far / 3000f);
+        // NEAR PLANE — pin it close to the eye, independent of `far`/`distance`. CameraClipPlanes.Fit
+        // derives near from (distance − sceneRadius); since sceneRadius is the WHOLE mesh (~22 km), a
+        // camera orbiting far from the scene centre gets a near of hundreds of metres → it clips every
+        // bit of terrain near the camera. At low altitude the whole scene is close, so ALL of it falls
+        // in front of that near plane and the view goes grey, leaving only distant peaks (the reported
+        // altitude-dependent "close terrain vanishes into grey"). Capping near to a few metres makes
+        // low-altitude flight render the ground under the camera at any distance/altitude.
+        const float MaxNearMeters = 5f;
+        near = MathF.Min(near, MaxNearMeters);
+        // The far/near ratio only matters for the translucent sea-of-clouds layer, which z-fights the
+        // peak silhouettes when depth precision collapses at huge ratios. Apply the precision-preserving
+        // floor ONLY when the cloud layer is actually drawn; with clouds off keep near tight so the
+        // foreground always renders. (far/3000 ≈ 8–16 m, i.e. larger than MaxNearMeters, so this only
+        // ever pushes near OUT for the cloud case — never re-introduces the low-altitude clipping.)
+        bool cloudsActiveForClip = (EffectiveAtmosphere?.CloudCoverage ?? 0f) > 0.001f;
+        if (cloudsActiveForClip)
+        {
+            near = MathF.Max(near, far / 3000f);
+        }
         Camera.NearPlane = near;
         Camera.FarPlane = far;
+
+        // LOCAL camera floor — kept CameraClearanceMeters (real) above the terrain DIRECTLY UNDER THE EYE,
+        // sampled live from the DEM at the eye's own ground position. Sampling under the EYE (not the look
+        // target) is a HARD no-tunnelling guarantee: the camera can never drop below the ground it is
+        // physically over. (Sampling under the target let the eye sink below a ridge between it and the
+        // valley it was aimed at — "I can go under the map".) To sit 100 m above a particular valley, move
+        // the camera OVER that valley (zoom / pan); the floor then follows that terrain. Clearance is added
+        // in REAL metres (inside the exaggeration) so it stays a true 100 m at any Pion. Refreshed per frame.
+        if (Raster is { } floorRaster)
+        {
+            GeoPoint eyeGeo = frame.WorldToGeo(Camera.Position);
+            double groundElev = floorRaster.SampleBilinear(eyeGeo.Longitude, eyeGeo.Latitude);
+            if (groundElev > floorRaster.NoDataValue)
+            {
+                controller.CameraFloorZ = (float)((groundElev + CameraClearanceMeters) * frame.VerticalExaggeration);
+            }
+        }
+
+        // Hard altitude ceiling: the eye may not rise above CameraCeilingMeters of REAL altitude (× Pion to
+        // world-Z), so raise / zoom-out can't fly the camera off above the scene. Combined with the floor it
+        // pins the camera into a sane vertical band over the map.
+        controller.CameraCeilingZ = (float)(CameraCeilingMeters * frame.VerticalExaggeration);
+
+        // The legacy MaxTargetElevation was a FIXED 8000 *world units* — at Pion 3.4× that is only ~2353 m of
+        // REAL altitude, BELOW the peaks, so "raise"/zoom-out hit it long before the ceiling and the camera
+        // couldn't even climb above the mountains ("4 km is very low"). Scale the look-point cap with the
+        // exaggeration too, with headroom above the ceiling, so the eye-ceiling above is the real limiter.
+        controller.MaxTargetElevation = (float)((CameraCeilingMeters + 2_000.0) * frame.VerticalExaggeration);
+
+        // ENFORCE the dynamic floor + bounds EVERY frame, not just on the gestures that opt in. ApplyOrbit
+        // deliberately skips the floor (to avoid juddering the distance on small pitch changes), so a rotation
+        // — especially orbiting to the far side — used to swing the eye UNDER the terrain, where the
+        // (un-culled, double-sided) surface shows its textured underside ("mountains textured from inside,
+        // from both sides"). Re-applying the limit here, after the floor is sampled for the current eye
+        // position, keeps the eye above the map however it got there (orbit, a restored stale camera, …), so
+        // the camera can never see the inside of the terrain and there is nothing in there to render.
+        controller.ClampToBounds();
 
         // Project the overlays once — needed by both the GPU and Skia paths. The stateful projectors reuse
         // their world cache + screen buffers, so during a gesture this is just the per-frame screen
@@ -914,7 +1090,7 @@ public partial class Terrain3DView : ContentView
 
         // Peaks carry their own DEM elevation, so projection needs no raster lookup.
         IReadOnlyList<ProjectedPeak>? projectedPeaks = null;
-        if (Peaks is { Count: > 0 } peaks)
+        if (ShowPeakNames && Peaks is { Count: > 0 } peaks)
         {
             projectedPeaks = peakProjector.Project(
                 peaks, null, frame, Camera, e.Info.Width, e.Info.Height, PeakMarkerLiftMeters);
@@ -1253,10 +1429,9 @@ public partial class Terrain3DView : ContentView
         lastPinchScale = e.Scale;
 #endif
 
-        // Power-2.5 boost so a tiny finger-spread (perFrame ~ 1.02) produces a visible zoom step
-        // on a phone screen — without it pinch barely moved because two-finger spread between
-        // 60 Hz update frames is only a couple of pixels.
-        double boosted = Math.Pow(perFrame, 2.5);
+        // Small boost so a tiny finger-spread (perFrame ~ 1.02) still produces a visible zoom step on a
+        // phone screen, without making pinch lurch. 2.5 was too fast ("zoom shoots off"); 1.5 is gentle.
+        double boosted = Math.Pow(perFrame, 1.5);
         controller.ApplyZoom((float)boosted);
         Canvas.InvalidateSurface();
     }
@@ -1631,6 +1806,48 @@ public partial class Terrain3DView : ContentView
     private string? cachedOrthoSignature;
     private List<(byte[] Rgba, int Width, int Height)>? cachedOrthoDecoded;
 
+    // Forest (instanced trees) placed once per mesh from the DEM + ortho frame, cached by the tiles
+    // reference (the placement is a CPU scan — don't redo it every frame). Phase 1: fixed density; a
+    // "Las" slider will drive it next.
+    private IReadOnlyList<TreeInstance>? cachedForest;
+    private IReadOnlyList<TerrainMesh3D>? cachedForestTiles;
+
+    private IReadOnlyList<TreeInstance>? EnsureForest(IReadOnlyList<TerrainMesh3D> tiles)
+    {
+        if (Raster is not { } raster || tiles.Count == 0)
+        {
+            return null;
+        }
+        if (ReferenceEquals(cachedForestTiles, tiles) && cachedForest is not null)
+        {
+            return cachedForest;
+        }
+
+        float density = (float)Math.Clamp(ForestDensity, 0.0, 1.0);
+        if (density <= 0.001f)
+        {
+            cachedForest = System.Array.Empty<TreeInstance>();
+            cachedForestTiles = tiles;
+            return cachedForest;
+        }
+
+        // Quadratic density curve so the slider's LOW end is genuinely sparse (a few trees) and only the
+        // top end is a dense forest — the old linear mapping made even 30% a full carpet, so the slider
+        // looked like it "did little". Stride 4 keeps the max count sane now that trees are larger.
+        float curved = density * density;
+        var options = new ForestOptions(
+            StrideCells: 4,
+            MinElevationMeters: 0.0,
+            TreelineMeters: 1500.0,
+            MaxSlope: 1.1f,
+            Density: curved,
+            MinScale: 0.8f,
+            MaxScale: 1.7f);
+        cachedForest = ForestPlacement.Generate(raster, tiles[0], options);
+        cachedForestTiles = tiles;
+        return cachedForest;
+    }
+
     private bool TryRenderTerrainGl(SKCanvas canvas, IReadOnlyList<TerrainMesh3D> tiles, int width, int height)
     {
         if (glDisabled)
@@ -1650,6 +1867,8 @@ public partial class Terrain3DView : ContentView
         try
         {
             glRenderer ??= new Services.Terrain3DGlRenderer();
+            glRenderer.OrthoEnabled = ShowOrtho; // premium menu "Ortofoto" toggle (textures stay resident)
+            glRenderer.MsaaEnabled = MsaaEnabled; // premium menu render-quality profile (AA on/off)
 
             // Push a changed ortho image to the GL renderer once (it uploads on the GL thread next Render).
             if (orthoPathDirty)
@@ -1673,7 +1892,8 @@ public partial class Terrain3DView : ContentView
             // into a colour texture it owns and returns the texture handle. A 0 handle means the present
             // FBO couldn't be allocated this frame; fall back to Skia. The optional Atmosphere drives the
             // sky pass and the terrain fragment shader's aerial-perspective blend; passing null skips both.
-            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere);
+            IReadOnlyList<TreeInstance>? forest = EnsureForest(tiles);
+            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere, forest);
             if (terrainTextureId == 0)
             {
                 return false;

@@ -25,4 +25,10 @@ public interface IPoiRepository
     /// <param name="bounds">Bounding box.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     Task<IReadOnlyList<MountainPoi>> FindIntersectingAsync(MapBounds bounds, CancellationToken cancellationToken = default);
+
+    /// <summary>Number of cached POI records (for the settings cache summary).</summary>
+    Task<int> CountAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>Deletes every cached POI (premium menu "Wyczyść pobrane dane").</summary>
+    Task ClearAsync(CancellationToken cancellationToken = default);
 }

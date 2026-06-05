@@ -65,6 +65,12 @@ public static class MauiProgram
         return builder.Build();
     }
 
+    /// <summary>
+    /// Runtime-adjustable Serilog level. Default Information; the Ustawienia "Szczegółowe logi" toggle
+    /// flips it to Verbose for in-field diagnostics without a rebuild.
+    /// </summary>
+    public static readonly Serilog.Core.LoggingLevelSwitch LogLevelSwitch = new(LogEventLevel.Information);
+
     private static void ConfigureSerilog()
     {
         // Write logs next to the exe so they're trivial to locate and immune to
@@ -82,7 +88,7 @@ public static class MauiProgram
         }
 
         Log.Logger = new LoggerConfiguration()
-            .MinimumLevel.Debug()
+            .MinimumLevel.ControlledBy(LogLevelSwitch)
             .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
             .WriteTo.File(
                 path: Path.Combine(logDirectory, "mapatur-.log"),

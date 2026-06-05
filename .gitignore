@@ -504,3 +504,10 @@ testdata/maps/tatry-hillshade-real.mbtiles
 # Local video captures (fly-through recordings) + music assets — large / licensed, kept local-only.
 /docs/videos/
 /music/
+
+# Android release signing — the keystore + its passwords are SECRETS, never committed.
+# Create your own (see RELEASE.md) and pass it at build time / via CI secrets.
+*.keystore
+*.jks
+keystore.properties
+signing.env

@@ -19,13 +19,13 @@
             <Setter Property="TextColor" Value="White" />
             <Setter Property="BorderColor" Value="#90FFFFFF" />
             <Setter Property="BorderWidth" Value="1" />
-            <Setter Property="Opacity" Value="0.20" />
+            <Setter Property="Opacity" Value="0.35" />
             <Setter Property="VisualStateManager.VisualStateGroups">
                 <VisualStateGroupList>
                     <VisualStateGroup x:Name="CommonStates">
                         <VisualState x:Name="Normal">
                             <VisualState.Setters>
-                                <Setter Property="Opacity" Value="0.20" />
+                                <Setter Property="Opacity" Value="0.35" />
                             </VisualState.Setters>
                         </VisualState>
                         <VisualState x:Name="PointerOver">
@@ -106,7 +106,6 @@
              keeps its own tappable column. -->
         <VerticalStackLayout x:Name="AltitudePad" HorizontalOptions="Start" VerticalOptions="End"
                              Margin="12" Spacing="4" InputTransparent="False">
-            <Label Text="Wys." Style="{StaticResource Cam3DCaption}" />
             <Button Text="&#x25B2;" Pressed="OnRaiseClicked" Released="OnPadReleased" Style="{StaticResource Cam3DButton}" />
             <Button Text="&#x25BC;" Pressed="OnLowerClicked" Released="OnPadReleased" Style="{StaticResource Cam3DButton}" />
         </VerticalStackLayout>

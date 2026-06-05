@@ -27,6 +27,23 @@ public sealed class AtmosphereTests
     }
 
     [Fact]
+    public void SnowAmount_DefaultsToZero()
+    {
+        new Atmosphere(timeOfDayHours: 12f).SnowAmount.Should().Be(0f);
+    }
+
+    [Theory]
+    [InlineData(-0.5f, 0f)]
+    [InlineData(0f, 0f)]
+    [InlineData(0.4f, 0.4f)]
+    [InlineData(1f, 1f)]
+    [InlineData(2f, 1f)]
+    public void SnowAmount_IsClampedToUnitRange(float input, float expected)
+    {
+        new Atmosphere(timeOfDayHours: 12f, snow: input).SnowAmount.Should().Be(expected);
+    }
+
+    [Fact]
     public void SunDirection_AtSunrise_IsAtHorizonInTheEast()
     {
         var atmo = new Atmosphere(timeOfDayHours: 6f);

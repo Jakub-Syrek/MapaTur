@@ -130,6 +130,25 @@ public sealed class SqliteClimbingRepository : IClimbingRepository, IDisposable
     }
 
     /// <inheritdoc />
+    public async Task<int> CountAsync(CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM climbing_areas;";
+        object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        return Convert.ToInt32(result ?? 0);
+    }
+
+    /// <inheritdoc />
+    public async Task ClearAsync(CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM climbing_areas;";
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public void Dispose()
     {
         if (disposed)

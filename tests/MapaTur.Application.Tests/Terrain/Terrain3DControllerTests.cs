@@ -313,12 +313,16 @@ public sealed class Terrain3DControllerTests
     [Fact]
     public void ApplyVertical_StepMagnitudeScalesWithDistance()
     {
+        // Above the VerticalStepMinDistance floor the step is still proportional to Distance
+        // (far view → coarser steps). Both distances here are well above the floor (4 km), so the
+        // 4× distance ratio yields a 4× step. The floored behaviour below it is covered by
+        // Terrain3DControllerSafetyBoundsTests.ApplyVertical_StepStaysUsableWhenPinchedIn.
         var ctrlNear = BuildController(out var camNear);
-        camNear.Distance = 1000f;
+        camNear.Distance = 10_000f;
         ctrlNear.ApplyVertical(10f);
 
         var ctrlFar = BuildController(out var camFar);
-        camFar.Distance = 4000f;
+        camFar.Distance = 40_000f;
         ctrlFar.ApplyVertical(10f);
 
         camFar.Target.Z.Should().BeApproximately(camNear.Target.Z * 4f, 1e-3f);

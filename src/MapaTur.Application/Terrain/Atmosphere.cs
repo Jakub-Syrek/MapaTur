@@ -36,6 +36,11 @@ public sealed class Atmosphere
     /// 0 = calm + bright, 1 = gale + dark storm clouds.</summary>
     public float Wind { get; }
 
+    /// <summary>Snow cover amount in [0,1]. 0 = no snow; 1 = full snow (the snowline drops to the
+    /// valley floor). Drives the terrain shader's snow blend — whitening above a snowline that lowers
+    /// as this rises, concentrated on flatter slopes so cliffs stay bare.</summary>
+    public float SnowAmount { get; }
+
     /// <summary>Unit vector from the surface toward the sun, in world frame (X east, Y north, Z up).</summary>
     public Vector3 SunDirection { get; }
 
@@ -62,11 +67,12 @@ public sealed class Atmosphere
     /// coverage in [0,1]. Default coverage = 0.35 (scattered cirrus, the look that fits a
     /// blue-sky day with high-altitude wisps).
     /// </summary>
-    public Atmosphere(float timeOfDayHours, float cloudCoverage = 0.35f, float wind = 0.3f)
+    public Atmosphere(float timeOfDayHours, float cloudCoverage = 0.35f, float wind = 0.3f, float snow = 0f)
     {
         TimeOfDayHours = WrapToDay(timeOfDayHours);
         CloudCoverage = Math.Clamp(cloudCoverage, 0f, 1f);
         Wind = Math.Clamp(wind, 0f, 1f);
+        SnowAmount = Math.Clamp(snow, 0f, 1f);
 
         // Sun arc: sin(π · t/12) shapes a half-cycle that peaks at noon and bottoms at midnight.
         // Scaling by PeakElevationRadians gives a max of ~64° above the horizon during the day

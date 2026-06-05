@@ -50,6 +50,12 @@ public partial class MapPage : ContentPage
     // toggles between them ("przechodzenie pomiędzy 3d a 2d ... po wybraniu kąta i powiększenia").
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
+        if (e.PropertyName == nameof(MapPageViewModel.ActiveSection))
+        {
+            AnimateActiveSection(viewModel.ActiveSection);
+            return;
+        }
+
         if (e.PropertyName != nameof(MapPageViewModel.Is3DMode))
         {
             return;
@@ -57,19 +63,13 @@ public partial class MapPage : ContentPage
 
         if (viewModel.Is3DMode)
         {
-            // Defer so this runs after any mesh-change FrameMesh() the binding may dispatch,
-            // otherwise the auto-frame would clobber the focus we just synced from the 2D map.
-            Dispatcher.Dispatch(() =>
-            {
-                SyncCameraToMap();
-                // Grab keyboard focus so the arrow keys / WASD work immediately without a click first.
-                TerrainView.FocusForKeyboard();
-            });
+            // The 2D map covers the whole voivodeship while the 3D DEM is just one region, so syncing the
+            // 3D camera FROM the 2D centre kept parking it off the terrain (grey, mis-framed). Decoupled:
+            // entering 3D keeps the 3D view's own framing (FrameMesh default / the last 3D position). Just
+            // grab keyboard focus so the arrow keys work immediately.
+            Dispatcher.Dispatch(TerrainView.FocusForKeyboard);
         }
-        else
-        {
-            SyncMapToCamera();
-        }
+        // 3D → 2D no longer drags the flat map either; the two views are independent.
     }
 
     // 2D → 3D: point the camera at whatever the flat map is centred on, matching its zoom AND its
@@ -217,6 +217,47 @@ public partial class MapPage : ContentPage
     private void OnMarkerTapped(object? sender, MarkerPopupContent content)
     {
         viewModel.ShowMarkerPopup(content);
+    }
+
+    // Premium-menu microinteraction: the frosted section panel slides down + fades in as it opens, and the
+    // dim scrim cross-fades. The panel's IsVisible is binding-driven (show/hide); this just polishes the
+    // entrance so sections feel like floating glass, not a hard cut. Exit is an instant hide (acceptable).
+    private void AnimateActiveSection(int section)
+    {
+        _ = Scrim.FadeToAsync(section > 0 ? 1 : 0, 160, Easing.CubicOut);
+
+        Border? panel = section switch
+        {
+            1 => PanelMapa,
+            2 => PanelPogoda,
+            3 => PanelWidok,
+            4 => PanelDane,
+            5 => PanelUstawienia,
+            _ => null,
+        };
+        if (panel is null)
+        {
+            return;
+        }
+
+        panel.Opacity = 0;
+        panel.TranslationY = -14;
+        _ = panel.FadeToAsync(1, 200, Easing.CubicOut);
+        _ = panel.TranslateToAsync(0, 0, 220, Easing.CubicOut);
+    }
+
+    // Premium-menu "Widok" actions. Camera framing + the cinematic fly-through live in the 3D view, so the
+    // page forwards these button taps straight to it (the on-screen pad + altitude buttons are unchanged).
+    private void OnResetCameraClicked(object? sender, EventArgs e)
+    {
+        viewModel.ActiveSection = 0; // close the panel so the framed view is unobstructed
+        TerrainView.FrameMesh();
+    }
+
+    private void OnFlyThroughClicked(object? sender, EventArgs e)
+    {
+        viewModel.ActiveSection = 0;
+        TerrainView.StartOrlaPercFlight();
     }
 
     /// <inheritdoc />
