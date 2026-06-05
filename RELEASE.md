@@ -58,6 +58,23 @@ Workflow `.github/workflows/release.yml` zbuduje podpisany APK (`ApplicationDisp
 `ApplicationVersion` = numer runu = rosnący kod wersji) i opublikuje go jako **GitHub Release**.
 Strona-lądowanie linkuje najnowszy asset.
 
+## Auto-build po każdej zmianie (rolling „latest")
+
+`.github/workflows/latest.yml` na **każdy push do `main`** buduje APK i — gdy sekrety podpisu są ustawione
+— publikuje go do **rolling pre-release `latest`** (nadpisywany co build) oraz zostawia **artefakt** przy
+każdym runie Actions (historia ~90 dni). Strona linkuje wtedy **stały URL do najnowszego**:
+
+```
+https://github.com/Jakub-Syrek/MapaTur/releases/download/latest/MapaTur.apk
+```
+
+Bez sekretów build i tak przejdzie (zielony), wrzuci **niepodpisany** artefakt, ale **nie** opublikuje
+release'u (niepodpisanego APK nie da się zainstalować) — wystarczy dodać sekrety z sekcji 3, by „latest"
+zaczął się napełniać.
+
+> Dwa tory współistnieją: **`latest.yml`** = zawsze-najnowszy (auto, z `main`); **`release.yml`** =
+> ostemplowane wydanie na tag `vX.Y.Z`.
+
 ## Do zrobienia przed publicznym wydaniem
 
 - [ ] **`ApplicationId`** — teraz placeholder `com.companyname.mapatur.app`; ustaw docelowy (np.
