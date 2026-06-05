@@ -263,18 +263,37 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // and drifts smoothly — the iconic Tatra temperature-inversion look, peaks poking through fog.
     private const string CloudLayerVertexShaderSource =
         "#version 300 es\n" +
-        "layout(location=0) in vec2 aCorner;\n" + // unit quad corner in [-1,1]
+        "layout(location=0) in vec2 aCorner;\n" + // tessellated grid vertex in [-1,1]
         "uniform mat4 uMvp;\n" +
         "uniform vec2 uCenter;\n" +    // world XY centre of the layer
         "uniform float uHalfExtent;\n" + // world half-size of the quad
-        "uniform float uAltitude;\n" + // world Z of the layer
+        "uniform float uAltitude;\n" + // base world Z of the layer
+        "uniform float uDispScale;\n" + // 1/metres — wavelength of the surface undulation
+        "uniform float uDispAmp;\n" +   // metres of vertical lap (grows with wind)
+        "uniform vec2 uWind;\n" +       // drift (waves slide downwind)
+        "uniform float uTime;\n" +
         "out vec2 vWorldXY;\n" +
         "out vec2 vLocal;\n" +
+        "out float vCrest;\n" + // signed surface height (−1 trough … +1 crest) for billow shading
+        "float hashV(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n" +
+        "float noiseV(vec2 p){\n" +
+        "  vec2 i = floor(p); vec2 f = fract(p);\n" +
+        "  f = f * f * (3.0 - 2.0 * f);\n" +
+        "  return mix(mix(hashV(i), hashV(i + vec2(1.0,0.0)), f.x),\n" +
+        "             mix(hashV(i + vec2(0.0,1.0)), hashV(i + vec2(1.0,1.0)), f.x), f.y);\n" +
+        "}\n" +
+        "float fbmV(vec2 p){ float v=0.0,a=0.5; for(int i=0;i<4;i++){ v+=a*noiseV(p); p*=2.04; a*=0.5;} return v; }\n" +
         "void main(){\n" +
         "  vLocal = aCorner;\n" +
         "  vec2 world = uCenter + (aCorner * uHalfExtent);\n" +
         "  vWorldXY = world;\n" +
-        "  gl_Position = uMvp * vec4(world, uAltitude, 1.0);\n" +
+        // Undulate the cloud surface vertically with a wind-drifting fBm. The amplitude grows with the
+        // wind, so a calm day is a near-flat sea while a gale heaves the cloud crests up the slopes — the
+        // perfectly level waterline becomes a living, wind-driven boundary that laps onto the terrain.
+        "  vec2 q = (world * uDispScale) + (uWind * uTime * 0.6);\n" +
+        "  float n = (fbmV(q) - 0.5) * 2.0;\n" + // ~[-1,1]
+        "  vCrest = n;\n" +
+        "  gl_Position = uMvp * vec4(world, uAltitude + (n * uDispAmp), 1.0);\n" +
         "}\n";
 
     private const string CloudLayerFragmentShaderSource =
@@ -282,6 +301,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "precision highp float;\n" +
         "in vec2 vWorldXY;\n" +
         "in vec2 vLocal;\n" +
+        "in float vCrest;\n" +
         "uniform float uTime;\n" +
         "uniform float uCoverage;\n" +
         "uniform vec3 uCloudColor;\n" +
@@ -311,7 +331,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // edge out toward the horizon.
         "  float edge = smoothstep(1.0, 0.65, max(abs(vLocal.x), abs(vLocal.y)));\n" +
         "  a *= edge * 0.55;\n" + // lower peak opacity so the sheet is lighter / less obtrusive
-        "  fragColor = vec4(uCloudColor, a);\n" +
+        // Billow shading from the surface height: crests catch the light (brighter, a touch denser),
+        // troughs fall into shade — turns the flat veil into a rolling 3D sea of clouds.
+        "  a = clamp(a * (0.88 + (0.34 * max(vCrest, 0.0))), 0.0, 1.0);\n" +
+        "  vec3 lit = uCloudColor * (0.80 + (0.28 * clamp(vCrest, -1.0, 1.0)));\n" +
+        "  fragColor = vec4(lit, a);\n" +
         "}\n";
 
     // Flat fragment shader for the line/ribbon program (trails/route): no lighting, just the vertex colour.
@@ -448,8 +472,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int cloudColorLocation = -1;
     private int cloudNoiseScaleLocation = -1;
     private int cloudWindLocation = -1;
+    private int cloudDispScaleLocation = -1;
+    private int cloudDispAmpLocation = -1;
     private uint cloudVao;
     private uint cloudVbo;
+    private uint cloudIbo;
+    private int cloudIndexCount;
 
     // Wall-clock seconds since the renderer was constructed; drives the cirrus drift in the sky
     // shader. Started lazily so a Disposed renderer doesn't leak the stopwatch into the next one.
@@ -677,8 +705,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             cloudColorLocation = -1;
             cloudNoiseScaleLocation = -1;
             cloudWindLocation = -1;
+            cloudDispScaleLocation = -1;
+            cloudDispAmpLocation = -1;
             cloudVao = 0;
             cloudVbo = 0;
+            cloudIbo = 0;
+            cloudIndexCount = 0;
             // Forest program + buffers belonged to the dead context too; drop the IDs and force a rebuild
             // + instance re-upload on the next forest pass.
             forestProgram = 0;
@@ -1078,8 +1110,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.Uniform3(cloudColorLocation, cloudCol.X, cloudCol.Y, cloudCol.Z);
             gl.Uniform1(cloudNoiseScaleLocation, cloudNoiseScale);
             gl.Uniform2(cloudWindLocation, windVec.X, windVec.Y);
+            // Surface undulation: ~2.8 km wavelength; amplitude grows from a gentle calm-day swell to a
+            // gale that heaves crests hundreds of metres up the slopes.
+            gl.Uniform1(cloudDispScaleLocation, 1f / 2800f);
+            gl.Uniform1(cloudDispAmpLocation, 70f + (340f * wind));
             gl.BindVertexArray(cloudVao);
-            gl.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
+            gl.DrawElements(PrimitiveType.Triangles, (uint)cloudIndexCount, DrawElementsType.UnsignedInt, (void*)0);
             gl.BindVertexArray(0);
             gl.DepthMask(true);
             gl.Disable(EnableCap.Blend);
@@ -1589,16 +1625,51 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         cloudColorLocation = g.GetUniformLocation(cloudProgram, "uCloudColor");
         cloudNoiseScaleLocation = g.GetUniformLocation(cloudProgram, "uNoiseScale");
         cloudWindLocation = g.GetUniformLocation(cloudProgram, "uWind");
+        cloudDispScaleLocation = g.GetUniformLocation(cloudProgram, "uDispScale");
+        cloudDispAmpLocation = g.GetUniformLocation(cloudProgram, "uDispAmp");
 
-        // Unit quad as a triangle strip: (-1,-1) (1,-1) (-1,1) (1,1).
-        Span<float> quad = stackalloc float[8] { -1f, -1f,  1f, -1f,  -1f, 1f,  1f, 1f };
+        // Tessellated grid (was a flat 4-vertex quad) so the vertex shader can heave the cloud surface
+        // vertically into a rolling, wind-drifting sea — the depth test then carves a living, wavy
+        // waterline against the peaks instead of a perfectly level one.
+        const int cloudRes = 128;                 // cells per side
+        const int cloudVpr = cloudRes + 1;        // vertices per row
+        var cloudVerts = new float[cloudVpr * cloudVpr * 2];
+        int vi = 0;
+        for (int j = 0; j < cloudVpr; j++)
+        {
+            float v = ((j / (float)cloudRes) * 2f) - 1f;
+            for (int i = 0; i < cloudVpr; i++)
+            {
+                cloudVerts[vi++] = ((i / (float)cloudRes) * 2f) - 1f;
+                cloudVerts[vi++] = v;
+            }
+        }
+        var cloudIndices = new uint[cloudRes * cloudRes * 6];
+        int ii = 0;
+        for (int j = 0; j < cloudRes; j++)
+        {
+            for (int i = 0; i < cloudRes; i++)
+            {
+                uint a = (uint)((j * cloudVpr) + i);
+                uint b = a + 1;
+                uint c = a + (uint)cloudVpr;
+                uint d = c + 1;
+                cloudIndices[ii++] = a; cloudIndices[ii++] = c; cloudIndices[ii++] = b;
+                cloudIndices[ii++] = b; cloudIndices[ii++] = c; cloudIndices[ii++] = d;
+            }
+        }
+        cloudIndexCount = cloudIndices.Length;
+
         cloudVao = g.GenVertexArray();
         g.BindVertexArray(cloudVao);
         cloudVbo = g.GenBuffer();
         g.BindBuffer(BufferTargetARB.ArrayBuffer, cloudVbo);
-        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(quad.Length * sizeof(float)), quad, BufferUsageARB.StaticDraw);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(cloudVerts.Length * sizeof(float)), cloudVerts, BufferUsageARB.StaticDraw);
         g.EnableVertexAttribArray(0);
         g.VertexAttribPointer(0, 2, VertexAttribPointerType.Float, false, 2 * sizeof(float), (void*)0);
+        cloudIbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ElementArrayBuffer, cloudIbo);
+        g.BufferData<uint>(BufferTargetARB.ElementArrayBuffer, (nuint)(cloudIndices.Length * sizeof(uint)), cloudIndices, BufferUsageARB.StaticDraw);
         g.BindVertexArray(0);
 
         // Line ribbon program (reuses the same fragment shader).
@@ -2683,12 +2754,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.DeleteProgram(cloudProgram);
             gl.DeleteVertexArray(cloudVao);
             gl.DeleteBuffer(cloudVbo);
+            gl.DeleteBuffer(cloudIbo);
             skyProgram = 0;
             skyVao = 0;
             skyVbo = 0;
             cloudProgram = 0;
             cloudVao = 0;
             cloudVbo = 0;
+            cloudIbo = 0;
             programReady = false;
         }
         if (forestProgram != 0)
