@@ -78,6 +78,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform float uSnowStrength;\n" +
         "uniform float uSnowLineZ;\n" +
         "uniform float uSnowBandZ;\n" +
+        "uniform float uSnowSlopeCosBare;\n" + // cos(steep angle): at/below this n.z the face is bare rock
+        "uniform float uSnowSlopeCosFull;\n" + // cos(gentle angle): at/above this n.z snow fully holds
         "out vec4 fragColor;\n" +
         "float hashT(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n" +
         "float noiseT(vec2 p){\n" +
@@ -139,7 +141,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  if (uSnowStrength > 0.001) {\n" +
         "    float snowH = smoothstep(uSnowLineZ, uSnowLineZ + uSnowBandZ, vWorldPos.z);\n" +
         "    vec3 nrm = normalize(vNormal);\n" +
-        "    float slope = mix(0.65, 1.0, smoothstep(0.10, 0.50, nrm.z));\n" +
+        // Slope drives snow holding: it lies on gentle ground and slides off steep faces, leaving bare
+        // rock. n.z is cos(slope-from-vertical) — 1 flat, 0 vertical — so snow fades from full (gentle)
+        // to nothing (steep) across the model's two angle thresholds. This is the "snow on one level by
+        // slope" look (rock on the steeps, white on the benches), not a flat elevation line.
+        "    float slope = smoothstep(uSnowSlopeCosBare, uSnowSlopeCosFull, nrm.z);\n" +
         // Aspect: sunny SOUTH-facing slopes (+Y is north, so south = -Y) melt off first. The melt is
         // strongest when there's only a little snow and fades to nothing at full cover — so a thin
         // dusting clings to the shaded north faces while a deep pack still blankets every aspect.
@@ -443,6 +449,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int terrainSnowStrengthLocation = -1;
     private int terrainSnowLineZLocation = -1;
     private int terrainSnowBandZLocation = -1;
+    private int terrainSnowSlopeCosBareLocation = -1;
+    private int terrainSnowSlopeCosFullLocation = -1;
 
     // Sky / atmospheric program: drawn as a fullscreen triangle BEFORE the terrain pass, with the
     // depth-write disabled so the depth-tested terrain composes on top. Owns its own program +
@@ -681,6 +689,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             terrainSnowStrengthLocation = -1;
             terrainSnowLineZLocation = -1;
             terrainSnowBandZLocation = -1;
+            terrainSnowSlopeCosBareLocation = -1;
+            terrainSnowSlopeCosFullLocation = -1;
             // Sky program + fullscreen triangle VAO belonged to the dead context too.
             skyProgram = 0;
             skyInvViewProjLocation = -1;
@@ -991,21 +1001,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform1(terrainCloudCoverageLocation, cloudsActive ? effectiveCoverage : 0f);
         gl.Uniform1(terrainCloudShadowLocation, cloudsActive ? CloudShadowStrength : 0f);
 
-        // Snow cover: derive the snowline (world-Z) from the slider + the mesh Z range so it scales with
-        // Pion. At snow=0 the line sits ABOVE every peak (no snow); at snow=1 it drops BELOW the valley
-        // floor (full snow). The shader whitens above the line, over a soft band, on flat-ish slopes.
+        // Snow cover: the snowline (world-Z) + soft band scale with the mesh Z range (so they track Pion),
+        // and the slope-angle cosines hold snow on gentle ground while baring rock on steep faces. All four
+        // come from the pure, unit-tested SnowModel — the single source of truth the shader mirrors.
         float snowAmount = atmosphere?.SnowAmount ?? 0f;
         float snowMaxZ = float.IsNegativeInfinity(cloudMaxZ) ? 0f : cloudMaxZ;
         float snowMinZ = float.IsPositiveInfinity(terrainMinZ) ? 0f : terrainMinZ;
-        float snowRelief = MathF.Max(1f, snowMaxZ - snowMinZ);
-        float snowBandZ = snowRelief * 0.15f;
-        // Snowline = highest peak when the slider is just on (snow appears on the TOP first), dropping to
-        // one band below the valley floor at full (everything covered, floor included). Highest-first,
-        // top-last — exactly "the most snow where it's highest".
-        float snowLineZ = (snowMaxZ * (1f - snowAmount)) + ((snowMinZ - snowBandZ) * snowAmount);
+        SnowShadingParameters snow = SnowModel.Compute(snowAmount, snowMinZ, snowMaxZ);
         gl.Uniform1(terrainSnowStrengthLocation, snowAmount);
-        gl.Uniform1(terrainSnowLineZLocation, snowLineZ);
-        gl.Uniform1(terrainSnowBandZLocation, snowBandZ);
+        gl.Uniform1(terrainSnowLineZLocation, snow.LineZ);
+        gl.Uniform1(terrainSnowBandZLocation, snow.BandZ);
+        gl.Uniform1(terrainSnowSlopeCosBareLocation, snow.SlopeCosBare);
+        gl.Uniform1(terrainSnowSlopeCosFullLocation, snow.SlopeCosFull);
 
         // Aerial perspective: when the atmosphere is bound, distant fragments blend toward
         // uFogColor with an exponential ramp. uFogDensity = 0 disables the blend (legacy path).
@@ -1558,6 +1565,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         terrainSnowStrengthLocation = g.GetUniformLocation(program, "uSnowStrength");
         terrainSnowLineZLocation = g.GetUniformLocation(program, "uSnowLineZ");
         terrainSnowBandZLocation = g.GetUniformLocation(program, "uSnowBandZ");
+        terrainSnowSlopeCosBareLocation = g.GetUniformLocation(program, "uSnowSlopeCosBare");
+        terrainSnowSlopeCosFullLocation = g.GetUniformLocation(program, "uSnowSlopeCosFull");
 
         // Sky program — single triangle covering the screen, fragment-shader-only atmospheric model.
         uint sks = CompileShader(g, ShaderType.VertexShader, SkyVertexShaderSource);
