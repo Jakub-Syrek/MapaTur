@@ -1,0 +1,83 @@
+name: Release APK
+
+# Tag a commit `vX.Y.Z` and push it to build a signed Android APK and publish it to a GitHub Release.
+# The landing page can then link to the latest release asset. Requires four repo secrets — see RELEASE.md:
+#   ANDROID_KEYSTORE_BASE64   base64 of your .keystore file
+#   ANDROID_KEYSTORE_PASSWORD store password
+#   ANDROID_KEY_ALIAS         key alias
+#   ANDROID_KEY_PASSWORD      key password
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch: {}   # allow a manual run for testing
+
+permissions:
+  contents: write          # create the GitHub Release + upload the APK
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  android-apk:
+    name: Build + sign + release APK
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Install MAUI Android workload
+        run: dotnet workload install maui-android
+
+      - name: Decode keystore
+        shell: pwsh
+        run: |
+          if (-not "${{ secrets.ANDROID_KEYSTORE_BASE64 }}") { throw "ANDROID_KEYSTORE_BASE64 secret is not set — see RELEASE.md." }
+          $bytes = [System.Convert]::FromBase64String("${{ secrets.ANDROID_KEYSTORE_BASE64 }}")
+          [System.IO.File]::WriteAllBytes("$env:RUNNER_TEMP/mapatur.keystore", $bytes)
+
+      - name: Derive version from tag
+        id: ver
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $display = if ($tag -like 'v*') { $tag.Substring(1) } else { $tag }
+          if (-not $display) { $display = "0.0.${{ github.run_number }}" }
+          "display=$display" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Publish signed APK
+        shell: pwsh
+        run: >
+          dotnet publish src/MapaTur.App/MapaTur.App.csproj
+          -c Release -f net10.0-android
+          -p:ApplicationDisplayVersion=${{ steps.ver.outputs.display }}
+          -p:ApplicationVersion=${{ github.run_number }}
+          -p:AndroidSigningKeyStore="$env:RUNNER_TEMP/mapatur.keystore"
+          -p:AndroidSigningKeyAlias="${{ secrets.ANDROID_KEY_ALIAS }}"
+          -p:AndroidSigningStorePass="${{ secrets.ANDROID_KEYSTORE_PASSWORD }}"
+          -p:AndroidSigningKeyPass="${{ secrets.ANDROID_KEY_PASSWORD }}"
+
+      - name: Collect APK
+        id: apk
+        shell: pwsh
+        run: |
+          $signed = Get-ChildItem -Recurse -Path src/MapaTur.App/bin/Release -Filter *-Signed.apk -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $signed) { $signed = Get-ChildItem -Recurse -Path src/MapaTur.App/bin/Release -Filter *.apk -ErrorAction SilentlyContinue | Select-Object -First 1 }
+          if (-not $signed) { throw "No APK produced under src/MapaTur.App/bin/Release." }
+          $dest = "$env:RUNNER_TEMP/MapaTur-${{ steps.ver.outputs.display }}.apk"
+          Copy-Item $signed.FullName $dest
+          "path=$dest" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "APK: $($signed.FullName) -> $dest"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.apk.outputs.path }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
