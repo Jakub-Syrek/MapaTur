@@ -1973,12 +1973,15 @@ public sealed partial class MapPageViewModel : ObservableObject
         // keeps it clearly finer than the base yet quick to rebuild + upload).
         detail = DemRasterDownsampler.SubsampleToMaxCells(detail, maxCells: 1_500_000);
 
-        // Cyan tint (diagnostic) so the extent of the 1 m improvement is visible — turn off for the final
-        // seamless look (Etap 5).
+        // Diagnostic tint ENCODES the chosen zoom so the adaptive LOD is visible on screen (Krok 4):
+        // z16 cyan (finest 1 m), z14 amber (mid ~6 m), coarser red. Removed for the seamless look (Krok 5).
+        uint tint = zoom >= 16 ? 0xFF00E5FFu  // cyan  — finest detail
+            : zoom >= 14 ? 0xFFFFC400u        // amber — mid detail
+            : 0xFFFF3B30u;                    // red   — coarse detail
         var detailOptions = new MapaTur.Application.Terrain.TerrainMeshOptions
         {
             VerticalExaggeration = (float)Math.Clamp(VerticalExaggeration, 1.0, 5.0),
-            OverlayTintArgb = 0xFF00E5FFu,
+            OverlayTintArgb = tint,
             OverlayTintStrength = 0.45f,
         };
         return await Task.Run(() => TerrainMesh3D.BuildTiles(detail, detailOptions, projectionAnchor: anchor)).ConfigureAwait(true);
