@@ -1947,6 +1947,14 @@ public sealed partial class MapPageViewModel : ObservableObject
             "LOD detail @ {Lat:F4},{Lon:F4}: {Cols}x{Rows}, elev {Min:F0}-{Max:F0} m",
             focus.Latitude, focus.Longitude, detail.Columns, detail.Rows, dMin, dMax);
 
+        // NoData fallback (rule #12): past the Polish border GUGiK returns empty/zero tiles — don't overlay
+        // a flat-zero plateau, keep the coarse base showing there instead.
+        if (!DemRasterCoverage.HasTerrain(detail, minTopMeters: 100))
+        {
+            logger.LogInformation("LOD detail @ {Lat:F4},{Lon:F4}: no 1 m coverage — keeping base", focus.Latitude, focus.Longitude);
+            return null;
+        }
+
         var detailOptions = new MapaTur.Application.Terrain.TerrainMeshOptions
         {
             VerticalExaggeration = (float)Math.Clamp(VerticalExaggeration, 1.0, 5.0),
@@ -1985,7 +1993,12 @@ public sealed partial class MapPageViewModel : ObservableObject
             IReadOnlyList<TerrainMesh3D>? detailTiles = await BuildDetailTilesAsync(focus, lodAnchor).ConfigureAwait(true);
             if (detailTiles is null)
             {
-                return; // off coverage — keep the current detail + base
+                // Off coverage (rule #12): show the base ALONE — drop the stale detail patch rather than
+                // leaving it hanging where the camera no longer is.
+                TerrainTiles = new List<TerrainMesh3D>(lodBaseTiles);
+                OnPropertyChanged(nameof(TerrainFrame));
+                lodDetailCentre = focus;
+                return;
             }
 
             var combined = new List<TerrainMesh3D>(lodBaseTiles);
