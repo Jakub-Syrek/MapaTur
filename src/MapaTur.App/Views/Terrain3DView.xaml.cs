@@ -377,6 +377,15 @@ public partial class Terrain3DView : ContentView
         private set => SetValue(IsFlyingProperty, value);
     }
 
+    /// <summary>When true (LOD Etap 3), the view reports the camera's ground focus as it moves so the host
+    /// can stream the 1 m DETAIL tiles to follow it. The coarse base stays static and framed — only the
+    /// detail layer swaps — so a detail reload must NOT reframe the camera.</summary>
+    public bool DetailStreamingEnabled { get; set; }
+
+    /// <summary>Raised (debounced by the camera-save timer) with the camera's ground focus while
+    /// <see cref="DetailStreamingEnabled"/>. The host decides whether to reload the detail ring.</summary>
+    public event EventHandler<GeoPoint>? CameraFocusMoved;
+
     /// <summary>Camera state mutated by gestures and used by the renderer.</summary>
     public Camera3D Camera { get; } = new Camera3D();
 
@@ -506,6 +515,13 @@ public partial class Terrain3DView : ContentView
         {
             lastSavedCameraSerialized = serialized;
             CameraState = serialized; // flows to the view-model → settings store
+
+            // LOD Etap 3: report the ground point under the camera so the host streams the detail ring to
+            // it. The timer debounces; the host gates the actual reload on how far the focus drifted.
+            if (DetailStreamingEnabled)
+            {
+                CameraFocusMoved?.Invoke(this, frame.WorldToGeo(Camera.Target));
+            }
         }
     }
 
@@ -971,7 +987,18 @@ public partial class Terrain3DView : ContentView
 
     private static void OnTilesChanged(BindableObject bindable, object oldValue, object newValue)
     {
-        if (bindable is Terrain3DView view)
+        if (bindable is not Terrain3DView view)
+        {
+            return;
+        }
+
+        // LOD Etap 3 detail swap: the coarse base is already framed and the camera roams it; only the 1 m
+        // detail tiles changed, so DON'T reframe (that would yank the camera) — just repaint.
+        if (view.DetailStreamingEnabled)
+        {
+            view.Canvas.InvalidateSurface();
+        }
+        else
         {
             view.FrameMesh();
         }

@@ -1864,10 +1864,7 @@ public sealed partial class MapPageViewModel : ObservableObject
                 "LOD demo base (blocky): {Cols}x{Rows}, centre {Lat:F4},{Lon:F4}",
                 baseRaster.Columns, baseRaster.Rows, baseCentre.Latitude, baseCentre.Longitude);
 
-            // Detail: 1 m (z16) ~700 m patch over the centre, anchored to the SAME origin as the base.
             StatusMessage = "LOD demo: kafel 1 m…";
-            DemRaster? detailRaster = await regionDemLoader.LoadRegionAsync(LodTerrainWindow.Around(baseCentre, 350), 16).ConfigureAwait(true);
-
             var options = new MapaTur.Application.Terrain.TerrainMeshOptions
             {
                 VerticalExaggeration = (float)Math.Clamp(VerticalExaggeration, 1.0, 5.0),
@@ -1883,41 +1880,28 @@ public sealed partial class MapPageViewModel : ObservableObject
             var baseTiles = await Task.Run(() => TerrainMesh3D.BuildTiles(baseRaster, options)).ConfigureAwait(true);
             var combined = new List<TerrainMesh3D>(baseTiles);
 
-            if (detailRaster is not null)
+            // Initial detail ring centred on the base centre, anchored to the same scene origin.
+            IReadOnlyList<TerrainMesh3D>? detailTiles = await BuildDetailTilesAsync(baseCentre, baseCentre).ConfigureAwait(true);
+            if (detailTiles is not null)
             {
-                (double dMin, double dMax) = detailRaster.GetElevationRange();
-                logger.LogInformation(
-                    "LOD demo detail: {Cols}x{Rows} z16, elev {Min:F0}-{Max:F0} m",
-                    detailRaster.Columns, detailRaster.Rows, dMin, dMax);
-                GeoPoint anchor = baseCentre;
-                // Tint the 1 m detail tiles cyan so it's UNMISTAKABLE where the overlay sits over the base
-                // (diagnostic — the real LOD won't tint). 0xFF00E5FF = cyan, blended 55%.
-                var detailOptions = new MapaTur.Application.Terrain.TerrainMeshOptions
-                {
-                    VerticalExaggeration = options.VerticalExaggeration,
-                    OverlayTintArgb = 0xFF00E5FFu,
-                    OverlayTintStrength = 0.55f,
-                };
-                var detailTiles = await Task.Run(() =>
-                    TerrainMesh3D.BuildTiles(detailRaster, detailOptions, projectionAnchor: anchor)).ConfigureAwait(true);
                 combined.AddRange(detailTiles);
-            }
-            else
-            {
-                logger.LogWarning("LOD demo: detail tile null (no 1 m here)");
             }
 
             TerrainRaster = baseRaster;
             Peaks3DOverlay = null; // skip peak detection for the demo
+            lodBaseTiles = baseTiles;
+            lodAnchor = baseCentre;
+            lodDetailCentre = baseCentre;
             TerrainTiles = combined;
             OnPropertyChanged(nameof(TerrainFrame));
             Is3DMode = true;
             TerrainReframeRequested?.Invoke(this, EventArgs.Empty);
 
-            logger.LogInformation("LOD demo built: {BaseTiles} base + {Total} total tiles", baseTiles.Count, combined.Count);
-            StatusMessage = detailRaster is not null
-                ? $"LOD demo: baza 30 m + kafel 1 m ({combined.Count} tiles)"
-                : "LOD demo: tylko baza 30 m (brak kafla 1 m)";
+            // Base is framed + static; turn on detail streaming so the 1 m ring follows the camera focus
+            // (Etap 3) — the view stops reframing on detail swaps so the camera roams the base freely.
+            IsLodStreaming = true;
+            logger.LogInformation("LOD built: {BaseTiles} base + {Total} total tiles; detail streaming ON", baseTiles.Count, combined.Count);
+            StatusMessage = "LOD: baza + 1 m podąża za kamerą (Etap 3)";
         }
         catch (Exception ex)
         {
@@ -1927,6 +1911,96 @@ public sealed partial class MapPageViewModel : ObservableObject
         finally
         {
             IsBusy = false;
+        }
+    }
+
+    /// <summary>True while LOD Etap 3 detail streaming is active (1 m ring follows the camera over a static base).</summary>
+    [ObservableProperty]
+    private bool isLodStreaming;
+
+    private IReadOnlyList<TerrainMesh3D>? lodBaseTiles;
+    private GeoPoint lodAnchor;
+    private GeoPoint lodDetailCentre;
+    private bool lodDetailLoading;
+    private DateTime lastLodDetailReloadUtc = DateTime.MinValue;
+    private const double LodDetailReloadThresholdMeters = 350;            // re-centre the detail ring after ~350 m drift
+    private static readonly TimeSpan LodDetailReloadCooldown = TimeSpan.FromMilliseconds(1200);
+
+    // Builds the tinted 1 m detail tiles for a patch centred on `focus`, anchored to the fixed scene origin
+    // `anchor` (= base centre) so it lands correctly over the static base. Cyan tint is a diagnostic.
+    private async Task<IReadOnlyList<TerrainMesh3D>?> BuildDetailTilesAsync(GeoPoint focus, GeoPoint anchor)
+    {
+        if (regionDemLoader is null)
+        {
+            return null;
+        }
+
+        DemRaster? detail = await regionDemLoader.LoadRegionAsync(LodTerrainWindow.Around(focus, 350), 16).ConfigureAwait(true);
+        if (detail is null)
+        {
+            logger.LogWarning("LOD detail: no 1 m raster at {Lat:F4},{Lon:F4}", focus.Latitude, focus.Longitude);
+            return null;
+        }
+
+        (double dMin, double dMax) = detail.GetElevationRange();
+        logger.LogInformation(
+            "LOD detail @ {Lat:F4},{Lon:F4}: {Cols}x{Rows}, elev {Min:F0}-{Max:F0} m",
+            focus.Latitude, focus.Longitude, detail.Columns, detail.Rows, dMin, dMax);
+
+        var detailOptions = new MapaTur.Application.Terrain.TerrainMeshOptions
+        {
+            VerticalExaggeration = (float)Math.Clamp(VerticalExaggeration, 1.0, 5.0),
+            OverlayTintArgb = 0xFF00E5FFu, // cyan — diagnostic so the overlay is visible; real LOD won't tint
+            OverlayTintStrength = 0.55f,
+        };
+        return await Task.Run(() => TerrainMesh3D.BuildTiles(detail, detailOptions, projectionAnchor: anchor)).ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// LOD Etap 3: the camera moved over the static base — re-centre the 1 m detail ring on the new focus
+    /// (from cache, fast) and swap ONLY the detail layer. The base (and camera framing) stays put, so this
+    /// never moves the camera. Debounced + cooldown so a fast pan doesn't thrash rebuilds.
+    /// </summary>
+    public async Task OnDetailFocusAsync(GeoPoint focus)
+    {
+        if (!IsLodStreaming || lodDetailLoading || lodBaseTiles is null || regionDemLoader is null)
+        {
+            return;
+        }
+
+        if (!LodTerrainWindow.ShouldReload(lodDetailCentre, focus, LodDetailReloadThresholdMeters))
+        {
+            return;
+        }
+
+        if (DateTime.UtcNow - lastLodDetailReloadUtc < LodDetailReloadCooldown)
+        {
+            return;
+        }
+
+        lodDetailLoading = true;
+        lastLodDetailReloadUtc = DateTime.UtcNow;
+        try
+        {
+            IReadOnlyList<TerrainMesh3D>? detailTiles = await BuildDetailTilesAsync(focus, lodAnchor).ConfigureAwait(true);
+            if (detailTiles is null)
+            {
+                return; // off coverage — keep the current detail + base
+            }
+
+            var combined = new List<TerrainMesh3D>(lodBaseTiles);
+            combined.AddRange(detailTiles);
+            TerrainTiles = combined; // OnTilesChanged: DetailStreamingEnabled ⇒ repaint only, no reframe
+            OnPropertyChanged(nameof(TerrainFrame));
+            lodDetailCentre = focus;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "LOD detail reload failed");
+        }
+        finally
+        {
+            lodDetailLoading = false;
         }
     }
 

@@ -44,6 +44,7 @@ public partial class MapPage : ContentPage
         MapControl.Map.Tapped += OnMapTapped;
         TerrainView.MarkerTapped += OnMarkerTapped;
         TerrainView.RecordingSaved += OnRecordingSaved;
+        TerrainView.CameraFocusMoved += OnCameraFocusMoved;
         viewModel.PropertyChanged += OnViewModelPropertyChanged;
         viewModel.TerrainReframeRequested += OnTerrainReframeRequested;
     }
@@ -55,6 +56,14 @@ public partial class MapPage : ContentPage
         if (e.PropertyName == nameof(MapPageViewModel.ActiveSection))
         {
             AnimateActiveSection(viewModel.ActiveSection);
+            return;
+        }
+
+        if (e.PropertyName == nameof(MapPageViewModel.IsLodStreaming))
+        {
+            // LOD Etap 3: let the 3D view report the camera focus only while streaming, so the 1 m detail
+            // ring follows it. The base stays static, so this never moves the camera.
+            TerrainView.DetailStreamingEnabled = viewModel.IsLodStreaming;
             return;
         }
 
@@ -263,6 +272,14 @@ public partial class MapPage : ContentPage
     {
         viewModel.ActiveSection = 0;
         Dispatcher.Dispatch(() => TerrainView.FrameMesh());
+    }
+
+    // LOD Etap 3: the 3D view reports the camera's ground focus as it roams the static base; forward it so
+    // the VM streams the 1 m detail ring to follow (it gates the reload on drift + cooldown). The base and
+    // camera framing don't change, so this never yanks the camera.
+    private async void OnCameraFocusMoved(object? sender, GeoPoint focus)
+    {
+        await viewModel.OnDetailFocusAsync(focus);
     }
 
     // "Download whole Tatras offline": a big one-time pull meant for WiFi (no signal in the field). The
