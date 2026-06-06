@@ -382,9 +382,10 @@ public partial class Terrain3DView : ContentView
     /// detail layer swaps — so a detail reload must NOT reframe the camera.</summary>
     public bool DetailStreamingEnabled { get; set; }
 
-    /// <summary>Raised (debounced by the camera-save timer) with the camera's ground focus while
-    /// <see cref="DetailStreamingEnabled"/>. The host decides whether to reload the detail ring.</summary>
-    public event EventHandler<GeoPoint>? CameraFocusMoved;
+    /// <summary>Raised (debounced by the camera-save timer) with a snapshot of the camera pose while
+    /// <see cref="DetailStreamingEnabled"/>. The host resolves the look-at point and decides whether to
+    /// reload the detail patch (Krok 4: detail follows the gaze, not the camera target).</summary>
+    public event EventHandler<Camera3D>? CameraFocusMoved;
 
     /// <summary>Camera state mutated by gestures and used by the renderer.</summary>
     public Camera3D Camera { get; } = new Camera3D();
@@ -516,11 +517,22 @@ public partial class Terrain3DView : ContentView
             lastSavedCameraSerialized = serialized;
             CameraState = serialized; // flows to the view-model → settings store
 
-            // LOD Etap 3: report the ground point under the camera so the host streams the detail ring to
-            // it. The timer debounces; the host gates the actual reload on how far the focus drifted.
+            // LOD Krok 4: report a snapshot of the camera pose so the host can raycast the look-at point and
+            // stream the detail patch to the gaze. Snapshot (not the live camera) so the async reload reads a
+            // stable pose. The timer debounces; the host gates the actual reload on look-at drift.
             if (DetailStreamingEnabled)
             {
-                CameraFocusMoved?.Invoke(this, frame.WorldToGeo(Camera.Target));
+                var pose = new Camera3D
+                {
+                    Target = Camera.Target,
+                    Distance = Camera.Distance,
+                    AzimuthRadians = Camera.AzimuthRadians,
+                    PitchRadians = Camera.PitchRadians,
+                    FieldOfViewYRadians = Camera.FieldOfViewYRadians,
+                    NearPlane = Camera.NearPlane,
+                    FarPlane = Camera.FarPlane,
+                };
+                CameraFocusMoved?.Invoke(this, pose);
             }
         }
     }

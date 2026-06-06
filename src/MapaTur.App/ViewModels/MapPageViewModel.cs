@@ -1879,8 +1879,8 @@ public sealed partial class MapPageViewModel : ObservableObject
             var baseTiles = await Task.Run(() => TerrainMesh3D.BuildTiles(baseRaster, options)).ConfigureAwait(true);
             var combined = new List<TerrainMesh3D>(baseTiles);
 
-            // Initial detail ring centred on the base centre, anchored to the same scene origin.
-            IReadOnlyList<TerrainMesh3D>? detailTiles = await BuildDetailTilesAsync(baseCentre, baseCentre).ConfigureAwait(true);
+            // Initial detail ring centred on the base centre, anchored to the same scene origin (finest z16).
+            IReadOnlyList<TerrainMesh3D>? detailTiles = await BuildDetailTilesAsync(baseCentre, baseCentre, NearDetailZoom).ConfigureAwait(true);
             if (detailTiles is not null)
             {
                 combined.AddRange(detailTiles);
@@ -1925,27 +1925,35 @@ public sealed partial class MapPageViewModel : ObservableObject
     private const double LodDetailReloadThresholdMeters = 700;            // re-centre after ~700 m drift (the 2 km patch has headroom)
     private static readonly TimeSpan LodDetailReloadCooldown = TimeSpan.FromMilliseconds(1200);
 
+    // Krok 4 (screen-space-error LOD): the detail patch follows the look-at point (raycast through the
+    // screen centre, Krok 1) and its zoom adapts to the on-screen error (Krok 2/3) instead of a fixed z16.
+    private const int NearDetailZoom = 16;                                // finest detail zoom (GUGiK native 1 m)
+    private static readonly int[] DetailZoomCandidates = { 16, 14, 12 };  // finest → coarsest, fed to ScreenSpaceLod
+    private const double DetailMaxErrorPixels = 2.0;                      // per-tile screen-space error budget
+    private const int BaseDetailZoomFloor = 12;                          // chosen zoom at/below base (z12) ⇒ no detail patch
+
     // Builds the tinted 1 m detail tiles for a patch centred on `focus`, anchored to the fixed scene origin
     // `anchor` (= base centre) so it lands correctly over the static base. Cyan tint is a diagnostic.
-    private async Task<IReadOnlyList<TerrainMesh3D>?> BuildDetailTilesAsync(GeoPoint focus, GeoPoint anchor)
+    private async Task<IReadOnlyList<TerrainMesh3D>?> BuildDetailTilesAsync(GeoPoint focus, GeoPoint anchor, int zoom)
     {
         if (regionDemLoader is null)
         {
             return null;
         }
 
-        // Detail covers the near-field (~4 km around the focus) — fills the visible foreground.
-        DemRaster? detail = await regionDemLoader.LoadRegionAsync(LodTerrainWindow.Around(focus, 2000), 16).ConfigureAwait(true);
+        // Detail covers the near-field (~4 km around the focus) — fills the visible foreground. The zoom is
+        // chosen per reload by the screen-space-error LOD (Krok 4), not fixed.
+        DemRaster? detail = await regionDemLoader.LoadRegionAsync(LodTerrainWindow.Around(focus, 2000), zoom).ConfigureAwait(true);
         if (detail is null)
         {
-            logger.LogWarning("LOD detail: no 1 m raster at {Lat:F4},{Lon:F4}", focus.Latitude, focus.Longitude);
+            logger.LogWarning("LOD detail: no z{Zoom} raster at {Lat:F4},{Lon:F4}", zoom, focus.Latitude, focus.Longitude);
             return null;
         }
 
         (double dMin, double dMax) = detail.GetElevationRange();
         logger.LogInformation(
-            "LOD detail @ {Lat:F4},{Lon:F4}: {Cols}x{Rows}, elev {Min:F0}-{Max:F0} m",
-            focus.Latitude, focus.Longitude, detail.Columns, detail.Rows, dMin, dMax);
+            "LOD detail @ {Lat:F4},{Lon:F4} z{Zoom}: {Cols}x{Rows}, elev {Min:F0}-{Max:F0} m",
+            focus.Latitude, focus.Longitude, zoom, detail.Columns, detail.Rows, dMin, dMax);
 
         // NoData fallback (rule #12): past the Polish border GUGiK returns empty/zero tiles — don't overlay
         // a flat-zero plateau, keep the coarse base showing there instead.
@@ -1971,15 +1979,33 @@ public sealed partial class MapPageViewModel : ObservableObject
     }
 
     /// <summary>
-    /// LOD Etap 3: the camera moved over the static base — re-centre the 1 m detail ring on the new focus
-    /// (from cache, fast) and swap ONLY the detail layer. The base (and camera framing) stays put, so this
-    /// never moves the camera. Debounced + cooldown so a fast pan doesn't thrash rebuilds.
+    /// LOD Krok 4: the camera moved over the static base — re-centre the 1 m detail patch on the LOOK-AT
+    /// point (raycast through the screen centre onto the terrain, Krok 1) instead of the camera target, and
+    /// pick its zoom from the on-screen error (Krok 2/3) so detail follows the gaze and adapts to distance.
+    /// Swaps ONLY the detail layer; the base (and camera framing) stays put. Debounced + cooldown so a fast
+    /// pan doesn't thrash rebuilds.
     /// </summary>
-    public async Task OnDetailFocusAsync(GeoPoint focus)
+    public async Task OnDetailFocusAsync(MapaTur.Application.Terrain.Camera3D camera)
     {
+        ArgumentNullException.ThrowIfNull(camera);
         if (!IsLodStreaming || lodDetailLoading || lodBaseTiles is null || regionDemLoader is null)
         {
             return;
+        }
+
+        // Look-at point: where the screen centre ray meets the terrain (Krok 1), raycast against the coarse
+        // base raster. Falls back to the camera target's ground point when the ray misses (e.g. sky).
+        GeoPoint targetGeo = LocalTangentProjection.WorldToGeo(camera.Target, lodAnchor);
+        GeoPoint focus = targetGeo;
+        System.Numerics.Vector3? lookAtWorld = null;
+        if (TerrainRaster is { } baseRaster)
+        {
+            float ve = (float)Math.Clamp(VerticalExaggeration, 1.0, 5.0);
+            lookAtWorld = LookAtPoint.Resolve(camera, 1f, 1f, baseRaster, lodAnchor, ve); // centre ray is aspect-independent
+            if (lookAtWorld is { } hit)
+            {
+                focus = LocalTangentProjection.WorldToGeo(hit, lodAnchor);
+            }
         }
 
         if (!LodTerrainWindow.ShouldReload(lodDetailCentre, focus, LodDetailReloadThresholdMeters))
@@ -1992,11 +2018,31 @@ public sealed partial class MapPageViewModel : ObservableObject
             return;
         }
 
+        // Adaptive detail zoom (Krok 2/3): screen-space error from the camera→look-at distance picks the zoom.
+        double cameraToLookAt = lookAtWorld is { } hitWorld
+            ? System.Numerics.Vector3.Distance(camera.Position, hitWorld)
+            : camera.Distance;
+        double viewportHeight = 1000.0;
+        if (TryGetMapFocus(out _, out _, out double vh) && vh > 0)
+        {
+            viewportHeight = vh;
+        }
+
+        int detailZoom = ScreenSpaceLod.ZoomForCameraDistance(
+            DetailZoomCandidates, cameraToLookAt, focus.Latitude, camera.FieldOfViewYRadians, viewportHeight, DetailMaxErrorPixels);
+
+        logger.LogInformation(
+            "LOD focus: target {TLat:F4},{TLon:F4} → look-at {FLat:F4},{FLon:F4} (hit={Hit}); cam→look-at {Dist:F0} m → detail z{Zoom}",
+            targetGeo.Latitude, targetGeo.Longitude, focus.Latitude, focus.Longitude, lookAtWorld is not null, cameraToLookAt, detailZoom);
+
         lodDetailLoading = true;
         lastLodDetailReloadUtc = DateTime.UtcNow;
         try
         {
-            IReadOnlyList<TerrainMesh3D>? detailTiles = await BuildDetailTilesAsync(focus, lodAnchor).ConfigureAwait(true);
+            // At/below the base zoom the patch would add nothing — keep the base alone and save the rebuild.
+            IReadOnlyList<TerrainMesh3D>? detailTiles = detailZoom > BaseDetailZoomFloor
+                ? await BuildDetailTilesAsync(focus, lodAnchor, detailZoom).ConfigureAwait(true)
+                : null;
             if (detailTiles is null)
             {
                 // Off coverage (rule #12): show the base ALONE — drop the stale detail patch rather than

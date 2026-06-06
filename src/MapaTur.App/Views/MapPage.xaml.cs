@@ -274,12 +274,12 @@ public partial class MapPage : ContentPage
         Dispatcher.Dispatch(() => TerrainView.FrameMesh());
     }
 
-    // LOD Etap 3: the 3D view reports the camera's ground focus as it roams the static base; forward it so
-    // the VM streams the 1 m detail ring to follow (it gates the reload on drift + cooldown). The base and
-    // camera framing don't change, so this never yanks the camera.
-    private async void OnCameraFocusMoved(object? sender, GeoPoint focus)
+    // LOD Krok 4: the 3D view reports a snapshot of the camera pose as it roams the static base; forward it
+    // so the VM raycasts the look-at point and streams the 1 m detail patch to the gaze (it gates the reload
+    // on drift + cooldown). The base and camera framing don't change, so this never yanks the camera.
+    private async void OnCameraFocusMoved(object? sender, Camera3D camera)
     {
-        await viewModel.OnDetailFocusAsync(focus);
+        await viewModel.OnDetailFocusAsync(camera);
     }
 
     // "Download whole Tatras offline": a big one-time pull meant for WiFi (no signal in the field). The
