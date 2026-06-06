@@ -146,6 +146,42 @@ public sealed class OnlineRegionDemLoaderTests
         source.MaxObserved.Should().BeGreaterThan(1, "fetches should overlap, not run one-at-a-time");
     }
 
+    // Synchronous IProgress so the loader's reports land before LoadRegionAsync returns (the default
+    // Progress<T> posts to a SynchronizationContext, which a unit test doesn't have — making it racy).
+    private sealed class SyncProgress : IProgress<RegionLoadProgress>
+    {
+        private readonly object sync = new();
+        private readonly List<RegionLoadProgress> reports = new();
+
+        public IReadOnlyList<RegionLoadProgress> Reports
+        {
+            get { lock (this.sync) { return this.reports.ToList(); } }
+        }
+
+        public void Report(RegionLoadProgress value)
+        {
+            lock (this.sync)
+            {
+                this.reports.Add(value);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task LoadRegionAsync_ReportsProgress_ForEveryPlannedTile()
+    {
+        var planned = DemTilePlanner.TilesForBounds(Region, Zoom);
+        var loader = new OnlineRegionDemLoader(new FakeSource(k => TileRaster(k)));
+        var progress = new SyncProgress();
+
+        await loader.LoadRegionAsync(Region, Zoom, progress);
+
+        IReadOnlyList<RegionLoadProgress> reports = progress.Reports;
+        reports.Should().HaveCount(planned.Count, "one report fires per tile fetched");
+        reports.Should().OnlyContain(p => p.Total == planned.Count, "every report carries the planned total");
+        reports.Max(p => p.Completed).Should().Be(planned.Count, "the final report signals all tiles done");
+    }
+
     [Fact]
     public void Constructor_RejectsNonPositiveConcurrency()
     {
@@ -162,7 +198,7 @@ public sealed class OnlineRegionDemLoaderTests
         using var cts = new CancellationTokenSource();
         cts.Cancel();
 
-        var act = async () => await loader.LoadRegionAsync(Region, Zoom, cts.Token);
+        var act = async () => await loader.LoadRegionAsync(Region, Zoom, cancellationToken: cts.Token);
 
         await act.Should().ThrowAsync<OperationCanceledException>();
         source.Requested.Should().BeEmpty();

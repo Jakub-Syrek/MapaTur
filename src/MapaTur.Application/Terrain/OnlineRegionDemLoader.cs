@@ -3,6 +3,11 @@ using MapaTur.Domain.Terrain;
 
 namespace MapaTur.Application.Terrain;
 
+/// <summary>Progress of a region load: <see cref="Completed"/> of <see cref="Total"/> tiles fetched.</summary>
+/// <param name="Completed">Tiles whose fetch has finished (whether they returned data or not).</param>
+/// <param name="Total">Total tiles planned for the region.</param>
+public readonly record struct RegionLoadProgress(int Completed, int Total);
+
 /// <summary>
 /// Loads a whole region's elevation as one <see cref="DemRaster"/> by planning the slippy tiles that
 /// cover a <see cref="MapBounds"/> at a zoom (<see cref="DemTilePlanner"/>), fetching them through an
@@ -36,16 +41,30 @@ public sealed class OnlineRegionDemLoader
     /// Fetches and stitches the tiles covering <paramref name="bounds"/> at <paramref name="zoom"/>.
     /// Returns <c>null</c> when no tile was available.
     /// </summary>
+    /// <param name="bounds">Geographic extent to cover.</param>
+    /// <param name="zoom">Slippy zoom level to fetch at.</param>
+    /// <param name="progress">Optional reporter; fires once per tile as fetches finish.</param>
+    /// <param name="cancellationToken">Cancels the load.</param>
     /// <exception cref="OperationCanceledException">Cancellation was requested.</exception>
-    public async Task<DemRaster?> LoadRegionAsync(MapBounds bounds, int zoom, CancellationToken cancellationToken = default)
+    public async Task<DemRaster?> LoadRegionAsync(
+        MapBounds bounds,
+        int zoom,
+        IProgress<RegionLoadProgress>? progress = null,
+        CancellationToken cancellationToken = default)
     {
         IReadOnlyList<DemTileKey> keys = DemTilePlanner.TilesForBounds(bounds, zoom);
+        int total = keys.Count;
 
         using var gate = new SemaphoreSlim(this.maxConcurrentFetches);
+        int completed = 0;
         var tasks = new List<Task<PlacedDemTile?>>(keys.Count);
         foreach (DemTileKey key in keys)
         {
-            tasks.Add(FetchAsync(key, gate, cancellationToken));
+            tasks.Add(FetchAsync(
+                key,
+                gate,
+                () => progress?.Report(new RegionLoadProgress(Interlocked.Increment(ref completed), total)),
+                cancellationToken));
         }
 
         PlacedDemTile?[] fetched = await Task.WhenAll(tasks).ConfigureAwait(false);
@@ -69,7 +88,8 @@ public sealed class OnlineRegionDemLoader
         return DemRasterRepair.FillNoData(DemTileMosaic.Stitch(placed));
     }
 
-    private async Task<PlacedDemTile?> FetchAsync(DemTileKey key, SemaphoreSlim gate, CancellationToken cancellationToken)
+    private async Task<PlacedDemTile?> FetchAsync(
+        DemTileKey key, SemaphoreSlim gate, Action onFetched, CancellationToken cancellationToken)
     {
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -80,6 +100,7 @@ public sealed class OnlineRegionDemLoader
         finally
         {
             gate.Release();
+            onFetched();
         }
     }
 }

@@ -44,6 +44,7 @@ public partial class MapPage : ContentPage
         TerrainView.MarkerTapped += OnMarkerTapped;
         TerrainView.RecordingSaved += OnRecordingSaved;
         viewModel.PropertyChanged += OnViewModelPropertyChanged;
+        viewModel.TerrainReframeRequested += OnTerrainReframeRequested;
     }
 
     // Keeps the 3D camera and the 2D map framed on the same place + zoom as the user
@@ -252,6 +253,15 @@ public partial class MapPage : ContentPage
     {
         viewModel.ActiveSection = 0; // close the panel so the framed view is unobstructed
         TerrainView.FrameMesh();
+    }
+
+    // A freshly loaded region (e.g. GUGiK 1 m) has different bounds than the saved camera, so the VM asks
+    // the page to reframe — same action as "Reset kamery". Dispatched so the mesh binding has propagated to
+    // the 3D view (FrameMesh reads its WorldFrame) before we frame it.
+    private void OnTerrainReframeRequested(object? sender, EventArgs e)
+    {
+        viewModel.ActiveSection = 0;
+        Dispatcher.Dispatch(() => TerrainView.FrameMesh());
     }
 
     private void OnFlyThroughClicked(object? sender, EventArgs e)

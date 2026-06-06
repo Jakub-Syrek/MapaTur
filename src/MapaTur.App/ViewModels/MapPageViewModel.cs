@@ -94,6 +94,13 @@ public sealed partial class MapPageViewModel : ObservableObject
 
     partial void OnIs3DFlyingChanged(bool value) => OnPropertyChanged(nameof(Show3DChrome));
 
+    /// <summary>
+    /// Raised after an explicit terrain load (e.g. the GUGiK region) so the host page reframes the 3D
+    /// camera onto the new mesh. A freshly loaded region has different bounds than the saved camera, so
+    /// without this it stays framed on the old terrain (appearing tiny / off-map until a manual reset).
+    /// </summary>
+    public event EventHandler? TerrainReframeRequested;
+
     /// <summary>Current GPS fix or null. Bound by both the 2D map renderer and the 3D view.</summary>
     [ObservableProperty]
     private UserLocation? userLocation;
@@ -1598,6 +1605,9 @@ public sealed partial class MapPageViewModel : ObservableObject
         long verts = (long)source.Columns * source.Rows;
         if (verts <= MaxMeshVerticesForPlatform)
         {
+            logger.LogInformation(
+                "DEM within renderer budget ({Verts} <= {Cap}); no subsample (full detail)",
+                verts, MaxMeshVerticesForPlatform);
             return source;
         }
 
@@ -1649,9 +1659,16 @@ public sealed partial class MapPageViewModel : ObservableObject
         // the DEM resolution — without this the high-res DEM clustered all the peaks onto the top massif
         // and left most of the map bare. MergeWithGazetteer then guarantees every known named summit
         // shows (seated on the terrain), with detected maxima filling the gaps.
+        //
+        // Detect on a COARSE copy: the dominance scan is O(cells × window²) and the window is a fixed
+        // GROUND distance, so on a z16 1 m raster (~4.7 M cells, 550 m ≈ 366-cell window) it balloons to
+        // ~10¹² ops and effectively hangs. A ~20 k-cell copy (≈20 m/px) is ample for summit spotting and
+        // runs instantly; the full raster is still passed to MergeWithGazetteer so named summits seat on
+        // the real terrain elevation.
         var peakOptions = new PeakDetectionOptions { DominanceRadiusMeters = 550.0, MaxPeaks = 48 };
+        DemRaster peakRaster = DemRasterDownsampler.SubsampleToMaxCells(raster, maxCells: 20_000);
         Peaks3DOverlay = await Task.Run(() =>
-            PeakNamer.MergeWithGazetteer(PeakDetector.Detect(raster, peakOptions), TatraSummits.All, raster)).ConfigureAwait(true);
+            PeakNamer.MergeWithGazetteer(PeakDetector.Detect(peakRaster, peakOptions), TatraSummits.All, raster)).ConfigureAwait(true);
         logger.LogInformation("Loaded DEM {Label} ({Cols}x{Rows})", label, raster.Columns, raster.Rows);
         StatusMessage = $"{Localization.AppStrings.StatusDemLoaded}: {label}";
     }
@@ -1686,15 +1703,48 @@ public sealed partial class MapPageViewModel : ObservableObject
             MapBounds bounds = TatraDemRegion.Bounds;
             int zoom = DemTilePlanner.ChooseZoomForBudget(
                 bounds, TatraDemRegion.MaxTiles, TatraDemRegion.MinZoom, TatraDemRegion.MaxZoom);
+            long plannedTiles = DemTilePlanner.TileCount(bounds, zoom);
+            logger.LogInformation("GUGiK region load start: z{Zoom}, {Tiles} tiles planned", zoom, plannedTiles);
 
-            DemRaster? raster = await regionDemLoader.LoadRegionAsync(bounds, zoom).ConfigureAwait(true);
+            var progress = new Progress<RegionLoadProgress>(p =>
+            {
+                int percent = p.Total > 0 ? (int)(100L * p.Completed / p.Total) : 0;
+                StatusMessage = $"Pobieranie terenu 1 m… {percent}% ({p.Completed}/{p.Total} kafli)";
+                logger.LogInformation("GUGiK region tiles: {Completed}/{Total} ({Percent}%)", p.Completed, p.Total, percent);
+            });
+
+            DemRaster? raster = await regionDemLoader.LoadRegionAsync(bounds, zoom, progress).ConfigureAwait(true);
             if (raster is null)
             {
+                logger.LogWarning("GUGiK region load returned no raster (no network / coverage)");
                 StatusMessage = "Nie udało się pobrać terenu (brak sieci/pokrycia)";
                 return;
             }
 
+            logger.LogInformation(
+                "GUGiK region stitched: {Cols}x{Rows} = {Samples} samples",
+                raster.Columns, raster.Rows, (long)raster.Columns * raster.Rows);
+
+            // Drop the local terrain's ortho drape: its texture covers a DIFFERENT geographic area, so
+            // stretching it over the GUGiK region mesh smears it across the wrong ground. Clearing all
+            // ortho state makes the 1 m region render in clean hypsometric colour (1×1 grid = no drape).
+            OrthoTexturePath = null;
+            OrthoTexturePaths = null;
+            OrthoTextureCells = null;
+            orthoGridCols = 1;
+            orthoGridRows = 1;
+
             await BuildSceneFromRasterAsync(raster, $"Tatry 1 m (z{zoom})").ConfigureAwait(true);
+
+            // Land in 3D with the camera-movement pads — the 3D view (and its only movement controls)
+            // is hidden in 2D mode. Loading a region must take the user INTO the headline 3D view, not
+            // leave them on the flat map with no way to fly the freshly-loaded terrain.
+            Is3DMode = true;
+
+            // The region's bounds differ from the saved camera's DEM, so reframe onto the new mesh —
+            // otherwise it appears tiny / off-map until the user manually taps "Reset kamery".
+            TerrainReframeRequested?.Invoke(this, EventArgs.Empty);
+            logger.LogInformation("GUGiK region scene built: {Label}", $"Tatry 1 m (z{zoom})");
         }
         catch (Exception ex)
         {
