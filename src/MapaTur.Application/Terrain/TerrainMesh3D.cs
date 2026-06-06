@@ -76,8 +76,10 @@ public sealed class TerrainMesh3D
         MapBounds bounds,
         Vector3 lightDirection,
         float ambientFactor,
-        int orthoTileIndex)
+        int orthoTileIndex,
+        GeoPoint projectionAnchor)
     {
+        ProjectionAnchor = projectionAnchor;
         Vertices = vertices;
         Normals = normals;
         Colors = colors;
@@ -118,7 +120,7 @@ public sealed class TerrainMesh3D
     /// geometry (trails, routes) sits at the same vertical scale as the rendered terrain.
     /// </summary>
     public Vector3 GeoToWorld(GeoPoint geoPoint, float elevationMeters)
-        => LocalTangentProjection.GeoToWorld(geoPoint, elevationMeters, BoundsCenter, VerticalExaggeration);
+        => LocalTangentProjection.GeoToWorld(geoPoint, elevationMeters, ProjectionAnchor, VerticalExaggeration);
 
     /// <summary>
     /// Inverse of <see cref="GeoToWorld"/>: maps a world-space point (X east, Y north, in metres)
@@ -127,12 +129,14 @@ public sealed class TerrainMesh3D
     /// 2D map centre so switching between 3D and 2D keeps the same place framed.
     /// </summary>
     public GeoPoint WorldToGeo(Vector3 worldPoint)
-        => LocalTangentProjection.WorldToGeo(worldPoint, BoundsCenter);
+        => LocalTangentProjection.WorldToGeo(worldPoint, ProjectionAnchor);
 
-    /// <summary>Geographic centre of the source raster's bounds — the origin of this mesh's world frame.</summary>
-    private GeoPoint BoundsCenter => new(
-        (Bounds.NorthEast.Latitude + Bounds.SouthWest.Latitude) / 2.0,
-        (Bounds.NorthEast.Longitude + Bounds.SouthWest.Longitude) / 2.0);
+    /// <summary>
+    /// Geographic origin of this mesh's world frame. The raster's own bounds centre unless a shared anchor
+    /// was passed to <see cref="BuildTiles"/> (LOD) — then it's that anchor, so independently-built windows
+    /// project into one frame and the camera doesn't jump as tiles stream.
+    /// </summary>
+    public GeoPoint ProjectionAnchor { get; }
 
     /// <summary>Largest vertex count addressable by 16-bit (ushort) triangle indices.</summary>
     private const int MaxVerticesPerMesh = ushort.MaxValue + 1;
@@ -180,8 +184,10 @@ public sealed class TerrainMesh3D
                 nameof(raster));
         }
 
-        MeshFrame frame = ComputeFrame(raster);
-        return BuildBlock(raster, options, frame, 0, raster.Columns - 1, 0, raster.Rows - 1);
+        var rasterCentre = new GeoPoint(
+            (raster.North + raster.South) / 2.0, (raster.East + raster.West) / 2.0);
+        MeshFrame frame = ComputeFrame(raster, rasterCentre.Latitude);
+        return BuildBlock(raster, options, frame, 0, raster.Columns - 1, 0, raster.Rows - 1, rasterCentre, Vector3.Zero);
     }
 
     /// <summary>
@@ -198,12 +204,16 @@ public sealed class TerrainMesh3D
     /// <param name="maxTileSide">Maximum vertices per tile side minus one; a tile spans up to (maxTileSide + 1)² vertices. Default 255 → ≤ 256² = 65 536.</param>
     /// <param name="orthoGridCols">Number of ortho texture cells across (west–east). 1 = a single texture over the whole raster.</param>
     /// <param name="orthoGridRows">Number of ortho texture cells down (north–south). 1 = a single texture over the whole raster.</param>
+    /// <param name="projectionAnchor">Optional fixed world-frame origin. Null (default) anchors on the raster's
+    /// own bounds centre (legacy behaviour). A shared anchor across independently-built windows gives them one
+    /// world frame so a streaming reload doesn't shift the origin under a fixed camera (LOD).</param>
     public static IReadOnlyList<TerrainMesh3D> BuildTiles(
         DemRaster raster,
         TerrainMeshOptions? options = null,
         int maxTileSide = 255,
         int orthoGridCols = 1,
-        int orthoGridRows = 1)
+        int orthoGridRows = 1,
+        GeoPoint? projectionAnchor = null)
     {
         ArgumentNullException.ThrowIfNull(raster);
         if (maxTileSide < 1)
@@ -221,7 +231,17 @@ public sealed class TerrainMesh3D
         ArgumentOutOfRangeException.ThrowIfLessThan(orthoGridRows, 1);
 
         options ??= new TerrainMeshOptions();
-        MeshFrame frame = ComputeFrame(raster);
+
+        // World-frame origin: the raster's own bounds centre by default (vertices centred on ~0), or a
+        // caller-supplied anchor shared with other windows. anchorOffset is where this raster's centre sits
+        // in the anchored frame (Zero when anchor == own centre), added to every vertex; the frame's lon
+        // scale uses the anchor latitude so vertices and GeoToWorld agree exactly.
+        var rasterCentre = new GeoPoint(
+            (raster.North + raster.South) / 2.0, (raster.East + raster.West) / 2.0);
+        GeoPoint anchor = projectionAnchor ?? rasterCentre;
+        Vector3 anchorOffset = LocalTangentProjection.GeoToWorld(rasterCentre, 0f, anchor, 1f);
+
+        MeshFrame frame = ComputeFrame(raster, anchor.Latitude);
         int cols = raster.Columns;
         int rows = raster.Rows;
 
@@ -250,7 +270,7 @@ public sealed class TerrainMesh3D
                     for (int c0 = cellC0; c0 < cellC1; c0 += maxTileSide)
                     {
                         int c1 = Math.Min(c0 + maxTileSide, cellC1);
-                        tiles.Add(BuildBlock(raster, options, frame, c0, c1, r0, r1, cell));
+                        tiles.Add(BuildBlock(raster, options, frame, c0, c1, r0, r1, anchor, anchorOffset, cell));
                     }
                 }
             }
@@ -268,12 +288,11 @@ public sealed class TerrainMesh3D
         double CellHeightMeters,
         float HorizontalExtent);
 
-    private static MeshFrame ComputeFrame(DemRaster raster)
+    private static MeshFrame ComputeFrame(DemRaster raster, double projectionLatitude)
     {
         int cols = raster.Columns;
         int rows = raster.Rows;
-        double centerLat = (raster.North + raster.South) / 2.0;
-        double metersPerLonDegree = MetersPerLatDegree * Math.Cos(centerLat * Math.PI / 180.0);
+        double metersPerLonDegree = MetersPerLatDegree * Math.Cos(projectionLatitude * Math.PI / 180.0);
         double halfWidthMeters = (raster.East - raster.West) * 0.5 * metersPerLonDegree;
         double halfHeightMeters = (raster.North - raster.South) * 0.5 * MetersPerLatDegree;
         double cellWidthMeters = (cols > 1) ? ((raster.East - raster.West) / (cols - 1)) * metersPerLonDegree : 1.0;
@@ -295,6 +314,8 @@ public sealed class TerrainMesh3D
         int colEnd,
         int rowStart,
         int rowEnd,
+        GeoPoint projectionAnchor,
+        Vector3 anchorOffset,
         OrthoCell orthoCell = default)
     {
         int cols = raster.Columns;
@@ -327,7 +348,8 @@ public sealed class TerrainMesh3D
             {
                 double xMeters = -frame.HalfWidthMeters + (frame.CellWidthMeters * c);
                 float z = raster[c, r] * exaggeration;
-                vertices[(localRow * tileCols) + (c - colStart)] = new Vector3((float)xMeters, (float)yMeters, z);
+                vertices[(localRow * tileCols) + (c - colStart)] =
+                    new Vector3((float)xMeters + anchorOffset.X, (float)yMeters + anchorOffset.Y, z);
             }
         }
 
@@ -397,13 +419,14 @@ public sealed class TerrainMesh3D
             baseColors,
             texCoords,
             indices,
-            Vector3.Zero,
+            anchorOffset,
             frame.HorizontalExtent,
             exaggeration,
             raster.Bounds,
             options.LightDirection,
             options.AmbientFactor,
-            cell.TileIndex);
+            cell.TileIndex,
+            projectionAnchor);
     }
 
     /// <summary>
