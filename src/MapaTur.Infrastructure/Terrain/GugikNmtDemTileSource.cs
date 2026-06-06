@@ -178,6 +178,13 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
                $"&WIDTH={size}&HEIGHT={size}&FORMAT=image/tiff";
     }
 
+    /// <summary>
+    /// True when <paramref name="key"/>'s TIFF is already on disk, i.e. it can be served without any
+    /// network call. Lets an offline-first layer (download planner / LOD) decide cache vs fetch without
+    /// reaching for the file system itself. Pure presence check — does not validate the file's contents.
+    /// </summary>
+    public bool IsCached(DemTileKey key) => File.Exists(CachePath(key));
+
     private string CachePath(DemTileKey key)
     {
         var inv = CultureInfo.InvariantCulture;

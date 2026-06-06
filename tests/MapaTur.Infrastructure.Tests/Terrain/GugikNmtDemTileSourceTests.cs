@@ -121,6 +121,26 @@ public sealed class GugikNmtDemTileSourceTests : IDisposable
     }
 
     [Fact]
+    public void IsCached_BeforeAnyFetch_IsFalse()
+    {
+        var handler = new StubHandler(_ => throw new InvalidOperationException("IsCached must not hit the network"));
+        var source = NewSource(handler);
+
+        source.IsCached(InsidePoland).Should().BeFalse("nothing has been downloaded yet");
+    }
+
+    [Fact]
+    public async Task IsCached_AfterTheTileIsFetched_IsTrue()
+    {
+        var handler = new StubHandler(_ => Ok(BuildTiff(2, 2, Quad)));
+        var source = NewSource(handler);
+
+        await source.GetTileAsync(InsidePoland);
+
+        source.IsCached(InsidePoland).Should().BeTrue("the fetched TIFF is now on disk and serves offline");
+    }
+
+    [Fact]
     public async Task GetTileAsync_OutsidePoland_ReturnsNullWithoutAnyNetworkCall()
     {
         var handler = new StubHandler(_ => throw new InvalidOperationException("must not hit the network outside Poland"));
