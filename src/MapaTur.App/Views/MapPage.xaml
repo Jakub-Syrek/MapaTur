@@ -38,6 +38,7 @@
                              ForestDensity="{Binding EffectiveForestDensity}"
                              ShowOrtho="{Binding ShowOrtho}"
                              ShowPeakNames="{Binding ShowPeakNames}"
+                             SlopeMapEnabled="{Binding SlopeMapMode}"
                              MsaaEnabled="{Binding AntiAliasingOn}"
                              DebugEnabled="{Binding ShowDebugOverlay}"
                              CameraState="{Binding CameraState, Mode=TwoWay}"
@@ -164,6 +165,13 @@
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                         <Label Grid.Column="0" Text="Nazwy szczytów" Style="{StaticResource GlassLabel}" />
                         <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowPeakNames}" />
+                    </Grid>
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <VerticalStackLayout Grid.Column="0" Spacing="0">
+                            <Label Text="Mapa nachylenia" Style="{StaticResource GlassLabel}" />
+                            <Label Text="kolor wg stromości stoku (lawinowa)" Style="{StaticResource GlassCaption}" FontSize="10" />
+                        </VerticalStackLayout>
+                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding SlopeMapMode}" />
                     </Grid>
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                         <Label Grid.Column="0" Text="Szlaki turystyczne" Style="{StaticResource GlassLabel}" />

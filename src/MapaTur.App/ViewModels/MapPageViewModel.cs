@@ -561,6 +561,9 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <summary>Whether summit glyphs + elevation labels are drawn over the 3D terrain.</summary>
     [ObservableProperty] private bool showPeakNames = true;
 
+    /// <summary>Whether the avalanche slope-steepness ("Mapa nachylenia") shading is active.</summary>
+    [ObservableProperty] private bool slopeMapMode;
+
     [ObservableProperty] private bool showTrails = true;
 
     partial void OnShowTrailsChanged(bool value) => OnTrailFilterChanged();

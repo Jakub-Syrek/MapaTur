@@ -59,6 +59,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform sampler2D uOrtho;\n" +
         "uniform int uUseOrtho;\n" +
         "uniform vec2 uOrthoTexel;\n" + // (1/width, 1/height) of the bound ortho texture
+        "uniform float uSlopeMode;\n" +     // 1 = avalanche slope-steepness map (overrides ortho/hypsometric)
+        "uniform vec3 uSlopePalette[8];\n" + // band colours (0-20…80-90°), from SlopePalette
         "uniform float uSharpen;\n" +   // unsharp-mask strength; 0 = off
         "uniform vec3 uFogColor;\n" +
         "uniform float uFogDensity;\n" + // per-metre exponential; 0 = no aerial perspective
@@ -130,6 +132,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  } else {\n" +
         "    base = vColor.rgb;\n" +
         "  }\n" +
+        // Avalanche slope-steepness map: replace the base colour with the band colour for this fragment's
+        // slope angle (n.z = cos(slope)). Banding mirrors SlopeClassification; the lighting below still
+        // shades it so the relief reads. Snow is skipped in this mode (it would mask the colours).
+        "  if (uSlopeMode > 0.5) {\n" +
+        "    vec3 sn = normalize(vNormal);\n" +
+        "    float slopeDeg = degrees(acos(clamp(sn.z, 0.0, 1.0)));\n" +
+        "    int band = slopeDeg < 20.0 ? 0 : int(min(floor((slopeDeg - 20.0) / 10.0) + 1.0, 7.0));\n" +
+        "    base = uSlopePalette[band];\n" +
+        "  }\n" +
         // Snow on top of the base colour, driven PRIMARILY BY ELEVATION: full above the snowline,
         // fading out over the band just below it. The snowline (uSnowLineZ) sits at the highest peak when
         // the slider is just on and drops to the valley floor at full — so snow always appears on the
@@ -138,7 +149,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // a cool white; the lighting below shades it (sunlit bright, shadowed cool). NO per-pixel fBm —
         // a 5-octave fbmT per fragment tanked the framerate ("zarywa"); the band already softens the edge.
         "  float snowMix = 0.0;\n" +
-        "  if (uSnowStrength > 0.001) {\n" +
+        "  if (uSnowStrength > 0.001 && uSlopeMode < 0.5) {\n" +
         "    float snowH = smoothstep(uSnowLineZ, uSnowLineZ + uSnowBandZ, vWorldPos.z);\n" +
         "    vec3 nrm = normalize(vNormal);\n" +
         // Slope drives snow holding: it lies on gentle ground and slides off steep faces, leaving bare
@@ -437,6 +448,25 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int useOrthoLocation = -1;
     private int orthoTexelLocation = -1;
     private int sharpenLocation = -1;
+    private int slopeModeLocation = -1;
+    private int slopePaletteLocation = -1;
+
+    // The slope-band palette flattened to 8×RGB, built once from the unit-tested SlopePalette and uploaded
+    // as the uSlopePalette uniform array. Single source of truth shared with SlopeClassification.
+    private static readonly float[] SlopePaletteFloats = BuildSlopePaletteFloats();
+
+    private static float[] BuildSlopePaletteFloats()
+    {
+        IReadOnlyList<Vector3> colors = SlopePalette.All;
+        var flat = new float[colors.Count * 3];
+        for (int i = 0; i < colors.Count; i++)
+        {
+            flat[(i * 3) + 0] = colors[i].X;
+            flat[(i * 3) + 1] = colors[i].Y;
+            flat[(i * 3) + 2] = colors[i].Z;
+        }
+        return flat;
+    }
     private int terrainFogColorLocation = -1;
     private int terrainFogDensityLocation = -1;
     private int terrainCameraPosLocation = -1;
@@ -601,6 +631,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     public bool OrthoEnabled { get; set; } = true;
 
     /// <summary>
+    /// When <c>true</c>, the terrain is shaded by the avalanche slope-steepness palette (overriding the
+    /// ortho/hypsometric base and suppressing snow). Driven by the premium menu's "Mapa nachylenia" switch.
+    /// </summary>
+    public bool SlopeMapEnabled { get; set; }
+
+    /// <summary>
     /// Whether MSAA anti-aliasing is used. <c>false</c> (the "Wydajność" quality profile) draws straight
     /// into the present FBO — jaggier edges, but skips the multisample resolve for more headroom.
     /// </summary>
@@ -677,6 +713,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             useOrthoLocation = -1;
             orthoTexelLocation = -1;
             sharpenLocation = -1;
+            slopeModeLocation = -1;
+            slopePaletteLocation = -1;
             terrainFogColorLocation = -1;
             terrainFogDensityLocation = -1;
             terrainCameraPosLocation = -1;
@@ -1013,6 +1051,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform1(terrainSnowBandZLocation, snow.BandZ);
         gl.Uniform1(terrainSnowSlopeCosBareLocation, snow.SlopeCosBare);
         gl.Uniform1(terrainSnowSlopeCosFullLocation, snow.SlopeCosFull);
+
+        // Slope-steepness ("avalanche") map mode: a flag + the band palette (from the unit-tested
+        // SlopePalette). The shader recolours each fragment by its slope angle when the flag is on.
+        gl.Uniform1(slopeModeLocation, SlopeMapEnabled ? 1f : 0f);
+        gl.Uniform3(slopePaletteLocation, (uint)SlopeClassification.BandCount, SlopePaletteFloats);
 
         // Aerial perspective: when the atmosphere is bound, distant fragments blend toward
         // uFogColor with an exponential ramp. uFogDensity = 0 disables the blend (legacy path).
@@ -1552,6 +1595,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         orthoSamplerLocation = g.GetUniformLocation(program, "uOrtho");
         useOrthoLocation = g.GetUniformLocation(program, "uUseOrtho");
         orthoTexelLocation = g.GetUniformLocation(program, "uOrthoTexel");
+        slopeModeLocation = g.GetUniformLocation(program, "uSlopeMode");
+        slopePaletteLocation = g.GetUniformLocation(program, "uSlopePalette");
         sharpenLocation = g.GetUniformLocation(program, "uSharpen");
         terrainFogColorLocation = g.GetUniformLocation(program, "uFogColor");
         terrainFogDensityLocation = g.GetUniformLocation(program, "uFogDensity");

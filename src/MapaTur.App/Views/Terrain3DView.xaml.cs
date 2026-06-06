@@ -175,6 +175,17 @@ public partial class Terrain3DView : ContentView
         set => SetValue(MsaaEnabledProperty, value);
     }
 
+    /// <summary>Whether the avalanche slope-steepness map shading is active (premium menu "Mapa nachylenia").</summary>
+    public static readonly BindableProperty SlopeMapEnabledProperty = BindableProperty.Create(
+        nameof(SlopeMapEnabled), typeof(bool), typeof(Terrain3DView), false,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
+
+    public bool SlopeMapEnabled
+    {
+        get => (bool)GetValue(SlopeMapEnabledProperty);
+        set => SetValue(SlopeMapEnabledProperty, value);
+    }
+
     /// <summary>Whether the per-frame debug stats string is computed (premium menu debug overlay).</summary>
     public static readonly BindableProperty DebugEnabledProperty = BindableProperty.Create(
         nameof(DebugEnabled), typeof(bool), typeof(Terrain3DView), false);
@@ -1869,6 +1880,7 @@ public partial class Terrain3DView : ContentView
             glRenderer ??= new Services.Terrain3DGlRenderer();
             glRenderer.OrthoEnabled = ShowOrtho; // premium menu "Ortofoto" toggle (textures stay resident)
             glRenderer.MsaaEnabled = MsaaEnabled; // premium menu render-quality profile (AA on/off)
+            glRenderer.SlopeMapEnabled = SlopeMapEnabled; // premium menu "Mapa nachylenia" (slope-steepness shading)
 
             // Push a changed ortho image to the GL renderer once (it uploads on the GL thread next Render).
             if (orthoPathDirty)
