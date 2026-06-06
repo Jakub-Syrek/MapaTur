@@ -20,7 +20,7 @@ namespace MapaTur.Infrastructure.Terrain;
 /// in the App layer); this class owns only the HTTP fetch, the on-disk cache, and the Terrarium → metres
 /// conversion via <see cref="TerrariumDecoder"/>.
 /// </summary>
-public sealed class OnlineDemTileSource
+public sealed class OnlineDemTileSource : IDemTileSource
 {
     /// <summary>The AWS public Terrarium DEM tile set (z/x/y order).</summary>
     public const string DefaultUrlTemplate =
