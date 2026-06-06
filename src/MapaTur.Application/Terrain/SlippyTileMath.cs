@@ -50,6 +50,28 @@ public static class SlippyTileMath
         return (west, south, east, north);
     }
 
+    /// <summary>Web-Mercator (EPSG:3857) half-extent in metres (π·R, R = 6378137 m). The projection spans
+    /// <c>[−HalfExtent, +HalfExtent]</c> on both axes.</summary>
+    public const double WebMercatorHalfExtent = 20037508.342789244;
+
+    /// <summary>
+    /// Returns the EPSG:3857 (Web-Mercator metres) bounds of tile (<paramref name="x"/>,
+    /// <paramref name="y"/>) at <paramref name="zoom"/>: minX/minY/maxX/maxY. Y grows southward in tile
+    /// space but northward in metres, so row <paramref name="y"/> maps to the upper (maxY) edge. This is
+    /// the bbox to hand to a WCS/WMS GetCoverage request that accepts EPSG:3857 directly (e.g. GUGiK NMT).
+    /// </summary>
+    public static (double MinX, double MinY, double MaxX, double MaxY) Tile3857Bounds(int x, int y, int zoom)
+    {
+        int n = TilesPerAxis(zoom);
+        double tileSpan = 2.0 * WebMercatorHalfExtent / n;
+
+        double minX = -WebMercatorHalfExtent + (x * tileSpan);
+        double maxX = -WebMercatorHalfExtent + ((x + 1) * tileSpan);
+        double maxY = WebMercatorHalfExtent - (y * tileSpan);
+        double minY = WebMercatorHalfExtent - ((y + 1) * tileSpan);
+        return (minX, minY, maxX, maxY);
+    }
+
     private static double TileLatitude(int y, int n)
     {
         double a = Math.PI * (1.0 - (2.0 * y / n));
