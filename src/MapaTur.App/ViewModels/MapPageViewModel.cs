@@ -1933,6 +1933,12 @@ public sealed partial class MapPageViewModel : ObservableObject
     private const double DetailMaxErrorPixels = 2.0;                      // per-tile screen-space error budget
     private const int BaseDetailZoomFloor = 12;                          // chosen zoom at/below base (z12) ⇒ no detail patch
 
+    // Krok 4b (per-tile concentric): the look-at ring is enumerated at z14 cells, each assigned its own
+    // SSE zoom, then grouped into layers. Radius 1 = 3×3 (~4.8 km, inside the 6 km base).
+    private const int DetailGridZoom = 14;
+    private const int DetailRingRadius = 1;
+    private const int DetailLayerMaxCells = 1_200_000;                   // per-layer vertex cap
+
     // Last look-at world point with a real terrain hit. On a transient raycast miss (sky / off-DEM) the
     // detail holds here instead of teleporting to the camera target — avoids micro-jumps of the patch.
     // Kept in the scene frame of the current lodAnchor, so it is reset whenever a new LOD session loads.
@@ -1988,6 +1994,80 @@ public sealed partial class MapPageViewModel : ObservableObject
     }
 
     /// <summary>
+    /// Krok 4b: builds the per-tile concentric detail as zoom LAYERS. A ring of cells around the look-at is
+    /// assigned a screen-space-error zoom each (<see cref="ScreenSpaceLod.AssignAroundLookAt"/>), then cells
+    /// are grouped by zoom; each group's union bbox is loaded at that zoom and tinted by it. Coarser layers
+    /// are emitted first so the finer one draws on top — concentric: amber (z14) outer, cyan (z16) inner.
+    /// Returns null when every cell sits at/below the base zoom (the base carries it).
+    /// </summary>
+    private async Task<IReadOnlyList<TerrainMesh3D>?> BuildLodDetailLayersAsync(
+        GeoPoint lookAt, float lookAtElevationMeters, System.Numerics.Vector3 cameraPosition, double fovY, double viewportHeight)
+    {
+        if (regionDemLoader is null)
+        {
+            return null;
+        }
+
+        float ve = (float)Math.Clamp(VerticalExaggeration, 1.0, 5.0);
+        IReadOnlyList<LookAtLodTile> assignments = ScreenSpaceLod.AssignAroundLookAt(
+            lookAt, lookAtElevationMeters, cameraPosition, lodAnchor, ve,
+            DetailZoomCandidates, DetailGridZoom, DetailRingRadius, fovY, viewportHeight, DetailMaxErrorPixels);
+
+        var byZoom = assignments
+            .Where(tile => tile.Zoom > BaseDetailZoomFloor)
+            .GroupBy(tile => tile.Zoom)
+            .OrderBy(group => group.Key) // coarser first → finer appended last → drawn on top
+            .ToList();
+        if (byZoom.Count == 0)
+        {
+            return null;
+        }
+
+        var layers = new List<TerrainMesh3D>();
+        foreach (IGrouping<int, LookAtLodTile> group in byZoom)
+        {
+            int zoom = group.Key;
+            MapBounds bbox = UnionTileBounds(group.Select(tile => tile.Cell));
+            DemRaster? raster = await regionDemLoader.LoadRegionAsync(bbox, zoom).ConfigureAwait(true);
+            if (raster is null || !DemRasterCoverage.HasTerrain(raster, minTopMeters: 100))
+            {
+                continue;
+            }
+
+            raster = DemRasterDownsampler.SubsampleToMaxCells(raster, DetailLayerMaxCells);
+            uint tint = zoom >= 16 ? 0xFF00E5FFu : zoom >= 14 ? 0xFFFFC400u : 0xFFFF3B30u;
+            var options = new MapaTur.Application.Terrain.TerrainMeshOptions
+            {
+                VerticalExaggeration = ve,
+                OverlayTintArgb = tint,
+                OverlayTintStrength = 0.45f,
+            };
+            IReadOnlyList<TerrainMesh3D> meshes = await Task.Run(
+                () => TerrainMesh3D.BuildTiles(raster, options, projectionAnchor: lodAnchor)).ConfigureAwait(true);
+            layers.AddRange(meshes);
+            logger.LogInformation("LOD layer z{Zoom}: {Cells} cells, {Cols}x{Rows}", zoom, group.Count(), raster.Columns, raster.Rows);
+        }
+
+        return layers.Count > 0 ? layers : null;
+    }
+
+    // Smallest geographic box covering all the given slippy tiles.
+    private static MapBounds UnionTileBounds(IEnumerable<DemTileKey> cells)
+    {
+        double minLat = double.MaxValue, minLon = double.MaxValue, maxLat = double.MinValue, maxLon = double.MinValue;
+        foreach (DemTileKey cell in cells)
+        {
+            (double west, double south, double east, double north) = SlippyTileMath.TileBounds(cell.X, cell.Y, cell.Zoom);
+            minLat = Math.Min(minLat, south);
+            maxLat = Math.Max(maxLat, north);
+            minLon = Math.Min(minLon, west);
+            maxLon = Math.Max(maxLon, east);
+        }
+
+        return new MapBounds(new GeoPoint(minLat, minLon), new GeoPoint(maxLat, maxLon));
+    }
+
+    /// <summary>
     /// LOD Krok 4: the camera moved over the static base — re-centre the 1 m detail patch on the LOOK-AT
     /// point (raycast through the screen centre onto the terrain, Krok 1) instead of the camera target, and
     /// pick its zoom from the on-screen error (Krok 2/3) so detail follows the gaze and adapts to distance.
@@ -2006,12 +2086,12 @@ public sealed partial class MapPageViewModel : ObservableObject
         // base raster. Fallback chain: a fresh hit → the last valid look-at → the camera target's ground
         // point. Holding the last valid look-at on a transient miss (sky / off-DEM) keeps the detail patch
         // from teleporting to the camera target and back — no micro-jumps when the gaze grazes the horizon.
+        float verticalExaggeration = (float)Math.Clamp(VerticalExaggeration, 1.0, 5.0);
         GeoPoint targetGeo = LocalTangentProjection.WorldToGeo(camera.Target, lodAnchor);
         System.Numerics.Vector3? freshLookAt = null;
         if (TerrainRaster is { } baseRaster)
         {
-            float ve = (float)Math.Clamp(VerticalExaggeration, 1.0, 5.0);
-            freshLookAt = LookAtPoint.Resolve(camera, 1f, 1f, baseRaster, lodAnchor, ve); // centre ray is aspect-independent
+            freshLookAt = LookAtPoint.Resolve(camera, 1f, 1f, baseRaster, lodAnchor, verticalExaggeration); // centre ray is aspect-independent
         }
 
         if (freshLookAt is { } hitNow)
@@ -2054,10 +2134,11 @@ public sealed partial class MapPageViewModel : ObservableObject
         lastLodDetailReloadUtc = DateTime.UtcNow;
         try
         {
-            // At/below the base zoom the patch would add nothing — keep the base alone and save the rebuild.
-            IReadOnlyList<TerrainMesh3D>? detailTiles = detailZoom > BaseDetailZoomFloor
-                ? await BuildDetailTilesAsync(focus, lodAnchor, detailZoom).ConfigureAwait(true)
-                : null;
+            // Per-tile concentric detail (Krok 4b): a ring of cells around the look-at, grouped by their
+            // screen-space-error zoom into layers (cyan z16 inner, amber z14 outer) over the static base.
+            float focusElevation = effectiveLookAt is { } worldHit ? worldHit.Z / verticalExaggeration : 0f;
+            IReadOnlyList<TerrainMesh3D>? detailTiles = await BuildLodDetailLayersAsync(
+                focus, focusElevation, camera.Position, camera.FieldOfViewYRadians, viewportHeight).ConfigureAwait(true);
             if (detailTiles is null)
             {
                 // Off coverage (rule #12): show the base ALONE — drop the stale detail patch rather than
