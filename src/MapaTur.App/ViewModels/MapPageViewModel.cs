@@ -67,6 +67,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     private readonly ExportRouteToGpxUseCase exportRouteToGpxUseCase;
     private readonly ILogger<MapPageViewModel> logger;
     private readonly OnlineRegionDemLoader? regionDemLoader;
+    private readonly OfflineRegionDownloader? offlineDownloader;
 
     private readonly List<GeoPoint> waypoints = new(capacity: 2);
 
@@ -920,6 +921,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <param name="userLocationService">Optional OS GPS feed; null disables the live location dot (e.g. in tests / on a headless host).</param>
     /// <param name="userLocationRenderer">Optional 2D-map renderer for the live GPS dot; null skips 2D rendering of the location.</param>
     /// <param name="regionDemLoader">Optional online-region DEM loader (GUGiK 1 m + Terrarium); null disables the "load Tatra region" button.</param>
+    /// <param name="offlineDownloader">Optional bulk tile prefetcher (GUGiK 1 m); null disables the "download Tatras offline" button.</param>
     public MapPageViewModel(
         IFilePickerService filePicker,
         IFileSaverService fileSaver,
@@ -947,7 +949,8 @@ public sealed partial class MapPageViewModel : ObservableObject
         MBTilesOrthoCompositor? orthoCompositor = null,
         IUserLocationService? userLocationService = null,
         IUserLocationLayerRenderer? userLocationRenderer = null,
-        OnlineRegionDemLoader? regionDemLoader = null)
+        OnlineRegionDemLoader? regionDemLoader = null,
+        OfflineRegionDownloader? offlineDownloader = null)
     {
         ArgumentNullException.ThrowIfNull(filePicker);
         ArgumentNullException.ThrowIfNull(fileSaver);
@@ -983,6 +986,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         this.userLocationRenderer = userLocationRenderer;
         this.settingsStore = settingsStore;
         this.regionDemLoader = regionDemLoader;
+        this.offlineDownloader = offlineDownloader;
 
         // Subscribe to the location feed once at construction. The service stays silent until the
         // user opts in via ToggleLocationTracking; we just need to be listening so the first fix
@@ -1750,6 +1754,61 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             logger.LogError(ex, "Online region DEM load failed");
             StatusMessage = "Błąd pobierania terenu regionu";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// Pre-fetches the whole Tatra range's GUGiK 1 m tiles into the on-disk cache so the app works
+    /// offline in the field (no signal on the ridge). Resumable — a dropped connection just re-runs and
+    /// skips what is already cached. The WiFi-or-warn gate lives in the view (it owns connectivity + the
+    /// dialog); this command is invoked once the user has agreed to the download. No-op when no
+    /// downloader was injected.
+    /// </summary>
+    [RelayCommand]
+    private async Task DownloadTatraOfflineAsync()
+    {
+        if (offlineDownloader is null)
+        {
+            StatusMessage = "Pobieranie offline niedostępne";
+            return;
+        }
+
+        if (IsBusy)
+        {
+            return;
+        }
+
+        try
+        {
+            IsBusy = true;
+            StatusMessage = "Pobieranie Tatr offline…";
+            logger.LogInformation("Offline Tatra download start: z{Zoom}", TatraOfflineRegion.DownloadZoom);
+
+            var progress = new Progress<OfflineDownloadProgress>(p =>
+            {
+                int percent = p.Total > 0 ? (int)(100L * p.Completed / p.Total) : 0;
+                string failed = p.Failed > 0 ? $", {p.Failed} pominięto" : string.Empty;
+                StatusMessage = $"Pobieranie Tatr offline… {percent}% ({p.Completed}/{p.Total}{failed})";
+            });
+
+            OfflineDownloadResult result = await offlineDownloader.DownloadAsync(
+                TatraOfflineRegion.Bounds, TatraOfflineRegion.DownloadZoom, progress).ConfigureAwait(true);
+
+            logger.LogInformation(
+                "Offline Tatra download done: {Downloaded} new, {Cached} cached, {Failed} skipped of {Total}",
+                result.Downloaded, result.AlreadyCached, result.Failed, result.Total);
+            StatusMessage = result.Failed == 0
+                ? $"Tatry offline gotowe: {result.Total} kafli 1 m na dysku"
+                : $"Tatry offline: {result.Total - result.Failed}/{result.Total} kafli (sieć/pokrycie — ponów, by dobrać resztę)";
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Offline Tatra download failed");
+            StatusMessage = "Błąd pobierania Tatr offline";
         }
         finally
         {

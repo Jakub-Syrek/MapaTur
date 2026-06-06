@@ -204,23 +204,37 @@ public static class MauiProgram
         // through to Terrarium worldwide. OnlineRegionDemLoader stitches a region's tiles into one mesh.
         services.AddHttpClient("dem-gugik", c => c.Timeout = TimeSpan.FromSeconds(60));
         services.AddHttpClient("dem-terrarium", c => c.Timeout = TimeSpan.FromSeconds(30));
+
+        // GUGiK source registered on its own so the offline downloader can fetch + probe its cache
+        // directly (bypassing the Terrarium fallback — an offline pull wants 1 m or nothing, not
+        // 30 m filler tiles in the cache).
+        services.AddSingleton<GugikNmtDemTileSource>(sp =>
+        {
+            var httpFactory = sp.GetRequiredService<System.Net.Http.IHttpClientFactory>();
+            string cacheRoot = Path.Combine(FileSystem.AppDataDirectory, "dem-cache");
+            return new GugikNmtDemTileSource(
+                httpFactory.CreateClient("dem-gugik"),
+                Path.Combine(cacheRoot, "gugik"),
+                tileSize: 256);
+        });
         services.AddSingleton<IDemTileSource>(sp =>
         {
             var httpFactory = sp.GetRequiredService<System.Net.Http.IHttpClientFactory>();
             var decoder = sp.GetRequiredService<IRasterTileDecoder>();
             string cacheRoot = Path.Combine(FileSystem.AppDataDirectory, "dem-cache");
-            var gugik = new GugikNmtDemTileSource(
-                httpFactory.CreateClient("dem-gugik"),
-                Path.Combine(cacheRoot, "gugik"),
-                tileSize: 256);
             var terrarium = new OnlineDemTileSource(
                 httpFactory.CreateClient("dem-terrarium"),
                 decoder,
                 Path.Combine(cacheRoot, "terrarium"));
-            return new CompositeDemTileSource(gugik, terrarium);
+            return new CompositeDemTileSource(sp.GetRequiredService<GugikNmtDemTileSource>(), terrarium);
         });
         services.AddSingleton<OnlineRegionDemLoader>(sp =>
             new OnlineRegionDemLoader(sp.GetRequiredService<IDemTileSource>()));
+        services.AddSingleton<OfflineRegionDownloader>(sp =>
+        {
+            var gugik = sp.GetRequiredService<GugikNmtDemTileSource>();
+            return new OfflineRegionDownloader(gugik, gugik.IsCached);
+        });
 
         services.AddTransient<MapPageViewModel>();
         services.AddTransient<MapPage>();

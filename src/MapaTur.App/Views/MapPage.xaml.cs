@@ -13,6 +13,7 @@ using Mapsui;
 using Mapsui.Projections;
 
 using Microsoft.Extensions.Logging;
+using Microsoft.Maui.Networking;
 
 namespace MapaTur.App.Views;
 
@@ -262,6 +263,33 @@ public partial class MapPage : ContentPage
     {
         viewModel.ActiveSection = 0;
         Dispatcher.Dispatch(() => TerrainView.FrameMesh());
+    }
+
+    // "Download whole Tatras offline": a big one-time pull meant for WiFi (no signal in the field). The
+    // connectivity check + warning live here in the view (the VM stays platform-agnostic and testable);
+    // off WiFi we warn with the size and let the user proceed on mobile data if they insist.
+    private async void OnDownloadTatraOfflineTapped(object? sender, TappedEventArgs e)
+    {
+        viewModel.ActiveSection = 0; // close the panel so the status line is visible
+
+        long tiles = DemTilePlanner.TileCount(TatraOfflineRegion.Bounds, TatraOfflineRegion.DownloadZoom);
+        int megabytes = (int)(TatraOfflineRegion.EstimatedBytes((int)tiles) / (1024 * 1024));
+
+        bool onWifi = Connectivity.Current.ConnectionProfiles.Contains(ConnectionProfile.WiFi);
+        if (!onWifi)
+        {
+            bool proceed = await DisplayAlertAsync(
+                "Brak WiFi",
+                $"Pobranie całych Tatr to ~{megabytes} MB ({tiles} kafli 1 m). Nie masz WiFi — pobrać teraz na danych mobilnych?",
+                "Pobierz mimo to",
+                "Anuluj");
+            if (!proceed)
+            {
+                return;
+            }
+        }
+
+        await viewModel.DownloadTatraOfflineCommand.ExecuteAsync(null);
     }
 
     private void OnFlyThroughClicked(object? sender, EventArgs e)
