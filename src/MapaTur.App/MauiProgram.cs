@@ -7,6 +7,7 @@ using MapaTur.Application.Maps;
 using MapaTur.Application.Pois;
 using MapaTur.Application.Roads;
 using MapaTur.Application.Routing;
+using MapaTur.Application.Terrain;
 using MapaTur.Application.Tracks;
 using MapaTur.Application.Trails;
 using MapaTur.Infrastructure.Climbing;
@@ -14,6 +15,7 @@ using MapaTur.Infrastructure.Maps.MBTiles;
 using MapaTur.Infrastructure.Pois;
 using MapaTur.Infrastructure.Roads;
 using MapaTur.Infrastructure.Routing;
+using MapaTur.Infrastructure.Terrain;
 using MapaTur.Infrastructure.Tracks;
 using MapaTur.Infrastructure.Trails;
 using MapaTur.Infrastructure.Trails.Overpass;
@@ -196,6 +198,29 @@ public static class MauiProgram
         {
             client.Timeout = TimeSpan.FromSeconds(90);
         });
+
+        // Online elevation: GUGiK NMT 1 m (Poland LiDAR) in front of the global Terrarium fallback,
+        // composed behind one IDemTileSource. GUGiK short-circuits outside Poland so the composite falls
+        // through to Terrarium worldwide. OnlineRegionDemLoader stitches a region's tiles into one mesh.
+        services.AddHttpClient("dem-gugik", c => c.Timeout = TimeSpan.FromSeconds(60));
+        services.AddHttpClient("dem-terrarium", c => c.Timeout = TimeSpan.FromSeconds(30));
+        services.AddSingleton<IDemTileSource>(sp =>
+        {
+            var httpFactory = sp.GetRequiredService<System.Net.Http.IHttpClientFactory>();
+            var decoder = sp.GetRequiredService<IRasterTileDecoder>();
+            string cacheRoot = Path.Combine(FileSystem.AppDataDirectory, "dem-cache");
+            var gugik = new GugikNmtDemTileSource(
+                httpFactory.CreateClient("dem-gugik"),
+                Path.Combine(cacheRoot, "gugik"),
+                tileSize: 512);
+            var terrarium = new OnlineDemTileSource(
+                httpFactory.CreateClient("dem-terrarium"),
+                decoder,
+                Path.Combine(cacheRoot, "terrarium"));
+            return new CompositeDemTileSource(gugik, terrarium);
+        });
+        services.AddSingleton<OnlineRegionDemLoader>(sp =>
+            new OnlineRegionDemLoader(sp.GetRequiredService<IDemTileSource>()));
 
         services.AddTransient<MapPageViewModel>();
         services.AddTransient<MapPage>();

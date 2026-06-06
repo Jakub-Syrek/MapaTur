@@ -244,6 +244,14 @@
                         </Border>
                     </FlexLayout>
 
+                    <Border Padding="12,9" StrokeThickness="1" Stroke="#3536E2FF" Margin="0,2,0,0"
+                            Background="#2236E2FF">
+                        <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
+                        <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding LoadTatraRegionCommand}" /></Border.GestureRecognizers>
+                        <Label Text="⛰️  Wczytaj teren 1 m (Tatry · GUGiK)" Style="{StaticResource GlassLabel}"
+                               FontSize="13" HorizontalOptions="Center" />
+                    </Border>
+
                     <Grid ColumnDefinitions="64,*,52" ColumnSpacing="10" Margin="0,2,0,0">
                         <Label Grid.Column="0" Text="Las" Style="{StaticResource GlassLabel}" />
                         <Slider Grid.Column="1" Style="{StaticResource GlassSlider}" Minimum="0" Maximum="1"

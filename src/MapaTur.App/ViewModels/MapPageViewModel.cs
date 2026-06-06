@@ -66,6 +66,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     private readonly PlanRouteUseCase planRouteUseCase;
     private readonly ExportRouteToGpxUseCase exportRouteToGpxUseCase;
     private readonly ILogger<MapPageViewModel> logger;
+    private readonly OnlineRegionDemLoader? regionDemLoader;
 
     private readonly List<GeoPoint> waypoints = new(capacity: 2);
 
@@ -911,6 +912,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <param name="orthoCompositor">Optional compositor that drapes basemap MBTiles tiles onto the 3D terrain mesh; null disables MBTiles draping.</param>
     /// <param name="userLocationService">Optional OS GPS feed; null disables the live location dot (e.g. in tests / on a headless host).</param>
     /// <param name="userLocationRenderer">Optional 2D-map renderer for the live GPS dot; null skips 2D rendering of the location.</param>
+    /// <param name="regionDemLoader">Optional online-region DEM loader (GUGiK 1 m + Terrarium); null disables the "load Tatra region" button.</param>
     public MapPageViewModel(
         IFilePickerService filePicker,
         IFileSaverService fileSaver,
@@ -937,7 +939,8 @@ public sealed partial class MapPageViewModel : ObservableObject
         ILogger<MapPageViewModel> logger,
         MBTilesOrthoCompositor? orthoCompositor = null,
         IUserLocationService? userLocationService = null,
-        IUserLocationLayerRenderer? userLocationRenderer = null)
+        IUserLocationLayerRenderer? userLocationRenderer = null,
+        OnlineRegionDemLoader? regionDemLoader = null)
     {
         ArgumentNullException.ThrowIfNull(filePicker);
         ArgumentNullException.ThrowIfNull(fileSaver);
@@ -972,6 +975,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         this.userLocationService = userLocationService;
         this.userLocationRenderer = userLocationRenderer;
         this.settingsStore = settingsStore;
+        this.regionDemLoader = regionDemLoader;
 
         // Subscribe to the location feed once at construction. The service stays silent until the
         // user opts in via ToggleLocationTracking; we just need to be listening so the first fix
@@ -1611,7 +1615,17 @@ public sealed partial class MapPageViewModel : ObservableObject
     private async Task LoadDemFromPathAsync(string path)
     {
         var raster = await Task.Run(() => DemRasterReader.Read(path)).ConfigureAwait(true);
+        await BuildSceneFromRasterAsync(raster, Path.GetFileName(path)).ConfigureAwait(true);
+    }
 
+    /// <summary>
+    /// Shared mesh-build path for any <see cref="DemRaster"/> source — a local .dem file or an online
+    /// region mosaic. Subsamples to the platform vertex budget, builds the tiled 3D mesh, detects and
+    /// names peaks, and posts a status line. <c>orthoGridCols/Rows</c> carry whatever the last local
+    /// map discovery set (1×1 = no ortho texturing → hypsometric colouring, fine for an online region).
+    /// </summary>
+    private async Task BuildSceneFromRasterAsync(DemRaster raster, string label)
+    {
         // CPU-Skia 3D path (mobile + non-Windows desktop) can't keep an interactive frame rate on
         // ~9 M-vertex LiDAR meshes — orbit/pinch stutter — so subsample the loaded DEM down to a
         // vertex budget the CPU rasteriser handles cleanly. Step is the smallest stride that
@@ -1638,8 +1652,57 @@ public sealed partial class MapPageViewModel : ObservableObject
         var peakOptions = new PeakDetectionOptions { DominanceRadiusMeters = 550.0, MaxPeaks = 48 };
         Peaks3DOverlay = await Task.Run(() =>
             PeakNamer.MergeWithGazetteer(PeakDetector.Detect(raster, peakOptions), TatraSummits.All, raster)).ConfigureAwait(true);
-        logger.LogInformation("Loaded DEM {Path} ({Cols}x{Rows})", path, raster.Columns, raster.Rows);
-        StatusMessage = $"{Localization.AppStrings.StatusDemLoaded}: {Path.GetFileName(path)}";
+        logger.LogInformation("Loaded DEM {Label} ({Cols}x{Rows})", label, raster.Columns, raster.Rows);
+        StatusMessage = $"{Localization.AppStrings.StatusDemLoaded}: {label}";
+    }
+
+    /// <summary>
+    /// Streams the high-resolution GUGiK NMT 1 m terrain for a Tatra region (Morskie Oko / Rysy) via the
+    /// online DEM source (GUGiK 1 m with Terrarium fallback) and builds the 3D scene — the proof path
+    /// for the 1 m LiDAR source. No-op with a status note when no region source was injected.
+    /// </summary>
+    [RelayCommand]
+    private async Task LoadTatraRegionAsync()
+    {
+        if (regionDemLoader is null)
+        {
+            StatusMessage = "Źródło terenu online niedostępne";
+            return;
+        }
+
+        if (IsBusy)
+        {
+            return;
+        }
+
+        try
+        {
+            IsBusy = true;
+            StatusMessage = "Pobieranie terenu 1 m (Tatry, GUGiK)…";
+
+            // Morskie Oko / Rysy — a dramatic, fully-Polish patch. Kept small so the planner can pick a
+            // high zoom (≈1 m/px) within the tile budget without decimating the mosaic past the vertex cap.
+            var bounds = new MapBounds(new GeoPoint(49.175, 20.055), new GeoPoint(49.205, 20.095));
+            int zoom = DemTilePlanner.ChooseZoomForBudget(bounds, maxTiles: 12, minZoom: 11, maxZoom: 16);
+
+            DemRaster? raster = await regionDemLoader.LoadRegionAsync(bounds, zoom).ConfigureAwait(true);
+            if (raster is null)
+            {
+                StatusMessage = "Nie udało się pobrać terenu (brak sieci/pokrycia)";
+                return;
+            }
+
+            await BuildSceneFromRasterAsync(raster, $"Tatry 1 m (z{zoom})").ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Online region DEM load failed");
+            StatusMessage = "Błąd pobierania terenu regionu";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
     }
 
     /// <summary>Clears any planned route and waypoints.</summary>
