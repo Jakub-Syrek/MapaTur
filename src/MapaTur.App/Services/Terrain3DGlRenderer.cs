@@ -82,6 +82,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform float uSnowBandZ;\n" +
         "uniform float uSnowSlopeCosBare;\n" + // cos(steep angle): at/below this n.z the face is bare rock
         "uniform float uSnowSlopeCosFull;\n" + // cos(gentle angle): at/above this n.z snow fully holds
+        "uniform float uNoonSnowLift;\n" + // extra white-lift for snow at high (noon) sun, 0..~0.30 (NoonLightModel)
         "out vec4 fragColor;\n" +
         "float hashT(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n" +
         "float noiseT(vec2 p){\n" +
@@ -168,7 +169,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  vec3 lit = base * lightSum;\n" +
         // Snow stays bright white even in shadow (very high albedo + sky/multiple scattering): lift the
         // lit colour toward white by the snow amount, so ambient-only (shadowed) snow doesn't read grey.
-        "  lit = mix(lit, vec3(1.0), snowMix * 0.6);\n" +
+        // The base lift (0.6) is boosted toward ~0.9 at high (noon) sun via uNoonSnowLift so the intense
+        // midday light reads as bright white instead of the flat grey it showed before ("o 12 szarawo").
+        "  lit = mix(lit, vec3(1.0), snowMix * (0.6 + uNoonSnowLift));\n" +
         "  float dist = length(vWorldPos - uCameraPos);\n" +
         "  float fogAmount = 1.0 - exp(-dist * uFogDensity);\n" +
         "  fragColor = vec4(mix(lit, uFogColor, fogAmount), 1.0);\n" +
@@ -481,6 +484,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int terrainSnowBandZLocation = -1;
     private int terrainSnowSlopeCosBareLocation = -1;
     private int terrainSnowSlopeCosFullLocation = -1;
+    private int terrainNoonSnowLiftLocation = -1;
 
     // Sky / atmospheric program: drawn as a fullscreen triangle BEFORE the terrain pass, with the
     // depth-write disabled so the depth-tested terrain composes on top. Owns its own program +
@@ -729,6 +733,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             terrainSnowBandZLocation = -1;
             terrainSnowSlopeCosBareLocation = -1;
             terrainSnowSlopeCosFullLocation = -1;
+            terrainNoonSnowLiftLocation = -1;
             // Sky program + fullscreen triangle VAO belonged to the dead context too.
             skyProgram = 0;
             skyInvViewProjLocation = -1;
@@ -1051,6 +1056,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform1(terrainSnowBandZLocation, snow.BandZ);
         gl.Uniform1(terrainSnowSlopeCosBareLocation, snow.SlopeCosBare);
         gl.Uniform1(terrainSnowSlopeCosFullLocation, snow.SlopeCosFull);
+
+        // Midday brightness: at high (noon) sun the light is intense, so lift snow further toward bright
+        // white instead of the flat grey it showed before. Derived from the sun elevation by the pure,
+        // unit-tested NoonLightModel; 0 at low sun so golden-hour snow keeps its warm/cool tint. (float —
+        // SnowWhiteLift returns float, so Uniform1 hits the GLSL float uniform, not the int overload.)
+        float noonSnowLift = atmosphere is null ? 0f : NoonLightModel.SnowWhiteLift(atmosphere.SunDirection.Z);
+        gl.Uniform1(terrainNoonSnowLiftLocation, noonSnowLift);
 
         // Slope-steepness ("avalanche") map mode: a flag + the band palette (from the unit-tested
         // SlopePalette). The shader recolours each fragment by its slope angle when the flag is on.
@@ -1612,6 +1624,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         terrainSnowBandZLocation = g.GetUniformLocation(program, "uSnowBandZ");
         terrainSnowSlopeCosBareLocation = g.GetUniformLocation(program, "uSnowSlopeCosBare");
         terrainSnowSlopeCosFullLocation = g.GetUniformLocation(program, "uSnowSlopeCosFull");
+        terrainNoonSnowLiftLocation = g.GetUniformLocation(program, "uNoonSnowLift");
 
         // Sky program — single triangle covering the screen, fragment-shader-only atmospheric model.
         uint sks = CompileShader(g, ShaderType.VertexShader, SkyVertexShaderSource);
