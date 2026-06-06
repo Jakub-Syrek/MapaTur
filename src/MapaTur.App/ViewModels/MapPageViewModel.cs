@@ -1680,12 +1680,12 @@ public sealed partial class MapPageViewModel : ObservableObject
             IsBusy = true;
             StatusMessage = "Pobieranie terenu 1 m (Tatry, GUGiK)…";
 
-            // Morskie Oko basin — a dramatic patch kept just NORTH of the Polish/Slovak border (~49.179°)
-            // so GUGiK has full 1 m coverage (NoData beyond the border is also filled defensively). Small
-            // enough that the planner picks a high zoom (≈1 m/px) within the tile budget without decimating
-            // the mosaic past the vertex cap.
-            var bounds = new MapBounds(new GeoPoint(49.185, 20.045), new GeoPoint(49.225, 20.100));
-            int zoom = DemTilePlanner.ChooseZoomForBudget(bounds, maxTiles: 12, minZoom: 11, maxZoom: 16);
+            // High Tatra core around Morskie Oko (see TatraDemRegion): the budget is sized so the planner
+            // picks z16 (≈1.5 m/px, near GUGiK's native 1 m) over the largest area whose native-resolution
+            // mosaic still fits under the Android mesh vertex cap — maximum detail without decimation.
+            MapBounds bounds = TatraDemRegion.Bounds;
+            int zoom = DemTilePlanner.ChooseZoomForBudget(
+                bounds, TatraDemRegion.MaxTiles, TatraDemRegion.MinZoom, TatraDemRegion.MaxZoom);
 
             DemRaster? raster = await regionDemLoader.LoadRegionAsync(bounds, zoom).ConfigureAwait(true);
             if (raster is null)

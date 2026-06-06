@@ -212,7 +212,7 @@ public static class MauiProgram
             var gugik = new GugikNmtDemTileSource(
                 httpFactory.CreateClient("dem-gugik"),
                 Path.Combine(cacheRoot, "gugik"),
-                tileSize: 512);
+                tileSize: 256);
             var terrarium = new OnlineDemTileSource(
                 httpFactory.CreateClient("dem-terrarium"),
                 decoder,
