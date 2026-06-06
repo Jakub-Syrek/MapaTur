@@ -1891,6 +1891,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             lodBaseTiles = baseTiles;
             lodAnchor = baseCentre;
             lodDetailCentre = baseCentre;
+            lastValidLookAtWorld = null; // new scene frame — drop any look-at from a previous LOD session
             TerrainTiles = combined;
             OnPropertyChanged(nameof(TerrainFrame));
             Is3DMode = true;
@@ -1931,6 +1932,11 @@ public sealed partial class MapPageViewModel : ObservableObject
     private static readonly int[] DetailZoomCandidates = { 16, 14, 12 };  // finest → coarsest, fed to ScreenSpaceLod
     private const double DetailMaxErrorPixels = 2.0;                      // per-tile screen-space error budget
     private const int BaseDetailZoomFloor = 12;                          // chosen zoom at/below base (z12) ⇒ no detail patch
+
+    // Last look-at world point with a real terrain hit. On a transient raycast miss (sky / off-DEM) the
+    // detail holds here instead of teleporting to the camera target — avoids micro-jumps of the patch.
+    // Kept in the scene frame of the current lodAnchor, so it is reset whenever a new LOD session loads.
+    private System.Numerics.Vector3? lastValidLookAtWorld;
 
     // Builds the tinted 1 m detail tiles for a patch centred on `focus`, anchored to the fixed scene origin
     // `anchor` (= base centre) so it lands correctly over the static base. Cyan tint is a diagnostic.
@@ -1994,19 +2000,25 @@ public sealed partial class MapPageViewModel : ObservableObject
         }
 
         // Look-at point: where the screen centre ray meets the terrain (Krok 1), raycast against the coarse
-        // base raster. Falls back to the camera target's ground point when the ray misses (e.g. sky).
+        // base raster. Fallback chain: a fresh hit → the last valid look-at → the camera target's ground
+        // point. Holding the last valid look-at on a transient miss (sky / off-DEM) keeps the detail patch
+        // from teleporting to the camera target and back — no micro-jumps when the gaze grazes the horizon.
         GeoPoint targetGeo = LocalTangentProjection.WorldToGeo(camera.Target, lodAnchor);
-        GeoPoint focus = targetGeo;
-        System.Numerics.Vector3? lookAtWorld = null;
+        System.Numerics.Vector3? freshLookAt = null;
         if (TerrainRaster is { } baseRaster)
         {
             float ve = (float)Math.Clamp(VerticalExaggeration, 1.0, 5.0);
-            lookAtWorld = LookAtPoint.Resolve(camera, 1f, 1f, baseRaster, lodAnchor, ve); // centre ray is aspect-independent
-            if (lookAtWorld is { } hit)
-            {
-                focus = LocalTangentProjection.WorldToGeo(hit, lodAnchor);
-            }
+            freshLookAt = LookAtPoint.Resolve(camera, 1f, 1f, baseRaster, lodAnchor, ve); // centre ray is aspect-independent
         }
+
+        if (freshLookAt is { } hitNow)
+        {
+            lastValidLookAtWorld = hitNow;
+        }
+
+        System.Numerics.Vector3? effectiveLookAt = freshLookAt ?? lastValidLookAtWorld;
+        GeoPoint focus = effectiveLookAt is { } w ? LocalTangentProjection.WorldToGeo(w, lodAnchor) : targetGeo;
+        string focusSource = freshLookAt is not null ? "look-at" : effectiveLookAt is not null ? "last-valid" : "target";
 
         if (!LodTerrainWindow.ShouldReload(lodDetailCentre, focus, LodDetailReloadThresholdMeters))
         {
@@ -2019,8 +2031,8 @@ public sealed partial class MapPageViewModel : ObservableObject
         }
 
         // Adaptive detail zoom (Krok 2/3): screen-space error from the camera→look-at distance picks the zoom.
-        double cameraToLookAt = lookAtWorld is { } hitWorld
-            ? System.Numerics.Vector3.Distance(camera.Position, hitWorld)
+        double cameraToLookAt = effectiveLookAt is { } w2
+            ? System.Numerics.Vector3.Distance(camera.Position, w2)
             : camera.Distance;
         double viewportHeight = 1000.0;
         if (TryGetMapFocus(out _, out _, out double vh) && vh > 0)
@@ -2032,8 +2044,8 @@ public sealed partial class MapPageViewModel : ObservableObject
             DetailZoomCandidates, cameraToLookAt, focus.Latitude, camera.FieldOfViewYRadians, viewportHeight, DetailMaxErrorPixels);
 
         logger.LogInformation(
-            "LOD focus: target {TLat:F4},{TLon:F4} → look-at {FLat:F4},{FLon:F4} (hit={Hit}); cam→look-at {Dist:F0} m → detail z{Zoom}",
-            targetGeo.Latitude, targetGeo.Longitude, focus.Latitude, focus.Longitude, lookAtWorld is not null, cameraToLookAt, detailZoom);
+            "LOD focus [{Source}]: target {TLat:F4},{TLon:F4} → {FLat:F4},{FLon:F4}; cam→look-at {Dist:F0} m → detail z{Zoom}",
+            focusSource, targetGeo.Latitude, targetGeo.Longitude, focus.Latitude, focus.Longitude, cameraToLookAt, detailZoom);
 
         lodDetailLoading = true;
         lastLodDetailReloadUtc = DateTime.UtcNow;
