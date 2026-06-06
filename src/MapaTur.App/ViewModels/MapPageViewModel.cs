@@ -1854,14 +1854,13 @@ public sealed partial class MapPageViewModel : ObservableObject
                 return;
             }
 
-            // Force the base BLOCKY (~64×64 ≈ 90 m/px) so the 1 m detail patch is unmistakably sharper —
-            // a clear visual proof of the overlay (a real 30 m base would be ~37 m; this exaggerates for
-            // the demo so there's no ambiguity about whether the detail layer is actually doing anything).
-            baseRaster = DemRasterDownsampler.SubsampleToMaxCells(baseRaster, maxCells: 4096);
+            // Real coarse base (no artificial blockiness now that the overlay is proven). The 1 m detail
+            // near the camera blends into it seamlessly; the base carries the distance.
+            baseRaster = SubsampleRasterForRenderer(baseRaster);
             var baseCentre = new GeoPoint(
                 (baseRaster.North + baseRaster.South) / 2.0, (baseRaster.East + baseRaster.West) / 2.0);
             logger.LogInformation(
-                "LOD demo base (blocky): {Cols}x{Rows}, centre {Lat:F4},{Lon:F4}",
+                "LOD base: {Cols}x{Rows}, centre {Lat:F4},{Lon:F4}",
                 baseRaster.Columns, baseRaster.Rows, baseCentre.Latitude, baseCentre.Longitude);
 
             StatusMessage = "LOD demo: kafel 1 m…";
@@ -1923,7 +1922,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     private GeoPoint lodDetailCentre;
     private bool lodDetailLoading;
     private DateTime lastLodDetailReloadUtc = DateTime.MinValue;
-    private const double LodDetailReloadThresholdMeters = 350;            // re-centre the detail ring after ~350 m drift
+    private const double LodDetailReloadThresholdMeters = 700;            // re-centre after ~700 m drift (the 2 km patch has headroom)
     private static readonly TimeSpan LodDetailReloadCooldown = TimeSpan.FromMilliseconds(1200);
 
     // Builds the tinted 1 m detail tiles for a patch centred on `focus`, anchored to the fixed scene origin
@@ -1935,7 +1934,8 @@ public sealed partial class MapPageViewModel : ObservableObject
             return null;
         }
 
-        DemRaster? detail = await regionDemLoader.LoadRegionAsync(LodTerrainWindow.Around(focus, 350), 16).ConfigureAwait(true);
+        // Detail covers the near-field (~4 km around the focus) — fills the visible foreground.
+        DemRaster? detail = await regionDemLoader.LoadRegionAsync(LodTerrainWindow.Around(focus, 2000), 16).ConfigureAwait(true);
         if (detail is null)
         {
             logger.LogWarning("LOD detail: no 1 m raster at {Lat:F4},{Lon:F4}", focus.Latitude, focus.Longitude);
@@ -1955,11 +1955,17 @@ public sealed partial class MapPageViewModel : ObservableObject
             return null;
         }
 
+        // Cap the detail so each reload stays smooth while flying (a 4 km z16 patch is ~7 M verts; ~1.5 M
+        // keeps it clearly finer than the base yet quick to rebuild + upload).
+        detail = DemRasterDownsampler.SubsampleToMaxCells(detail, maxCells: 1_500_000);
+
+        // Cyan tint (diagnostic) so the extent of the 1 m improvement is visible — turn off for the final
+        // seamless look (Etap 5).
         var detailOptions = new MapaTur.Application.Terrain.TerrainMeshOptions
         {
             VerticalExaggeration = (float)Math.Clamp(VerticalExaggeration, 1.0, 5.0),
-            OverlayTintArgb = 0xFF00E5FFu, // cyan — diagnostic so the overlay is visible; real LOD won't tint
-            OverlayTintStrength = 0.55f,
+            OverlayTintArgb = 0xFF00E5FFu,
+            OverlayTintStrength = 0.45f,
         };
         return await Task.Run(() => TerrainMesh3D.BuildTiles(detail, detailOptions, projectionAnchor: anchor)).ConfigureAwait(true);
     }
