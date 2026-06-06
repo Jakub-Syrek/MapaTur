@@ -18,4 +18,14 @@ public sealed class TerrainMeshOptions
 
     /// <summary>Ambient term added to Lambert shading, in [0,1].</summary>
     public float AmbientFactor { get; init; } = 0.35f;
+
+    /// <summary>
+    /// Optional opaque ARGB tint blended into the hypsometric base colour (before shading), in [0,1] strength
+    /// via <see cref="OverlayTintStrength"/>. Null = no tint. Used to make LOD detail tiles visually
+    /// distinct from the base for diagnostics / debugging the overlay.
+    /// </summary>
+    public uint? OverlayTintArgb { get; init; }
+
+    /// <summary>How strongly <see cref="OverlayTintArgb"/> replaces the base colour, in [0,1].</summary>
+    public float OverlayTintStrength { get; init; } = 0.5f;
 }

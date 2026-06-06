@@ -155,8 +155,20 @@
             <!-- 🗺️ MAPA -->
             <Border x:Name="PanelMapa" Style="{StaticResource GlassSurface}" Padding="16,14"
                     IsVisible="{Binding ActiveSection, Converter={StaticResource IntEquals}, ConverterParameter=1}">
+                <!-- Scrollable: the Mapa panel has the most controls (incl. GUGiK / offline / LOD-demo
+                     buttons) and overflows shorter screens, so cap its height and let it scroll. -->
+                <ScrollView MaximumHeightRequest="600">
                 <VerticalStackLayout Spacing="12">
                     <Label Text="🗺️  Mapa" Style="{StaticResource GlassTitle}" />
+
+                    <!-- LOD Etap-2 test button at the TOP so it's always visible without scrolling. -->
+                    <Border Padding="12,9" StrokeThickness="1" Stroke="#35E2A23C"
+                            Background="#22E2A23C">
+                        <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
+                        <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding LoadLodDemoCommand}" /></Border.GestureRecognizers>
+                        <Label Text="🔬  LOD demo (baza 30 m + kafel 1 m)" Style="{StaticResource GlassLabel}"
+                               FontSize="13" HorizontalOptions="Center" />
+                    </Border>
 
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                         <Label Grid.Column="0" Text="Ortofotomapa" Style="{StaticResource GlassLabel}" />
@@ -267,6 +279,7 @@
                         <Label Grid.Column="2" Text="{Binding ForestDensity, StringFormat='{0:P0}'}" Style="{StaticResource GlassValue}" />
                     </Grid>
                 </VerticalStackLayout>
+                </ScrollView>
             </Border>
 
             <!-- 🌦️ POGODA -->

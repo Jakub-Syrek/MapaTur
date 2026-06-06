@@ -1816,6 +1816,120 @@ public sealed partial class MapPageViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// LOD Etap 2 proof: a STATIC coarse base (z12 ≈ 37 m) under a single 1 m detail patch (z16) overlaid
+    /// in the SAME scene-local frame (one fixed origin = base centre). The base stays static so the camera
+    /// frames+roams it like region mode (works); the 1 m patch just sits on top showing local detail. No
+    /// camera streaming — this validates the persistent-base + overlay architecture before adding tile
+    /// streaming. Both layers from the offline cache where available. No-op without a region loader.
+    /// </summary>
+    [RelayCommand]
+    private async Task LoadLodDemoAsync()
+    {
+        if (regionDemLoader is null)
+        {
+            StatusMessage = "LOD demo niedostępne";
+            return;
+        }
+
+        if (IsBusy)
+        {
+            return;
+        }
+
+        try
+        {
+            IsBusy = true;
+            StatusMessage = "LOD demo: baza 30 m…";
+
+            var center = new GeoPoint(
+                (TatraDemRegion.Bounds.NorthEast.Latitude + TatraDemRegion.Bounds.SouthWest.Latitude) / 2.0,
+                (TatraDemRegion.Bounds.NorthEast.Longitude + TatraDemRegion.Bounds.SouthWest.Longitude) / 2.0);
+
+            // Base: coarse, wide, STATIC. z12 ≈ 37 m/px over ~6 km.
+            DemRaster? baseRaster = await regionDemLoader.LoadRegionAsync(LodTerrainWindow.Around(center, 3000), 12).ConfigureAwait(true);
+            if (baseRaster is null)
+            {
+                StatusMessage = "LOD demo: brak bazy (sieć?)";
+                return;
+            }
+
+            // Force the base BLOCKY (~64×64 ≈ 90 m/px) so the 1 m detail patch is unmistakably sharper —
+            // a clear visual proof of the overlay (a real 30 m base would be ~37 m; this exaggerates for
+            // the demo so there's no ambiguity about whether the detail layer is actually doing anything).
+            baseRaster = DemRasterDownsampler.SubsampleToMaxCells(baseRaster, maxCells: 4096);
+            var baseCentre = new GeoPoint(
+                (baseRaster.North + baseRaster.South) / 2.0, (baseRaster.East + baseRaster.West) / 2.0);
+            logger.LogInformation(
+                "LOD demo base (blocky): {Cols}x{Rows}, centre {Lat:F4},{Lon:F4}",
+                baseRaster.Columns, baseRaster.Rows, baseCentre.Latitude, baseCentre.Longitude);
+
+            // Detail: 1 m (z16) ~700 m patch over the centre, anchored to the SAME origin as the base.
+            StatusMessage = "LOD demo: kafel 1 m…";
+            DemRaster? detailRaster = await regionDemLoader.LoadRegionAsync(LodTerrainWindow.Around(baseCentre, 350), 16).ConfigureAwait(true);
+
+            var options = new MapaTur.Application.Terrain.TerrainMeshOptions
+            {
+                VerticalExaggeration = (float)Math.Clamp(VerticalExaggeration, 1.0, 5.0),
+            };
+
+            // Clean hypsometric (no ortho drape) so the 1 m patch's detail is obvious against the coarse base.
+            OrthoTexturePath = null;
+            OrthoTexturePaths = null;
+            OrthoTextureCells = null;
+            orthoGridCols = 1;
+            orthoGridRows = 1;
+
+            var baseTiles = await Task.Run(() => TerrainMesh3D.BuildTiles(baseRaster, options)).ConfigureAwait(true);
+            var combined = new List<TerrainMesh3D>(baseTiles);
+
+            if (detailRaster is not null)
+            {
+                (double dMin, double dMax) = detailRaster.GetElevationRange();
+                logger.LogInformation(
+                    "LOD demo detail: {Cols}x{Rows} z16, elev {Min:F0}-{Max:F0} m",
+                    detailRaster.Columns, detailRaster.Rows, dMin, dMax);
+                GeoPoint anchor = baseCentre;
+                // Tint the 1 m detail tiles cyan so it's UNMISTAKABLE where the overlay sits over the base
+                // (diagnostic — the real LOD won't tint). 0xFF00E5FF = cyan, blended 55%.
+                var detailOptions = new MapaTur.Application.Terrain.TerrainMeshOptions
+                {
+                    VerticalExaggeration = options.VerticalExaggeration,
+                    OverlayTintArgb = 0xFF00E5FFu,
+                    OverlayTintStrength = 0.55f,
+                };
+                var detailTiles = await Task.Run(() =>
+                    TerrainMesh3D.BuildTiles(detailRaster, detailOptions, projectionAnchor: anchor)).ConfigureAwait(true);
+                combined.AddRange(detailTiles);
+            }
+            else
+            {
+                logger.LogWarning("LOD demo: detail tile null (no 1 m here)");
+            }
+
+            TerrainRaster = baseRaster;
+            Peaks3DOverlay = null; // skip peak detection for the demo
+            TerrainTiles = combined;
+            OnPropertyChanged(nameof(TerrainFrame));
+            Is3DMode = true;
+            TerrainReframeRequested?.Invoke(this, EventArgs.Empty);
+
+            logger.LogInformation("LOD demo built: {BaseTiles} base + {Total} total tiles", baseTiles.Count, combined.Count);
+            StatusMessage = detailRaster is not null
+                ? $"LOD demo: baza 30 m + kafel 1 m ({combined.Count} tiles)"
+                : "LOD demo: tylko baza 30 m (brak kafla 1 m)";
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "LOD demo failed");
+            StatusMessage = "Błąd LOD demo";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
     /// <summary>Clears any planned route and waypoints.</summary>
     [RelayCommand]
     public void ClearRoute()

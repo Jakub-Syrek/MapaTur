@@ -383,6 +383,10 @@ public sealed class TerrainMesh3D
                 texCoords[(li * 2) + 1] = (r - cell.RowStart) / vDenom;
 
                 uint baseColor = HypsometricColor(raster[c, r]);
+                if (options.OverlayTintArgb is { } tint)
+                {
+                    baseColor = BlendColor(baseColor, tint, options.OverlayTintStrength);
+                }
                 baseColors[li] = baseColor;
                 float lambert = Math.Max(0f, Vector3.Dot(normal, options.LightDirection));
                 float shade = options.AmbientFactor + ((1f - options.AmbientFactor) * lambert);
@@ -489,5 +493,18 @@ public sealed class TerrainMesh3D
         g = (byte)(g * shade);
         b = (byte)(b * shade);
         return (uint)((a << 24) | (r << 16) | (g << 8) | b);
+    }
+
+    // Linear per-channel blend of two opaque ARGB colours: result = a·(1−t) + b·t. Used to tint LOD detail
+    // tiles so they read distinctly from the base.
+    private static uint BlendColor(uint a, uint b, float t)
+    {
+        t = Math.Clamp(t, 0f, 1f);
+        byte ar = (byte)((a >> 16) & 0xFF), ag = (byte)((a >> 8) & 0xFF), ab = (byte)(a & 0xFF);
+        byte br = (byte)((b >> 16) & 0xFF), bg = (byte)((b >> 8) & 0xFF), bb = (byte)(b & 0xFF);
+        byte r = (byte)(ar + ((br - ar) * t));
+        byte g = (byte)(ag + ((bg - ag) * t));
+        byte bl = (byte)(ab + ((bb - ab) * t));
+        return 0xFF000000u | ((uint)r << 16) | ((uint)g << 8) | bl;
     }
 }
