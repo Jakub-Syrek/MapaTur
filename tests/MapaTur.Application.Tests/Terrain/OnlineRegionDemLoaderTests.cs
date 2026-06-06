@@ -8,8 +8,8 @@ namespace MapaTur.Application.Tests.Terrain;
 
 /// <summary>
 /// Behaviour pinning for <see cref="OnlineRegionDemLoader"/>: it plans the tiles for a region, pulls
-/// each through an <see cref="IDemTileSource"/>, and stitches them into one raster — skipping tiles the
-/// source can't supply and returning null only when none are available.
+/// each through an <see cref="IDemTileSource"/> with bounded concurrency, and stitches them into one
+/// raster — skipping tiles the source can't supply and returning null only when none are available.
 /// </summary>
 public sealed class OnlineRegionDemLoaderTests
 {
@@ -28,16 +28,60 @@ public sealed class OnlineRegionDemLoaderTests
     private sealed class FakeSource : IDemTileSource
     {
         private readonly Func<DemTileKey, DemRaster?> factory;
+        private readonly object sync = new();
+        private readonly List<DemTileKey> requested = new();
 
         public FakeSource(Func<DemTileKey, DemRaster?> factory) => this.factory = factory;
 
-        public List<DemTileKey> Requested { get; } = new();
+        // Snapshot — fetches run concurrently, so the backing list is guarded.
+        public IReadOnlyList<DemTileKey> Requested
+        {
+            get { lock (this.sync) { return this.requested.ToList(); } }
+        }
 
         public Task<DemRaster?> GetTileAsync(DemTileKey key, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            Requested.Add(key);
+            lock (this.sync)
+            {
+                this.requested.Add(key);
+            }
+
             return Task.FromResult(this.factory(key));
+        }
+    }
+
+    // Tracks how many fetches are in flight at once so the concurrency cap can be asserted.
+    private sealed class ConcurrencyTrackingSource : IDemTileSource
+    {
+        private readonly object sync = new();
+        private int current;
+
+        public int MaxObserved { get; private set; }
+
+        public async Task<DemRaster?> GetTileAsync(DemTileKey key, CancellationToken cancellationToken = default)
+        {
+            lock (this.sync)
+            {
+                this.current++;
+                if (this.current > this.MaxObserved)
+                {
+                    this.MaxObserved = this.current;
+                }
+            }
+
+            try
+            {
+                await Task.Delay(25, cancellationToken).ConfigureAwait(false);
+                return TileRaster(key);
+            }
+            finally
+            {
+                lock (this.sync)
+                {
+                    this.current--;
+                }
+            }
         }
     }
 
@@ -88,6 +132,26 @@ public sealed class OnlineRegionDemLoaderTests
         DemRaster? mosaic = await loader.LoadRegionAsync(Region, Zoom);
 
         mosaic.Should().NotBeNull("the remaining tiles still form a region");
+    }
+
+    [Fact]
+    public async Task LoadRegionAsync_LimitsConcurrentFetches()
+    {
+        var source = new ConcurrencyTrackingSource();
+        var loader = new OnlineRegionDemLoader(source, maxConcurrentFetches: 2);
+
+        await loader.LoadRegionAsync(Region, 13);
+
+        source.MaxObserved.Should().BeLessThanOrEqualTo(2, "the loader caps in-flight fetches");
+        source.MaxObserved.Should().BeGreaterThan(1, "fetches should overlap, not run one-at-a-time");
+    }
+
+    [Fact]
+    public void Constructor_RejectsNonPositiveConcurrency()
+    {
+        var act = () => new OnlineRegionDemLoader(new FakeSource(_ => null), maxConcurrentFetches: 0);
+
+        act.Should().Throw<ArgumentOutOfRangeException>();
     }
 
     [Fact]
