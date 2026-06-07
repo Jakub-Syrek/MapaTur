@@ -235,9 +235,34 @@ public sealed class Terrain3DController
     /// the footprint (<see cref="ClampCameraOverMap"/>); the target itself is left unclamped so a low-pitch
     /// / far-zoom view can still reach the far side of the map.
     /// </summary>
+    /// <summary>
+    /// Floor on the height-above-terrain used to scale the pan step when the camera is close to the ground,
+    /// so a near free-fly view still pans a usable (but fine) amount instead of stalling.
+    /// </summary>
+    public float PanMinDistance { get; set; } = 50f;
+
+    // Distance that scales the pan step. Normally the orbit Distance (far view → coarse pan), but in free-fly
+    // the orbit Distance stays at the far anchor while the EYE is metres above a ridge — scaling by it then
+    // moves the camera enormously per click. When a terrain floor is known and the eye is close to it, scale
+    // by the (smaller) height above terrain instead, so close views pan finely.
+    private float EffectivePanDistance()
+    {
+        float distance = Camera.Distance;
+        if (!float.IsNaN(CameraFloorZ))
+        {
+            float heightAboveTerrain = Camera.Position.Z - CameraFloorZ;
+            if (heightAboveTerrain > 0f && heightAboveTerrain < distance)
+            {
+                distance = MathF.Max(heightAboveTerrain, PanMinDistance);
+            }
+        }
+
+        return distance;
+    }
+
     public void ApplyPan(float dxPixels, float dyPixels)
     {
-        float scale = PanSensitivity * Camera.Distance;
+        float scale = PanSensitivity * EffectivePanDistance();
         float cosA = MathF.Cos(Camera.AzimuthRadians);
         float sinA = MathF.Sin(Camera.AzimuthRadians);
         Vector3 right = new(-sinA, cosA, 0f);

@@ -278,6 +278,50 @@ public sealed class Terrain3DControllerTests
     }
 
     [Fact]
+    public void ApplyPan_CloseToTerrain_StepScalesWithHeightAboveTerrain_NotOrbitDistance()
+    {
+        // Free-fly: the orbit Distance stays huge (far anchor) even when the eye is metres above a ridge, so
+        // scaling pan by Distance moved the camera enormously per click ("too fast to capture when close").
+        // With a terrain floor near the eye, the pan step must scale by the small height above terrain instead.
+        var ctrl = BuildController(out var camera);
+        camera.Distance = 16000f; // far orbit anchor (free-fly over a near ridge)
+        camera.PitchRadians = MathF.PI / 4f;
+        camera.Target = Vector3.Zero;
+
+        ctrl.CameraFloorZ = float.NaN; // far view: no floor → scales by full orbit distance
+        ctrl.ApplyPan(100f, 0f);
+        float farStep = camera.Target.Length();
+
+        camera.Target = Vector3.Zero;
+        ctrl.CameraFloorZ = camera.Position.Z - 100f; // eye only ~100 m above terrain
+        ctrl.ApplyPan(100f, 0f);
+        float nearStep = camera.Target.Length();
+
+        nearStep.Should().BeLessThan(farStep * 0.2f, "close to terrain the pan step must be far finer");
+        nearStep.Should().BeGreaterThan(0f, "but still move a usable amount");
+    }
+
+    [Fact]
+    public void ApplyPan_FarFromTerrain_StillScalesWithOrbitDistance()
+    {
+        // A floor far below the eye must NOT shrink the step — only genuine proximity should.
+        var ctrl = BuildController(out var camera);
+        camera.Distance = 2000f;
+        camera.Target = Vector3.Zero;
+
+        ctrl.CameraFloorZ = float.NaN;
+        ctrl.ApplyPan(10f, 0f);
+        float noFloor = camera.Target.Length();
+
+        camera.Target = Vector3.Zero;
+        ctrl.CameraFloorZ = camera.Position.Z - 50_000f; // terrain way below → not "close"
+        ctrl.ApplyPan(10f, 0f);
+        float farFloor = camera.Target.Length();
+
+        farFloor.Should().BeApproximately(noFloor, 1e-3f);
+    }
+
+    [Fact]
     public void ApplyPan_AtNinetyDegreeAzimuth_PositiveDxDecreasesTargetX()
     {
         var ctrl = BuildController(out var camera);
