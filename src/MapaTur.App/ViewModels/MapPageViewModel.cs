@@ -243,11 +243,12 @@ public sealed partial class MapPageViewModel : ObservableObject
 
     /// <summary>
     /// Time of day in hours, [0,24). Drives the <see cref="Atmosphere"/> sun / sky / fog model
-    /// the 3D renderer samples each frame. 14.0 = early afternoon (default), 18.0 = sunset,
-    /// 6.0 = sunrise, 0.0 = midnight. Persisted in <see cref="settingsStore"/>.
+    /// the 3D renderer samples each frame. 16.0 = mid-afternoon (default — a lower sun rakes the
+    /// slopes and models the relief far better than a high noon sun), 18.0 = sunset, 6.0 = sunrise,
+    /// 0.0 = midnight. Persisted in <see cref="settingsStore"/>.
     /// </summary>
     [ObservableProperty]
-    private double timeOfDayHours = 14.0;
+    private double timeOfDayHours = 16.0;
 
     /// <summary>
     /// Base cloud coverage, [0,1]: 0 = clear sky, ~0.35 = scattered (default), 1 = heavy/overcast.

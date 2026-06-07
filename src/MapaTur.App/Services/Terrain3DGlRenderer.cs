@@ -74,9 +74,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform float uCloudTime;\n" +
         "uniform float uCloudCoverage;\n" +
         "uniform float uCloudShadow;\n" + // strength 0..1; 0 disables
-        // Snow cover: whiten the surface above uSnowLineZ (world-Z), softened over uSnowBandZ, and only
-        // on flatter slopes; uSnowStrength (0..1) gates + scales it. The line/band/strength are derived on
-        // the CPU from the snow slider + the mesh's Z range, so the snowline lowers as the slider rises.
+                                          // Snow cover: whiten the surface above uSnowLineZ (world-Z), softened over uSnowBandZ, and only
+                                          // on flatter slopes; uSnowStrength (0..1) gates + scales it. The line/band/strength are derived on
+                                          // the CPU from the snow slider + the mesh's Z range, so the snowline lowers as the slider rises.
         "uniform float uSnowStrength;\n" +
         "uniform float uSnowLineZ;\n" +
         "uniform float uSnowBandZ;\n" +
@@ -351,8 +351,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // edge out toward the horizon.
         "  float edge = smoothstep(1.0, 0.65, max(abs(vLocal.x), abs(vLocal.y)));\n" +
         "  a *= edge * 0.55;\n" + // lower peak opacity so the sheet is lighter / less obtrusive
-        // Billow shading from the surface height: crests catch the light (brighter, a touch denser),
-        // troughs fall into shade — turns the flat veil into a rolling 3D sea of clouds.
+                                  // Billow shading from the surface height: crests catch the light (brighter, a touch denser),
+                                  // troughs fall into shade — turns the flat veil into a rolling 3D sea of clouds.
         "  a = clamp(a * (0.88 + (0.34 * max(vCrest, 0.0))), 0.0, 1.0);\n" +
         "  vec3 lit = uCloudColor * (0.80 + (0.28 * clamp(vCrest, -1.0, 1.0)));\n" +
         "  fragColor = vec4(lit, a);\n" +
@@ -1011,9 +1011,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Per-pixel lighting: the Atmosphere instance, when provided, overrides the per-tile baked
         // light direction + ambient so the time-of-day slider drives shading live. Without an
         // atmosphere the renderer falls back to the mesh-bake values (legacy behaviour).
+        // Sky-ambient is dialled to half strength: the full atmosphere ambient washed out local slope
+        // contrast ("ambient won over direct light"), flattening the relief. Halving it lets the direct sun
+        // model the terrain forms again — verified on device via a pinned A/B — without crushing shadows.
+        const float AmbientStrengthScale = 0.5f;
+
         TerrainMesh3D lightFrame = tiles[0];
         Vector3 light = atmosphere?.SunDirection ?? lightFrame.LightDirection;
-        float ambient = atmosphere?.AmbientFactor ?? lightFrame.AmbientFactor;
+        float ambient = (atmosphere?.AmbientFactor ?? lightFrame.AmbientFactor) * AmbientStrengthScale;
         gl.Uniform3(lightDirLocation, light.X, light.Y, light.Z);
         gl.Uniform1(ambientLocation, ambient);
 
@@ -1656,7 +1661,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         // Fullscreen triangle: 3 vertices, each xy in clip space, covering NDC [-1,1]^2 with one extra
         // vertex outside the rect so the rasteriser fills the full screen without re-clipping a quad.
-        Span<float> tri = stackalloc float[6] { -1f, -1f,  3f, -1f,  -1f,  3f };
+        Span<float> tri = stackalloc float[6] { -1f, -1f, 3f, -1f, -1f, 3f };
         skyVao = g.GenVertexArray();
         g.BindVertexArray(skyVao);
         skyVbo = g.GenBuffer();
