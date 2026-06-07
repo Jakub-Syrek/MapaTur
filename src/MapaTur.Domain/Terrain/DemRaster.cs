@@ -214,4 +214,49 @@ public sealed class DemRaster
 
         return new DemRaster(newCols, newRows, Bounds, samples, NoDataValue);
     }
+
+    /// <summary>
+    /// Extracts the sub-grid [<paramref name="colStart"/>..) × [<paramref name="rowStart"/>..) as its own
+    /// raster, with the geographic sub-bounds that match it (so a cropped tile keeps the source's world
+    /// frame). Used to split one big window into per-tile rasters (Model 1 roughness + per-tile mesh).
+    /// </summary>
+    /// <param name="colStart">First column (west) of the window.</param>
+    /// <param name="rowStart">First row (north) of the window.</param>
+    /// <param name="columns">Width of the window (≥ 2).</param>
+    /// <param name="rows">Height of the window (≥ 2).</param>
+    /// <exception cref="ArgumentOutOfRangeException">A degenerate size, or a window outside the raster.</exception>
+    public DemRaster Crop(int colStart, int rowStart, int columns, int rows)
+    {
+        if (columns < 2)
+        {
+            throw new ArgumentOutOfRangeException(nameof(columns), columns, "columns must be at least 2.");
+        }
+
+        if (rows < 2)
+        {
+            throw new ArgumentOutOfRangeException(nameof(rows), rows, "rows must be at least 2.");
+        }
+
+        if (colStart < 0 || rowStart < 0 || colStart + columns > Columns || rowStart + rows > Rows)
+        {
+            throw new ArgumentOutOfRangeException(nameof(colStart), "The crop window must lie within the raster.");
+        }
+
+        var samples = new float[columns * rows];
+        for (int r = 0; r < rows; r++)
+        {
+            for (int c = 0; c < columns; c++)
+            {
+                samples[(r * columns) + c] = Samples[((rowStart + r) * Columns) + (colStart + c)];
+            }
+        }
+
+        double LonAt(int c) => West + ((double)c / (Columns - 1) * (East - West));
+        double LatAt(int r) => North - ((double)r / (Rows - 1) * (North - South));
+        var bounds = new MapBounds(
+            new GeoPoint(LatAt(rowStart + rows - 1), LonAt(colStart)),
+            new GeoPoint(LatAt(rowStart), LonAt(colStart + columns - 1)));
+
+        return new DemRaster(columns, rows, bounds, samples, NoDataValue);
+    }
 }
