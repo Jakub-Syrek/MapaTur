@@ -34,10 +34,12 @@ on a Galaxy S25 Ultra (FPS "bardzo płynnie", sharp ridges, crack-free).
       free-fly (was using the far orbit distance → "too fast to capture when close").
 - [x] **On-device telemetry** — per-rebuild step histogram, finest/avg step,
       boosted/demoted counts, max roughness/factor, vertices + split timings.
+- [x] **`NormalSmoothingRadius`** — render-only normal low-pass (heights untouched)
+      softens 1 m facets while keeping the ridge silhouette sharp; radius 3 on the
+      detail (base unchanged), confirmed on device via a pinned A/B.
 
 ### Not yet (optional polish)
 
-- [ ] Aesthetic faceting at 1 m — softer normals (wider stencil; touches the base too).
 - [ ] Budget / roughness tuning with on-device measurement (telemetry is in place).
 
 ## M12 — Atmosphere & ambience

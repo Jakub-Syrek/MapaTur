@@ -78,6 +78,7 @@ WGS84) — marker przyciągany do wierzchołka DEM, etykieta z publikowanej wyso
 - GLES nie pozwala odczytać bufora głębi → okluzja nakładek robiona w pipeline GL (linie), nie w post-passie Skii.
 - ANGLE/D3D11 clampuje grubość linii do ~1 px (szlaki cienkie; pogrubienie = rozszerzenie do trójkątów).
 - Markery/etykiety szczytów rysowane na wierzchu (bez okluzji), bez de-kolizji przy dużym oddaleniu.
-- Detal 1 m z bliska wygląda „fasetowato" — to **realna poszarpaność grani** w tej skali (normalne są
-  per-wierzchołek, central-difference, więc cieniowanie jest gładkie), nie artefakt. Złagodzenie wymagałoby
-  szerszego stencila normalnych, który dotknąłby też bazy — świadomie odłożone.
+- Fasety na detalu 1 m były artefaktem **zbyt lokalnych normalnych** (central-difference ±1), nie geometrii.
+  Złagodzone przez `NormalSmoothingRadius` (szerszy baseline central-difference = low-pass pola normalnych,
+  **tylko render — wysokości nietknięte**); promień 3 na detalu usuwa fasety stoków, a ostra **sylwetka grani
+  zostaje**. Baza ~30 m bez zmian (i tak gładka).
