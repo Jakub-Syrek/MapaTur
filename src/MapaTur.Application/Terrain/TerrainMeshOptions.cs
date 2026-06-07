@@ -28,4 +28,12 @@ public sealed class TerrainMeshOptions
 
     /// <summary>How strongly <see cref="OverlayTintArgb"/> replaces the base colour, in [0,1].</summary>
     public float OverlayTintStrength { get; init; } = 0.5f;
+
+    /// <summary>
+    /// Optional vertical skirt depth (metres) hung down from each tile's perimeter. 0 (default) = no skirt.
+    /// A skirt fills the crack between adjacent tiles of DIFFERENT resolution (per-tile LOD, Model 1) with
+    /// real terrain-coloured geometry, so seams don't show through to the base/sky. Adds perimeter vertices,
+    /// so keep <c>maxTileSide ≤ ~250</c> to stay under the 16-bit index limit.
+    /// </summary>
+    public float SkirtDepthMeters { get; init; }
 }

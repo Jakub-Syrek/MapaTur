@@ -465,6 +465,56 @@ public sealed class TerrainMesh3D
             }
         }
 
+        // Skirt (Model 1): hang a vertical apron from the tile perimeter so the crack to a different-resolution
+        // neighbour is filled with real terrain-coloured geometry, not a see-through gap. Appends a lowered
+        // copy of the boundary ring + wall triangles. Keep maxTileSide ≤ ~250 so this stays under the 16-bit limit.
+        if (options.SkirtDepthMeters > 0f)
+        {
+            float drop = options.SkirtDepthMeters * exaggeration;
+            var ring = new List<int>(2 * (tileCols + tileRows));
+            for (int lc = 0; lc < tileCols; lc++) { ring.Add(lc); }                                  // top edge, W→E
+            for (int lr = 1; lr < tileRows; lr++) { ring.Add((lr * tileCols) + tileCols - 1); }       // right edge, N→S
+            for (int lc = tileCols - 2; lc >= 0; lc--) { ring.Add(((tileRows - 1) * tileCols) + lc); } // bottom edge, E→W
+            for (int lr = tileRows - 2; lr >= 1; lr--) { ring.Add(lr * tileCols); }                   // left edge, S→N
+
+            int skirtBase = vertexCount;
+            int skirtCount = ring.Count;
+            int newCount = vertexCount + skirtCount;
+            Array.Resize(ref vertices, newCount);
+            Array.Resize(ref normals, newCount);
+            Array.Resize(ref colors, newCount);
+            Array.Resize(ref baseColors, newCount);
+            Array.Resize(ref texCoords, newCount * 2);
+
+            for (int j = 0; j < skirtCount; j++)
+            {
+                int src = ring[j];
+                int dst = skirtBase + j;
+                Vector3 v = vertices[src];
+                vertices[dst] = new Vector3(v.X, v.Y, v.Z - drop);
+                normals[dst] = normals[src];
+                colors[dst] = colors[src];
+                baseColors[dst] = baseColors[src];
+                texCoords[dst * 2] = texCoords[src * 2];
+                texCoords[(dst * 2) + 1] = texCoords[(src * 2) + 1];
+            }
+
+            for (int j = 0; j < skirtCount; j++)
+            {
+                int jn = (j + 1) % skirtCount;
+                ushort topA = (ushort)ring[j];
+                ushort topB = (ushort)ring[jn];
+                ushort botA = (ushort)(skirtBase + j);
+                ushort botB = (ushort)(skirtBase + jn);
+                indexList.Add(topA);
+                indexList.Add(topB);
+                indexList.Add(botB);
+                indexList.Add(topA);
+                indexList.Add(botB);
+                indexList.Add(botA);
+            }
+        }
+
         ushort[] indices = indexList.ToArray();
 
         return new TerrainMesh3D(
