@@ -1864,7 +1864,11 @@ public sealed partial class MapPageViewModel : ObservableObject
             // Real coarse base (no artificial blockiness now that the overlay is proven). The 1 m detail
             // near the camera blends into it seamlessly; the base carries the distance.
             baseRaster = SubsampleRasterForRenderer(baseRaster);
-            baseRaster = DemRasterRepair.HoleBelow(baseRaster, DetailCoverageFloorMeters); // GUGiK out-of-coverage flat-0 → hole, not plate
+            // Base coverage cleanup: GUGiK flat-0 out-of-coverage → NoData, then FILL interior gaps but keep
+            // the edge-connected out-of-coverage as a hole (→ sky). No flat green plate, no white see-through
+            // windows in the base (it's the bottom layer — interior gaps must not become holes).
+            baseRaster = DemRasterRepair.HoleBelow(baseRaster, DetailCoverageFloorMeters);
+            baseRaster = DemRasterRepair.FillInteriorKeepEdgeGaps(baseRaster);
             var baseCentre = new GeoPoint(
                 (baseRaster.North + baseRaster.South) / 2.0, (baseRaster.East + baseRaster.West) / 2.0);
             (double bMin, double bMax) = baseRaster.GetElevationRange();

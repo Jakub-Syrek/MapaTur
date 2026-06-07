@@ -130,4 +130,36 @@ public sealed class DemRasterRepairTests
 
         holed.Samples.Should().Equal(800f, 1500f, 2000f, 2500f);
     }
+
+    [Fact]
+    public void FillInteriorKeepEdgeGaps_HolesEdgeConnectedGap_FillsInteriorGap()
+    {
+        // 5×5 valid=100. Edge-connected NoData at the NW corner (touches the boundary) stays a hole (the
+        // out-of-coverage plate → sky); an isolated INTERIOR NoData cell is filled (no white window).
+        var s = new float[25];
+        Array.Fill(s, 100f);
+        s[(0 * 5) + 0] = ND; // (c0,r0) corner — edge
+        s[(0 * 5) + 1] = ND; // (c1,r0) — edge row
+        s[(1 * 5) + 0] = ND; // (c0,r1) — edge col
+        s[(2 * 5) + 2] = ND; // (c2,r2) — interior, surrounded by valid
+        var raster = Make(5, 5, s);
+
+        var result = DemRasterRepair.FillInteriorKeepEdgeGaps(raster);
+
+        result[0, 0].Should().Be(ND, "edge-connected out-of-coverage stays a hole → sky");
+        result[1, 0].Should().Be(ND, "edge gap stays a hole");
+        result[0, 1].Should().Be(ND, "edge gap stays a hole");
+        result[2, 2].Should().Be(100f, "an isolated interior gap is filled — no white window through the base");
+    }
+
+    [Fact]
+    public void FillInteriorKeepEdgeGaps_NoGaps_LeavesRasterUnchanged()
+    {
+        var samples = new[] { 1f, 2f, 3f, 4f };
+        var raster = Make(2, 2, samples);
+
+        var result = DemRasterRepair.FillInteriorKeepEdgeGaps(raster);
+
+        result.Samples.Should().Equal(1f, 2f, 3f, 4f);
+    }
 }

@@ -68,6 +68,89 @@ public static class DemRasterRepair
         return new DemRaster(raster.Columns, raster.Rows, raster.Bounds, s, noData);
     }
 
+    /// <summary>
+    /// Fills only INTERIOR gaps, keeping gaps connected to the raster edge as holes. The base's bbox spills
+    /// past GUGiK/Terrarium coverage, leaving a large edge-connected no-data region that must stay a hole
+    /// (→ sky, the honest finite-terrain edge) rather than a flat plate — while small interior gaps are
+    /// filled so the base shows no see-through white windows. Used for the LOD base (a bottom layer with no
+    /// further fallback); the detail patch holes ALL its gaps instead, so the base shows through.
+    /// </summary>
+    public static DemRaster FillInteriorKeepEdgeGaps(DemRaster raster)
+    {
+        ArgumentNullException.ThrowIfNull(raster);
+
+        int cols = raster.Columns;
+        int rows = raster.Rows;
+        float noData = raster.NoDataValue;
+        float[] src = raster.Samples;
+
+        bool IsHole(float v) => v.Equals(noData) || float.IsNaN(v);
+
+        // Flood-fill (4-connectivity) from every boundary hole to mark the edge-connected out-of-coverage.
+        var edgeConnected = new bool[cols * rows];
+        var queue = new Queue<int>();
+        void Seed(int c, int r)
+        {
+            int i = (r * cols) + c;
+            if (IsHole(src[i]) && !edgeConnected[i])
+            {
+                edgeConnected[i] = true;
+                queue.Enqueue(i);
+            }
+        }
+
+        for (int c = 0; c < cols; c++)
+        {
+            Seed(c, 0);
+            Seed(c, rows - 1);
+        }
+
+        for (int r = 0; r < rows; r++)
+        {
+            Seed(0, r);
+            Seed(cols - 1, r);
+        }
+
+        while (queue.Count > 0)
+        {
+            int i = queue.Dequeue();
+            int c = i % cols;
+            int r = i / cols;
+            if (c > 0)
+            {
+                Seed(c - 1, r);
+            }
+
+            if (c < cols - 1)
+            {
+                Seed(c + 1, r);
+            }
+
+            if (r > 0)
+            {
+                Seed(c, r - 1);
+            }
+
+            if (r < rows - 1)
+            {
+                Seed(c, r + 1);
+            }
+        }
+
+        // Fill every gap, then re-open only the edge-connected ones — interior gaps stay filled (no window).
+        DemRaster filled = FillNoData(raster);
+        float[] s = (float[])filled.Samples.Clone();
+        for (int i = 0; i < s.Length; i++)
+        {
+            if (edgeConnected[i])
+            {
+                s[i] = noData;
+            }
+        }
+
+        return new DemRaster(cols, rows, raster.Bounds, s, noData);
+    }
+
     // Walks `count` samples from `start` by `stride`, carrying the last valid value forward into holes.
     private static void FillRun(float[] s, int start, int count, int stride, Func<float, bool> isHole)
     {
