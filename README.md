@@ -7,7 +7,7 @@
 [![MAUI](https://img.shields.io/badge/.NET%20MAUI-Android%20%7C%20iOS%20%7C%20Windows%20%7C%20macOS-512BD4?logo=dotnet&logoColor=white)](https://learn.microsoft.com/dotnet/maui/)
 [![3D engine](https://img.shields.io/badge/3D-OpenGL%20ES%203.0%20%C2%B7%20ANGLE%20%2F%20D3D11-CC3333)](docs/3d-terrain.md)
 [![Mapsui](https://img.shields.io/badge/maps-Mapsui%20%2B%20SkiaSharp-2E7D32)](https://mapsui.com/)
-[![Tests](https://img.shields.io/badge/tests-525%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-889%20passing-brightgreen)](#testing)
 [![Architecture](https://img.shields.io/badge/architecture-Clean-success)](#architecture)
 [![Top language](https://img.shields.io/github/languages/top/Jakub-Syrek/MapaTur2)](#)
 [![Code size](https://img.shields.io/github/languages/code-size/Jakub-Syrek/MapaTur2)](#)
@@ -52,6 +52,7 @@ the ridges; named summits and mountain POIs are labelled. No telemetry, no accou
 | Accessibility (semantic labels, AA contrast) | ✅ Verified | Screen-reader hints on toolbar; heading level on status |
 | **Interactive 3D terrain (GPU)** | ✅ Verified | OpenGL ES 3.0 / ANGLE renderer, 24-bit depth buffer; orbit / look-around / pan, mouse + keyboard + on-screen pads — see [`docs/3d-terrain.md`](docs/3d-terrain.md) |
 | High-resolution DEM terrain mesh | ✅ Verified | Copernicus GLO-30 (~30 m), tiled to beat the 16-bit index limit; hypsometric ramp + Lambert hillshade + vertical exaggeration |
+| **Streaming 1 m detail LOD (GUGiK NMT)** | ✅ Verified | Persistent ~30 m base + a **1 m** detail patch that follows the gaze (screen-space-error LOD); **per-tile roughness** keeps ridges/walls sharp while smooth ground coarsens, under a hard vertex budget; crack-free via skirts, planning off the UI thread |
 | Depth-occluded 3D trail & route overlays | ✅ Verified | Screen-space ribbon lines, hidden behind ridges, clipped to the DEM edge |
 | Named summit overlay | ✅ Verified | DEM peak detection + WGS84 gazetteer (incl. Orla Perć), published elevations, label de-collision |
 | Mountain POIs (huts / shelters / chalets / viewpoints) | ✅ Verified | Overpass download; colour-coded markers + labels on 2D map and 3D view (viewpoints as a lookout-tower glyph); per-kind show/hide filter |
@@ -77,6 +78,7 @@ The 3D view is a **custom real-time renderer**, not an off-the-shelf 3D engine:
 - **Texture-bridge composition** — the renderer draws into an off-screen colour-texture FBO that it owns; the texture handle is wrapped via `SKImage.FromTexture` (`GRBackendTexture` + `GRGlTextureInfo`) and composed by Skia with `DrawImage`. Sidesteps Android's FBO-0 collision and unifies the Windows / Android render path (no `#if` branch in the renderer).
 - **24-bit depth buffer** for hardware occlusion — no painter's algorithm, correct from any angle, full DEM resolution.
 - **Tiled mesh** (≤65 536-vertex tiles) built from a Copernicus GLO-30 (~30 m) DEM, with adjustable vertical exaggeration.
+- **Streaming level-of-detail (Model 1)** — over the persistent ~30 m base, a **GUGiK NMT 1 m** detail patch streams to the *look-at* point (raycast through the screen centre, not the camera). The window is split into a grid and each tile's resolution is chosen by **screen-space error × terrain roughness** (local curvature measured at ridge scale): sharp ridges/walls hold full 1 m detail from farther out while smooth valleys step down, all under a **hard vertex budget** for stable FPS, with **skirts** hiding the seams between resolutions. The whole plan + mesh build runs on a background thread so flying never stutters, and rich on-device telemetry (per-tile step histogram + timings) drives the tuning.
 - **Per-pixel lighting** (Lambert shading evaluated per fragment from interpolated normals) and **4× MSAA** for smooth slopes and ridgelines.
 - **Orthophoto drape** (optional): a high-resolution aerial image sampled per-pixel over the terrain, with mipmaps + anisotropic filtering; falls back to a hypsometric ramp + hillshade when no image is bundled.
 - **Trails, roads & route as depth-tested screen-space ribbons** (occluded by ridges, clipped to the DEM); **named summits and mountain POIs** with de-cluttered labels (2D overlay drawn by Skia over the GL terrain).
@@ -97,7 +99,7 @@ src/
 ├── MapaTur.Infrastructure  SQLite, HTTP (Overpass), TCX parser, GPX writer, DEM reader
 ├── MapaTur.Routing         TrailGraph, AStarRouter, Tobler hiking function
 └── MapaTur.App             MAUI: MapPage + view model, OpenGL ES terrain renderer, DI bootstrap
-tests/                      400+ unit + integration tests (xUnit + FluentAssertions + FsCheck)
+tests/                      880+ unit + integration tests (xUnit + FluentAssertions + FsCheck)
 testdata/                   sample-tatry.tcx, overpass-tatry-sample.json, demo MBTiles, DEM generators
 docs/
 ├── adr/                    architecture decision records (MADR format)
@@ -180,15 +182,15 @@ dotnet test
 
 | Suite | Tests | Focus |
 |---|---|---|
-| `MapaTur.Domain.Tests` | 129 | Value objects, aggregates (Route), elevation math, DEM, POI tags + colours |
-| `MapaTur.Application.Tests` | 310 | Overpass queries (trails/POI/roads), 3D terrain math + camera + atmosphere, route planner + use cases |
-| `MapaTur.Infrastructure.Tests` | 64 | TCX/Overpass/POI/road parsers, MBTiles + DEM readers, SQLite (trails/climbing/POI), GPX |
+| `MapaTur.Domain.Tests` | 134 | Value objects, aggregates (Route), elevation math, DEM (+ crop), POI tags + colours |
+| `MapaTur.Application.Tests` | 647 | Overpass queries (trails/POI/roads), 3D terrain math + camera + atmosphere, screen-space LOD + per-tile roughness planner + vertex budget, route planner + use cases |
+| `MapaTur.Infrastructure.Tests` | 86 | TCX/Overpass/POI/road parsers, MBTiles + DEM readers, SQLite (trails/climbing/POI), GPX |
 | `MapaTur.Routing.Tests` | 22 | Tobler function, distance/time cost functions, graph snapping, A\* correctness |
-| **Total** | **525** | xUnit + FluentAssertions + NSubstitute + FsCheck |
+| **Total** | **889** | xUnit + FluentAssertions + NSubstitute + FsCheck |
 
 ## Roadmap
 
-Milestones tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md). Initial milestones (M0–M6), hillshade (M7), climbing POIs (M8) and the **3D terrain GPU engine (M9)** are complete and verified live on real Tatra data. Active line of work: mountain POIs (huts/shelters/viewpoints + chains) in 3D, pre-bundled offline trail dataset, and 3D render polish (per-pixel lighting, ortho-imagery draping).
+Milestones tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md). Initial milestones (M0–M6), hillshade (M7), climbing POIs (M8), the **3D terrain GPU engine (M9)** and the **streaming 1 m detail LOD with per-tile roughness** are complete and verified live on real Tatra data (Samsung S25 Ultra). Active line of work: pre-bundled offline trail dataset, elevation-aware routing, and signed store builds.
 
 ## Contributing
 
