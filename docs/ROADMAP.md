@@ -2,6 +2,44 @@
 
 Status legend: `[ ]` planned · `[~]` in progress · `[x]` done
 
+## M13 — Streaming 1 m DEM LOD (per-tile roughness)
+
+A persistent ~30 m base with a **1 m GUGiK NMT** detail patch that streams to the
+look-at point; each tile's resolution is chosen by screen-space-error × terrain
+roughness under a hard vertex budget. Pure decision logic lives in Application
+behind `UsePerTileDetail` (single stitched patch as the fallback). Device-validated
+on a Galaxy S25 Ultra (FPS "bardzo płynnie", sharp ridges, crack-free).
+
+### Done
+
+- [x] **`LookAtPoint` raycast LOD centre** — detail follows the screen-centre ray
+      onto the terrain, not the camera target; on a sky miss it probes progressively
+      lower in the frame so a horizontal "across the ridge" view still streams detail.
+- [x] **`ScreenSpaceError` / `ScreenSpaceLod`** — geometric error projected to
+      pixels picks the per-tile zoom; a roughness factor boosts sharp tiles.
+- [x] **`DemRasterRoughness`** — local-curvature (jaggedness) metric, P95 aggregate,
+      with `stride` (cheaper scan, metric scale preserved) and `neighborDistance`
+      (curvature at ridge scale — ±1 on a ~1.3 m raster reads ~0, boost stays inert).
+- [x] **`PerTileDetailPlanner`** — splits the look-at window into an 8×8 grid,
+      assigns each tile a subsample step from SSE × roughness, applies the hard
+      vertex budget; `PlanDetailed` returns per-tile diagnostics + timings.
+- [x] **`VertexBudget`** — hard cap (~1.5 M) demotes the lowest-priority tiles
+      first (smooth/far give up detail; sharp/near keep it) for stable FPS.
+- [x] **`DemRaster.Crop` + skirts** — per-tile crops meshed with a vertical skirt
+      that hides the seams between resolutions (no cracks, no no-data plates).
+- [x] **`BuildPerTileDetailAsync`** — wires it into the live render behind
+      `UsePerTileDetail`; all heavy CPU (roughness scan, planning, meshing) runs
+      off the UI thread (`Task.Run`) so flying never stutters.
+- [x] **Proximity-scaled pan** — arrow-pad pan scales by height above terrain in
+      free-fly (was using the far orbit distance → "too fast to capture when close").
+- [x] **On-device telemetry** — per-rebuild step histogram, finest/avg step,
+      boosted/demoted counts, max roughness/factor, vertices + split timings.
+
+### Not yet (optional polish)
+
+- [ ] Aesthetic faceting at 1 m — softer normals (wider stencil; touches the base too).
+- [ ] Budget / roughness tuning with on-device measurement (telemetry is in place).
+
 ## M12 — Atmosphere & ambience
 
 - [x] **Time-of-day `Atmosphere` model** — single `Atmosphere(timeOfDay)` drives

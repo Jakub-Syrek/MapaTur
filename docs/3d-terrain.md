@@ -4,8 +4,9 @@
 Matematyka na `System.Numerics`. Logika 3D (siatka, kamera, projekcje) wydzielona i testowana w warstwie
 Application; renderer GPU i widok w warstwie App.
 
-**Dane:** DEM z **Copernicus GLO-30**, natywne **2160×1080 (~30 m)** nad bbox Tatr, własny format `.dem`
-(`dem/tatry.dem`, gitignored, generowany skryptem). Szlaki/POI z OSM (Overpass).
+**Dane:** baza DEM z **Copernicus GLO-30**, natywne **2160×1080 (~30 m)** nad bbox Tatr, własny format `.dem`
+(`dem/tatry.dem`, gitignored, generowany skryptem). Detal bliski: **GUGiK NMT 1 m** (kafle slippy z16,
+cache na urządzeniu). Szlaki/POI z OSM (Overpass).
 
 **Siatka:** z DEM budowana siatka trójkątów (X-wsch, Y-płn, Z-góra), kolor **hipsometryczny** +
 cieniowanie **Lamberta** (wypiekane per-wierzchołek), regulowane **przewyższenie pionowe**. Gęsty teren
@@ -32,6 +33,31 @@ wydaje surowe polecenia **OpenGL ES 3.0** na kontekście współdzielonym ze Ski
 - **Fallback:** każdy błąd GL/shaderów przełącza widok na renderer Skii (`Terrain3DCanvasRenderer`,
   painter's algorithm) — widok nigdy nie gaśnie. Ta sama ścieżka obsługuje platformy bez ANGLE.
 
+## Streaming LOD 1 m (Model 1 — roughness per-tile)
+Nad **statyczną bazą ~30 m** strumieniowany jest **detal 1 m** (GUGiK NMT, z16, cache-only) — baza zostaje,
+detal dokłada się przy tym, na co patrzysz. Cała logika decyzji jest czysta i testowana w warstwie Application.
+
+- **Look-at, nie kamera.** Centrum detalu to punkt trafienia promienia przez **środek ekranu** w teren
+  (`LookAtPoint` + `TerrainRaycaster`) — w górach patrzysz kilometry przed siebie, więc detal idzie za
+  wzrokiem, nie za pozycją kamery. Gdy środek trafia w niebo (patrzenie poziomo przez grań), look-at
+  próbkuje **niżej w kadrze** i łapie teren pod spojrzeniem (`lowerFrameFallbacks`).
+- **Przydział per-kafel po `screen-space-error × roughness`.** Okno z16 dzielone na siatkę (8×8); każdy
+  kafel dostaje krok podpróbkowania (1/2/4/8) z metryki: błąd geometryczny zrzutowany na piksele **×
+  współczynnik szorstkości**. Szorstkość = lokalna krzywizna mierzona na **skali grani** (~10 m sąsiedztwa,
+  agregat P95 — odporny na szpilki); ostre granie/ściany trzymają 1 m z większej odległości, gładkie doliny
+  schodzą grubiej. (`PerTileDetailPlanner`, `DemRasterRoughness`, `ScreenSpaceError`/`ScreenSpaceLod`.)
+- **Twardy budżet wierzchołków** (~1,5 M) — gdy roughness chce HD wszędzie, demotowane są kafle o najniższym
+  priorytecie (gładkie/dalekie), ostre/bliskie trzymają detal → stabilny FPS niezależnie od sceny.
+  (`VertexBudget`.)
+- **Szwy = skirt.** Między kaflami różnej rozdzielczości pionowy „fartuch" zasłania szczeliny realną
+  geometrią — bez kurtyn i dziur. Kafle wycinane z okna (`DemRaster.Crop` + `Subsample`).
+- **Poza wątkiem UI.** Cały ciężki CPU (skan roughness, planowanie, budowa mesha) liczony w tle
+  (`Task.Run`) — lot się nie zacina; przebudowa detalu rzędu ~1–2 s. Skan roughness próbkuje co N-tą komórkę
+  (`stride`) zachowując skalę metryki.
+- **Telemetria.** Log per-przebudowę: liczba kafli, histogram kroków, finestStep/avgStep, boosted/demoted,
+  maxRough/maxFactor, vertices + rozbicie czasów (roughnessMs/planningMs/meshBuildMs/totalDetailMs) — do
+  strojenia z urządzenia. Za flagą `UsePerTileDetail` (wyłączona = jeden zszyty patch jako fallback).
+
 ## Nakładki
 - **Szlaki i trasa** rysowane w GL jako **linie z testem głębi** (teren je przysłania — nie prześwitują
   przez góry), przycięte do bbox DEM. Szlaki 3D są upraszczane (Douglas–Peucker, raz przy pobraniu) i
@@ -52,3 +78,6 @@ WGS84) — marker przyciągany do wierzchołka DEM, etykieta z publikowanej wyso
 - GLES nie pozwala odczytać bufora głębi → okluzja nakładek robiona w pipeline GL (linie), nie w post-passie Skii.
 - ANGLE/D3D11 clampuje grubość linii do ~1 px (szlaki cienkie; pogrubienie = rozszerzenie do trójkątów).
 - Markery/etykiety szczytów rysowane na wierzchu (bez okluzji), bez de-kolizji przy dużym oddaleniu.
+- Detal 1 m z bliska wygląda „fasetowato" — to **realna poszarpaność grani** w tej skali (normalne są
+  per-wierzchołek, central-difference, więc cieniowanie jest gładkie), nie artefakt. Złagodzenie wymagałoby
+  szerszego stencila normalnych, który dotknąłby też bazy — świadomie odłożone.
