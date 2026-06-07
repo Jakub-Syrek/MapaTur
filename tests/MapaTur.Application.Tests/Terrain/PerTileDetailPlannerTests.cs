@@ -205,6 +205,28 @@ public sealed class PerTileDetailPlannerTests
             "under budget pressure the high-priority (near+rough) tile keeps detail; the low-priority one is demoted first");
     }
 
+    [Fact]
+    public void Plan_CameraBubble_ForcesFineStepWhereSseWouldCoarsen_AndSurvivesTheBudget()
+    {
+        // Flat raster seen from 16 km up: SSE coarsens every tile (step > 1). A camera bubble covering them
+        // forces step 1 — proving near-camera tiles keep detail regardless of the SSE/look-at decision — and
+        // the top-priority boost means even a tight budget keeps the in-bubble tile fine.
+        DemRaster full = Build(64, (_, _) => 100f);
+        var cameraHigh = new Vector3(0f, 0f, 16000f);
+
+        int stepNoBubble = PerTileDetailPlanner.Plan(
+            full, cameraHigh, Anchor, VerticalExaggeration, gridN: 4, Steps, FovY, ViewportHeight,
+            MaxErrorPixels, Preset, HugeBudget).Single(d => d.RowStart == 32 && d.ColStart == 32).SubsampleStep;
+
+        int stepWithBubble = PerTileDetailPlanner.Plan(
+            full, cameraHigh, Anchor, VerticalExaggeration, gridN: 4, Steps, FovY, ViewportHeight,
+            MaxErrorPixels, Preset, maxVertices: 20_000, cameraBubbleRadiusMeters: 20_000.0, cameraBubbleStep: 1)
+            .Single(d => d.RowStart == 32 && d.ColStart == 32).SubsampleStep;
+
+        stepNoBubble.Should().BeGreaterThan(1, "SSE alone coarsens the distant flat tile");
+        stepWithBubble.Should().Be(1, "the camera bubble forces it to full detail and the budget keeps it");
+    }
+
     private static long VerticesAfter(PerTileLodDecision d)
     {
         int cols = ((d.Columns + d.SubsampleStep - 1) / d.SubsampleStep);

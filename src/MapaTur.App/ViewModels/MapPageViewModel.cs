@@ -845,6 +845,11 @@ public sealed partial class MapPageViewModel : ObservableObject
     private int orthoGridCols = 1;
     private int orthoGridRows = 1;
 
+    // Geographic extent the bundled ortho covers (= the auto-loaded DEM bounds the ortho was generated for),
+    // captured at auto-load. Used to geo-reference ortho UV when draping it on the streaming-LOD sub-region
+    // tiles (whose extent differs from the ortho). Null until an ortho + DEM have auto-loaded.
+    private MapBounds? bundledOrthoCoverageBounds;
+
     /// <summary>
     /// DEM-derived summits drawn as labelled markers in the 3D view so it isn't bare terrain +
     /// trails. Computed offline from the loaded raster (no network) and refreshed each DEM load.
@@ -1884,14 +1889,24 @@ public sealed partial class MapPageViewModel : ObservableObject
                 VerticalExaggeration = (float)Math.Clamp(VerticalExaggeration, 1.0, 5.0),
             };
 
-            // Clean hypsometric (no ortho drape) so the 1 m patch's detail is obvious against the coarse base.
-            OrthoTexturePath = null;
-            OrthoTexturePaths = null;
-            OrthoTextureCells = null;
-            orthoGridCols = 1;
-            orthoGridRows = 1;
+            // Ortho-on-LOD: if a bundled ortho auto-loaded, KEEP it (textures stay uploaded + enabled) and drape
+            // it on the LOD tiles via geo-referenced UV (the ortho covers a larger extent than these tiles).
+            // Otherwise clean hypsometric so the 1 m detail is obvious against the coarse base.
+            MapaTur.Application.Terrain.OrthoCoverage? orthoCoverage = bundledOrthoCoverageBounds is { } cov
+                ? new MapaTur.Application.Terrain.OrthoCoverage(cov, orthoGridCols, orthoGridRows)
+                : null;
+            if (orthoCoverage is null)
+            {
+                OrthoTexturePath = null;
+                OrthoTexturePaths = null;
+                OrthoTextureCells = null;
+                orthoGridCols = 1;
+                orthoGridRows = 1;
+            }
 
-            var baseTiles = await Task.Run(() => TerrainMesh3D.BuildTiles(baseRaster, options)).ConfigureAwait(true);
+            lodOrthoCoverage = orthoCoverage; // shared with the per-tile detail build
+
+            var baseTiles = await Task.Run(() => TerrainMesh3D.BuildTiles(baseRaster, options, orthoCoverage: orthoCoverage)).ConfigureAwait(true);
             var combined = new List<TerrainMesh3D>(baseTiles);
 
             // Initial detail ring centred on the base centre, anchored to the same scene origin (finest z16).
@@ -1934,6 +1949,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     private bool isLodStreaming;
 
     private IReadOnlyList<TerrainMesh3D>? lodBaseTiles;
+    private MapaTur.Application.Terrain.OrthoCoverage? lodOrthoCoverage; // ortho coverage for the current LOD scene (null = hypsometric)
     private GeoPoint lodAnchor;
     private GeoPoint lodDetailCentre;
     private bool lodDetailLoading;
@@ -1967,6 +1983,9 @@ public sealed partial class MapPageViewModel : ObservableObject
     private const int PerTileRoughnessStride = 4;                        // sample every 4th cell for roughness (cost ÷16, metric scale kept)
     private const int PerTileRoughnessNeighborDistance = 8;              // measure curvature over ±8 cells (~10 m) so ridge roughness registers (±1 reads ~0)
     private const int PerTileNormalSmoothingRadius = 3;                  // normal low-pass radius (1 = sharp; >1 softens 1 m facets, heights untouched) — A/B knob
+    private const double PerTileWindowRadiusMeters = 1500.0;             // detail window radius (smaller than 2000 = same budget on less area = sharper foreground)
+    private const double PerTileCameraBubbleRadiusMeters = 250.0;        // near-camera tiles forced fine regardless of look-at (no blocky foreground under a low camera)
+    private const int PerTileCameraBubbleStep = 2;                       // coarsest step allowed inside the camera bubble
 
     // Last look-at world point with a real terrain hit. On a transient raycast miss (sky / off-DEM) the
     // detail holds here instead of teleporting to the camera target — avoids micro-jumps of the patch.
@@ -2056,7 +2075,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             return null;
         }
 
-        MapBounds window = LodTerrainWindow.Around(focus, 2000);
+        MapBounds window = LodTerrainWindow.Around(focus, PerTileWindowRadiusMeters);
         IReadOnlyList<DemTileKey> planned = DemTilePlanner.TilesForBounds(window, NearDetailZoom);
         int cachedCount = detailTileCached is null ? planned.Count : planned.Count(detailTileCached);
         logger.LogInformation(
@@ -2095,7 +2114,8 @@ public sealed partial class MapPageViewModel : ObservableObject
             PerTilePlanResult planResult = PerTileDetailPlanner.PlanDetailed(
                 holed, cameraPosition, anchor, exaggeration, PerTileGridN, PerTileSubsampleSteps,
                 fovY, viewportHeight, DetailMaxErrorPixels, preset, PerTileVertexBudget,
-                PerTileRoughnessStride, PerTileRoughnessNeighborDistance);
+                PerTileRoughnessStride, PerTileRoughnessNeighborDistance,
+                PerTileCameraBubbleRadiusMeters, PerTileCameraBubbleStep);
             IReadOnlyList<PerTileLodDecision> plan = planResult.Tiles;
 
             long totalVertices = 0;
@@ -2116,6 +2136,11 @@ public sealed partial class MapPageViewModel : ObservableObject
             int demotedTiles = planResult.TileInfos.Count(t => t.FinalStep > t.DesiredStep);
             double maxRoughness = planResult.TileInfos.Count == 0 ? 0 : planResult.TileInfos.Max(t => t.RoughnessMeters);
             double maxFactor = planResult.TileInfos.Count == 0 ? 0 : planResult.TileInfos.Max(t => t.RoughnessFactor);
+            // How close/far the finest (step-1) tiles sit from the camera — reveals whether the foreground right
+            // under the eye is sharp (nearStep1 small) or detail only starts hundreds of metres out.
+            var step1Distances = planResult.TileInfos.Where(t => t.FinalStep == 1).Select(t => t.DistanceMeters).ToList();
+            double nearStep1 = step1Distances.Count == 0 ? -1 : step1Distances.Min();
+            double farStep1 = step1Distances.Count == 0 ? -1 : step1Distances.Max();
 
             var meshTimer = System.Diagnostics.Stopwatch.StartNew();
             var meshes = new List<TerrainMesh3D>();
@@ -2124,7 +2149,8 @@ public sealed partial class MapPageViewModel : ObservableObject
                 DemRaster crop = holed.Crop(d.ColStart, d.RowStart, d.Columns, d.Rows);
                 DemRaster subsampled = crop.Subsample(d.SubsampleStep);
                 meshes.AddRange(TerrainMesh3D.BuildTiles(
-                    subsampled, detailOptions, maxTileSide: PerTileMaxTileSide, projectionAnchor: anchor));
+                    subsampled, detailOptions, maxTileSide: PerTileMaxTileSide, projectionAnchor: anchor,
+                    orthoCoverage: lodOrthoCoverage));
             }
 
             meshTimer.Stop();
@@ -2136,9 +2162,11 @@ public sealed partial class MapPageViewModel : ObservableObject
             logger.LogInformation(
                 "LOD per-tile [{Preset}]: tiles={Tiles} finestStep={Finest} avgStep={Avg:F1} hist(1/2/4/8)={S1}/{S2}/{S4}/{S8} " +
                 "boosted={Boosted} demoted={Demoted} maxRough={MaxR:F1}m maxFactor={MaxF:F2} vertices={Verts}/{Budget}; " +
+                "step1Dist={NearS1:F0}-{FarS1:F0}m; " +
                 "roughnessMs={RoughnessMs:F0} planningMs={PlanningMs:F0} meshBuildMs={MeshMs} totalDetailMs={TotalMs} (stride {Stride})",
                 preset.Name, plan.Count, finestStep, avgStep, s1, s2, s4, s8,
                 boostedTiles, demotedTiles, maxRoughness, maxFactor, totalVertices, PerTileVertexBudget,
+                nearStep1, farStep1,
                 planResult.RoughnessMs, planResult.PlanningMs, meshTimer.ElapsedMilliseconds, totalTimer.ElapsedMilliseconds, PerTileRoughnessStride);
 
             return (IReadOnlyList<TerrainMesh3D>?)meshes;
@@ -2506,6 +2534,14 @@ public sealed partial class MapPageViewModel : ObservableObject
                 if (TerrainRaster is { } demRaster)
                 {
                     await LoadCachedPoisAsync(demRaster.Bounds).ConfigureAwait(true);
+
+                    // The bundled ortho was generated for THIS DEM's extent, so its coverage = the DEM bounds.
+                    // Capture it now (before any LOD demo overwrites TerrainRaster) to geo-reference ortho UV
+                    // when draping the bundled ortho on the streaming-LOD sub-region tiles.
+                    if (OrthoTexturePaths is { Count: > 0 } || orthoGridCols * orthoGridRows > 1)
+                    {
+                        bundledOrthoCoverageBounds = demRaster.Bounds;
+                    }
                 }
             }
 

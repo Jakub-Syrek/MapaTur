@@ -40,6 +40,9 @@ public sealed record PerTilePlanResult(
 /// </summary>
 public static class PerTileDetailPlanner
 {
+    // Priority added to in-bubble tiles so the vertex budget never demotes them below their forced step.
+    private const double CameraBubblePriorityBoost = 1e9;
+
     /// <summary>
     /// Plans the per-tile LOD for <paramref name="full"/> (the loaded detail window).
     /// </summary>
@@ -58,6 +61,9 @@ public static class PerTileDetailPlanner
     /// native ±1 neighbours, cutting cost ÷ N² without changing the metric scale. 1 scans every cell.</param>
     /// <param name="roughnessNeighborDistance">Neighbour baseline (cells, ≥ 1) for the roughness curvature; a
     /// larger value measures roughness at ridge scale (a fine raster reads ~0 at ±1). 1 = native pitch.</param>
+    /// <param name="cameraBubbleRadiusMeters">Tiles within this distance of the camera are forced to at least
+    /// the bubble step and kept by the budget, so a low camera always has sharp ground under it. 0 = off.</param>
+    /// <param name="cameraBubbleStep">Coarsest subsample step allowed inside the camera bubble (1 = full detail).</param>
     public static IReadOnlyList<PerTileLodDecision> Plan(
         DemRaster full,
         Vector3 cameraPosition,
@@ -71,10 +77,13 @@ public static class PerTileDetailPlanner
         RoughnessLodPreset preset,
         long maxVertices,
         int roughnessStride = 1,
-        int roughnessNeighborDistance = 1)
+        int roughnessNeighborDistance = 1,
+        double cameraBubbleRadiusMeters = 0.0,
+        int cameraBubbleStep = 1)
         => PlanDetailed(
             full, cameraPosition, projectionAnchor, verticalExaggeration, gridN, subsampleStepsFinestFirst,
-            fovY, viewportHeight, maxErrorPixels, preset, maxVertices, roughnessStride, roughnessNeighborDistance).Tiles;
+            fovY, viewportHeight, maxErrorPixels, preset, maxVertices, roughnessStride, roughnessNeighborDistance,
+            cameraBubbleRadiusMeters, cameraBubbleStep).Tiles;
 
     /// <summary>
     /// As <see cref="Plan"/>, but also returns a timing breakdown (roughness vs the rest) for on-device
@@ -94,7 +103,9 @@ public static class PerTileDetailPlanner
         RoughnessLodPreset preset,
         long maxVertices,
         int roughnessStride = 1,
-        int roughnessNeighborDistance = 1)
+        int roughnessNeighborDistance = 1,
+        double cameraBubbleRadiusMeters = 0.0,
+        int cameraBubbleStep = 1)
     {
         ArgumentNullException.ThrowIfNull(full);
         ArgumentNullException.ThrowIfNull(subsampleStepsFinestFirst);
@@ -111,6 +122,18 @@ public static class PerTileDetailPlanner
 
         // Cell pitch in metres, from the world projection of the window's own east–west extent at mid-latitude.
         double cellMeters = CellSizeMeters(full, projectionAnchor, verticalExaggeration);
+
+        // Camera bubble: the coarsest level still ≤ cameraBubbleStep. Tiles within the bubble radius of the
+        // camera are forced to at least this level and given top priority, so a low-skimming camera keeps
+        // sharp ground right under it even when the gaze (look-at) — and thus the SSE budget — is elsewhere.
+        int bubbleLevel = 0;
+        for (int i = 0; i < subsampleStepsFinestFirst.Count; i++)
+        {
+            if (subsampleStepsFinestFirst[i] <= cameraBubbleStep)
+            {
+                bubbleLevel = i;
+            }
+        }
 
         // Grid boundaries, clamped so each segment is at least 2 cells (a legal mesh raster).
         int[] colBounds = GridBoundaries(full.Columns, gridN);
@@ -162,6 +185,14 @@ public static class PerTileDetailPlanner
                 // Priority for the budget: on-screen size of one cell, boosted by roughness — sharp/near tiles
                 // keep their detail when the budget forces demotions, smooth/far ones step down first.
                 double priority = ScreenSpaceError.InPixels(cellMeters, distance, fovY, viewportHeight) * factor;
+
+                // Camera bubble: near-camera tiles get forced to the bubble level (or finer) and top priority,
+                // so they survive the vertex budget and the ground under a low camera is never blocky.
+                if (cameraBubbleRadiusMeters > 0.0 && distance <= cameraBubbleRadiusMeters)
+                {
+                    desiredLevel = Math.Min(desiredLevel, bubbleLevel);
+                    priority += CameraBubblePriorityBoost;
+                }
 
                 windows.Add((c0, r0, cW, rH));
                 entries.Add(new TileBudgetEntry(desiredLevel, priority, costByLevel));
