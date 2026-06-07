@@ -110,9 +110,16 @@ public static class PeakNamer
         int r0 = Math.Max(0, centerRow - radius);
         int r1 = Math.Min(rows - 1, centerRow + radius);
 
-        float best = float.NegativeInfinity;
-        int bestCol = centerCol;
-        int bestRow = centerRow;
+        // Prefer the NEAREST STRICT local maximum (a cell strictly above all its in-bounds orthogonal
+        // neighbours) to the gazetteer point — so a low, distinct summit (e.g. Mnich 2068 m) seats on its OWN
+        // apex instead of a taller neighbour's slope (Cubryna 2376 m) that merely happens to be the highest
+        // cell in the window. Fall back to the plain highest cell when the window has no strict local max
+        // (e.g. flat ground), then to the point sample.
+        float hiElev = float.NegativeInfinity;
+        int hiCol = centerCol, hiRow = centerRow;
+        int lmCol = -1, lmRow = -1;
+        float lmElev = 0f;
+        long lmDistSq = long.MaxValue;
         for (int r = r0; r <= r1; r++)
         {
             for (int c = c0; c <= c1; c++)
@@ -123,16 +130,49 @@ public static class PeakNamer
                     continue;
                 }
 
-                if (e > best)
+                if (e > hiElev)
                 {
-                    best = e;
-                    bestCol = c;
-                    bestRow = r;
+                    hiElev = e;
+                    hiCol = c;
+                    hiRow = r;
+                }
+
+                bool strictLocalMax =
+                    (c == 0 || raster[c - 1, r] == raster.NoDataValue || e > raster[c - 1, r]) &&
+                    (c == cols - 1 || raster[c + 1, r] == raster.NoDataValue || e > raster[c + 1, r]) &&
+                    (r == 0 || raster[c, r - 1] == raster.NoDataValue || e > raster[c, r - 1]) &&
+                    (r == rows - 1 || raster[c, r + 1] == raster.NoDataValue || e > raster[c, r + 1]);
+                if (strictLocalMax)
+                {
+                    long dCol = c - centerCol;
+                    long dRow = r - centerRow;
+                    long distSq = (dCol * dCol) + (dRow * dRow);
+                    if (distSq < lmDistSq)
+                    {
+                        lmDistSq = distSq;
+                        lmCol = c;
+                        lmRow = r;
+                        lmElev = e;
+                    }
                 }
             }
         }
 
-        if (float.IsNegativeInfinity(best))
+        float best;
+        int bestCol, bestRow;
+        if (lmCol >= 0)
+        {
+            best = lmElev;
+            bestCol = lmCol;
+            bestRow = lmRow;
+        }
+        else if (!float.IsNegativeInfinity(hiElev))
+        {
+            best = hiElev;
+            bestCol = hiCol;
+            bestRow = hiRow;
+        }
+        else
         {
             return (point, raster.SampleBilinear(point.Longitude, point.Latitude));
         }

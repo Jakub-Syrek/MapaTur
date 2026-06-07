@@ -1926,6 +1926,8 @@ public sealed partial class MapPageViewModel : ObservableObject
             // base terrain. Same world frame as the tiles (anchor = base centre), so labels line up.
             var lodPeakOptions = new PeakDetectionOptions { DominanceRadiusMeters = 550.0, MaxPeaks = 48 };
             DemRaster lodPeakRaster = DemRasterDownsampler.SubsampleToMaxCells(baseRaster, maxCells: 20_000);
+            // PeakNamer now snaps each name to the NEAREST local maximum (its own apex), not the highest cell
+            // in the radius — so a low summit (e.g. Mnich) no longer borrows a taller neighbour's ridge.
             Peaks3DOverlay = await Task.Run(() =>
                 PeakNamer.MergeWithGazetteer(PeakDetector.Detect(lodPeakRaster, lodPeakOptions), TatraSummits.All, baseRaster)).ConfigureAwait(true);
             lodBaseTiles = baseTiles;

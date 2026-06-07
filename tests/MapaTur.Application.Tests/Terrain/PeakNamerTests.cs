@@ -67,6 +67,21 @@ public sealed class PeakNamerTests
     }
 
     [Fact]
+    public void MergeWithGazetteer_SnapsToNearestLocalMaximum_NotATallerNeighbourSlope()
+    {
+        // The "Mnich" case: the named summit is a low, distinct LOCAL maximum (2068 m), but a TALLER neighbour
+        // (2500 m, like Cubryna over Mnich) sits inside the snap radius. Snapping to the highest cell would put
+        // the name on the taller neighbour; nearest-local-max must seat it on its own apex.
+        var raster = FlatRaster(baseline: 1000f, (30, 30, 2068f), (32, 30, 2500f));
+        var summit = new[] { new NamedSummit("Mnich", CellGeo(30, 30), 2068) };
+
+        var peak = PeakNamer.MergeWithGazetteer(
+            Array.Empty<TerrainPeak>(), summit, raster, snapRadiusMeters: 6000.0).Single(p => p.Name == "Mnich");
+
+        peak.ElevationMeters.Should().BeApproximately(2068.0, 1e-3, "seated on its own local-max apex, not the taller neighbour");
+    }
+
+    [Fact]
     public void MergeWithGazetteer_SeatsOnDemButLabelsWithPublishedElevation()
     {
         // DEM max near the summit is 2300 m (smoothed), but the gazetteer publishes 2655 m. The marker
