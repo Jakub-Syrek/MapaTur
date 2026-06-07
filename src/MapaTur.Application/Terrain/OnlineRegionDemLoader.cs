@@ -44,15 +44,37 @@ public sealed class OnlineRegionDemLoader
     /// <param name="bounds">Geographic extent to cover.</param>
     /// <param name="zoom">Slippy zoom level to fetch at.</param>
     /// <param name="progress">Optional reporter; fires once per tile as fetches finish.</param>
+    /// <param name="tileAvailable">Optional gate: when set, only tiles it returns <c>true</c> for are
+    /// fetched; the rest are skipped without ever reaching the source. Pass a cache-presence check to keep
+    /// a render loop offline-deterministic (no network fetch while flying); returns null when nothing
+    /// passes the gate, so the caller can fall back to a coarser base.</param>
     /// <param name="cancellationToken">Cancels the load.</param>
     /// <exception cref="OperationCanceledException">Cancellation was requested.</exception>
     public async Task<DemRaster?> LoadRegionAsync(
         MapBounds bounds,
         int zoom,
         IProgress<RegionLoadProgress>? progress = null,
+        Func<DemTileKey, bool>? tileAvailable = null,
         CancellationToken cancellationToken = default)
     {
-        IReadOnlyList<DemTileKey> keys = DemTilePlanner.TilesForBounds(bounds, zoom);
+        IReadOnlyList<DemTileKey> planned = DemTilePlanner.TilesForBounds(bounds, zoom);
+        List<DemTileKey> keys;
+        if (tileAvailable is null)
+        {
+            keys = new List<DemTileKey>(planned);
+        }
+        else
+        {
+            keys = new List<DemTileKey>(planned.Count);
+            foreach (DemTileKey planKey in planned)
+            {
+                if (tileAvailable(planKey))
+                {
+                    keys.Add(planKey);
+                }
+            }
+        }
+
         int total = keys.Count;
 
         using var gate = new SemaphoreSlim(this.maxConcurrentFetches);

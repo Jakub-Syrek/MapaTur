@@ -69,6 +69,10 @@ public sealed partial class MapPageViewModel : ObservableObject
     private readonly OnlineRegionDemLoader? regionDemLoader;
     private readonly OfflineRegionDownloader? offlineDownloader;
 
+    // Cache-presence gate for the LOD render loop (Krok 4b): only already-cached 1 m tiles are loaded while
+    // flying, so detail streaming never triggers a WCS download. Null when no GUGiK source is wired.
+    private readonly Func<DemTileKey, bool>? detailTileCached;
+
     private readonly List<GeoPoint> waypoints = new(capacity: 2);
 
     [ObservableProperty]
@@ -950,7 +954,8 @@ public sealed partial class MapPageViewModel : ObservableObject
         IUserLocationService? userLocationService = null,
         IUserLocationLayerRenderer? userLocationRenderer = null,
         OnlineRegionDemLoader? regionDemLoader = null,
-        OfflineRegionDownloader? offlineDownloader = null)
+        OfflineRegionDownloader? offlineDownloader = null,
+        GugikNmtDemTileSource? gugikDemSource = null)
     {
         ArgumentNullException.ThrowIfNull(filePicker);
         ArgumentNullException.ThrowIfNull(fileSaver);
@@ -987,6 +992,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         this.settingsStore = settingsStore;
         this.regionDemLoader = regionDemLoader;
         this.offlineDownloader = offlineDownloader;
+        this.detailTileCached = gugikDemSource is null ? null : gugikDemSource.IsCached;
 
         // Subscribe to the location feed once at construction. The service stays silent until the
         // user opts in via ToggleLocationTracking; we just need to be listening so the first fix
@@ -2028,7 +2034,9 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             int zoom = group.Key;
             MapBounds bbox = UnionTileBounds(group.Select(tile => tile.Cell));
-            DemRaster? raster = await regionDemLoader.LoadRegionAsync(bbox, zoom).ConfigureAwait(true);
+            // Cache-only: never trigger a WCS download while flying. A zoom whose tiles aren't cached is
+            // skipped (null) and the base carries that area — online pulls happen only in the offline mode.
+            DemRaster? raster = await regionDemLoader.LoadRegionAsync(bbox, zoom, tileAvailable: detailTileCached).ConfigureAwait(true);
             if (raster is null || !DemRasterCoverage.HasTerrain(raster, minTopMeters: 100))
             {
                 continue;

@@ -203,4 +203,31 @@ public sealed class OnlineRegionDemLoaderTests
         await act.Should().ThrowAsync<OperationCanceledException>();
         source.Requested.Should().BeEmpty();
     }
+
+    [Fact]
+    public async Task LoadRegionAsync_WithTileAvailablePredicate_NeverFetchesUnavailableTiles()
+    {
+        // Offline-deterministic render loop: only tiles the predicate accepts (e.g. already cached) may be
+        // fetched — the rest must never reach the source, so no WCS download is triggered while flying.
+        var planned = DemTilePlanner.TilesForBounds(Region, Zoom);
+        DemTileKey available = planned[0];
+        var source = new FakeSource(k => TileRaster(k));
+        var loader = new OnlineRegionDemLoader(source);
+
+        await loader.LoadRegionAsync(Region, Zoom, tileAvailable: key => key.Equals(available));
+
+        source.Requested.Should().ContainSingle().Which.Should().Be(available);
+    }
+
+    [Fact]
+    public async Task LoadRegionAsync_WithTileAvailablePredicate_ReturnsNull_AndFetchesNothing_WhenNoneAvailable()
+    {
+        var source = new FakeSource(k => TileRaster(k));
+        var loader = new OnlineRegionDemLoader(source);
+
+        DemRaster? mosaic = await loader.LoadRegionAsync(Region, Zoom, tileAvailable: _ => false);
+
+        mosaic.Should().BeNull("nothing cached ⇒ no layer; the caller leaves the base showing");
+        source.Requested.Should().BeEmpty("the render loop never reaches out to the network");
+    }
 }
