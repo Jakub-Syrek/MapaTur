@@ -36,7 +36,7 @@ public static class TatraSummits
         new NamedSummit("Starorobociański Wierch", new GeoPoint(49.199361, 19.819944), 2176),
         new NamedSummit("Czerwone Wierchy", new GeoPoint(49.231667, 19.909472), 2122),
         new NamedSummit("Małołączniak", new GeoPoint(49.235806, 19.919306), 2096),
-        new NamedSummit("Mnich", new GeoPoint(49.192500, 20.055000), 2068),
+        new NamedSummit("Mnich", new GeoPoint(49.198611, 20.076944), 2068),
         new NamedSummit("Wołowiec", new GeoPoint(49.207556, 19.763111), 2064),
         new NamedSummit("Wielka Kopa Koprowa", new GeoPoint(49.200667, 19.973889), 2052),
         new NamedSummit("Kasprowy Wierch", new GeoPoint(49.231833, 19.981556), 1987),
