@@ -127,6 +127,55 @@ public sealed class LookAtPointTests
     }
 
     [Fact]
+    public void Resolve_CentreHitsSky_LowerFrameFallbackFindsTerrainBelow()
+    {
+        // Looking horizontally across a ridge: the eye is above the terrain and the CENTRE ray skims out over
+        // it (sky in the middle of the frame), so it never descends to the ground. A lower-frame sample tilts
+        // down and finds the terrain you are actually flying toward — without it, detail would not stream.
+        var anchor = new GeoPoint(49.0, 20.0);
+        DemRaster dem = Flat(100.0, new GeoPoint(48.99, 19.99), new GeoPoint(49.01, 20.01));
+        var camera = new Camera3D
+        {
+            Target = new Vector3(0f, 0f, 200f), // eye ends up at z=200, well above terrain at z=100
+            Distance = 500f,
+            AzimuthRadians = 0f,
+            PitchRadians = 0f, // horizontal view → centre ray never meets the lower terrain
+        };
+
+        float[] fallbacks = { 0.7f, 0.85f };
+        Vector3? noFallback = LookAtPoint.Resolve(camera, 800f, 600f, dem, anchor, verticalExaggeration: 1f);
+        Vector3? withFallback = LookAtPoint.Resolve(
+            camera, 800f, 600f, dem, anchor, verticalExaggeration: 1f, lowerFrameFallbacks: fallbacks);
+
+        noFallback.Should().BeNull("the centre ray at eye height never descends to the lower terrain");
+        withFallback.Should().NotBeNull("a lower-frame sample tilts down and hits the terrain");
+        withFallback!.Value.Z.Should().BeApproximately(100f, 2f);
+    }
+
+    [Fact]
+    public void Resolve_CentreHits_FallbacksAreNotConsulted()
+    {
+        // When the centre already hits, the result must be the centre hit regardless of any fallbacks supplied.
+        var anchor = new GeoPoint(49.0, 20.0);
+        DemRaster dem = Flat(100.0, new GeoPoint(48.99, 19.99), new GeoPoint(49.01, 20.01));
+        var camera = new Camera3D
+        {
+            Target = new Vector3(0f, 0f, 100f),
+            Distance = 500f,
+            AzimuthRadians = 0f,
+            PitchRadians = MathF.PI / 3f, // looking down — centre hits
+        };
+
+        float[] fallbacks = { 0.8f };
+        Vector3? hit = LookAtPoint.Resolve(
+            camera, 800f, 600f, dem, anchor, verticalExaggeration: 1f, lowerFrameFallbacks: fallbacks);
+
+        hit.Should().NotBeNull();
+        hit!.Value.X.Should().BeApproximately(0f, 2f);
+        hit.Value.Y.Should().BeApproximately(0f, 2f);
+    }
+
+    [Fact]
     public void Resolve_ZeroViewport_ReturnsNull()
     {
         var anchor = new GeoPoint(49.0, 20.0);

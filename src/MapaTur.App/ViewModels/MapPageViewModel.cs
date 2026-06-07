@@ -1948,6 +1948,10 @@ public sealed partial class MapPageViewModel : ObservableObject
     private const int BaseDetailZoomFloor = 12;                          // chosen zoom at/below base (z12) ⇒ no detail patch
     private const double DetailCoverageFloorMeters = 100.0;              // below this ⇒ GUGiK out-of-coverage flat-0 → hole (Tatra-context guard)
     private const int DetailEdgeMatchRows = 8;                           // morph band: blend the patch perimeter into the base over N rows
+    // Look-at fallback: if the screen-centre ray hits sky (looking horizontally across a ridge), probe lower in
+    // the frame so detail still streams to the terrain the camera is flying toward instead of falling back to
+    // the off-screen target. Centre column, so aspect-independent.
+    private static readonly float[] LookAtLowerFrameFallbacks = { 0.62f, 0.74f, 0.86f };
     private const bool ShowDiagnosticDetailTint = false;                 // Krok 5: tint OFF for the seamless look; true re-enables tint-by-zoom debug
 
     // Model 1 (per-tile roughness): split the loaded z16 window into a grid and give each tile its own
@@ -2169,7 +2173,10 @@ public sealed partial class MapPageViewModel : ObservableObject
         System.Numerics.Vector3? freshLookAt = null;
         if (TerrainRaster is { } baseRaster)
         {
-            freshLookAt = LookAtPoint.Resolve(camera, 1f, 1f, baseRaster, lodAnchor, verticalExaggeration); // centre ray is aspect-independent
+            // Centre ray first (aspect-independent); on a sky miss, probe lower in the frame so a horizontal
+            // "looking across the ridge" view still streams detail to the terrain below the gaze.
+            freshLookAt = LookAtPoint.Resolve(
+                camera, 1f, 1f, baseRaster, lodAnchor, verticalExaggeration, LookAtLowerFrameFallbacks);
         }
 
         if (freshLookAt is { } hitNow)

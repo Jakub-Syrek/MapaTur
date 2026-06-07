@@ -49,13 +49,25 @@ public static class LookAtPoint
     /// Resolves the look-at point: the world-space terrain hit under the screen centre, or null when
     /// the centre ray meets no real terrain (looking at the sky, off the DEM, or over no-data).
     /// </summary>
+    /// <param name="camera">Camera whose view ray is cast.</param>
+    /// <param name="screenWidth">Viewport width (any unit; only the centre column is used, so it cancels).</param>
+    /// <param name="screenHeight">Viewport height (same unit as width).</param>
+    /// <param name="raster">DEM to intersect.</param>
+    /// <param name="anchor">Shared world-frame origin tying the DEM to geographic coordinates.</param>
+    /// <param name="verticalExaggeration">Z scale matching the rendered terrain.</param>
+    /// <param name="lowerFrameFallbacks">Optional vertical screen fractions (0 = top, 1 = bottom) probed in
+    /// order ONLY when the centre ray misses. Looking horizontally across a ridge puts sky in the centre but
+    /// terrain lower in the frame, so a lower sample (e.g. 0.7) still finds what the camera is flying toward
+    /// and detail keeps streaming. Each sample stays in the centre column, so it is aspect-independent. Null
+    /// (default) = centre only.</param>
     public static Vector3? Resolve(
         Camera3D camera,
         float screenWidth,
         float screenHeight,
         DemRaster raster,
         GeoPoint anchor,
-        float verticalExaggeration)
+        float verticalExaggeration,
+        IReadOnlyList<float>? lowerFrameFallbacks = null)
     {
         ArgumentNullException.ThrowIfNull(camera);
         ArgumentNullException.ThrowIfNull(raster);
@@ -64,8 +76,33 @@ public static class LookAtPoint
             return null;
         }
 
-        Ray ray = ScreenCenterRay(camera, screenWidth, screenHeight);
         (float maxDistance, float step) = MarchParameters(camera, raster);
+
+        // Centre of the frame first — that is where the camera is genuinely aimed.
+        Vector3? hit = CastAt(camera, 0.5f, screenWidth, screenHeight, raster, anchor, verticalExaggeration, maxDistance, step);
+        if (hit is not null || lowerFrameFallbacks is null)
+        {
+            return hit;
+        }
+
+        // Centre missed (sky / off-DEM): probe progressively lower in the frame for the terrain below the gaze.
+        foreach (float verticalFraction in lowerFrameFallbacks)
+        {
+            hit = CastAt(camera, verticalFraction, screenWidth, screenHeight, raster, anchor, verticalExaggeration, maxDistance, step);
+            if (hit is not null)
+            {
+                return hit;
+            }
+        }
+
+        return null;
+    }
+
+    private static Vector3? CastAt(
+        Camera3D camera, float verticalFraction, float screenWidth, float screenHeight,
+        DemRaster raster, GeoPoint anchor, float verticalExaggeration, float maxDistance, float step)
+    {
+        Ray ray = ScreenPointRay(camera, screenWidth * 0.5f, screenHeight * verticalFraction, screenWidth, screenHeight);
         return TerrainRaycaster.Intersect(ray, raster, anchor, verticalExaggeration, maxDistance, step);
     }
 
