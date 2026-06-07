@@ -234,12 +234,13 @@ public sealed partial class MapPageViewModel : ObservableObject
     private DemRaster? terrainRaster;
 
     /// <summary>
-    /// Multiplier applied to elevation when building the 3D mesh. 1.0 = true scale,
-    /// higher values exaggerate vertical relief so soft hills read better on screen.
-    /// Changing this rebuilds the mesh from the current raster.
+    /// Multiplier applied to elevation when building the 3D mesh. 1.0 = TRUE scale (default — the Tatras are
+    /// dramatic enough at real proportions; 2× made slopes ~2× too steep / needle-like vs photos). Higher
+    /// values exaggerate vertical relief; the user can still raise it on the "Pion" slider. Changing this
+    /// rebuilds the mesh from the current raster.
     /// </summary>
     [ObservableProperty]
-    private double verticalExaggeration = 2.0;
+    private double verticalExaggeration = 1.0;
 
     /// <summary>
     /// Time of day in hours, [0,24). Drives the <see cref="Atmosphere"/> sun / sky / fog model
