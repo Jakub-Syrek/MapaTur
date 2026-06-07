@@ -336,7 +336,8 @@ public sealed class TerrainMesh3D
         var colors = new uint[vertexCount];
         var baseColors = new uint[vertexCount];
         var texCoords = new float[vertexCount * 2];
-        var indices = new ushort[(tileCols - 1) * (tileRows - 1) * 2 * 3];
+        var indexList = new List<ushort>((tileCols - 1) * (tileRows - 1) * 6);
+        float noDataValue = raster.NoDataValue;
 
         // UV maps each vertex to [0,1] within its ORTHO CELL (the texture this tile samples). The default
         // full-extent cell spans the whole raster (legacy global mapping); a finer grid gives local UV so
@@ -414,8 +415,9 @@ public sealed class TerrainMesh3D
             }
         }
 
-        // Two triangles per grid cell (clockwise as seen from +Z), indices local to the tile.
-        int idx = 0;
+        // Two triangles per grid cell (clockwise as seen from +Z), indices local to the tile. A triangle
+        // whose corner sits on a no-data cell is dropped (Krok 4c), leaving a hole so the coarse base shows
+        // through instead of flat geometry spiking over the gap (the yellow "blinds" / flat green rectangle).
         for (int lr = 0; lr < tileRows - 1; lr++)
         {
             for (int lc = 0; lc < tileCols - 1; lc++)
@@ -425,16 +427,32 @@ public sealed class TerrainMesh3D
                 ushort i01 = (ushort)(((lr + 1) * tileCols) + lc);
                 ushort i11 = (ushort)(((lr + 1) * tileCols) + lc + 1);
 
+                int gc = colStart + lc;
+                int gr = rowStart + lr;
+                bool nw = raster[gc, gr] == noDataValue;
+                bool ne = raster[gc + 1, gr] == noDataValue;
+                bool sw = raster[gc, gr + 1] == noDataValue;
+                bool se = raster[gc + 1, gr + 1] == noDataValue;
+
                 // Triangle 1: NW, NE, SW
-                indices[idx++] = i00;
-                indices[idx++] = i10;
-                indices[idx++] = i01;
+                if (!nw && !ne && !sw)
+                {
+                    indexList.Add(i00);
+                    indexList.Add(i10);
+                    indexList.Add(i01);
+                }
+
                 // Triangle 2: NE, SE, SW
-                indices[idx++] = i10;
-                indices[idx++] = i11;
-                indices[idx++] = i01;
+                if (!ne && !se && !sw)
+                {
+                    indexList.Add(i10);
+                    indexList.Add(i11);
+                    indexList.Add(i01);
+                }
             }
         }
+
+        ushort[] indices = indexList.ToArray();
 
         return new TerrainMesh3D(
             vertices,

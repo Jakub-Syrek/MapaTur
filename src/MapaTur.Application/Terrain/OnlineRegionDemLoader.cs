@@ -48,6 +48,9 @@ public sealed class OnlineRegionDemLoader
     /// fetched; the rest are skipped without ever reaching the source. Pass a cache-presence check to keep
     /// a render loop offline-deterministic (no network fetch while flying); returns null when nothing
     /// passes the gate, so the caller can fall back to a coarser base.</param>
+    /// <param name="fillNoData">When true (default), coverage gaps and the Slovak-border clip are filled so
+    /// a NoData-unaware mesh extends flat to the edge. The LOD render path passes false so its NoData-aware
+    /// mesh can hole those cells through to the coarse base instead of rendering flat geometry over them.</param>
     /// <param name="cancellationToken">Cancels the load.</param>
     /// <exception cref="OperationCanceledException">Cancellation was requested.</exception>
     public async Task<DemRaster?> LoadRegionAsync(
@@ -55,6 +58,7 @@ public sealed class OnlineRegionDemLoader
         int zoom,
         IProgress<RegionLoadProgress>? progress = null,
         Func<DemTileKey, bool>? tileAvailable = null,
+        bool fillNoData = true,
         CancellationToken cancellationToken = default)
     {
         IReadOnlyList<DemTileKey> planned = DemTilePlanner.TilesForBounds(bounds, zoom);
@@ -105,9 +109,11 @@ public sealed class OnlineRegionDemLoader
             return null;
         }
 
-        // Fill NoData (coverage gaps / a bbox clipping the Slovak border) so the mesh — which has no
-        // NoData handling — extends flat to the edge instead of spiking to the sentinel depth.
-        return DemRasterRepair.FillNoData(DemTileMosaic.Stitch(placed));
+        DemRaster stitched = DemTileMosaic.Stitch(placed);
+        // FillNoData (coverage gaps / a bbox clipping the Slovak border) lets a NoData-unaware mesh extend
+        // flat to the edge. The LOD render path opts OUT so its NoData-aware mesh can hole those cells to the
+        // base instead of spiking flat geometry over them.
+        return fillNoData ? DemRasterRepair.FillNoData(stitched) : stitched;
     }
 
     private async Task<PlacedDemTile?> FetchAsync(

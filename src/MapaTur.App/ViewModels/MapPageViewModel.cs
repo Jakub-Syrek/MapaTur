@@ -1963,7 +1963,9 @@ public sealed partial class MapPageViewModel : ObservableObject
             "LOD cache-only z{Zoom}: requested={Requested}, cached={Cached}, skipped={Skipped}",
             zoom, planned.Count, cachedCount, planned.Count - cachedCount);
 
-        DemRaster? detail = await regionDemLoader.LoadRegionAsync(window, zoom, tileAvailable: detailTileCached).ConfigureAwait(true);
+        // fillNoData: false — keep NoData so the NoData-aware mesh holes gaps/uncovered cells through to the
+        // base (Krok 4c), instead of rendering flat geometry over them (the yellow blinds / green rectangle).
+        DemRaster? detail = await regionDemLoader.LoadRegionAsync(window, zoom, tileAvailable: detailTileCached, fillNoData: false).ConfigureAwait(true);
         if (detail is null)
         {
             logger.LogWarning("LOD detail: no cached z{Zoom} raster at {Lat:F4},{Lon:F4}", zoom, focus.Latitude, focus.Longitude);
