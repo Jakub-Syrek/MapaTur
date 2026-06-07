@@ -1,6 +1,9 @@
 # Design Doc — Ortofoto na streaming LOD (Faza 0)
 
-**Status:** DRAFT do akceptacji. Bez kodu do czasu zatwierdzenia.
+**Status:** ZAAKCEPTOWANY (2026-06-07). Faza 1 w toku.
+**Decyzje (sek. 9):** #2 MVP **bez cięcia** (kafel = komórka ortho jego środka; drobny błąd UV na styku → Faza 2).
+#3 oświetlenie ortho **to samo** co hipsometria (ambient 0.5, słońce 16; osobny balans tylko jeśli za ciemne).
+#6 **baza też ortho** (drape na bazę z12 i detal — bez szwu hipso/zdjęcie).
 **Cel:** drapować istniejące ortofoto na kafle 1 m streaming-LOD (dziś hipsometria), żeby bliski teren
 wyglądał jak realne zdjęcie ("Google Earth dla Tatr"), zachowując stabilny silnik LOD/oświetlenie.
 
