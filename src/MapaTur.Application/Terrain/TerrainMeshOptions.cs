@@ -36,4 +36,13 @@ public sealed class TerrainMeshOptions
     /// so keep <c>maxTileSide ≤ ~250</c> to stay under the 16-bit index limit.
     /// </summary>
     public float SkirtDepthMeters { get; init; }
+
+    /// <summary>
+    /// Radius (in cells, ≥ 1) of the central difference used for per-vertex normals. 1 (default) samples the
+    /// immediate neighbours; a larger radius low-passes the NORMAL field over a wider baseline so dense 1 m
+    /// detail shades softer (fewer hard facets) WITHOUT touching the elevation data — heights stay the source
+    /// of truth, only the lighting normals are smoothed. A planar slope still reads its true normal at any
+    /// radius (only curvature is averaged out).
+    /// </summary>
+    public int NormalSmoothingRadius { get; init; } = 1;
 }

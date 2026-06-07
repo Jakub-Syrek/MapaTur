@@ -186,6 +186,54 @@ public sealed class TerrainMesh3DTests
         (mesh.Indices.Length / 3).Should().Be(expectedTriangles);
     }
 
+    private static DemRaster BuildRaster(int cols, int rows, Func<int, int, float> elevation)
+    {
+        var samples = new float[cols * rows];
+        for (int r = 0; r < rows; r++)
+        {
+            for (int c = 0; c < cols; c++)
+            {
+                samples[(r * cols) + c] = elevation(c, r);
+            }
+        }
+
+        var bounds = new MapBounds(new GeoPoint(49.0, 19.0), new GeoPoint(50.0, 20.0));
+        return new DemRaster(cols, rows, bounds, samples);
+    }
+
+    [Fact]
+    public void BuildTiles_WiderNormalRadius_SoftensASharpSpike_WithoutMovingHeights()
+    {
+        // One raised cell on flat ground. At radius 1 the cells next to it get a very steep normal (a hard
+        // facet); a wider radius spreads that gradient over a longer baseline, so the steepest normal is less
+        // steep — softer shading. The elevation data (vertex Z) is identical: only the normals change.
+        DemRaster spike = BuildRaster(11, 11, (c, r) => (c == 5 && r == 5) ? 200f : 0f);
+
+        TerrainMesh3D sharp = TerrainMesh3D.BuildTiles(spike, new TerrainMeshOptions { VerticalExaggeration = 1f, NormalSmoothingRadius = 1 })[0];
+        TerrainMesh3D soft = TerrainMesh3D.BuildTiles(spike, new TerrainMeshOptions { VerticalExaggeration = 1f, NormalSmoothingRadius = 2 })[0];
+
+        sharp.Normals.Min(n => n.Z).Should().BeLessThan(soft.Normals.Min(n => n.Z),
+            "a wider normal radius makes the steepest facet shallower (softer shading)");
+        soft.Vertices.Select(v => v.Z).Should().Equal(sharp.Vertices.Select(v => v.Z),
+            "heights are the source of truth — normal smoothing must not move any vertex");
+    }
+
+    [Fact]
+    public void BuildTiles_NormalRadius_LeavesAPlanarSlopeNormalUnchanged()
+    {
+        // A linear ramp has one true normal everywhere; central differences give it exactly at any radius.
+        DemRaster slope = BuildRaster(11, 11, (c, _) => 20f * c);
+
+        TerrainMesh3D r1 = TerrainMesh3D.BuildTiles(slope, new TerrainMeshOptions { VerticalExaggeration = 1f, NormalSmoothingRadius = 1 })[0];
+        TerrainMesh3D r3 = TerrainMesh3D.BuildTiles(slope, new TerrainMeshOptions { VerticalExaggeration = 1f, NormalSmoothingRadius = 3 })[0];
+
+        Vector3 centre1 = r1.Normals[(5 * 11) + 5];
+        Vector3 centre3 = r3.Normals[(5 * 11) + 5];
+        centre3.X.Should().BeApproximately(centre1.X, 1e-4f);
+        centre3.Y.Should().BeApproximately(centre1.Y, 1e-4f);
+        centre3.Z.Should().BeApproximately(centre1.Z, 1e-4f);
+    }
+
     [Fact]
     public void Build_NormalsArePointingUpForFlatTerrain()
     {

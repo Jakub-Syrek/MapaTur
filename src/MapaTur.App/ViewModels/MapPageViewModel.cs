@@ -1965,6 +1965,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     private const long PerTileVertexBudget = 1_500_000;                  // hard cap on total detail verts (FPS safety)
     private const int PerTileRoughnessStride = 4;                        // sample every 4th cell for roughness (cost ÷16, metric scale kept)
     private const int PerTileRoughnessNeighborDistance = 8;              // measure curvature over ±8 cells (~10 m) so ridge roughness registers (±1 reads ~0)
+    private const int PerTileNormalSmoothingRadius = 3;                  // normal low-pass radius (1 = sharp; >1 softens 1 m facets, heights untouched) — A/B knob
 
     // Last look-at world point with a real terrain hit. On a transient raycast miss (sky / off-DEM) the
     // detail holds here instead of teleporting to the camera target — avoids micro-jumps of the patch.
@@ -2077,6 +2078,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             VerticalExaggeration = exaggeration,
             SkirtDepthMeters = PerTileSkirtDepthMeters,
+            NormalSmoothingRadius = PerTileNormalSmoothingRadius,
         };
 
         return await Task.Run(() =>

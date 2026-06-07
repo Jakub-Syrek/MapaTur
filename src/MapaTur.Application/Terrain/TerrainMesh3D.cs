@@ -389,15 +389,18 @@ public sealed class TerrainMesh3D
 
         // Per-vertex normals via central differences in elevation, sampling the full raster so tile-edge
         // normals use real neighbour cells (continuous shading across seams) rather than clamped values.
+        // The radius widens the difference baseline to low-pass the NORMAL field (softer facets) without
+        // altering any elevation — only the lighting normals are smoothed, never the heights.
+        int normalRadius = Math.Max(1, options.NormalSmoothingRadius);
         for (int r = rowStart; r <= rowEnd; r++)
         {
-            int rN = Math.Max(r - 1, 0);
-            int rS = Math.Min(r + 1, rows - 1);
+            int rN = Math.Max(r - normalRadius, 0);
+            int rS = Math.Min(r + normalRadius, rows - 1);
             int localRow = r - rowStart;
             for (int c = colStart; c <= colEnd; c++)
             {
-                int cW = Math.Max(c - 1, 0);
-                int cE = Math.Min(c + 1, cols - 1);
+                int cW = Math.Max(c - normalRadius, 0);
+                int cE = Math.Min(c + normalRadius, cols - 1);
 
                 float zE = raster[cE, r] * exaggeration;
                 float zW = raster[cW, r] * exaggeration;
