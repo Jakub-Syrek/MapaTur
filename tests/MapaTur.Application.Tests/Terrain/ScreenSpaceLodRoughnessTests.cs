@@ -1,6 +1,9 @@
+using System.Numerics;
+
 using FluentAssertions;
 
 using MapaTur.Application.Terrain;
+using MapaTur.Domain.Geography;
 
 namespace MapaTur.Application.Tests.Terrain;
 
@@ -59,5 +62,30 @@ public sealed class ScreenSpaceLodRoughnessTests
         int explicitOne = ScreenSpaceLod.ZoomForCameraDistance(Candidates, 5000.0, 49.0, HalfPi, 1000.0, 2.0, roughnessFactor: 1.0);
 
         weighted.Should().Be(explicitOne);
+    }
+
+    [Fact]
+    public void AssignAroundLookAt_PerTileRoughness_BoostsRoughCellsNeverCoarsens()
+    {
+        var lookAt = new GeoPoint(49.18, 20.08);
+        var camera = new Vector3(0f, 0f, 1300f);
+
+        IReadOnlyList<LookAtLodTile> baseline = ScreenSpaceLod.AssignAroundLookAt(
+            lookAt, 1000f, camera, lookAt, 1f, Candidates, gridZoom: 14, radiusTiles: 1,
+            fovY: HalfPi, viewportHeight: 1000.0, maxErrorPixels: 2.0);
+
+        // Pretend every cell is very rough: each cell's screen-space error is boosted ⇒ finer (or equal) zoom.
+        IReadOnlyList<LookAtLodTile> boosted = ScreenSpaceLod.AssignAroundLookAt(
+            lookAt, 1000f, camera, lookAt, 1f, Candidates, gridZoom: 14, radiusTiles: 1,
+            fovY: HalfPi, viewportHeight: 1000.0, maxErrorPixels: 2.0,
+            cellRoughnessMeters: _ => 200.0, referenceRoughnessMeters: 30.0, maxRoughnessBoost: 3.0);
+
+        var baselineByCell = baseline.ToDictionary(t => t.Cell, t => t.Zoom);
+        foreach (LookAtLodTile tile in boosted)
+        {
+            tile.Zoom.Should().BeGreaterThanOrEqualTo(baselineByCell[tile.Cell], "roughness only boosts, never coarsens");
+        }
+
+        boosted.Sum(t => t.Zoom).Should().BeGreaterThan(baseline.Sum(t => t.Zoom), "rough cells move to a finer zoom");
     }
 }

@@ -104,6 +104,12 @@ public static class ScreenSpaceLod
     /// <param name="fovY">Vertical field of view, in radians.</param>
     /// <param name="viewportHeight">Viewport height, in pixels.</param>
     /// <param name="maxErrorPixels">Pixel error budget; the coarsest zoom within it is chosen per cell.</param>
+    /// <param name="cellRoughnessMeters">Model 1 (optional): per-cell terrain roughness lookup
+    /// (<see cref="DemRasterRoughness.Roughness"/>). When set, each cell's screen-space error is boosted by
+    /// its own <see cref="RoughnessFactor"/>, so a sharp ridge keeps HD from farther while a smooth valley
+    /// beside it grades down — per tile, not per patch. Null ⇒ every cell weighs 1 (pure distance LOD).</param>
+    /// <param name="referenceRoughnessMeters">Roughness that adds a full +1 boost (see <see cref="RoughnessFactor"/>).</param>
+    /// <param name="maxRoughnessBoost">Upper clamp on the additive roughness boost.</param>
     public static IReadOnlyList<LookAtLodTile> AssignAroundLookAt(
         GeoPoint lookAt,
         float lookAtElevationMeters,
@@ -115,7 +121,10 @@ public static class ScreenSpaceLod
         int radiusTiles,
         double fovY,
         double viewportHeight,
-        double maxErrorPixels)
+        double maxErrorPixels,
+        Func<DemTileKey, double>? cellRoughnessMeters = null,
+        double referenceRoughnessMeters = 30.0,
+        double maxRoughnessBoost = 3.0)
     {
         IReadOnlyList<DemTileKey> ring = DetailTileRing.Around(lookAt, gridZoom, radiusTiles);
         var assignments = new List<LookAtLodTile>(ring.Count);
@@ -126,7 +135,13 @@ public static class ScreenSpaceLod
             var centre = new GeoPoint((south + north) / 2.0, (west + east) / 2.0);
             Vector3 world = LocalTangentProjection.GeoToWorld(centre, lookAtElevationMeters, projectionAnchor, verticalExaggeration);
             double distance = Vector3.Distance(cameraPosition, world);
-            int zoom = ZoomForCameraDistance(zoomCandidatesFinestFirst, distance, centre.Latitude, fovY, viewportHeight, maxErrorPixels);
+
+            double roughnessFactor = cellRoughnessMeters is null
+                ? 1.0
+                : RoughnessFactor(cellRoughnessMeters(cell), referenceRoughnessMeters, maxRoughnessBoost);
+
+            int zoom = ZoomForCameraDistance(
+                zoomCandidatesFinestFirst, distance, centre.Latitude, fovY, viewportHeight, maxErrorPixels, roughnessFactor);
             assignments.Add(new LookAtLodTile(cell, zoom));
         }
 
