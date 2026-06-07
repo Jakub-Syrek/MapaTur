@@ -103,4 +103,31 @@ public sealed class DemRasterRepairTests
         filled.North.Should().Be(raster.North);
         filled.NoDataValue.Should().Be(ND);
     }
+
+    [Fact]
+    public void HoleBelow_SetsCellsBelowFloorToNoData_KeepsValidAndExistingNoData()
+    {
+        // GUGiK returns a flat ~0 outside coverage (a real value, not the sentinel); holing it lets the
+        // NoData-aware mesh drop those cells to the base. Real terrain above the floor is untouched.
+        var samples = new[] { 1000f, 0f, ND, 1200f }; // (c0,r0)=valid, (c1,r0)=flat-0, (c0,r1)=NoData, (c1,r1)=valid
+        var raster = Make(2, 2, samples);
+
+        var holed = DemRasterRepair.HoleBelow(raster, 100.0);
+
+        holed[0, 0].Should().Be(1000f, "real terrain above the floor is kept");
+        holed[1, 0].Should().Be(ND, "the flat-0 coverage artefact is holed");
+        holed[0, 1].Should().Be(ND, "existing NoData stays NoData");
+        holed[1, 1].Should().Be(1200f);
+    }
+
+    [Fact]
+    public void HoleBelow_NoCellBelowFloor_LeavesRasterUnchanged()
+    {
+        var samples = new[] { 800f, 1500f, 2000f, 2500f };
+        var raster = Make(2, 2, samples);
+
+        var holed = DemRasterRepair.HoleBelow(raster, 100.0);
+
+        holed.Samples.Should().Equal(800f, 1500f, 2000f, 2500f);
+    }
 }

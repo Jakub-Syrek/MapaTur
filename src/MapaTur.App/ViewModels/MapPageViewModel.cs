@@ -1938,6 +1938,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     private static readonly int[] DetailZoomCandidates = { 16, 14, 12 };  // finest → coarsest, fed to ScreenSpaceLod
     private const double DetailMaxErrorPixels = 2.0;                      // per-tile screen-space error budget
     private const int BaseDetailZoomFloor = 12;                          // chosen zoom at/below base (z12) ⇒ no detail patch
+    private const double DetailCoverageFloorMeters = 100.0;              // below this ⇒ GUGiK out-of-coverage flat-0 → hole (Tatra-context guard)
 
     // Last look-at world point with a real terrain hit. On a transient raycast miss (sky / off-DEM) the
     // detail holds here instead of teleporting to the camera target — avoids micro-jumps of the patch.
@@ -1964,13 +1965,17 @@ public sealed partial class MapPageViewModel : ObservableObject
             zoom, planned.Count, cachedCount, planned.Count - cachedCount);
 
         // fillNoData: false — keep NoData so the NoData-aware mesh holes gaps/uncovered cells through to the
-        // base (Krok 4c), instead of rendering flat geometry over them (the yellow blinds / green rectangle).
+        // base (Krok 4c), instead of rendering flat geometry over them (the yellow blinds).
         DemRaster? detail = await regionDemLoader.LoadRegionAsync(window, zoom, tileAvailable: detailTileCached, fillNoData: false).ConfigureAwait(true);
         if (detail is null)
         {
             logger.LogWarning("LOD detail: no cached z{Zoom} raster at {Lat:F4},{Lon:F4}", zoom, focus.Latitude, focus.Longitude);
             return null;
         }
+
+        // Coverage guard: GUGiK returns flat ~0 outside its coverage (not a NoData sentinel) → a flat green
+        // plate below the terrain. Hole cells below the floor so the mesh drops them and the base shows.
+        detail = DemRasterRepair.HoleBelow(detail, DetailCoverageFloorMeters);
 
         (double dMin, double dMax) = detail.GetElevationRange();
         logger.LogInformation(

@@ -44,6 +44,30 @@ public static class DemRasterRepair
         return new DemRaster(cols, rows, raster.Bounds, s, noData);
     }
 
+    /// <summary>
+    /// Returns a copy with every valid cell strictly below <paramref name="floorMeters"/> set to NoData, so
+    /// the NoData-aware mesh holes them through to the base. GUGiK returns a flat ~0 OUTSIDE its coverage
+    /// (instead of a NoData sentinel), which would otherwise render as a flat plate below the terrain; for a
+    /// mountain patch (real terrain well above the floor) this drops only those coverage-edge artefacts.
+    /// Note: a Tatra-context guard — a per-cell floor would hole genuine lowland if used nationwide.
+    /// </summary>
+    public static DemRaster HoleBelow(DemRaster raster, double floorMeters)
+    {
+        ArgumentNullException.ThrowIfNull(raster);
+
+        float noData = raster.NoDataValue;
+        float[] s = (float[])raster.Samples.Clone();
+        for (int i = 0; i < s.Length; i++)
+        {
+            if (!s[i].Equals(noData) && s[i] < floorMeters)
+            {
+                s[i] = noData;
+            }
+        }
+
+        return new DemRaster(raster.Columns, raster.Rows, raster.Bounds, s, noData);
+    }
+
     // Walks `count` samples from `start` by `stride`, carrying the last valid value forward into holes.
     private static void FillRun(float[] s, int start, int count, int stride, Func<float, bool> isHole)
     {
