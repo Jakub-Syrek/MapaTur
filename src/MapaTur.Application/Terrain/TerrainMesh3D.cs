@@ -207,10 +207,13 @@ public sealed class TerrainMesh3D
     /// <param name="projectionAnchor">Optional fixed world-frame origin. Null (default) anchors on the raster's
     /// own bounds centre (legacy behaviour). A shared anchor across independently-built windows gives them one
     /// world frame so a streaming reload doesn't shift the origin under a fixed camera (LOD).</param>
-    /// <param name="edgeHeightSource">Optional coarser raster (e.g. the LOD base) to pin this raster's OUTER
-    /// perimeter vertices to (edge matching, Krok 4c). Null (default) keeps every vertex at its own height.
-    /// When set, boundary vertices take the source's bilinear height so a streamed detail patch meets the
-    /// base seamlessly instead of stepping away from it; no-data source samples leave the detail height.</param>
+    /// <param name="edgeHeightSource">Optional coarser raster (e.g. the LOD base) to morph this raster's OUTER
+    /// band of vertices toward (edge matching, Krok 4c). Null (default) keeps every vertex at its own height.
+    /// When set, the outermost <paramref name="edgeMatchRows"/> rows blend from the source's bilinear height
+    /// at the very edge to full detail one band in, so a streamed detail patch melts into the base instead of
+    /// stepping; no-data source samples leave the detail height.</param>
+    /// <param name="edgeMatchRows">Width (in vertices) of the edge-match morph band. 1 (default) pins only the
+    /// perimeter; higher blends the step over several rows. Ignored when <paramref name="edgeHeightSource"/> is null.</param>
     public static IReadOnlyList<TerrainMesh3D> BuildTiles(
         DemRaster raster,
         TerrainMeshOptions? options = null,
@@ -218,7 +221,8 @@ public sealed class TerrainMesh3D
         int orthoGridCols = 1,
         int orthoGridRows = 1,
         GeoPoint? projectionAnchor = null,
-        DemRaster? edgeHeightSource = null)
+        DemRaster? edgeHeightSource = null,
+        int edgeMatchRows = 1)
     {
         ArgumentNullException.ThrowIfNull(raster);
         if (maxTileSide < 1)
@@ -275,7 +279,7 @@ public sealed class TerrainMesh3D
                     for (int c0 = cellC0; c0 < cellC1; c0 += maxTileSide)
                     {
                         int c1 = Math.Min(c0 + maxTileSide, cellC1);
-                        tiles.Add(BuildBlock(raster, options, frame, c0, c1, r0, r1, anchor, anchorOffset, cell, edgeHeightSource));
+                        tiles.Add(BuildBlock(raster, options, frame, c0, c1, r0, r1, anchor, anchorOffset, cell, edgeHeightSource, edgeMatchRows));
                     }
                 }
             }
@@ -322,10 +326,12 @@ public sealed class TerrainMesh3D
         GeoPoint projectionAnchor,
         Vector3 anchorOffset,
         OrthoCell orthoCell = default,
-        DemRaster? edgeHeightSource = null)
+        DemRaster? edgeHeightSource = null,
+        int edgeMatchRows = 1)
     {
         int cols = raster.Columns;
         int rows = raster.Rows;
+        int morphBand = Math.Max(1, edgeMatchRows);
         int tileCols = colEnd - colStart + 1;
         int tileRows = rowEnd - rowStart + 1;
         int vertexCount = tileCols * tileRows;
@@ -356,16 +362,23 @@ public sealed class TerrainMesh3D
                 double xMeters = -frame.HalfWidthMeters + (frame.CellWidthMeters * c);
                 float z = raster[c, r] * exaggeration;
 
-                // Edge matching (Krok 4c): pin OUTER-perimeter vertices to the coarse base so a detail patch
-                // meets it seamlessly instead of stepping. A no-data base sample leaves the detail height.
-                if (edgeHeightSource is not null && (c == 0 || c == cols - 1 || r == 0 || r == rows - 1))
+                // Edge matching (Krok 4c): morph the outer band toward the coarse base so a detail patch melts
+                // into it over `morphBand` rows instead of stepping — weight 1 at the very edge → 0 one band
+                // in. A no-data base sample leaves the detail height.
+                if (edgeHeightSource is not null)
                 {
-                    double lon = cols > 1 ? raster.West + ((double)c / (cols - 1) * (raster.East - raster.West)) : raster.West;
-                    double lat = rows > 1 ? raster.North - ((double)r / (rows - 1) * (raster.North - raster.South)) : raster.North;
-                    double baseElev = edgeHeightSource.SampleBilinear(lon, lat);
-                    if (baseElev != edgeHeightSource.NoDataValue)
+                    int distFromEdge = Math.Min(Math.Min(c, cols - 1 - c), Math.Min(r, rows - 1 - r));
+                    if (distFromEdge < morphBand)
                     {
-                        z = (float)(baseElev * exaggeration);
+                        double lon = cols > 1 ? raster.West + ((double)c / (cols - 1) * (raster.East - raster.West)) : raster.West;
+                        double lat = rows > 1 ? raster.North - ((double)r / (rows - 1) * (raster.North - raster.South)) : raster.North;
+                        double baseElev = edgeHeightSource.SampleBilinear(lon, lat);
+                        if (baseElev != edgeHeightSource.NoDataValue)
+                        {
+                            float baseZ = (float)(baseElev * exaggeration);
+                            float weight = (float)(morphBand - distFromEdge) / morphBand;
+                            z = (baseZ * weight) + (z * (1f - weight));
+                        }
                     }
                 }
 

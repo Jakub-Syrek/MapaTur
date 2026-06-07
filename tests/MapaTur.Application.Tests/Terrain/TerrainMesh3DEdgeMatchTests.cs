@@ -43,6 +43,22 @@ public sealed class TerrainMesh3DEdgeMatchTests
     }
 
     [Fact]
+    public void BuildTiles_EdgeMatchRows_MorphsTheOuterBandFromBaseToDetail()
+    {
+        DemRaster baseLayer = Flat(7, 100.0);
+        DemRaster detail = Flat(7, 200.0);
+        var options = new TerrainMeshOptions { VerticalExaggeration = 1f };
+
+        TerrainMesh3D mesh = TerrainMesh3D.BuildTiles(detail, options, edgeHeightSource: baseLayer, edgeMatchRows: 3)[0];
+
+        // 7×7 row-major (tileCols=7). Distance from the nearest edge: (0,0)=0, (1,1)=1, (2,2)=2, (3,3)=3.
+        mesh.Vertices[0].Z.Should().BeApproximately(100f, 0.5f, "the very edge = full base");
+        mesh.Vertices[(1 * 7) + 1].Z.Should().BeApproximately(133.33f, 0.5f, "dist 1 of a 3-wide band = 2/3 base + 1/3 detail");
+        mesh.Vertices[(2 * 7) + 2].Z.Should().BeApproximately(166.67f, 0.5f, "dist 2 = 1/3 base + 2/3 detail");
+        mesh.Vertices[(3 * 7) + 3].Z.Should().BeApproximately(200f, 0.5f, "centre (dist 3, outside the band) = full detail");
+    }
+
+    [Fact]
     public void BuildTiles_WithoutEdgeHeightSource_KeepsDetailHeightsEverywhere()
     {
         DemRaster detail = Flat(4, 200.0);

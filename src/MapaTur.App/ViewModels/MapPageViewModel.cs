@@ -1942,6 +1942,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     private const double DetailMaxErrorPixels = 2.0;                      // per-tile screen-space error budget
     private const int BaseDetailZoomFloor = 12;                          // chosen zoom at/below base (z12) ⇒ no detail patch
     private const double DetailCoverageFloorMeters = 100.0;              // below this ⇒ GUGiK out-of-coverage flat-0 → hole (Tatra-context guard)
+    private const int DetailEdgeMatchRows = 8;                           // morph band: blend the patch perimeter into the base over N rows
 
     // Last look-at world point with a real terrain hit. On a transient raycast miss (sky / off-DEM) the
     // detail holds here instead of teleporting to the camera target — avoids micro-jumps of the patch.
@@ -2008,11 +2009,11 @@ public sealed partial class MapPageViewModel : ObservableObject
             OverlayTintArgb = tint,
             OverlayTintStrength = 0.45f,
         };
-        // Edge matching (Krok 4c): pin the patch's outer perimeter to the coarse base so it meets it
-        // seamlessly instead of stepping down to it ("hard boundary").
+        // Edge matching (Krok 4c): morph the patch's outer band into the coarse base over several rows so it
+        // melts in instead of stepping down to it ("hard boundary").
         DemRaster? baseForEdges = TerrainRaster;
         return await Task.Run(() =>
-            TerrainMesh3D.BuildTiles(detail, detailOptions, projectionAnchor: anchor, edgeHeightSource: baseForEdges)).ConfigureAwait(true);
+            TerrainMesh3D.BuildTiles(detail, detailOptions, projectionAnchor: anchor, edgeHeightSource: baseForEdges, edgeMatchRows: DetailEdgeMatchRows)).ConfigureAwait(true);
     }
 
     /// <summary>
