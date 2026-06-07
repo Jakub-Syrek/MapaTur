@@ -2034,6 +2034,15 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             int zoom = group.Key;
             MapBounds bbox = UnionTileBounds(group.Select(tile => tile.Cell));
+
+            // Mandatory cache-only diagnostic: shows at a glance whether this zoom exists offline. If
+            // cached=0 the layer skips and the base carries it — correct behaviour, not a regression.
+            IReadOnlyList<DemTileKey> planned = DemTilePlanner.TilesForBounds(bbox, zoom);
+            int cachedCount = detailTileCached is null ? planned.Count : planned.Count(detailTileCached);
+            logger.LogInformation(
+                "LOD cache-only z{Zoom}: requested={Requested}, cached={Cached}, skipped={Skipped}",
+                zoom, planned.Count, cachedCount, planned.Count - cachedCount);
+
             // Cache-only: never trigger a WCS download while flying. A zoom whose tiles aren't cached is
             // skipped (null) and the base carries that area — online pulls happen only in the offline mode.
             DemRaster? raster = await regionDemLoader.LoadRegionAsync(bbox, zoom, tileAvailable: detailTileCached).ConfigureAwait(true);
