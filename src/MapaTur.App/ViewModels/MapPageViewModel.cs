@@ -1998,7 +1998,11 @@ public sealed partial class MapPageViewModel : ObservableObject
             OverlayTintArgb = tint,
             OverlayTintStrength = 0.45f,
         };
-        return await Task.Run(() => TerrainMesh3D.BuildTiles(detail, detailOptions, projectionAnchor: anchor)).ConfigureAwait(true);
+        // Edge matching (Krok 4c): pin the patch's outer perimeter to the coarse base so it meets it
+        // seamlessly instead of stepping down to it ("hard boundary").
+        DemRaster? baseForEdges = TerrainRaster;
+        return await Task.Run(() =>
+            TerrainMesh3D.BuildTiles(detail, detailOptions, projectionAnchor: anchor, edgeHeightSource: baseForEdges)).ConfigureAwait(true);
     }
 
     /// <summary>

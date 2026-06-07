@@ -207,13 +207,18 @@ public sealed class TerrainMesh3D
     /// <param name="projectionAnchor">Optional fixed world-frame origin. Null (default) anchors on the raster's
     /// own bounds centre (legacy behaviour). A shared anchor across independently-built windows gives them one
     /// world frame so a streaming reload doesn't shift the origin under a fixed camera (LOD).</param>
+    /// <param name="edgeHeightSource">Optional coarser raster (e.g. the LOD base) to pin this raster's OUTER
+    /// perimeter vertices to (edge matching, Krok 4c). Null (default) keeps every vertex at its own height.
+    /// When set, boundary vertices take the source's bilinear height so a streamed detail patch meets the
+    /// base seamlessly instead of stepping away from it; no-data source samples leave the detail height.</param>
     public static IReadOnlyList<TerrainMesh3D> BuildTiles(
         DemRaster raster,
         TerrainMeshOptions? options = null,
         int maxTileSide = 255,
         int orthoGridCols = 1,
         int orthoGridRows = 1,
-        GeoPoint? projectionAnchor = null)
+        GeoPoint? projectionAnchor = null,
+        DemRaster? edgeHeightSource = null)
     {
         ArgumentNullException.ThrowIfNull(raster);
         if (maxTileSide < 1)
@@ -270,7 +275,7 @@ public sealed class TerrainMesh3D
                     for (int c0 = cellC0; c0 < cellC1; c0 += maxTileSide)
                     {
                         int c1 = Math.Min(c0 + maxTileSide, cellC1);
-                        tiles.Add(BuildBlock(raster, options, frame, c0, c1, r0, r1, anchor, anchorOffset, cell));
+                        tiles.Add(BuildBlock(raster, options, frame, c0, c1, r0, r1, anchor, anchorOffset, cell, edgeHeightSource));
                     }
                 }
             }
@@ -316,7 +321,8 @@ public sealed class TerrainMesh3D
         int rowEnd,
         GeoPoint projectionAnchor,
         Vector3 anchorOffset,
-        OrthoCell orthoCell = default)
+        OrthoCell orthoCell = default,
+        DemRaster? edgeHeightSource = null)
     {
         int cols = raster.Columns;
         int rows = raster.Rows;
@@ -348,6 +354,20 @@ public sealed class TerrainMesh3D
             {
                 double xMeters = -frame.HalfWidthMeters + (frame.CellWidthMeters * c);
                 float z = raster[c, r] * exaggeration;
+
+                // Edge matching (Krok 4c): pin OUTER-perimeter vertices to the coarse base so a detail patch
+                // meets it seamlessly instead of stepping. A no-data base sample leaves the detail height.
+                if (edgeHeightSource is not null && (c == 0 || c == cols - 1 || r == 0 || r == rows - 1))
+                {
+                    double lon = cols > 1 ? raster.West + ((double)c / (cols - 1) * (raster.East - raster.West)) : raster.West;
+                    double lat = rows > 1 ? raster.North - ((double)r / (rows - 1) * (raster.North - raster.South)) : raster.North;
+                    double baseElev = edgeHeightSource.SampleBilinear(lon, lat);
+                    if (baseElev != edgeHeightSource.NoDataValue)
+                    {
+                        z = (float)(baseElev * exaggeration);
+                    }
+                }
+
                 vertices[(localRow * tileCols) + (c - colStart)] =
                     new Vector3((float)xMeters + anchorOffset.X, (float)yMeters + anchorOffset.Y, z);
             }
