@@ -3,20 +3,24 @@ using MapaTur.Domain.Terrain;
 namespace MapaTur.Application.Terrain;
 
 /// <summary>
-/// Terrain-roughness metrics for the screen-space-error LOD (Model 1): grade detail by how much terrain a
-/// tile actually contains, not just by distance. The geometric error of a tile is how far its true surface
-/// strays from the coarsest representation — a single corner-bilinear quad — so a jagged ridge demands HD
-/// even kilometres away while a planar slope stays coarse.
+/// Terrain-roughness metric for the screen-space-error LOD (Model 1): how geometrically SHARP a tile is,
+/// so detail can be boosted on ridges / walls / gullies and not on smooth ground. Roughness here is LOCAL
+/// curvature — how far each cell sits above/below the mean of its neighbours — NOT deviation from a plane,
+/// so a smooth (deep) valley reads low while a jagged ridge reads high. The aggregate is a high percentile,
+/// not the max, so a single noisy speckle does not masquerade as roughness. No-data cells are ignored.
 /// </summary>
 public static class DemRasterRoughness
 {
     /// <summary>
-    /// Max vertical distance (metres) between the raster's true surface and the bilinear surface through its
-    /// four corners — the geometric error of representing the whole tile as one quad. Flat or planar tiles
-    /// return ~0; rugged tiles return a large value. No-data cells are skipped; a no-data corner (a coverage
-    /// edge with no fittable quad) yields 0.
+    /// Roughness in metres = the <paramref name="highPercentile"/> percentile of per-cell local curvature
+    /// (<c>|z − mean(valid orthogonal neighbours)|</c>). Flat / planar tiles return ~0; a gentle valley
+    /// returns low (uniform small curvature); a ridge or wall returns high; an isolated speckle is dropped
+    /// by the percentile. Cells with fewer than two valid neighbours, and no-data cells, are skipped.
     /// </summary>
-    public static double MaxDeviationFromBilinear(DemRaster raster)
+    /// <param name="raster">Source DEM tile.</param>
+    /// <param name="highPercentile">Percentile in [0,1] used to aggregate (0.95 ⇒ ignore the roughest ~5%,
+    /// which is where lone speckles live, while a real ridge spans far more than 5% of the tile).</param>
+    public static double Roughness(DemRaster raster, double highPercentile = 0.95)
     {
         ArgumentNullException.ThrowIfNull(raster);
 
@@ -24,41 +28,59 @@ public static class DemRasterRoughness
         int rows = raster.Rows;
         float noData = raster.NoDataValue;
 
-        double nw = raster[0, 0];
-        double ne = raster[cols - 1, 0];
-        double sw = raster[0, rows - 1];
-        double se = raster[cols - 1, rows - 1];
+        bool Valid(float v) => !v.Equals(noData) && !float.IsNaN(v);
 
-        if (nw == noData || ne == noData || sw == noData || se == noData)
-        {
-            return 0.0;
-        }
-
-        double maxDeviation = 0.0;
+        var curvatures = new List<double>(cols * rows);
         for (int r = 0; r < rows; r++)
         {
-            double fr = rows > 1 ? (double)r / (rows - 1) : 0.0;
             for (int c = 0; c < cols; c++)
             {
-                double actual = raster[c, r];
-                if (actual == noData)
+                float z = raster[c, r];
+                if (!Valid(z))
                 {
                     continue;
                 }
 
-                double fc = cols > 1 ? (double)c / (cols - 1) : 0.0;
-                double top = nw + ((ne - nw) * fc);
-                double bottom = sw + ((se - sw) * fc);
-                double bilinear = top + ((bottom - top) * fr);
+                double sum = 0.0;
+                int n = 0;
+                AccumulateNeighbour(raster, Valid, c - 1, r, cols, rows, ref sum, ref n);
+                AccumulateNeighbour(raster, Valid, c + 1, r, cols, rows, ref sum, ref n);
+                AccumulateNeighbour(raster, Valid, c, r - 1, cols, rows, ref sum, ref n);
+                AccumulateNeighbour(raster, Valid, c, r + 1, cols, rows, ref sum, ref n);
 
-                double deviation = Math.Abs(actual - bilinear);
-                if (deviation > maxDeviation)
+                if (n < 4)
                 {
-                    maxDeviation = deviation;
+                    continue; // need all four neighbours — an asymmetric edge cell reads a plain slope as curved
                 }
+
+                curvatures.Add(Math.Abs(z - (sum / n)));
             }
         }
 
-        return maxDeviation;
+        if (curvatures.Count == 0)
+        {
+            return 0.0;
+        }
+
+        curvatures.Sort();
+        int index = (int)Math.Round(highPercentile * (curvatures.Count - 1), MidpointRounding.AwayFromZero);
+        index = Math.Clamp(index, 0, curvatures.Count - 1);
+        return curvatures[index];
+    }
+
+    private static void AccumulateNeighbour(
+        DemRaster raster, Func<float, bool> valid, int c, int r, int cols, int rows, ref double sum, ref int count)
+    {
+        if (c < 0 || c >= cols || r < 0 || r >= rows)
+        {
+            return;
+        }
+
+        float v = raster[c, r];
+        if (valid(v))
+        {
+            sum += v;
+            count++;
+        }
     }
 }

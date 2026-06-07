@@ -6,7 +6,7 @@ namespace MapaTur.Application.Tests.Terrain;
 
 /// <summary>
 /// Model 1: detail follows where the terrain is geometrically SHARP, not just near. A tile's roughness
-/// (its <see cref="DemRasterRoughness.MaxDeviationFromBilinear"/>) becomes a factor that scales its
+/// (its <see cref="DemRasterRoughness.Roughness"/>) becomes a factor that scales its
 /// screen-space error: <c>tilePriority = screenSpaceError × roughnessFactor</c>. Ridges/walls/gullies
 /// (high roughness) earn a finer zoom even from a distance; gentle valleys (low roughness) stay coarser.
 /// </summary>
@@ -16,31 +16,29 @@ public sealed class ScreenSpaceLodRoughnessTests
     private static readonly int[] Candidates = { 16, 14, 11 };
 
     [Fact]
-    public void RoughnessFactor_AtReferenceRoughness_IsOne()
+    public void RoughnessFactor_FlatTile_IsOne_NoPenalty()
     {
-        ScreenSpaceLod.RoughnessFactor(roughnessMeters: 30.0, referenceRoughnessMeters: 30.0, maxFactor: 4.0)
+        // SSE stays the decision base: a flat valley gets no boost and no penalty.
+        ScreenSpaceLod.RoughnessFactor(roughnessMeters: 0.0, referenceRoughnessMeters: 30.0, maxBoost: 4.0)
             .Should().BeApproximately(1.0, 1e-9);
+    }
+
+    [Fact]
+    public void RoughnessFactor_AtReferenceRoughness_AddsAFullBoost()
+    {
+        ScreenSpaceLod.RoughnessFactor(30.0, 30.0, 4.0).Should().BeApproximately(2.0, 1e-9); // 1 + 1
     }
 
     [Fact]
     public void RoughnessFactor_RougherThanReference_BoostsProportionally()
     {
-        ScreenSpaceLod.RoughnessFactor(90.0, 30.0, 4.0).Should().BeApproximately(3.0, 1e-9); // 3× as rough ⇒ 3×
+        ScreenSpaceLod.RoughnessFactor(90.0, 30.0, 4.0).Should().BeApproximately(4.0, 1e-9); // 1 + clamp(3,0,4)
     }
 
     [Fact]
-    public void RoughnessFactor_VeryRough_ClampsToMaxFactor()
+    public void RoughnessFactor_VeryRough_ClampsTheBoost()
     {
-        ScreenSpaceLod.RoughnessFactor(1000.0, 30.0, 4.0).Should().BeApproximately(4.0, 1e-9);
-    }
-
-    [Fact]
-    public void RoughnessFactor_NearlyFlat_StaysAboveAFloorSoTilesArentDropped()
-    {
-        double factor = ScreenSpaceLod.RoughnessFactor(0.0, 30.0, 4.0);
-
-        factor.Should().BeGreaterThan(0.0, "a flat valley is coarser, not invisible");
-        factor.Should().BeLessThan(1.0, "but below the reference so it grades down");
+        ScreenSpaceLod.RoughnessFactor(1000.0, 30.0, 3.0).Should().BeApproximately(4.0, 1e-9); // 1 + min(33,3)
     }
 
     [Fact]

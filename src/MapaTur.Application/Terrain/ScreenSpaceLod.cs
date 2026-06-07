@@ -27,28 +27,25 @@ public static class ScreenSpaceLod
         return EquatorMetersPerPixelZoom0 * cosLat / Math.Pow(2.0, zoom);
     }
 
-    // Floor so a flat valley still grades down rather than vanishing from the detail budget entirely.
-    private const double MinRoughnessFactor = 0.25;
-
     /// <summary>
-    /// Turns a tile's roughness (e.g. <see cref="DemRasterRoughness.MaxDeviationFromBilinear"/>) into the LOD
-    /// weight used as <c>tilePriority = screenSpaceError × roughnessFactor</c> (Model 1): the ratio of the
-    /// tile's roughness to a reference, clamped to [<see cref="MinRoughnessFactor"/>, <paramref name="maxFactor"/>].
-    /// A tile at the reference roughness weighs 1; a ridge weighs &gt; 1 (finer detail from farther); a smooth
-    /// valley weighs &lt; 1 (grades down).
+    /// Turns a tile's roughness (e.g. <see cref="DemRasterRoughness.Roughness"/>) into the LOD weight used as
+    /// <c>tilePriority = screenSpaceError × roughnessFactor</c> (Model 1): <c>1 + clamp(roughness / reference,
+    /// 0, maxBoost)</c>. The factor is always ≥ 1, so screen-space error stays the decision base and roughness
+    /// only BOOSTS geometrically interesting tiles — a flat valley weighs 1 (no penalty), a ridge weighs more
+    /// (finer detail from farther), capped at 1 + maxBoost.
     /// </summary>
-    /// <param name="roughnessMeters">The tile's measured geometric roughness, in metres.</param>
-    /// <param name="referenceRoughnessMeters">Roughness that maps to weight 1 (tuning anchor); ≤ 0 returns 1.</param>
-    /// <param name="maxFactor">Upper clamp so one extreme tile can't demand unbounded detail.</param>
-    public static double RoughnessFactor(double roughnessMeters, double referenceRoughnessMeters, double maxFactor)
+    /// <param name="roughnessMeters">The tile's measured local roughness, in metres.</param>
+    /// <param name="referenceRoughnessMeters">Roughness that adds a full +1 boost (tuning anchor); ≤ 0 returns 1.</param>
+    /// <param name="maxBoost">Upper clamp on the additive boost, so one extreme tile can't demand unbounded detail.</param>
+    public static double RoughnessFactor(double roughnessMeters, double referenceRoughnessMeters, double maxBoost)
     {
         if (referenceRoughnessMeters <= 0.0)
         {
             return 1.0;
         }
 
-        double factor = roughnessMeters / referenceRoughnessMeters;
-        return Math.Clamp(factor, MinRoughnessFactor, maxFactor);
+        double boost = Math.Clamp(roughnessMeters / referenceRoughnessMeters, 0.0, maxBoost);
+        return 1.0 + boost;
     }
 
     /// <summary>
