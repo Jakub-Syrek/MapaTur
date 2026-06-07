@@ -926,6 +926,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <param name="userLocationRenderer">Optional 2D-map renderer for the live GPS dot; null skips 2D rendering of the location.</param>
     /// <param name="regionDemLoader">Optional online-region DEM loader (GUGiK 1 m + Terrarium); null disables the "load Tatra region" button.</param>
     /// <param name="offlineDownloader">Optional bulk tile prefetcher (GUGiK 1 m); null disables the "download Tatras offline" button.</param>
+    /// <param name="gugikDemSource">Optional GUGiK 1 m tile source; supplies the cache-only availability check used by LOD detail streaming; null disables it.</param>
     public MapPageViewModel(
         IFilePickerService filePicker,
         IFileSaverService fileSaver,
@@ -1949,6 +1950,18 @@ public sealed partial class MapPageViewModel : ObservableObject
     private const int DetailEdgeMatchRows = 8;                           // morph band: blend the patch perimeter into the base over N rows
     private const bool ShowDiagnosticDetailTint = false;                 // Krok 5: tint OFF for the seamless look; true re-enables tint-by-zoom debug
 
+    // Model 1 (per-tile roughness): split the loaded z16 window into a grid and give each tile its own
+    // subsample step from screen-space-error × roughness (sharp ridges/walls keep 1 m from farther, smooth
+    // valleys step down), capped by a hard vertex budget. Flag OFF ⇒ the proven single-patch path stays.
+    private static readonly bool UsePerTileDetail = true;                // false ⇒ fall back to BuildDetailTilesAsync (single patch)
+    private const int PerTileGridN = 8;                                  // N×N crops over the loaded window (8 = ~500 m tiles, finer budget control)
+    private static readonly int[] PerTileSubsampleSteps = { 1, 2, 4, 8 };// finest → coarsest stride per tile
+    private const float PerTileSkirtDepthMeters = 25f;                   // vertical curtain hides inter-tile (and window→base) seams
+    private const int PerTileMaxTileSide = 250;                          // skirt + 16-bit index limit
+    private const long PerTileVertexBudget = 1_500_000;                  // hard cap on total detail verts (FPS safety)
+    private const int PerTileRoughnessStride = 4;                        // sample every 4th cell for roughness (cost ÷16, metric scale kept)
+    private const int PerTileRoughnessNeighborDistance = 8;              // measure curvature over ±8 cells (~10 m) so ridge roughness registers (±1 reads ~0)
+
     // Last look-at world point with a real terrain hit. On a transient raycast miss (sky / off-DEM) the
     // detail holds here instead of teleporting to the camera target — avoids micro-jumps of the patch.
     // Kept in the scene frame of the current lodAnchor, so it is reset whenever a new LOD session loads.
@@ -2023,6 +2036,108 @@ public sealed partial class MapPageViewModel : ObservableObject
             TerrainMesh3D.BuildTiles(detail, detailOptions, projectionAnchor: anchor, edgeHeightSource: baseForEdges, edgeMatchRows: DetailEdgeMatchRows)).ConfigureAwait(true);
     }
 
+    // Model 1 per-tile detail: loads the SAME z16 window as the single patch, but instead of one global
+    // subsample it splits the window into a grid and gives each tile its own step from screen-space-error ×
+    // roughness (sharp/near → 1 m, smooth/far → coarser), capped by a hard vertex budget. Per-tile seams are
+    // covered by a skirt (a vertical curtain), so we deliberately DON'T edge-match every crop to the base —
+    // that would morph the inner (neighbour-shared) edges too and waffle the surface. v1 is skirt-only; if the
+    // outer window→base boundary steps visibly, an outer-only edge-match pre-pass is the next iteration.
+    private async Task<IReadOnlyList<TerrainMesh3D>?> BuildPerTileDetailAsync(
+        GeoPoint focus, GeoPoint anchor, System.Numerics.Vector3 cameraPosition, double fovY, double viewportHeight)
+    {
+        if (regionDemLoader is null)
+        {
+            return null;
+        }
+
+        MapBounds window = LodTerrainWindow.Around(focus, 2000);
+        IReadOnlyList<DemTileKey> planned = DemTilePlanner.TilesForBounds(window, NearDetailZoom);
+        int cachedCount = detailTileCached is null ? planned.Count : planned.Count(detailTileCached);
+        logger.LogInformation(
+            "LOD per-tile cache-only z{Zoom}: requested={Requested}, cached={Cached}, skipped={Skipped}",
+            NearDetailZoom, planned.Count, cachedCount, planned.Count - cachedCount);
+
+        DemRaster? full = await regionDemLoader.LoadRegionAsync(window, NearDetailZoom, tileAvailable: detailTileCached, fillNoData: false).ConfigureAwait(true);
+        if (full is null)
+        {
+            logger.LogWarning("LOD per-tile: no cached z{Zoom} raster at {Lat:F4},{Lon:F4}", NearDetailZoom, focus.Latitude, focus.Longitude);
+            return null;
+        }
+
+        // All the heavy CPU — HoleBelow, the roughness/SSE/budget plan, and the per-tile meshing — runs OFF the
+        // UI thread so flying never freezes (the roughness scan over the ~8 M-cell z16 window was the stall).
+        DemRaster loaded = full;
+        float exaggeration = (float)Math.Clamp(VerticalExaggeration, 1.0, 5.0);
+        RoughnessLodPreset preset = RoughnessLodPreset.Balanced;
+        var detailOptions = new MapaTur.Application.Terrain.TerrainMeshOptions
+        {
+            VerticalExaggeration = exaggeration,
+            SkirtDepthMeters = PerTileSkirtDepthMeters,
+        };
+
+        return await Task.Run(() =>
+        {
+            var totalTimer = System.Diagnostics.Stopwatch.StartNew();
+            DemRaster holed = DemRasterRepair.HoleBelow(loaded, DetailCoverageFloorMeters);
+            if (!DemRasterCoverage.HasTerrain(holed, minTopMeters: 100))
+            {
+                logger.LogInformation("LOD per-tile @ {Lat:F4},{Lon:F4}: no 1 m coverage — keeping base", focus.Latitude, focus.Longitude);
+                return null;
+            }
+
+            PerTilePlanResult planResult = PerTileDetailPlanner.PlanDetailed(
+                holed, cameraPosition, anchor, exaggeration, PerTileGridN, PerTileSubsampleSteps,
+                fovY, viewportHeight, DetailMaxErrorPixels, preset, PerTileVertexBudget,
+                PerTileRoughnessStride, PerTileRoughnessNeighborDistance);
+            IReadOnlyList<PerTileLodDecision> plan = planResult.Tiles;
+
+            long totalVertices = 0;
+            foreach (PerTileLodDecision d in plan)
+            {
+                int planCols = (d.Columns + d.SubsampleStep - 1) / d.SubsampleStep;
+                int planRows = (d.Rows + d.SubsampleStep - 1) / d.SubsampleStep;
+                totalVertices += (long)planCols * planRows;
+            }
+
+            int finestStep = plan.Count == 0 ? 0 : plan.Min(d => d.SubsampleStep);
+            double avgStep = plan.Count == 0 ? 0 : plan.Average(d => d.SubsampleStep);
+            int s1 = plan.Count(d => d.SubsampleStep == 1);
+            int s2 = plan.Count(d => d.SubsampleStep == 2);
+            int s4 = plan.Count(d => d.SubsampleStep == 4);
+            int s8 = plan.Count(d => d.SubsampleStep >= 8);
+            int boostedTiles = planResult.TileInfos.Count(t => t.RoughnessFactor > 1.01);
+            int demotedTiles = planResult.TileInfos.Count(t => t.FinalStep > t.DesiredStep);
+            double maxRoughness = planResult.TileInfos.Count == 0 ? 0 : planResult.TileInfos.Max(t => t.RoughnessMeters);
+            double maxFactor = planResult.TileInfos.Count == 0 ? 0 : planResult.TileInfos.Max(t => t.RoughnessFactor);
+
+            var meshTimer = System.Diagnostics.Stopwatch.StartNew();
+            var meshes = new List<TerrainMesh3D>();
+            foreach (PerTileLodDecision d in plan)
+            {
+                DemRaster crop = holed.Crop(d.ColStart, d.RowStart, d.Columns, d.Rows);
+                DemRaster subsampled = crop.Subsample(d.SubsampleStep);
+                meshes.AddRange(TerrainMesh3D.BuildTiles(
+                    subsampled, detailOptions, maxTileSide: PerTileMaxTileSide, projectionAnchor: anchor));
+            }
+
+            meshTimer.Stop();
+            totalTimer.Stop();
+
+            // Diagnostics (Krok 4): the FULL per-tile distribution so the screenshot and the log can't diverge —
+            // step histogram + avgStep (is the viewed ridge actually fine?), boosted/demoted counts (is it the
+            // SSE metric or the budget keeping it coarse?), max roughness/factor, plus the split timings.
+            logger.LogInformation(
+                "LOD per-tile [{Preset}]: tiles={Tiles} finestStep={Finest} avgStep={Avg:F1} hist(1/2/4/8)={S1}/{S2}/{S4}/{S8} " +
+                "boosted={Boosted} demoted={Demoted} maxRough={MaxR:F1}m maxFactor={MaxF:F2} vertices={Verts}/{Budget}; " +
+                "roughnessMs={RoughnessMs:F0} planningMs={PlanningMs:F0} meshBuildMs={MeshMs} totalDetailMs={TotalMs} (stride {Stride})",
+                preset.Name, plan.Count, finestStep, avgStep, s1, s2, s4, s8,
+                boostedTiles, demotedTiles, maxRoughness, maxFactor, totalVertices, PerTileVertexBudget,
+                planResult.RoughnessMs, planResult.PlanningMs, meshTimer.ElapsedMilliseconds, totalTimer.ElapsedMilliseconds, PerTileRoughnessStride);
+
+            return (IReadOnlyList<TerrainMesh3D>?)meshes;
+        }).ConfigureAwait(true);
+    }
+
     /// <summary>
     /// LOD Krok 4: the camera moved over the static base — re-centre the 1 m detail patch on the LOOK-AT
     /// point (raycast through the screen centre onto the terrain, Krok 1) instead of the camera target, and
@@ -2037,6 +2152,13 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             return;
         }
+
+        // DEBUG (roughness-LOD tuning): full camera orbit so a good viewpoint can be pinned and reproduced across
+        // redeploys (paste these 6 numbers into Terrain3DView.DebugPinnedCamera). Order matches SerializeCamera.
+        logger.LogInformation(
+            "LOD camera: {TX:R};{TY:R};{TZ:R};{Dist:R};{Az:R};{Pitch:R} (fov={Fov:F4})",
+            camera.Target.X, camera.Target.Y, camera.Target.Z, camera.Distance,
+            camera.AzimuthRadians, camera.PitchRadians, camera.FieldOfViewYRadians);
 
         // Look-at point: where the screen centre ray meets the terrain (Krok 1), raycast against the coarse
         // base raster. Fallback chain: a fresh hit → the last valid look-at → the camera target's ground
@@ -2093,9 +2215,22 @@ public sealed partial class MapPageViewModel : ObservableObject
             // ONE stitched detail patch at the look-at's adaptive zoom — a single crack-free surface.
             // (Overlapping multi-res layers caused vertical curtains; proper multi-res stitching is 4c.)
             // At/below the base zoom the patch adds nothing — keep the base alone.
-            IReadOnlyList<TerrainMesh3D>? detailTiles = detailZoom > BaseDetailZoomFloor
-                ? await BuildDetailTilesAsync(focus, lodAnchor, detailZoom).ConfigureAwait(true)
-                : null;
+            IReadOnlyList<TerrainMesh3D>? detailTiles;
+            if (detailZoom <= BaseDetailZoomFloor)
+            {
+                detailTiles = null; // at/below the base zoom the patch adds nothing — keep the base alone.
+            }
+            else if (UsePerTileDetail)
+            {
+                // Model 1: per-tile roughness LOD over the look-at window (1 m on sharp, coarser on smooth).
+                detailTiles = await BuildPerTileDetailAsync(
+                    focus, lodAnchor, camera.Position, camera.FieldOfViewYRadians, viewportHeight).ConfigureAwait(true);
+            }
+            else
+            {
+                // Fallback: the proven single stitched patch at the look-at's adaptive zoom.
+                detailTiles = await BuildDetailTilesAsync(focus, lodAnchor, detailZoom).ConfigureAwait(true);
+            }
             if (detailTiles is null)
             {
                 // Off coverage (rule #12): show the base ALONE — drop the stale detail patch rather than

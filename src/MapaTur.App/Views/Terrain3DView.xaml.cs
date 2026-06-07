@@ -546,6 +546,44 @@ public partial class Terrain3DView : ContentView
         System.Globalization.CultureInfo.InvariantCulture,
         $"{DemKey(frame.Bounds)};{Camera.Target.X:R};{Camera.Target.Y:R};{Camera.Target.Z:R};{Camera.Distance:R};{Camera.AzimuthRadians:R};{Camera.PitchRadians:R}");
 
+    // DEBUG (roughness-LOD tuning): when non-empty, the scene comes up at EXACTLY this camera instead of
+    // auto-framing or restoring, so every redeploy reproduces one viewpoint for A/B comparison. Capture the
+    // 6 numbers from the "LOD camera:" log line. Format: "TargetX;TargetY;TargetZ;Distance;Azimuth;Pitch".
+    private const string DebugPinnedCamera = "";
+
+    // Applies the debug pinned camera verbatim (no pitch clamp — reproduce the exact pose). Returns false when
+    // unset / unparseable so the caller falls back to restore/auto-frame.
+    private bool TryApplyPinnedCamera()
+    {
+        if (string.IsNullOrEmpty(DebugPinnedCamera))
+        {
+            return false;
+        }
+
+        string[] parts = DebugPinnedCamera.Split(';');
+        if (parts.Length != 6)
+        {
+            return false;
+        }
+
+        var ci = System.Globalization.CultureInfo.InvariantCulture;
+        if (float.TryParse(parts[0], System.Globalization.NumberStyles.Float, ci, out float tx)
+            && float.TryParse(parts[1], System.Globalization.NumberStyles.Float, ci, out float ty)
+            && float.TryParse(parts[2], System.Globalization.NumberStyles.Float, ci, out float tz)
+            && float.TryParse(parts[3], System.Globalization.NumberStyles.Float, ci, out float dist)
+            && float.TryParse(parts[4], System.Globalization.NumberStyles.Float, ci, out float az)
+            && float.TryParse(parts[5], System.Globalization.NumberStyles.Float, ci, out float pitch))
+        {
+            Camera.Target = new Vector3(tx, ty, tz);
+            Camera.Distance = dist;
+            Camera.AzimuthRadians = az;
+            Camera.PitchRadians = pitch;
+            return true;
+        }
+
+        return false;
+    }
+
     // Applies a saved camera string IF its DEM key matches the current frame. Returns false (leaving
     // the camera untouched) on any mismatch / parse failure so the caller can auto-frame instead.
     private bool TryRestoreCamera(TerrainMesh3D frame)
@@ -982,8 +1020,9 @@ public partial class Terrain3DView : ContentView
         // Cap zoom-out so pinching out can't fly the camera kilometres past the map edge into grey space.
         controller.MaxDistance = Math.Max(frame.HorizontalExtent * 3f, 12_000f);
 
-        // Restore the camera saved for this DEM; if none (or a different region), auto-frame.
-        if (!TryRestoreCamera(frame))
+        // A debug pinned camera (roughness-LOD tuning) wins over everything so redeploys reproduce one view;
+        // otherwise restore the camera saved for this DEM; if none (or a different region), auto-frame.
+        if (!TryApplyPinnedCamera() && !TryRestoreCamera(frame))
         {
             Camera.Target = Vector3.Zero;
             Camera.Distance = Math.Max(frame.HorizontalExtent * 2.5f, 5_000f);

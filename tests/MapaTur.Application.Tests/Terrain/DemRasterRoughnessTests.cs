@@ -80,4 +80,76 @@ public sealed class DemRasterRoughnessTests
 
         DemRasterRoughness.Roughness(withHole).Should().BeApproximately(0.0, 1e-4);
     }
+
+    // --- stride: a cheaper scan (every N-th cell as a curvature centre, neighbours still ±1 native cell) ---
+    // Stride preserves the METRIC SCALE — unlike subsampling the raster, which would space the neighbours N×
+    // apart and inflate even a smooth valley into "roughness". These tests pin that distinction.
+
+    [Fact]
+    public void Roughness_Stride_KeepsTheMetricScale_SmoothValleyStaysLow()
+    {
+        // Same smooth bowl as the full-scan test: every interior cell has the SAME small curvature, so sampling
+        // fewer of them changes nothing — the value stays low (a raster subsample would blow this up).
+        DemRaster valley = Build(7, (c, r) => 5f * (((c - 3) * (c - 3)) + ((r - 3) * (r - 3))));
+
+        DemRasterRoughness.Roughness(valley, stride: 2).Should().BeLessThan(15.0);
+    }
+
+    [Fact]
+    public void Roughness_Stride_StillFiresOnARidge_FarAboveAValley()
+    {
+        DemRaster valley = Build(7, (c, r) => 5f * (((c - 3) * (c - 3)) + ((r - 3) * (r - 3))));
+        DemRaster ridge = Build(7, (_, r) => r == 3 ? 100f : 0f);
+
+        double valleyRoughness = DemRasterRoughness.Roughness(valley, stride: 2);
+        double ridgeRoughness = DemRasterRoughness.Roughness(ridge, stride: 2);
+
+        ridgeRoughness.Should().BeGreaterThan(15.0, "a ridge is still a sharp edge when sampled at a stride");
+        ridgeRoughness.Should().BeGreaterThan(valleyRoughness * 3.0, "stride keeps rough ≫ smooth");
+    }
+
+    [Fact]
+    public void Roughness_Stride_FlatStaysZero()
+    {
+        DemRasterRoughness.Roughness(Build(9, (_, _) => 500f), stride: 3).Should().BeApproximately(0.0, 1e-6);
+    }
+
+    [Fact]
+    public void Roughness_StrideBelowOne_Throws()
+    {
+        Action act = () => DemRasterRoughness.Roughness(Build(5, (_, _) => 100f), stride: 0);
+
+        act.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    // --- neighbour distance: measure curvature over a WIDER baseline (±N cells), so ridge-scale jaggedness
+    // registers. At 1-cell spacing real terrain reads ~0 (the boost stays inert); a coarser baseline lifts it.
+
+    [Fact]
+    public void Roughness_LargerNeighbourDistance_AmplifiesCurvature()
+    {
+        // A gently curved dome: curvature over a wider baseline grows (~distance²), so a coarser neighbour
+        // distance lifts a feature that 1-cell sampling reads as nearly flat.
+        DemRaster dome = Build(13, (c, r) => -0.5f * (((c - 6) * (c - 6)) + ((r - 6) * (r - 6))));
+
+        double near = DemRasterRoughness.Roughness(dome, neighborDistance: 1);
+        double wide = DemRasterRoughness.Roughness(dome, neighborDistance: 3);
+
+        wide.Should().BeGreaterThan(near * 4.0, "a wider baseline measures curvature at a larger, ridge-relevant scale");
+    }
+
+    [Fact]
+    public void Roughness_LargerNeighbourDistance_StillZeroOnAPlanarSlope()
+    {
+        // A wider baseline must still read a plain slope as flat — only curvature, never gradient, counts.
+        DemRasterRoughness.Roughness(Build(13, (c, _) => 40f * c), neighborDistance: 3).Should().BeApproximately(0.0, 1e-3);
+    }
+
+    [Fact]
+    public void Roughness_NeighbourDistanceBelowOne_Throws()
+    {
+        Action act = () => DemRasterRoughness.Roughness(Build(5, (_, _) => 100f), neighborDistance: 0);
+
+        act.Should().Throw<ArgumentOutOfRangeException>();
+    }
 }

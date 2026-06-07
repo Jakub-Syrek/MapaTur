@@ -20,9 +20,19 @@ public static class DemRasterRoughness
     /// <param name="raster">Source DEM tile.</param>
     /// <param name="highPercentile">Percentile in [0,1] used to aggregate (0.95 ⇒ ignore the roughest ~5%,
     /// which is where lone speckles live, while a real ridge spans far more than 5% of the tile).</param>
-    public static double Roughness(DemRaster raster, double highPercentile = 0.95)
+    /// <param name="stride">Sample every <paramref name="stride"/>-th cell as a curvature centre (≥ 1). The
+    /// neighbours stay at the native ±1 cell, so this samples FEWER centres without changing the metric scale
+    /// (cost ÷ stride²) — unlike subsampling the raster, which would space the neighbours apart and inflate a
+    /// smooth slope/valley into false roughness. 1 (default) scans every cell.</param>
+    /// <param name="neighborDistance">How many cells away the orthogonal neighbours sit (≥ 1). 1 measures
+    /// curvature at the native cell pitch; a larger value measures it over a wider baseline (ridge scale) — on
+    /// a fine raster (~1 m) the 1-cell curvature is tiny, so this is the knob that makes ridge roughness
+    /// register. A planar slope still reads 0 at any distance (only curvature counts, never gradient).</param>
+    public static double Roughness(DemRaster raster, double highPercentile = 0.95, int stride = 1, int neighborDistance = 1)
     {
         ArgumentNullException.ThrowIfNull(raster);
+        ArgumentOutOfRangeException.ThrowIfLessThan(stride, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(neighborDistance, 1);
 
         int cols = raster.Columns;
         int rows = raster.Rows;
@@ -30,10 +40,10 @@ public static class DemRasterRoughness
 
         bool Valid(float v) => !v.Equals(noData) && !float.IsNaN(v);
 
-        var curvatures = new List<double>(cols * rows);
-        for (int r = 0; r < rows; r++)
+        var curvatures = new List<double>((cols / stride + 1) * (rows / stride + 1));
+        for (int r = 0; r < rows; r += stride)
         {
-            for (int c = 0; c < cols; c++)
+            for (int c = 0; c < cols; c += stride)
             {
                 float z = raster[c, r];
                 if (!Valid(z))
@@ -43,10 +53,10 @@ public static class DemRasterRoughness
 
                 double sum = 0.0;
                 int n = 0;
-                AccumulateNeighbour(raster, Valid, c - 1, r, cols, rows, ref sum, ref n);
-                AccumulateNeighbour(raster, Valid, c + 1, r, cols, rows, ref sum, ref n);
-                AccumulateNeighbour(raster, Valid, c, r - 1, cols, rows, ref sum, ref n);
-                AccumulateNeighbour(raster, Valid, c, r + 1, cols, rows, ref sum, ref n);
+                AccumulateNeighbour(raster, Valid, c - neighborDistance, r, cols, rows, ref sum, ref n);
+                AccumulateNeighbour(raster, Valid, c + neighborDistance, r, cols, rows, ref sum, ref n);
+                AccumulateNeighbour(raster, Valid, c, r - neighborDistance, cols, rows, ref sum, ref n);
+                AccumulateNeighbour(raster, Valid, c, r + neighborDistance, cols, rows, ref sum, ref n);
 
                 if (n < 4)
                 {
