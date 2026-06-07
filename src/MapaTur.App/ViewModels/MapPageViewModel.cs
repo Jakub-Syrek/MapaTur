@@ -1947,6 +1947,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     private const int BaseDetailZoomFloor = 12;                          // chosen zoom at/below base (z12) ⇒ no detail patch
     private const double DetailCoverageFloorMeters = 100.0;              // below this ⇒ GUGiK out-of-coverage flat-0 → hole (Tatra-context guard)
     private const int DetailEdgeMatchRows = 8;                           // morph band: blend the patch perimeter into the base over N rows
+    private const bool ShowDiagnosticDetailTint = false;                 // Krok 5: tint OFF for the seamless look; true re-enables tint-by-zoom debug
 
     // Last look-at world point with a real terrain hit. On a transient raycast miss (sky / off-DEM) the
     // detail holds here instead of teleporting to the camera target — avoids micro-jumps of the patch.
@@ -2002,11 +2003,13 @@ public sealed partial class MapPageViewModel : ObservableObject
         // keeps it clearly finer than the base yet quick to rebuild + upload).
         detail = DemRasterDownsampler.SubsampleToMaxCells(detail, maxCells: 1_500_000);
 
-        // Diagnostic tint ENCODES the chosen zoom so the adaptive LOD is visible on screen (Krok 4):
-        // z16 cyan (finest 1 m), z14 amber (mid ~6 m), coarser red. Removed for the seamless look (Krok 5).
-        uint tint = zoom >= 16 ? 0xFF00E5FFu  // cyan  — finest detail
-            : zoom >= 14 ? 0xFFFFC400u        // amber — mid detail
-            : 0xFFFF3B30u;                    // red   — coarse detail
+        // Krok 5: the diagnostic tint is OFF — the detail now renders in plain hypsometric colour like the
+        // base, so (heights edge-matched) it melts in seamlessly and the patch is invisible. The tint-by-zoom
+        // (z16 cyan / z14 amber / coarser red) stays available behind the flag for debugging; the LOD is still
+        // observable from the `cache-only z{N}` / `detail z{N}` log lines.
+        uint? tint = ShowDiagnosticDetailTint
+            ? (zoom >= 16 ? 0xFF00E5FFu : zoom >= 14 ? 0xFFFFC400u : 0xFFFF3B30u)
+            : null;
         var detailOptions = new MapaTur.Application.Terrain.TerrainMeshOptions
         {
             VerticalExaggeration = (float)Math.Clamp(VerticalExaggeration, 1.0, 5.0),
