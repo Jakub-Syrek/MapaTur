@@ -42,10 +42,18 @@ ortho ≈ 1 m detal). Sedno nowego = geo-UV + geo-resolve + geo-cięcie.
 
 ## 3. Źródła ortho
 
-- **Teraz:** bundlowane komórki (`tatry-ortho`, PL+SK composited, ~1 m) — pokrycie = `tatry.dem`. Rezydentne
-  w pamięci (RGBA8, ~1,9 GB po mip na flagowcu — patrz M11 ROADMAP). **MVP używa tego, zero nowych źródeł.**
-- **Później (poza tym doc):** strumieniowe ortho GUGiK z16 (jak DEM streaming) dla pokrycia całego
-  województwa — osobny milestone, NIE w zakresie ortho-na-LOD MVP.
+- **Teraz (MVP):** bundlowane komórki (`tatry-ortho`, PL+SK composited, ~1 m) — pokrycie = `tatry.dem`.
+  Rezydentne w pamięci (RGBA8, ~1,9 GB po mip na flagowcu — patrz M11 ROADMAP). Zero nowych źródeł.
+- **🎯 NORTH STAR — „kostki na całą mapę Tatr":** strumieniowane kafle ortho (GUGiK ortho z16 / Geoportal
+  WMTS), per-viewport, dokładnie jak streaming DEM (`OnlineDemTileSource` + `DemTilePlanner` + `SlippyTileMath`
+  + `TerrariumDecoder` — fundamenty zmergowane, patrz [[dem-streaming-engine]]). Wtedy ortho (i 1 m DEM) pokrywa
+  **cały obszar Tatr/województwa**, lecisz gdziekolwiek, kafle dociągają się i evictują (LRU).
+- **Kluczowe:** `OrthoCoverage` (geo-UV) jest **wspólnym prymitywem** dla obu — bundlowana komórka i
+  strumieniowana „kostka" różnią się TYLKO źródłem bajtów; każda ma geo-bounds → ta sama geo-UV. Więc krok
+  geo-UV w `BuildTiles` (Faza 1) jest fundamentem także dla streamingu, nie pracą do wyrzucenia.
+- **Prerequisite streamingu (z [[dem-streaming-engine]] krok 2):** **wspólny world-origin** zamiast per-sesja
+  anchor — ryzykowny rework (camera persistence, projekcje overlayów, sync 2D↔3D). To brama do whole-Tatra,
+  poza MVP ortho.
 
 ## 4. Przepływ docelowy
 
@@ -106,6 +114,11 @@ Bez GL, bez I/O.
 - **Faza 2 — robustność:** geo-cięcie po granicach komórek (kafel na styku), (opcj.) async upload, budżet
   pamięci. Tu wchodzi M11 #39/#43.
 - **Faza 3 — jakość:** blending PL/SK, szwy, przejścia, ew. korekcja kolorystyczna/ośw. ortho.
+- **🎯 Faza 4 — „kostki na całą mapę Tatr" (north star, osobny duży arc):** zamień bundlowane komórki na
+  **strumieniowane kafle ortho** (analogicznie do `OnlineDemTileSource` dla DEM) + LRU eviction. Każdy kafel =
+  `OrthoCoverage` z geo-bounds → reużywa geo-UV z Fazy 1. **Prerequisite:** wspólny world-origin
+  ([[dem-streaming-engine]] krok 2) — ryzykowny rework, do zaplanowania osobno. Efekt: 1 m DEM + ortho na
+  całym obszarze, lecisz gdziekolwiek.
 
 ## 9. Ryzyka / decyzje do podjęcia
 
