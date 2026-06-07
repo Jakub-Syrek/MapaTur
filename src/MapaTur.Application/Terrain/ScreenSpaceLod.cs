@@ -27,6 +27,30 @@ public static class ScreenSpaceLod
         return EquatorMetersPerPixelZoom0 * cosLat / Math.Pow(2.0, zoom);
     }
 
+    // Floor so a flat valley still grades down rather than vanishing from the detail budget entirely.
+    private const double MinRoughnessFactor = 0.25;
+
+    /// <summary>
+    /// Turns a tile's roughness (e.g. <see cref="DemRasterRoughness.MaxDeviationFromBilinear"/>) into the LOD
+    /// weight used as <c>tilePriority = screenSpaceError × roughnessFactor</c> (Model 1): the ratio of the
+    /// tile's roughness to a reference, clamped to [<see cref="MinRoughnessFactor"/>, <paramref name="maxFactor"/>].
+    /// A tile at the reference roughness weighs 1; a ridge weighs &gt; 1 (finer detail from farther); a smooth
+    /// valley weighs &lt; 1 (grades down).
+    /// </summary>
+    /// <param name="roughnessMeters">The tile's measured geometric roughness, in metres.</param>
+    /// <param name="referenceRoughnessMeters">Roughness that maps to weight 1 (tuning anchor); ≤ 0 returns 1.</param>
+    /// <param name="maxFactor">Upper clamp so one extreme tile can't demand unbounded detail.</param>
+    public static double RoughnessFactor(double roughnessMeters, double referenceRoughnessMeters, double maxFactor)
+    {
+        if (referenceRoughnessMeters <= 0.0)
+        {
+            return 1.0;
+        }
+
+        double factor = roughnessMeters / referenceRoughnessMeters;
+        return Math.Clamp(factor, MinRoughnessFactor, maxFactor);
+    }
+
     /// <summary>
     /// Chooses a detail zoom for a tile at <paramref name="cameraDistanceMeters"/> from the camera, using
     /// each candidate zoom's ground resolution as its geometric error. Returns the coarsest (lowest) zoom
@@ -39,13 +63,17 @@ public static class ScreenSpaceLod
     /// <param name="fovY">Vertical field of view, in radians.</param>
     /// <param name="viewportHeight">Viewport height, in pixels.</param>
     /// <param name="maxErrorPixels">Pixel error budget; the coarsest zoom within it is chosen.</param>
+    /// <param name="roughnessFactor">Model 1 weight (default 1). Scales the screen-space error so a rough
+    /// tile (ridge/wall) earns a finer zoom from the same distance and a smooth valley grades down — i.e.
+    /// <c>tilePriority = screenSpaceError × roughnessFactor</c>. See <see cref="RoughnessFactor"/>.</param>
     public static int ZoomForCameraDistance(
         IReadOnlyList<int> zoomCandidatesFinestFirst,
         double cameraDistanceMeters,
         double latitudeDegrees,
         double fovY,
         double viewportHeight,
-        double maxErrorPixels)
+        double maxErrorPixels,
+        double roughnessFactor = 1.0)
     {
         ArgumentNullException.ThrowIfNull(zoomCandidatesFinestFirst);
         if (zoomCandidatesFinestFirst.Count == 0)
@@ -56,7 +84,7 @@ public static class ScreenSpaceLod
         var geometricErrors = new double[zoomCandidatesFinestFirst.Count];
         for (int i = 0; i < zoomCandidatesFinestFirst.Count; i++)
         {
-            geometricErrors[i] = MetersPerPixel(zoomCandidatesFinestFirst[i], latitudeDegrees);
+            geometricErrors[i] = MetersPerPixel(zoomCandidatesFinestFirst[i], latitudeDegrees) * roughnessFactor;
         }
 
         int level = ScreenSpaceError.SelectLod(geometricErrors, cameraDistanceMeters, fovY, viewportHeight, maxErrorPixels);
