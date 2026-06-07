@@ -295,9 +295,13 @@ public sealed class Terrain3DController
     /// </summary>
     public void ApplyVertical(float dPixels)
     {
-        // Scale the step by distance, but never below VerticalStepMinDistance, so the arrows keep moving
-        // the camera a usable amount even when pinch-zoomed right in (where Camera.Distance is tiny).
-        float scale = PanSensitivity * MathF.Max(Camera.Distance, VerticalStepMinDistance);
+        // Step scales with the camera's height ABOVE the terrain when a floor is known, so a free-fly view
+        // hugging a ridge nudges altitude finely instead of leaping by the far orbit distance. Without a floor
+        // (legacy / pre-first-paint) fall back to the distance floor so the arrows stay usable at any zoom.
+        float reference = float.IsNaN(CameraFloorZ)
+            ? MathF.Max(Camera.Distance, VerticalStepMinDistance)
+            : MathF.Max(Camera.Position.Z - CameraFloorZ, PanMinDistance);
+        float scale = PanSensitivity * reference;
         float newZ = Camera.Target.Z + (dPixels * scale);
         newZ = Math.Clamp(newZ, MinTargetElevation, MaxTargetElevation);
         Camera.Target = new Vector3(Camera.Target.X, Camera.Target.Y, newZ);

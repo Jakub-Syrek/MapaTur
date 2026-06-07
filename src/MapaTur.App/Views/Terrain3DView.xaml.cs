@@ -780,9 +780,10 @@ public partial class Terrain3DView : ContentView
         (49.2283, 20.0586), // Krzyżne (flight end)
     };
 
-    // Real-metre clearance the LOCAL camera floor keeps the eye above the terrain directly beneath it.
-    // Added inside the vertical exaggeration so it stays a true 100 m at any Pion setting.
-    private const double CameraClearanceMeters = 100.0;
+    // Real-metre clearance the LOCAL camera floor keeps the eye above the terrain directly beneath it: the
+    // eye auto-lifts to stay ~this far over the ground as you fly. Added inside the vertical exaggeration so
+    // it stays a true value at any Pion setting. 5 m = skim just above the surface (immersive low fly-over).
+    private const double CameraClearanceMeters = 5.0;
 
     // Hard altitude ceiling (metres above sea level) the camera EYE can rise to. Multiplied by the
     // exaggeration to world-Z, so it is a fixed real altitude at any Pion. The camera cannot ascend

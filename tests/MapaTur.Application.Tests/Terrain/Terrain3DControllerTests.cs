@@ -333,6 +333,29 @@ public sealed class Terrain3DControllerTests
     }
 
     [Fact]
+    public void ApplyVertical_CloseToTerrain_StepScalesWithHeightAboveTerrain_NotOrbitDistance()
+    {
+        // Free-fly: the orbit Distance is huge (far anchor) while the eye hugs a ridge. The raise/lower step
+        // must scale by the small height above terrain (fine altitude control), not the 16 km distance.
+        var ctrl = BuildController(out var camera);
+        camera.Distance = 16000f;
+        camera.PitchRadians = MathF.PI / 4f;
+        camera.Target = Vector3.Zero;
+
+        ctrl.CameraFloorZ = float.NaN; // no floor → legacy distance-based (coarse)
+        ctrl.ApplyVertical(10f);
+        float farStep = Math.Abs(camera.Target.Z);
+
+        camera.Target = Vector3.Zero;
+        ctrl.CameraFloorZ = camera.Position.Z - 100f; // eye ~100 m above terrain
+        ctrl.ApplyVertical(10f);
+        float nearStep = Math.Abs(camera.Target.Z);
+
+        nearStep.Should().BeLessThan(farStep * 0.2f, "close to terrain the altitude step must be far finer");
+        nearStep.Should().BeGreaterThan(0f, "but still move a usable amount");
+    }
+
+    [Fact]
     public void ApplyVertical_PositivePixels_RaisesTargetZ()
     {
         var ctrl = BuildController(out var camera);
