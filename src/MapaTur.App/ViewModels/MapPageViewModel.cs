@@ -1917,7 +1917,14 @@ public sealed partial class MapPageViewModel : ObservableObject
             }
 
             TerrainRaster = baseRaster;
-            Peaks3DOverlay = null; // skip peak detection for the demo
+            // Landmarks: name + seat the known Tatra summits on the LOD base so peaks (Rysy, Mięguszowiecki,
+            // Mnich, Kozi Wierch, …) are labelled in the demo too. Detect on a coarse copy (the dominance scan
+            // is O(cells×window²)); the gazetteer guarantees every named summit in view shows, seated on the
+            // base terrain. Same world frame as the tiles (anchor = base centre), so labels line up.
+            var lodPeakOptions = new PeakDetectionOptions { DominanceRadiusMeters = 550.0, MaxPeaks = 48 };
+            DemRaster lodPeakRaster = DemRasterDownsampler.SubsampleToMaxCells(baseRaster, maxCells: 20_000);
+            Peaks3DOverlay = await Task.Run(() =>
+                PeakNamer.MergeWithGazetteer(PeakDetector.Detect(lodPeakRaster, lodPeakOptions), TatraSummits.All, baseRaster)).ConfigureAwait(true);
             lodBaseTiles = baseTiles;
             lodAnchor = baseCentre;
             lodDetailCentre = baseCentre;
