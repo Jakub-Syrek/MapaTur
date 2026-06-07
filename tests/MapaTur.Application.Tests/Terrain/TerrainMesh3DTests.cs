@@ -202,6 +202,40 @@ public sealed class TerrainMesh3DTests
     }
 
     [Fact]
+    public void BuildTiles_WithOrthoCoverage_GeoReferencesUvAndPicksCellByGeo()
+    {
+        // The raster is a small SUB-REGION sitting inside ortho cell (col 2, row 1) of a 4×2 coverage
+        // (lon [19.5,19.75], lat [49.0,49.1]). Its texCoords must be geo-referenced into that cell, and its
+        // OrthoTileIndex must be the geo cell (row*cols+col = 6) — not [0,1] local to the tile.
+        var coverage = new OrthoCoverage(
+            new MapBounds(new GeoPoint(49.0, 19.0), new GeoPoint(49.2, 20.0)), GridCols: 4, GridRows: 2);
+        var raster = new DemRaster(3, 3, new MapBounds(new GeoPoint(49.02, 19.55), new GeoPoint(49.08, 19.70)), new float[9]);
+
+        TerrainMesh3D tile = TerrainMesh3D.BuildTiles(
+            raster, new TerrainMeshOptions { VerticalExaggeration = 1f }, orthoCoverage: coverage)[0];
+
+        tile.OrthoTileIndex.Should().Be((1 * 4) + 2);
+        tile.TexCoords[0].Should().BeApproximately(0.2f, 1e-3f);  // NW vertex U
+        tile.TexCoords[1].Should().BeApproximately(0.2f, 1e-3f);  // NW vertex V (north → smaller V, not flipped)
+        tile.TexCoords[16].Should().BeApproximately(0.8f, 1e-3f); // SE vertex U (index 8 → ×2)
+        tile.TexCoords[17].Should().BeApproximately(0.8f, 1e-3f); // SE vertex V
+    }
+
+    [Fact]
+    public void BuildTiles_NullOrthoCoverage_KeepsLegacyLocalUv()
+    {
+        // Regression guard: without a coverage, texCoords stay [0,1] local to the tile (corner→0, corner→1).
+        var raster = BuildFlatRaster(3, 3);
+
+        TerrainMesh3D tile = TerrainMesh3D.BuildTiles(raster)[0];
+
+        tile.TexCoords[0].Should().BeApproximately(0f, 1e-4f);
+        tile.TexCoords[1].Should().BeApproximately(0f, 1e-4f);
+        tile.TexCoords[16].Should().BeApproximately(1f, 1e-4f);
+        tile.TexCoords[17].Should().BeApproximately(1f, 1e-4f);
+    }
+
+    [Fact]
     public void BuildTiles_WiderNormalRadius_SoftensASharpSpike_WithoutMovingHeights()
     {
         // One raised cell on flat ground. At radius 1 the cells next to it get a very steep normal (a hard

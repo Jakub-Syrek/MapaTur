@@ -214,6 +214,9 @@ public sealed class TerrainMesh3D
     /// stepping; no-data source samples leave the detail height.</param>
     /// <param name="edgeMatchRows">Width (in vertices) of the edge-match morph band. 1 (default) pins only the
     /// perimeter; higher blends the step over several rows. Ignored when <paramref name="edgeHeightSource"/> is null.</param>
+    /// <param name="orthoCoverage">Optional geographic placement of a larger ortho this raster is a sub-region
+    /// of (ortho-on-LOD). When set, per-vertex UV is geo-referenced into the coverage and each tile picks its
+    /// ortho cell by its centre's geo position (MVP: one cell per tile). Null (default) = legacy local UV.</param>
     public static IReadOnlyList<TerrainMesh3D> BuildTiles(
         DemRaster raster,
         TerrainMeshOptions? options = null,
@@ -222,7 +225,8 @@ public sealed class TerrainMesh3D
         int orthoGridRows = 1,
         GeoPoint? projectionAnchor = null,
         DemRaster? edgeHeightSource = null,
-        int edgeMatchRows = 1)
+        int edgeMatchRows = 1,
+        OrthoCoverage? orthoCoverage = null)
     {
         ArgumentNullException.ThrowIfNull(raster);
         if (maxTileSide < 1)
@@ -255,6 +259,27 @@ public sealed class TerrainMesh3D
         int rows = raster.Rows;
 
         var tiles = new List<TerrainMesh3D>();
+
+        // Geo-referenced ortho (ortho-on-LOD): this raster is a SUB-REGION of a larger ortho, so UV is mapped
+        // by geographic position into the coverage (not by the orthoGrid split, which assumes ortho-extent ==
+        // raster-extent). Tile by maxTileSide and let each block pick its ortho cell + per-vertex geo-UV from
+        // the coverage (MVP: one cell per block, by the block centre — no per-cell cutting yet).
+        if (orthoCoverage is not null)
+        {
+            for (int r0 = 0; r0 < rows - 1; r0 += maxTileSide)
+            {
+                int r1 = Math.Min(r0 + maxTileSide, rows - 1);
+                for (int c0 = 0; c0 < cols - 1; c0 += maxTileSide)
+                {
+                    int c1 = Math.Min(c0 + maxTileSide, cols - 1);
+                    tiles.Add(BuildBlock(
+                        raster, options, frame, c0, c1, r0, r1, anchor, anchorOffset,
+                        OrthoCell.Full(cols, rows), edgeHeightSource, edgeMatchRows, orthoCoverage));
+                }
+            }
+
+            return tiles;
+        }
 
         // Tile per ortho cell so a mesh tile never straddles a texture boundary: each mesh tile samples one
         // ortho cell with UV local to that cell. Cells share their seam row/column with the neighbour, and
@@ -327,7 +352,8 @@ public sealed class TerrainMesh3D
         Vector3 anchorOffset,
         OrthoCell orthoCell = default,
         DemRaster? edgeHeightSource = null,
-        int edgeMatchRows = 1)
+        int edgeMatchRows = 1,
+        OrthoCoverage? orthoCoverage = null)
     {
         int cols = raster.Columns;
         int rows = raster.Rows;
@@ -351,6 +377,20 @@ public sealed class TerrainMesh3D
         OrthoCell cell = orthoCell.Spans ? orthoCell : OrthoCell.Full(cols, rows);
         float uDenom = cell.ColEnd > cell.ColStart ? cell.ColEnd - cell.ColStart : 1;
         float vDenom = cell.RowEnd > cell.RowStart ? cell.RowEnd - cell.RowStart : 1;
+
+        // Geo-referenced ortho (ortho-on-LOD): resolve THIS block's ortho cell from its centre's geographic
+        // position in the coverage (MVP: one cell per block). texCoords below then map each vertex's geo into
+        // that cell. geoTileIndex overrides the grid cell index for the returned mesh.
+        int geoCol = 0, geoRow = 0;
+        int geoTileIndex = cell.TileIndex;
+        if (orthoCoverage is { } coverage)
+        {
+            double centreCol = (colStart + colEnd) * 0.5;
+            double centreRow = (rowStart + rowEnd) * 0.5;
+            double centreLon = cols > 1 ? raster.West + (centreCol / (cols - 1) * (raster.East - raster.West)) : raster.West;
+            double centreLat = rows > 1 ? raster.North - (centreRow / (rows - 1) * (raster.North - raster.South)) : raster.North;
+            (geoCol, geoRow, geoTileIndex) = coverage.CellAt(new GeoPoint(centreLat, centreLon));
+        }
 
         // Vertex positions in the full-raster world frame. Row 0 = north edge = +Y; last row = -Y.
         for (int r = rowStart; r <= rowEnd; r++)
@@ -416,8 +456,19 @@ public sealed class TerrainMesh3D
                 Vector3 normal = Vector3.Normalize(new Vector3(-dzdx, -dzdy, 1f));
                 int li = (localRow * tileCols) + (c - colStart);
                 normals[li] = normal;
-                texCoords[li * 2] = (c - cell.ColStart) / uDenom;
-                texCoords[(li * 2) + 1] = (r - cell.RowStart) / vDenom;
+                if (orthoCoverage is { } cov)
+                {
+                    double vlon = cols > 1 ? raster.West + ((double)c / (cols - 1) * (raster.East - raster.West)) : raster.West;
+                    double vlat = rows > 1 ? raster.North - ((double)r / (rows - 1) * (raster.North - raster.South)) : raster.North;
+                    (float gu, float gv) = cov.LocalUv(new GeoPoint(vlat, vlon), geoCol, geoRow);
+                    texCoords[li * 2] = gu;
+                    texCoords[(li * 2) + 1] = gv;
+                }
+                else
+                {
+                    texCoords[li * 2] = (c - cell.ColStart) / uDenom;
+                    texCoords[(li * 2) + 1] = (r - cell.RowStart) / vDenom;
+                }
 
                 uint baseColor = HypsometricColor(raster[c, r]);
                 if (options.OverlayTintArgb is { } tint)
@@ -533,7 +584,7 @@ public sealed class TerrainMesh3D
             raster.Bounds,
             options.LightDirection,
             options.AmbientFactor,
-            cell.TileIndex,
+            geoTileIndex,
             projectionAnchor);
     }
 
