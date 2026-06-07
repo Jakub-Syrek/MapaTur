@@ -7,7 +7,7 @@
 [![MAUI](https://img.shields.io/badge/.NET%20MAUI-Android%20%7C%20iOS%20%7C%20Windows%20%7C%20macOS-512BD4?logo=dotnet&logoColor=white)](https://learn.microsoft.com/dotnet/maui/)
 [![3D engine](https://img.shields.io/badge/3D-OpenGL%20ES%203.0%20%C2%B7%20ANGLE%20%2F%20D3D11-CC3333)](docs/3d-terrain.md)
 [![Mapsui](https://img.shields.io/badge/maps-Mapsui%20%2B%20SkiaSharp-2E7D32)](https://mapsui.com/)
-[![Tests](https://img.shields.io/badge/tests-889%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-893%20passing-brightgreen)](#testing)
 [![Architecture](https://img.shields.io/badge/architecture-Clean-success)](#architecture)
 [![Top language](https://img.shields.io/github/languages/top/Jakub-Syrek/MapaTur)](#)
 [![Code size](https://img.shields.io/github/languages/code-size/Jakub-Syrek/MapaTur)](#)
@@ -183,10 +183,10 @@ dotnet test
 | Suite | Tests | Focus |
 |---|---|---|
 | `MapaTur.Domain.Tests` | 134 | Value objects, aggregates (Route), elevation math, DEM (+ crop), POI tags + colours |
-| `MapaTur.Application.Tests` | 647 | Overpass queries (trails/POI/roads), 3D terrain math + camera + atmosphere, screen-space LOD + per-tile roughness planner + vertex budget, route planner + use cases |
+| `MapaTur.Application.Tests` | 651 | Overpass queries (trails/POI/roads), 3D terrain math + camera + atmosphere, screen-space LOD + per-tile roughness planner + vertex budget + normal smoothing, route planner + use cases |
 | `MapaTur.Infrastructure.Tests` | 86 | TCX/Overpass/POI/road parsers, MBTiles + DEM readers, SQLite (trails/climbing/POI), GPX |
 | `MapaTur.Routing.Tests` | 22 | Tobler function, distance/time cost functions, graph snapping, A\* correctness |
-| **Total** | **889** | xUnit + FluentAssertions + NSubstitute + FsCheck |
+| **Total** | **893** | xUnit + FluentAssertions + NSubstitute + FsCheck |
 
 ## Roadmap
 
