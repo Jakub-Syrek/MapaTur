@@ -1939,12 +1939,6 @@ public sealed partial class MapPageViewModel : ObservableObject
     private const double DetailMaxErrorPixels = 2.0;                      // per-tile screen-space error budget
     private const int BaseDetailZoomFloor = 12;                          // chosen zoom at/below base (z12) ⇒ no detail patch
 
-    // Krok 4b (per-tile concentric): the look-at ring is enumerated at z14 cells, each assigned its own
-    // SSE zoom, then grouped into layers. Radius 1 = 3×3 (~4.8 km, inside the 6 km base).
-    private const int DetailGridZoom = 14;
-    private const int DetailRingRadius = 1;
-    private const int DetailLayerMaxCells = 1_200_000;                   // per-layer vertex cap
-
     // Last look-at world point with a real terrain hit. On a transient raycast miss (sky / off-DEM) the
     // detail holds here instead of teleporting to the camera target — avoids micro-jumps of the patch.
     // Kept in the scene frame of the current lodAnchor, so it is reset whenever a new LOD session loads.
@@ -1959,12 +1953,20 @@ public sealed partial class MapPageViewModel : ObservableObject
             return null;
         }
 
-        // Detail covers the near-field (~4 km around the focus) — fills the visible foreground. The zoom is
-        // chosen per reload by the screen-space-error LOD (Krok 4), not fixed.
-        DemRaster? detail = await regionDemLoader.LoadRegionAsync(LodTerrainWindow.Around(focus, 2000), zoom).ConfigureAwait(true);
+        // Detail covers the near-field (~4 km around the focus) as ONE stitched raster → one crack-free mesh
+        // (no overlapping multi-res layers, which caused vertical curtains). Zoom is the look-at's adaptive
+        // SSE zoom; loaded CACHE-ONLY so flying never triggers a WCS download.
+        MapBounds window = LodTerrainWindow.Around(focus, 2000);
+        IReadOnlyList<DemTileKey> planned = DemTilePlanner.TilesForBounds(window, zoom);
+        int cachedCount = detailTileCached is null ? planned.Count : planned.Count(detailTileCached);
+        logger.LogInformation(
+            "LOD cache-only z{Zoom}: requested={Requested}, cached={Cached}, skipped={Skipped}",
+            zoom, planned.Count, cachedCount, planned.Count - cachedCount);
+
+        DemRaster? detail = await regionDemLoader.LoadRegionAsync(window, zoom, tileAvailable: detailTileCached).ConfigureAwait(true);
         if (detail is null)
         {
-            logger.LogWarning("LOD detail: no z{Zoom} raster at {Lat:F4},{Lon:F4}", zoom, focus.Latitude, focus.Longitude);
+            logger.LogWarning("LOD detail: no cached z{Zoom} raster at {Lat:F4},{Lon:F4}", zoom, focus.Latitude, focus.Longitude);
             return null;
         }
 
@@ -1997,91 +1999,6 @@ public sealed partial class MapPageViewModel : ObservableObject
             OverlayTintStrength = 0.45f,
         };
         return await Task.Run(() => TerrainMesh3D.BuildTiles(detail, detailOptions, projectionAnchor: anchor)).ConfigureAwait(true);
-    }
-
-    /// <summary>
-    /// Krok 4b: builds the per-tile concentric detail as zoom LAYERS. A ring of cells around the look-at is
-    /// assigned a screen-space-error zoom each (<see cref="ScreenSpaceLod.AssignAroundLookAt"/>), then cells
-    /// are grouped by zoom; each group's union bbox is loaded at that zoom and tinted by it. Coarser layers
-    /// are emitted first so the finer one draws on top — concentric: amber (z14) outer, cyan (z16) inner.
-    /// Returns null when every cell sits at/below the base zoom (the base carries it).
-    /// </summary>
-    private async Task<IReadOnlyList<TerrainMesh3D>?> BuildLodDetailLayersAsync(
-        GeoPoint lookAt, float lookAtElevationMeters, System.Numerics.Vector3 cameraPosition, double fovY, double viewportHeight)
-    {
-        if (regionDemLoader is null)
-        {
-            return null;
-        }
-
-        float ve = (float)Math.Clamp(VerticalExaggeration, 1.0, 5.0);
-        IReadOnlyList<LookAtLodTile> assignments = ScreenSpaceLod.AssignAroundLookAt(
-            lookAt, lookAtElevationMeters, cameraPosition, lodAnchor, ve,
-            DetailZoomCandidates, DetailGridZoom, DetailRingRadius, fovY, viewportHeight, DetailMaxErrorPixels);
-
-        var byZoom = assignments
-            .Where(tile => tile.Zoom > BaseDetailZoomFloor)
-            .GroupBy(tile => tile.Zoom)
-            .OrderBy(group => group.Key) // coarser first → finer appended last → drawn on top
-            .ToList();
-        if (byZoom.Count == 0)
-        {
-            return null;
-        }
-
-        var layers = new List<TerrainMesh3D>();
-        foreach (IGrouping<int, LookAtLodTile> group in byZoom)
-        {
-            int zoom = group.Key;
-            MapBounds bbox = UnionTileBounds(group.Select(tile => tile.Cell));
-
-            // Mandatory cache-only diagnostic: shows at a glance whether this zoom exists offline. If
-            // cached=0 the layer skips and the base carries it — correct behaviour, not a regression.
-            IReadOnlyList<DemTileKey> planned = DemTilePlanner.TilesForBounds(bbox, zoom);
-            int cachedCount = detailTileCached is null ? planned.Count : planned.Count(detailTileCached);
-            logger.LogInformation(
-                "LOD cache-only z{Zoom}: requested={Requested}, cached={Cached}, skipped={Skipped}",
-                zoom, planned.Count, cachedCount, planned.Count - cachedCount);
-
-            // Cache-only: never trigger a WCS download while flying. A zoom whose tiles aren't cached is
-            // skipped (null) and the base carries that area — online pulls happen only in the offline mode.
-            DemRaster? raster = await regionDemLoader.LoadRegionAsync(bbox, zoom, tileAvailable: detailTileCached).ConfigureAwait(true);
-            if (raster is null || !DemRasterCoverage.HasTerrain(raster, minTopMeters: 100))
-            {
-                continue;
-            }
-
-            raster = DemRasterDownsampler.SubsampleToMaxCells(raster, DetailLayerMaxCells);
-            uint tint = zoom >= 16 ? 0xFF00E5FFu : zoom >= 14 ? 0xFFFFC400u : 0xFFFF3B30u;
-            var options = new MapaTur.Application.Terrain.TerrainMeshOptions
-            {
-                VerticalExaggeration = ve,
-                OverlayTintArgb = tint,
-                OverlayTintStrength = 0.45f,
-            };
-            IReadOnlyList<TerrainMesh3D> meshes = await Task.Run(
-                () => TerrainMesh3D.BuildTiles(raster, options, projectionAnchor: lodAnchor)).ConfigureAwait(true);
-            layers.AddRange(meshes);
-            logger.LogInformation("LOD layer z{Zoom}: {Cells} cells, {Cols}x{Rows}", zoom, group.Count(), raster.Columns, raster.Rows);
-        }
-
-        return layers.Count > 0 ? layers : null;
-    }
-
-    // Smallest geographic box covering all the given slippy tiles.
-    private static MapBounds UnionTileBounds(IEnumerable<DemTileKey> cells)
-    {
-        double minLat = double.MaxValue, minLon = double.MaxValue, maxLat = double.MinValue, maxLon = double.MinValue;
-        foreach (DemTileKey cell in cells)
-        {
-            (double west, double south, double east, double north) = SlippyTileMath.TileBounds(cell.X, cell.Y, cell.Zoom);
-            minLat = Math.Min(minLat, south);
-            maxLat = Math.Max(maxLat, north);
-            minLon = Math.Min(minLon, west);
-            maxLon = Math.Max(maxLon, east);
-        }
-
-        return new MapBounds(new GeoPoint(minLat, minLon), new GeoPoint(maxLat, maxLon));
     }
 
     /// <summary>
@@ -2151,11 +2068,12 @@ public sealed partial class MapPageViewModel : ObservableObject
         lastLodDetailReloadUtc = DateTime.UtcNow;
         try
         {
-            // Per-tile concentric detail (Krok 4b): a ring of cells around the look-at, grouped by their
-            // screen-space-error zoom into layers (cyan z16 inner, amber z14 outer) over the static base.
-            float focusElevation = effectiveLookAt is { } worldHit ? worldHit.Z / verticalExaggeration : 0f;
-            IReadOnlyList<TerrainMesh3D>? detailTiles = await BuildLodDetailLayersAsync(
-                focus, focusElevation, camera.Position, camera.FieldOfViewYRadians, viewportHeight).ConfigureAwait(true);
+            // ONE stitched detail patch at the look-at's adaptive zoom — a single crack-free surface.
+            // (Overlapping multi-res layers caused vertical curtains; proper multi-res stitching is 4c.)
+            // At/below the base zoom the patch adds nothing — keep the base alone.
+            IReadOnlyList<TerrainMesh3D>? detailTiles = detailZoom > BaseDetailZoomFloor
+                ? await BuildDetailTilesAsync(focus, lodAnchor, detailZoom).ConfigureAwait(true)
+                : null;
             if (detailTiles is null)
             {
                 // Off coverage (rule #12): show the base ALONE — drop the stale detail patch rather than
