@@ -1852,8 +1852,9 @@ public sealed partial class MapPageViewModel : ObservableObject
                 (TatraDemRegion.Bounds.NorthEast.Latitude + TatraDemRegion.Bounds.SouthWest.Latitude) / 2.0,
                 (TatraDemRegion.Bounds.NorthEast.Longitude + TatraDemRegion.Bounds.SouthWest.Longitude) / 2.0);
 
-            // Base: coarse, wide, STATIC. z12 ≈ 37 m/px over ~6 km.
-            DemRaster? baseRaster = await regionDemLoader.LoadRegionAsync(LodTerrainWindow.Around(center, 3000), 12).ConfigureAwait(true);
+            // Base: coarse, wide, STATIC. z12 ≈ 37 m/px over ~6 km. fillNoData: false so a missing/uncovered
+            // tile holes to the sky, not a flat green plate behind the massif (the NoData-aware mesh drops it).
+            DemRaster? baseRaster = await regionDemLoader.LoadRegionAsync(LodTerrainWindow.Around(center, 3000), 12, fillNoData: false).ConfigureAwait(true);
             if (baseRaster is null)
             {
                 StatusMessage = "LOD demo: brak bazy (sieć?)";
@@ -1863,11 +1864,13 @@ public sealed partial class MapPageViewModel : ObservableObject
             // Real coarse base (no artificial blockiness now that the overlay is proven). The 1 m detail
             // near the camera blends into it seamlessly; the base carries the distance.
             baseRaster = SubsampleRasterForRenderer(baseRaster);
+            baseRaster = DemRasterRepair.HoleBelow(baseRaster, DetailCoverageFloorMeters); // GUGiK out-of-coverage flat-0 → hole, not plate
             var baseCentre = new GeoPoint(
                 (baseRaster.North + baseRaster.South) / 2.0, (baseRaster.East + baseRaster.West) / 2.0);
+            (double bMin, double bMax) = baseRaster.GetElevationRange();
             logger.LogInformation(
-                "LOD base: {Cols}x{Rows}, centre {Lat:F4},{Lon:F4}",
-                baseRaster.Columns, baseRaster.Rows, baseCentre.Latitude, baseCentre.Longitude);
+                "LOD base: {Cols}x{Rows}, centre {Lat:F4},{Lon:F4}, elev {Min:F0}-{Max:F0} m",
+                baseRaster.Columns, baseRaster.Rows, baseCentre.Latitude, baseCentre.Longitude, bMin, bMax);
 
             StatusMessage = "LOD demo: kafel 1 m…";
             var options = new MapaTur.Application.Terrain.TerrainMeshOptions
