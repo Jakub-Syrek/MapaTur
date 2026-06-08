@@ -115,7 +115,32 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // the warm direct-sun colour scaled by Lambert AND attenuated by any cloud blocking the
         // sun. Tinting (not just dimming) makes the terrain read as genuinely sunlit; the cloud
         // shadow term adds the moving dappled light that sells "sun + clouds" at any time of day.
-        "  float lambert = max(0.0, dot(normalize(vNormal), uLightDir));\n" +
+        // Rock material (steep faces): compute the slope weight + a triplanar granite noise field BEFORE
+        // lighting, then tilt the shading normal by the noise gradient (tangent detail normal) so the granite
+        // CATCHES THE SUN — sun-lit bumps + shaded crevices instead of a flat plate. rk/rockW are reused for
+        // the albedo blend below. Gentle ground keeps rockW=0 (shN = vNormal), so its lighting is unchanged.
+        "  vec3 shN = normalize(vNormal);\n" +
+        "  float rockSlopeDeg = degrees(acos(clamp(shN.z, 0.0, 1.0)));\n" +
+        "  float rockW = (uSlopeMode < 0.5) ? smoothstep(40.0, 65.0, rockSlopeDeg) * uRockStrength : 0.0;\n" +
+        "  float rk = 0.0;\n" +
+        "  if (rockW > 0.001) {\n" +
+        "    vec3 an = abs(shN); float bw = an.x + an.y + an.z + 0.0001;\n" +
+        "    float sc = 0.35;\n" + // cycles per metre (~3 m granite blotches); 2nd octave at 2.7x
+        "    float nA = noiseT(vWorldPos.yz * sc) + 0.5 * noiseT(vWorldPos.yz * sc * 2.7);\n" +
+        "    float nB = noiseT(vWorldPos.zx * sc) + 0.5 * noiseT(vWorldPos.zx * sc * 2.7);\n" +
+        "    float nC = noiseT(vWorldPos.xy * sc) + 0.5 * noiseT(vWorldPos.xy * sc * 2.7);\n" +
+        "    rk = clamp((((((nA * an.x) + (nB * an.y) + (nC * an.z)) / bw) / 1.5) - 0.5) * 1.55 + 0.5, 0.0, 1.0);\n" +
+        // Detail normal: central-difference the noise on the dominant world plane, project the tilt into the
+        // surface tangent (subtract the normal component), and bend the shading normal by it. Bounded by rockW.
+        "    vec2 dp = (an.z >= an.x && an.z >= an.y) ? vWorldPos.xy : ((an.x >= an.y) ? vWorldPos.yz : vWorldPos.zx);\n" +
+        "    float e = 0.8;\n" +
+        "    float gx = noiseT((dp + vec2(e, 0.0)) * sc) - noiseT((dp - vec2(e, 0.0)) * sc);\n" +
+        "    float gy = noiseT((dp + vec2(0.0, e)) * sc) - noiseT((dp - vec2(0.0, e)) * sc);\n" +
+        "    vec3 bvec = vec3(-gx, -gy, 0.0);\n" +
+        "    bvec = bvec - shN * dot(bvec, shN);\n" +
+        "    shN = normalize(shN + (0.6 * rockW) * bvec);\n" +
+        "  }\n" +
+        "  float lambert = max(0.0, dot(shN, uLightDir));\n" +
         "  float sunlit = lambert * (1.0 - uAmbient) * (1.0 - (sunShadow * uCloudShadow));\n" +
         "  vec3 lightSum = (uSkyAmbient * uAmbient) + (uSunColor * sunlit);\n" +
         "  vec3 base;\n" +
@@ -134,28 +159,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  } else {\n" +
         "    base = vColor.rgb;\n" +
         "  }\n" +
-        // Rock material on steep faces: a top-down orthophoto has no data for near-vertical walls, so it
-        // smears across them. Blend the base toward a flat rock colour by slope (gentle = ortho, steep =
-        // rock, smoothstep blend zone). Stage 1: flat colour; later triplanar rock + detail normal. Skipped
-        // in slope-map mode (that view wants the raw band colours).
-        "  if (uSlopeMode < 0.5 && uRockStrength > 0.001) {\n" +
-        "    vec3 rn = normalize(vNormal);\n" +
-        "    float rockSlopeDeg = degrees(acos(clamp(rn.z, 0.0, 1.0)));\n" +
-        "    float rockW = smoothstep(35.0, 60.0, rockSlopeDeg) * uRockStrength;\n" +
-        "    if (rockW > 0.001) {\n" +
-        // Triplanar procedural rock detail: sample cheap value noise on the three world-axis planes and
-        // blend by |normal|, so it follows the surface and does NOT stretch on vertical faces (the whole
-        // point — unlike the top-down ortho). Two octaves modulate the rock luminance into varied stone
-        // instead of a flat plate. Gated to rocky fragments so the extra taps don't cost on gentle ground.
-        "      vec3 an = abs(rn); float bw = an.x + an.y + an.z + 0.0001;\n" +
-        "      float sc = 0.35;\n" + // cycles per metre (~3 m features); 2nd octave at 2.7x
-        "      float nA = noiseT(vWorldPos.yz * sc) + 0.5 * noiseT(vWorldPos.yz * sc * 2.7);\n" +
-        "      float nB = noiseT(vWorldPos.zx * sc) + 0.5 * noiseT(vWorldPos.zx * sc * 2.7);\n" +
-        "      float nC = noiseT(vWorldPos.xy * sc) + 0.5 * noiseT(vWorldPos.xy * sc * 2.7);\n" +
-        "      float rk = ((nA * an.x) + (nB * an.y) + (nC * an.z)) / bw / 1.5;\n" + // 0..1
-        "      vec3 rockCol = vec3(0.42, 0.40, 0.37) * (0.60 + 0.80 * rk);\n" +
-        "      base = mix(base, rockCol, rockW);\n" +
-        "    }\n" +
+        // Granite albedo on rocky fragments — the slope weight + triplanar noise (rk) were computed above
+        // (with the detail normal), so here we only tint the base toward the stone colour with a sharp
+        // light/dark spread for visible grain.
+        "  if (rockW > 0.001) {\n" +
+        "    vec3 rockCol = vec3(0.46, 0.43, 0.40) * (0.52 + 0.92 * rk);\n" +
+        "    base = mix(base, rockCol, rockW);\n" +
         "  }\n" +
         // Avalanche slope-steepness map: replace the base colour with the band colour for this fragment's
         // slope angle (n.z = cos(slope)). Banding mirrors SlopeClassification; the lighting below still
