@@ -35,7 +35,6 @@
                              OrthoTextureCells="{Binding OrthoTextureCells}"
                              UserLocation="{Binding UserLocation}"
                              Atmosphere="{Binding Atmosphere}"
-                             ForestDensity="{Binding EffectiveForestDensity}"
                              ShowOrtho="{Binding ShowOrtho}"
                              ShowPeakNames="{Binding ShowPeakNames}"
                              SlopeMapEnabled="{Binding SlopeMapMode}"
@@ -271,13 +270,6 @@
                         <Label Text="⬇️  Pobierz całe Tatry offline (WiFi)" Style="{StaticResource GlassLabel}"
                                FontSize="13" HorizontalOptions="Center" />
                     </Border>
-
-                    <Grid ColumnDefinitions="64,*,52" ColumnSpacing="10" Margin="0,2,0,0">
-                        <Label Grid.Column="0" Text="Las" Style="{StaticResource GlassLabel}" />
-                        <Slider Grid.Column="1" Style="{StaticResource GlassSlider}" Minimum="0" Maximum="1"
-                                Value="{Binding ForestDensity, Mode=TwoWay}" SemanticProperties.Hint="Gęstość lasu" />
-                        <Label Grid.Column="2" Text="{Binding ForestDensity, StringFormat='{0:P0}'}" Style="{StaticResource GlassValue}" />
-                    </Grid>
                 </VerticalStackLayout>
                 </ScrollView>
             </Border>

@@ -1904,7 +1904,7 @@ public partial class Terrain3DView : ContentView
 
     private IReadOnlyList<TreeInstance>? EnsureForest(IReadOnlyList<TerrainMesh3D> tiles)
     {
-        if (Raster is not { } raster || tiles.Count == 0)
+        if (Raster is null || tiles.Count == 0)
         {
             return null;
         }
@@ -1913,27 +1913,9 @@ public partial class Terrain3DView : ContentView
             return cachedForest;
         }
 
-        float density = (float)Math.Clamp(ForestDensity, 0.0, 1.0);
-        if (density <= 0.001f)
-        {
-            cachedForest = System.Array.Empty<TreeInstance>();
-            cachedForestTiles = tiles;
-            return cachedForest;
-        }
-
-        // Quadratic density curve so the slider's LOW end is genuinely sparse (a few trees) and only the
-        // top end is a dense forest — the old linear mapping made even 30% a full carpet, so the slider
-        // looked like it "did little". Stride 4 keeps the max count sane now that trees are larger.
-        float curved = density * density;
-        var options = new ForestOptions(
-            StrideCells: 4,
-            MinElevationMeters: 0.0,
-            TreelineMeters: 1500.0,
-            MaxSlope: 1.1f,
-            Density: curved,
-            MinScale: 0.8f,
-            MaxScale: 1.7f);
-        cachedForest = ForestPlacement.Generate(raster, tiles[0], options);
+        // 3D forest rendering disabled per user request — the trees looked poor and added nothing. The
+        // ForestPlacement helper + GL pass are left dormant; no trees are ever placed, so none are drawn.
+        cachedForest = System.Array.Empty<TreeInstance>();
         cachedForestTiles = tiles;
         return cachedForest;
     }
