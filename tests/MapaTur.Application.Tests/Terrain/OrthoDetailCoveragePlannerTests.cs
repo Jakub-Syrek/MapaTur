@@ -10,73 +10,101 @@ public sealed class OrthoDetailCoveragePlannerTests
     private static readonly int[] EsriZoomCandidates = { 18, 17, 16, 15, 14, 13 };
     private static readonly GeoPoint Focus = new(49.18, 20.06);
 
+    private const double Radius = 800.0;
+    private const double Fov = Math.PI / 4;
+    private const double ViewportHeight = 1080;
+
     // The single-texture drape this feature replaces is ~16 m/px.
     private const double BaselineMetersPerPixel = 16.0;
 
-    private static MapBounds Window(double radiusMeters) => LodTerrainWindow.Around(Focus, radiusMeters);
+    private static OrthoDetailOptions Options(
+        long maxResidentBytes = 512L * 1024 * 1024,
+        int maxCellPixels = 2048,
+        double baseMetersPerPixel = BaselineMetersPerPixel) =>
+        new(EsriZoomCandidates, MaxErrorPixels: 1.5, MaxCellPixels: maxCellPixels,
+            MaxResidentBytes: maxResidentBytes, BaseMetersPerPixel: baseMetersPerPixel);
 
-    private static OrthoDetailOptions Options(long maxResidentBytes = 512L * 1024 * 1024, int maxCellPixels = 2048) =>
-        new(EsriZoomCandidates, MaxErrorPixels: 1.5, MaxCellPixels: maxCellPixels, MaxResidentBytes: maxResidentBytes);
+    private static OrthoDetailCoverage Plan(double cameraToLookAt, OrthoDetailOptions? options = null) =>
+        OrthoDetailCoveragePlanner.Plan(Focus, Radius, cameraToLookAt, Fov, ViewportHeight, options ?? Options());
 
     [Fact]
-    public void Plan_CloseCamera_PicksFineZoomBeatingTheBaselineResolution()
+    public void Plan_CloseCamera_StreamsFineZoomBeatingTheBaseline()
     {
-        var plan = OrthoDetailCoveragePlanner.Plan(
-            Window(800), cameraToLookAtMeters: 150, fovY: Math.PI / 4, viewportHeight: 1080, Options());
+        var plan = Plan(cameraToLookAt: 150);
 
+        plan.Decision.Should().Be(OrthoDetailDecision.Stream);
         plan.Zoom.Should().BeGreaterThanOrEqualTo(16);
-        ScreenSpaceLod.MetersPerPixel(plan.Zoom, Focus.Latitude).Should().BeLessThan(BaselineMetersPerPixel);
+        plan.MetersPerPixel.Should().BeLessThan(BaselineMetersPerPixel);
     }
 
     [Fact]
     public void Plan_FarCamera_PicksCoarserZoomThanCloseCamera()
     {
-        var near = OrthoDetailCoveragePlanner.Plan(Window(800), 150, Math.PI / 4, 1080, Options());
-        var far = OrthoDetailCoveragePlanner.Plan(Window(800), 6000, Math.PI / 4, 1080, Options());
+        Plan(6000).Zoom.Should().BeLessThan(Plan(150).Zoom);
+    }
 
-        far.Zoom.Should().BeLessThan(near.Zoom);
+    [Fact]
+    public void Plan_OutputsNearFieldWindowCentredOnFocus()
+    {
+        var plan = Plan(150);
+
+        plan.Window.Center.Latitude.Should().BeApproximately(Focus.Latitude, 1e-4);
+        plan.Window.Center.Longitude.Should().BeApproximately(Focus.Longitude, 1e-4);
     }
 
     [Fact]
     public void Plan_GridCoversTheWholeWindow()
     {
-        MapBounds window = Window(800);
-        var plan = OrthoDetailCoveragePlanner.Plan(window, 150, Math.PI / 4, 1080, Options());
+        var plan = Plan(150);
 
-        double mpp = ScreenSpaceLod.MetersPerPixel(plan.Zoom, Focus.Latitude);
-        double widthMeters = (window.NorthEast.Longitude - window.SouthWest.Longitude)
+        double widthMeters = (plan.Window.NorthEast.Longitude - plan.Window.SouthWest.Longitude)
             * 111_320.0 * Math.Cos(Focus.Latitude * Math.PI / 180.0);
-        double heightMeters = (window.NorthEast.Latitude - window.SouthWest.Latitude) * 111_320.0;
+        double heightMeters = (plan.Window.NorthEast.Latitude - plan.Window.SouthWest.Latitude) * 111_320.0;
 
-        ((double)plan.GridCols * plan.CellPixels * mpp).Should().BeGreaterThanOrEqualTo(widthMeters);
-        ((double)plan.GridRows * plan.CellPixels * mpp).Should().BeGreaterThanOrEqualTo(heightMeters);
+        ((double)plan.GridCols * plan.CellPixels * plan.MetersPerPixel).Should().BeGreaterThanOrEqualTo(widthMeters);
+        ((double)plan.GridRows * plan.CellPixels * plan.MetersPerPixel).Should().BeGreaterThanOrEqualTo(heightMeters);
     }
 
     [Fact]
-    public void Plan_StaysWithinVramBudget()
+    public void Plan_ReportsMetersPerPixelForTheChosenZoom()
+    {
+        var plan = Plan(150);
+
+        plan.MetersPerPixel.Should().BeApproximately(
+            ScreenSpaceLod.MetersPerPixel(plan.Zoom, Focus.Latitude), 1e-9);
+    }
+
+    [Fact]
+    public void Plan_EstimatedVramWithinBudget()
     {
         var options = Options();
-        var plan = OrthoDetailCoveragePlanner.Plan(Window(800), 150, Math.PI / 4, 1080, options);
+        var plan = Plan(150, options);
 
-        plan.ResidentBytes.Should().BeLessThanOrEqualTo(options.MaxResidentBytes);
+        plan.EstimatedVramBytes.Should().BeLessThanOrEqualTo(options.MaxResidentBytes);
     }
 
     [Fact]
     public void Plan_TightBudget_DropsZoomToFit()
     {
-        var generous = OrthoDetailCoveragePlanner.Plan(Window(800), 150, Math.PI / 4, 1080, Options(512L * 1024 * 1024));
-        // A tiny budget can't afford the fine zoom's grid → it must drop to a coarser zoom.
-        var tight = OrthoDetailCoveragePlanner.Plan(Window(800), 150, Math.PI / 4, 1080, Options(8L * 1024 * 1024));
+        var generous = Plan(150, Options(512L * 1024 * 1024));
+        var tight = Plan(150, Options(8L * 1024 * 1024));
 
-        tight.ResidentBytes.Should().BeLessThanOrEqualTo(8L * 1024 * 1024);
+        tight.EstimatedVramBytes.Should().BeLessThanOrEqualTo(8L * 1024 * 1024);
         tight.Zoom.Should().BeLessThan(generous.Zoom);
     }
 
     [Fact]
     public void Plan_NeverExceedsTheFinestCandidateZoom()
     {
-        var plan = OrthoDetailCoveragePlanner.Plan(Window(400), 5, Math.PI / 4, 1080, Options());
+        Plan(5).Zoom.Should().BeLessThanOrEqualTo(EsriZoomCandidates[0]);
+    }
 
-        plan.Zoom.Should().BeLessThanOrEqualTo(EsriZoomCandidates[0]);
+    [Fact]
+    public void Plan_DecidesSkipNoGain_WhenChosenZoomIsNoFinerThanBase()
+    {
+        // Pretend the base drape is already razor-sharp (0.1 m/px); no ESRI zoom can beat it.
+        var plan = Plan(150, Options(baseMetersPerPixel: 0.1));
+
+        plan.Decision.Should().Be(OrthoDetailDecision.SkipNoGain);
     }
 }
