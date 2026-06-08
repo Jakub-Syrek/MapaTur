@@ -1685,10 +1685,49 @@ public sealed partial class MapPageViewModel : ObservableObject
         // the real terrain elevation.
         var peakOptions = new PeakDetectionOptions { DominanceRadiusMeters = 550.0, MaxPeaks = 48 };
         DemRaster peakRaster = DemRasterDownsampler.SubsampleToMaxCells(raster, maxCells: 20_000);
+        IReadOnlyList<NamedSummit> gazetteer = await GetTatraGazetteerAsync().ConfigureAwait(true);
         Peaks3DOverlay = await Task.Run(() =>
-            PeakNamer.MergeWithGazetteer(PeakDetector.Detect(peakRaster, peakOptions), TatraSummits.All, raster)).ConfigureAwait(true);
+            PeakNamer.MergeWithGazetteer(PeakDetector.Detect(peakRaster, peakOptions), gazetteer, raster)).ConfigureAwait(true);
         logger.LogInformation("Loaded DEM {Label} ({Cols}x{Rows})", label, raster.Columns, raster.Rows);
         StatusMessage = $"{Localization.AppStrings.StatusDemLoaded}: {label}";
+    }
+
+    /// <summary>
+    /// The named-summit gazetteer for the Tatra peak overlay: OSM <c>natural=peak</c> (named, ≥1500 m) from
+    /// the bundled <c>tatra-osm-peaks.json</c>, merged with the curated <see cref="TatraSummits.All"/>
+    /// fallback so nothing OSM omits is lost. Loaded and cached once; falls back to the curated list alone
+    /// if the bundle can't be read or parsed — peak labels must never silently vanish.
+    /// </summary>
+    private async Task<IReadOnlyList<NamedSummit>> GetTatraGazetteerAsync()
+    {
+        if (tatraGazetteer is not null)
+        {
+            return tatraGazetteer;
+        }
+
+        try
+        {
+            await using Stream stream = await Microsoft.Maui.Storage.FileSystem
+                .OpenAppPackageFileAsync("tatra-osm-peaks.json").ConfigureAwait(false);
+            using var buffer = new MemoryStream();
+            await stream.CopyToAsync(buffer).ConfigureAwait(false);
+
+            IReadOnlyList<OsmPeak> peaks = OverpassPeakResponseParser.Parse(buffer.ToArray());
+            // Collapse OSM's multi-summit massifs (Rysy/Wysoka as separate nodes) before merging, so the
+            // overlay doesn't stack two or three labels on one apex.
+            IReadOnlyList<NamedSummit> osmSummits = SummitSources.Deduplicate(OsmPeakSummitMapper.ToSummits(peaks));
+            tatraGazetteer = SummitSources.Combine(osmSummits, TatraSummits.All);
+            logger.LogInformation(
+                "Tatra gazetteer: {Osm} OSM peaks (named, ≥1500 m) + {Fallback} curated → {Total} summits",
+                osmSummits.Count, TatraSummits.All.Count, tatraGazetteer.Count);
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
+        {
+            logger.LogWarning(ex, "Bundled OSM peaks unavailable; using the curated TatraSummits gazetteer");
+            tatraGazetteer = TatraSummits.All;
+        }
+
+        return tatraGazetteer;
     }
 
     /// <summary>
@@ -1926,10 +1965,11 @@ public sealed partial class MapPageViewModel : ObservableObject
             // base terrain. Same world frame as the tiles (anchor = base centre), so labels line up.
             var lodPeakOptions = new PeakDetectionOptions { DominanceRadiusMeters = 550.0, MaxPeaks = 48 };
             DemRaster lodPeakRaster = DemRasterDownsampler.SubsampleToMaxCells(baseRaster, maxCells: 20_000);
+            IReadOnlyList<NamedSummit> lodGazetteer = await GetTatraGazetteerAsync().ConfigureAwait(true);
             // PeakNamer now snaps each name to the NEAREST local maximum (its own apex), not the highest cell
             // in the radius — so a low summit (e.g. Mnich) no longer borrows a taller neighbour's ridge.
             Peaks3DOverlay = await Task.Run(() =>
-                PeakNamer.MergeWithGazetteer(PeakDetector.Detect(lodPeakRaster, lodPeakOptions), TatraSummits.All, baseRaster)).ConfigureAwait(true);
+                PeakNamer.MergeWithGazetteer(PeakDetector.Detect(lodPeakRaster, lodPeakOptions), lodGazetteer, baseRaster)).ConfigureAwait(true);
             lodBaseTiles = baseTiles;
             lodAnchor = baseCentre;
             lodDetailCentre = baseCentre;
@@ -1962,6 +2002,7 @@ public sealed partial class MapPageViewModel : ObservableObject
 
     private IReadOnlyList<TerrainMesh3D>? lodBaseTiles;
     private MapaTur.Application.Terrain.OrthoCoverage? lodOrthoCoverage; // ortho coverage for the current LOD scene (null = hypsometric)
+    private IReadOnlyList<NamedSummit>? tatraGazetteer;                  // bundled OSM natural=peak merged with the curated fallback; loaded once
     private GeoPoint lodAnchor;
     private GeoPoint lodDetailCentre;
     private bool lodDetailLoading;
