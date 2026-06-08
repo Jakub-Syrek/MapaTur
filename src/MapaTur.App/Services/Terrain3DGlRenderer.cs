@@ -62,6 +62,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform float uSlopeMode;\n" +     // 1 = avalanche slope-steepness map (overrides ortho/hypsometric)
         "uniform vec3 uSlopePalette[8];\n" + // band colours (0-20…80-90°), from SlopePalette
         "uniform float uSharpen;\n" +   // unsharp-mask strength; 0 = off
+        "uniform float uRockStrength;\n" + // rock-material-on-steep blend strength; 0 = off (pure ortho)
         "uniform vec3 uFogColor;\n" +
         "uniform float uFogDensity;\n" + // per-metre exponential; 0 = no aerial perspective
         "uniform vec3 uCameraPos;\n" +
@@ -132,6 +133,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    base = c;\n" +
         "  } else {\n" +
         "    base = vColor.rgb;\n" +
+        "  }\n" +
+        // Rock material on steep faces: a top-down orthophoto has no data for near-vertical walls, so it
+        // smears across them. Blend the base toward a flat rock colour by slope (gentle = ortho, steep =
+        // rock, smoothstep blend zone). Stage 1: flat colour; later triplanar rock + detail normal. Skipped
+        // in slope-map mode (that view wants the raw band colours).
+        "  if (uSlopeMode < 0.5 && uRockStrength > 0.001) {\n" +
+        "    float rockSlopeDeg = degrees(acos(clamp(normalize(vNormal).z, 0.0, 1.0)));\n" +
+        "    float rockW = smoothstep(35.0, 60.0, rockSlopeDeg) * uRockStrength;\n" +
+        "    base = mix(base, vec3(0.42, 0.40, 0.37), rockW);\n" +
         "  }\n" +
         // Avalanche slope-steepness map: replace the base colour with the band colour for this fragment's
         // slope angle (n.z = cos(slope)). Banding mirrors SlopeClassification; the lighting below still
@@ -452,6 +462,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int orthoTexelLocation = -1;
     private int sharpenLocation = -1;
     private int slopeModeLocation = -1;
+    private int rockStrengthLocation = -1;
     private int slopePaletteLocation = -1;
 
     // The slope-band palette flattened to 8×RGB, built once from the unit-tested SlopePalette and uploaded
@@ -641,6 +652,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     public bool SlopeMapEnabled { get; set; }
 
     /// <summary>
+    /// Strength [0,1] of the rock material blended onto steep faces, where a top-down orthophoto smears
+    /// (no data for near-vertical walls). 0 = pure ortho; 1 = full rock on the steepest faces. Slope-driven
+    /// in the shader (gentle = ortho, steep = rock). Default on; a future "Materiały/Skały" slider can drive it.
+    /// </summary>
+    public float RockStrength { get; set; } = 1f;
+
+    /// <summary>
     /// Whether MSAA anti-aliasing is used. <c>false</c> (the "Wydajność" quality profile) draws straight
     /// into the present FBO — jaggier edges, but skips the multisample resolve for more headroom.
     /// </summary>
@@ -718,6 +736,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             orthoTexelLocation = -1;
             sharpenLocation = -1;
             slopeModeLocation = -1;
+            rockStrengthLocation = -1;
             slopePaletteLocation = -1;
             terrainFogColorLocation = -1;
             terrainFogDensityLocation = -1;
@@ -1072,6 +1091,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Slope-steepness ("avalanche") map mode: a flag + the band palette (from the unit-tested
         // SlopePalette). The shader recolours each fragment by its slope angle when the flag is on.
         gl.Uniform1(slopeModeLocation, SlopeMapEnabled ? 1f : 0f);
+        gl.Uniform1(rockStrengthLocation, RockStrength);
         gl.Uniform3(slopePaletteLocation, (uint)SlopeClassification.BandCount, SlopePaletteFloats);
 
         // Aerial perspective: when the atmosphere is bound, distant fragments blend toward
@@ -1615,6 +1635,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         slopeModeLocation = g.GetUniformLocation(program, "uSlopeMode");
         slopePaletteLocation = g.GetUniformLocation(program, "uSlopePalette");
         sharpenLocation = g.GetUniformLocation(program, "uSharpen");
+        rockStrengthLocation = g.GetUniformLocation(program, "uRockStrength");
         terrainFogColorLocation = g.GetUniformLocation(program, "uFogColor");
         terrainFogDensityLocation = g.GetUniformLocation(program, "uFogDensity");
         terrainCameraPosLocation = g.GetUniformLocation(program, "uCameraPos");
