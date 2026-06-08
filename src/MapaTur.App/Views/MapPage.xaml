@@ -37,6 +37,7 @@
                              Atmosphere="{Binding Atmosphere}"
                              ShowOrtho="{Binding ShowOrtho}"
                              ShowPeakNames="{Binding ShowPeakNames}"
+                             ControlsVisible="{Binding ChromeVisible}"
                              SlopeMapEnabled="{Binding SlopeMapMode}"
                              MsaaEnabled="{Binding AntiAliasingOn}"
                              DebugEnabled="{Binding ShowDebugOverlay}"
@@ -59,7 +60,7 @@
         <VerticalStackLayout x:Name="MenuOverlay"
                              VerticalOptions="Start" HorizontalOptions="Fill"
                              Margin="10,48,10,0" Spacing="10"
-                             IsVisible="{Binding Is3DFlying, Converter={StaticResource InverseBool}}">
+                             IsVisible="{Binding ChromeVisible}">
 
             <!-- Debug HUD: live render stats, shown above the bar when the debug toggle is on. -->
             <Border Style="{StaticResource GlassBar}" Padding="12,6" HorizontalOptions="Center"

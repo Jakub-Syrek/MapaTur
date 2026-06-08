@@ -13,6 +13,7 @@ using Mapsui;
 using Mapsui.Projections;
 
 using Microsoft.Extensions.Logging;
+using Microsoft.Maui.Devices;
 using Microsoft.Maui.Networking;
 
 namespace MapaTur.App.Views;
@@ -320,6 +321,11 @@ public partial class MapPage : ContentPage
     {
         base.OnAppearing();
 
+        // Orientation-driven immersive mode: landscape hides the floating UI so a phone screenshot of the
+        // scene is chrome-free; portrait restores it ("przechylenie telefonu bokiem wyłącza menu").
+        DeviceDisplay.Current.MainDisplayInfoChanged += OnMainDisplayInfoChanged;
+        ApplyOrientationChrome(DeviceDisplay.Current.MainDisplayInfo.Orientation);
+
         if (initialCenterApplied)
         {
             return;
@@ -335,4 +341,18 @@ public partial class MapPage : ContentPage
             await viewModel.AutoLoadOnStartupAsync().ConfigureAwait(true);
         });
     }
+
+    /// <inheritdoc />
+    protected override void OnDisappearing()
+    {
+        DeviceDisplay.Current.MainDisplayInfoChanged -= OnMainDisplayInfoChanged;
+        base.OnDisappearing();
+    }
+
+    private void OnMainDisplayInfoChanged(object? sender, DisplayInfoChangedEventArgs e)
+        => ApplyOrientationChrome(e.DisplayInfo.Orientation);
+
+    // Landscape → immersive (floating UI hidden for a clean screenshot); portrait → chrome restored.
+    private void ApplyOrientationChrome(DisplayOrientation orientation)
+        => viewModel.ImmersiveMode = orientation == DisplayOrientation.Landscape;
 }

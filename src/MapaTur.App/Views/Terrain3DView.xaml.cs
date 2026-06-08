@@ -150,6 +150,24 @@ public partial class Terrain3DView : ContentView
         set => SetValue(ShowPeakNamesProperty, value);
     }
 
+    /// <summary>Whether the on-screen camera control pads (altitude + pan/tilt) are shown. Set false in the
+    /// immersive landscape mode so a phone screenshot of the scene is free of UI chrome.</summary>
+    public static readonly BindableProperty ControlsVisibleProperty = BindableProperty.Create(
+        nameof(ControlsVisible), typeof(bool), typeof(Terrain3DView), true,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).ApplyControlsVisibility((bool)n));
+
+    public bool ControlsVisible
+    {
+        get => (bool)GetValue(ControlsVisibleProperty);
+        set => SetValue(ControlsVisibleProperty, value);
+    }
+
+    private void ApplyControlsVisibility(bool visible)
+    {
+        AltitudePad.IsVisible = visible;
+        PanTiltPad.IsVisible = visible;
+    }
+
     /// <summary>
     /// Whether the orthophoto drape is shown. When false the terrain falls back to hypsometric shading
     /// (premium menu "Ortofoto"). Applied to the GL renderer each frame; textures stay resident.

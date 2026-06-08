@@ -95,9 +95,27 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <summary>Whether to show the 3D on-screen chrome (sliders): only in 3D mode and not mid-flight.</summary>
     public bool Show3DChrome => Is3DMode && !Is3DFlying;
 
+    /// <summary>
+    /// Immersive mode: hides the floating UI (top menu bar + on-screen camera pads) so a phone screenshot
+    /// captures just the scene. Driven by device orientation — the host page turns it ON in landscape and
+    /// OFF in portrait ("przechylenie telefonu bokiem wyłącza menu, pionowo włącza").
+    /// </summary>
+    [ObservableProperty]
+    private bool immersiveMode;
+
+    /// <summary>Whether the floating UI chrome (top menu bar + camera pads) is shown: hidden mid-flight or
+    /// in immersive landscape mode.</summary>
+    public bool ChromeVisible => !Is3DFlying && !ImmersiveMode;
+
     partial void OnIs3DModeChanged(bool value) => OnPropertyChanged(nameof(Show3DChrome));
 
-    partial void OnIs3DFlyingChanged(bool value) => OnPropertyChanged(nameof(Show3DChrome));
+    partial void OnIs3DFlyingChanged(bool value)
+    {
+        OnPropertyChanged(nameof(Show3DChrome));
+        OnPropertyChanged(nameof(ChromeVisible));
+    }
+
+    partial void OnImmersiveModeChanged(bool value) => OnPropertyChanged(nameof(ChromeVisible));
 
     /// <summary>
     /// Raised after an explicit terrain load (e.g. the GUGiK region) so the host page reframes the 3D
