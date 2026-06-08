@@ -196,6 +196,20 @@ public partial class Terrain3DView : ContentView
         set => SetValue(RockMaterialEnabledProperty, value);
     }
 
+    /// <summary>
+    /// Whether the base albedo is painted by elevation-zone biomes (premium menu "Biomy"): meadow/hala low,
+    /// scree/piargi mid, snow/ice high — from elevation + slope + aspect. Off by default (an A/B material mode).
+    /// </summary>
+    public static readonly BindableProperty BiomeMaterialEnabledProperty = BindableProperty.Create(
+        nameof(BiomeMaterialEnabled), typeof(bool), typeof(Terrain3DView), false,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
+
+    public bool BiomeMaterialEnabled
+    {
+        get => (bool)GetValue(BiomeMaterialEnabledProperty);
+        set => SetValue(BiomeMaterialEnabledProperty, value);
+    }
+
     /// <summary>Whether MSAA anti-aliasing is used (premium menu render-quality profile).</summary>
     public static readonly BindableProperty MsaaEnabledProperty = BindableProperty.Create(
         nameof(MsaaEnabled), typeof(bool), typeof(Terrain3DView), true,
@@ -1975,6 +1989,7 @@ public partial class Terrain3DView : ContentView
             glRenderer.MsaaEnabled = MsaaEnabled; // premium menu render-quality profile (AA on/off)
             glRenderer.SlopeMapEnabled = SlopeMapEnabled; // premium menu "Mapa nachylenia" (slope-steepness shading)
             glRenderer.RockStrength = RockMaterialEnabled ? 1f : 0f; // premium menu "Skały" (rock material on steep faces)
+            glRenderer.BiomeMaterialEnabled = BiomeMaterialEnabled; // premium menu "Biomy" (elevation-zone material)
 
             // Push a changed ortho image to the GL renderer once (it uploads on the GL thread next Render).
             if (orthoPathDirty)

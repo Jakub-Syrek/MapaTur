@@ -600,6 +600,9 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <summary>Premium menu "Skały": blend a rock material onto steep faces where the top-down ortho smears.</summary>
     [ObservableProperty] private bool rockMaterialOn = true;
 
+    /// <summary>Premium menu "Biomy": paint the base albedo by elevation-zone biomes (hala/piargi/skała/śnieg/lód).</summary>
+    [ObservableProperty] private bool biomeMaterialOn;
+
     [ObservableProperty] private bool showTrails = true;
 
     partial void OnShowTrailsChanged(bool value) => OnTrailFilterChanged();

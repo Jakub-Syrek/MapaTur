@@ -84,6 +84,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform float uSnowSlopeCosBare;\n" + // cos(steep angle): at/below this n.z the face is bare rock
         "uniform float uSnowSlopeCosFull;\n" + // cos(gentle angle): at/above this n.z snow fully holds
         "uniform float uNoonSnowLift;\n" + // extra white-lift for snow at high (noon) sun, 0..~0.30 (NoonLightModel)
+                                           // Elevation-zone biomes ("Biomy"): paint the base albedo by alpine zonation — meadow/hala low,
+                                           // scree/piargi mid, snow/ice high — from elevation (vWorldPos.z, world-Z = metres×Pion), slope and
+                                           // aspect (northness). Mirrors the unit-tested BiomeClassifier; the granite rock material (rockW) and
+                                           // the dynamic snow slider still layer on top. uBiomeMode (0/1) gates it; thresholds are world-Z.
+        "uniform float uBiomeMode;\n" +
+        "uniform float uBiomeScreeSlopeDeg;\n" + // slope at/above which non-rock ground reads as talus
+        "uniform float uBiomeMeadowMaxZ;\n" +    // world-Z above which gentle ground stops being meadow
+        "uniform float uBiomeSnowZ;\n" +         // aspect-adjusted world-Z snowline
+        "uniform float uBiomeIceZ;\n" +          // aspect-adjusted world-Z iceline
+        "uniform float uBiomeAspectShiftZ;\n" +  // world-Z the snow/ice lines shift with full N/S aspect
+        "uniform vec3 uBiomePalette[5];\n" +     // Meadow, Scree, Rock, Snow, Ice — from BiomePalette
         "out vec4 fragColor;\n" +
         "float hashT(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n" +
         "float noiseT(vec2 p){\n" +
@@ -158,6 +169,31 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    base = c;\n" +
         "  } else {\n" +
         "    base = vColor.rgb;\n" +
+        "  }\n" +
+        // Elevation-zone biomes: replace the base albedo with the alpine zonation material (meadow → scree →
+        // snow → ice up the slope) when "Biomy" is on. Mirrors BiomeClassifier with smooth band blends:
+        // elevation drives meadow→scree→snow→ice on gentle ground (aspect lowers the snow/ice lines on the
+        // cold north faces), and medium-steep ground reads as scree (talus). The granite rock material below
+        // (rockW) still paints the steep faces on top, and the dynamic snow slider layers over it.
+        "  if (uBiomeMode > 0.5 && uSlopeMode < 0.5) {\n" +
+        "    vec3 bn = normalize(vNormal);\n" +
+        "    float northness = clamp(bn.y, -1.0, 1.0);\n" +
+        "    float biomeSlopeDeg = degrees(acos(clamp(bn.z, 0.0, 1.0)));\n" +
+        "    float effZ = vWorldPos.z + (northness * uBiomeAspectShiftZ);\n" +
+        "    float bandZ = max(20.0, uBiomeAspectShiftZ * 0.4);\n" +
+        "    vec3 meadow = uBiomePalette[0];\n" +
+        "    vec3 scree = uBiomePalette[1];\n" +
+        "    vec3 snowC = uBiomePalette[3];\n" +
+        "    vec3 iceC = uBiomePalette[4];\n" +
+        "    vec3 bcol = meadow;\n" +
+        "    bcol = mix(bcol, scree, smoothstep(uBiomeMeadowMaxZ - bandZ, uBiomeMeadowMaxZ + bandZ, vWorldPos.z));\n" +
+        "    float toSnow = smoothstep(uBiomeSnowZ - bandZ, uBiomeSnowZ + bandZ, effZ);\n" +
+        "    bcol = mix(bcol, snowC, toSnow);\n" +
+        "    bcol = mix(bcol, iceC, smoothstep(uBiomeIceZ - bandZ, uBiomeIceZ + bandZ, effZ));\n" +
+        // Medium-steep ground below the snowline is talus (piargi), not meadow — but don't override snowy benches.
+        "    float screeBySlope = smoothstep(uBiomeScreeSlopeDeg - 6.0, uBiomeScreeSlopeDeg + 6.0, biomeSlopeDeg);\n" +
+        "    bcol = mix(bcol, scree, screeBySlope * (1.0 - toSnow));\n" +
+        "    base = bcol;\n" +
         "  }\n" +
         // Granite albedo on rocky fragments — the slope weight + triplanar noise (rk) were computed above
         // (with the detail normal), so here we only tint the base toward the stone colour with a sharp
@@ -487,6 +523,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int slopeModeLocation = -1;
     private int rockStrengthLocation = -1;
     private int slopePaletteLocation = -1;
+    private int biomeModeLocation = -1;
+    private int biomeScreeSlopeLocation = -1;
+    private int biomeMeadowMaxZLocation = -1;
+    private int biomeSnowZLocation = -1;
+    private int biomeIceZLocation = -1;
+    private int biomeAspectShiftZLocation = -1;
+    private int biomePaletteLocation = -1;
 
     // The slope-band palette flattened to 8×RGB, built once from the unit-tested SlopePalette and uploaded
     // as the uSlopePalette uniform array. Single source of truth shared with SlopeClassification.
@@ -495,6 +538,23 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private static float[] BuildSlopePaletteFloats()
     {
         IReadOnlyList<Vector3> colors = SlopePalette.All;
+        var flat = new float[colors.Count * 3];
+        for (int i = 0; i < colors.Count; i++)
+        {
+            flat[(i * 3) + 0] = colors[i].X;
+            flat[(i * 3) + 1] = colors[i].Y;
+            flat[(i * 3) + 2] = colors[i].Z;
+        }
+        return flat;
+    }
+
+    // The biome material palette flattened to 5×RGB (Meadow, Scree, Rock, Snow, Ice), built once from the
+    // unit-tested BiomePalette and uploaded as uBiomePalette. Single source of truth shared with BiomeClassifier.
+    private static readonly float[] BiomePaletteFloats = BuildBiomePaletteFloats();
+
+    private static float[] BuildBiomePaletteFloats()
+    {
+        IReadOnlyList<Vector3> colors = BiomePalette.All;
         var flat = new float[colors.Count * 3];
         for (int i = 0; i < colors.Count; i++)
         {
@@ -680,6 +740,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// in the shader (gentle = ortho, steep = rock). Default on; a future "Materiały/Skały" slider can drive it.
     /// </summary>
     public float RockStrength { get; set; } = 1f;
+
+    /// <summary>
+    /// When <c>true</c>, the terrain base albedo is painted by elevation-zone biomes (meadow/hala, scree/piargi,
+    /// snow, ice) from elevation + slope + aspect — the unit-tested <see cref="BiomeClassifier"/> mirrored in the
+    /// shader. The granite rock material and the dynamic snow slider still layer on top. Driven by the premium
+    /// menu's "Biomy" switch; off by default (an A/B material mode over the ortho/hypsometric base).
+    /// </summary>
+    public bool BiomeMaterialEnabled { get; set; }
 
     /// <summary>
     /// Whether MSAA anti-aliasing is used. <c>false</c> (the "Wydajność" quality profile) draws straight
@@ -1116,6 +1184,19 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform1(slopeModeLocation, SlopeMapEnabled ? 1f : 0f);
         gl.Uniform1(rockStrengthLocation, RockStrength);
         gl.Uniform3(slopePaletteLocation, (uint)SlopeClassification.BandCount, SlopePaletteFloats);
+
+        // Elevation-zone biomes ("Biomy"): the boundary thresholds are real elevations in metres, so convert
+        // the vertical ones to world-Z (× the mesh's vertical exaggeration / Pion) to match vWorldPos.z, then
+        // upload the palette. Slope threshold stays an angle. Mirrors the unit-tested BiomeClassifier/BiomePalette.
+        BiomeThresholds biome = BiomeThresholds.Default;
+        float biomeExaggeration = lightFrame.VerticalExaggeration;
+        gl.Uniform1(biomeModeLocation, BiomeMaterialEnabled ? 1f : 0f);
+        gl.Uniform1(biomeScreeSlopeLocation, (float)biome.ScreeSlopeDegrees);
+        gl.Uniform1(biomeMeadowMaxZLocation, (float)biome.MeadowMaxElevationM * biomeExaggeration);
+        gl.Uniform1(biomeSnowZLocation, (float)biome.SnowElevationM * biomeExaggeration);
+        gl.Uniform1(biomeIceZLocation, (float)biome.IceElevationM * biomeExaggeration);
+        gl.Uniform1(biomeAspectShiftZLocation, (float)biome.AspectElevationShiftM * biomeExaggeration);
+        gl.Uniform3(biomePaletteLocation, (uint)BiomePalette.All.Count, BiomePaletteFloats);
 
         // Aerial perspective: when the atmosphere is bound, distant fragments blend toward
         // uFogColor with an exponential ramp. uFogDensity = 0 disables the blend (legacy path).
@@ -1659,6 +1740,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         slopePaletteLocation = g.GetUniformLocation(program, "uSlopePalette");
         sharpenLocation = g.GetUniformLocation(program, "uSharpen");
         rockStrengthLocation = g.GetUniformLocation(program, "uRockStrength");
+        biomeModeLocation = g.GetUniformLocation(program, "uBiomeMode");
+        biomeScreeSlopeLocation = g.GetUniformLocation(program, "uBiomeScreeSlopeDeg");
+        biomeMeadowMaxZLocation = g.GetUniformLocation(program, "uBiomeMeadowMaxZ");
+        biomeSnowZLocation = g.GetUniformLocation(program, "uBiomeSnowZ");
+        biomeIceZLocation = g.GetUniformLocation(program, "uBiomeIceZ");
+        biomeAspectShiftZLocation = g.GetUniformLocation(program, "uBiomeAspectShiftZ");
+        biomePaletteLocation = g.GetUniformLocation(program, "uBiomePalette");
         terrainFogColorLocation = g.GetUniformLocation(program, "uFogColor");
         terrainFogDensityLocation = g.GetUniformLocation(program, "uFogDensity");
         terrainCameraPosLocation = g.GetUniformLocation(program, "uCameraPos");

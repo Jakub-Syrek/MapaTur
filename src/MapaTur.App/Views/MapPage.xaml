@@ -40,6 +40,7 @@
                              ControlsVisible="{Binding ChromeVisible}"
                              SlopeMapEnabled="{Binding SlopeMapMode}"
                              RockMaterialEnabled="{Binding RockMaterialOn}"
+                             BiomeMaterialEnabled="{Binding BiomeMaterialOn}"
                              MsaaEnabled="{Binding AntiAliasingOn}"
                              DebugEnabled="{Binding ShowDebugOverlay}"
                              CameraState="{Binding CameraState, Mode=TwoWay}"
@@ -185,6 +186,13 @@
                             <Label Text="materiał skały na stromiznach (zamiast rozmytego ortho)" Style="{StaticResource GlassCaption}" FontSize="10" />
                         </VerticalStackLayout>
                         <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding RockMaterialOn}" />
+                    </Grid>
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <VerticalStackLayout Grid.Column="0" Spacing="0">
+                            <Label Text="Biomy" Style="{StaticResource GlassLabel}" />
+                            <Label Text="strefy wysokościowe: hale / piargi / skała / śnieg / lód" Style="{StaticResource GlassCaption}" FontSize="10" />
+                        </VerticalStackLayout>
+                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding BiomeMaterialOn}" />
                     </Grid>
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                         <VerticalStackLayout Grid.Column="0" Spacing="0">
