@@ -217,6 +217,9 @@ public sealed class TerrainMesh3D
     /// <param name="orthoCoverage">Optional geographic placement of a larger ortho this raster is a sub-region
     /// of (ortho-on-LOD). When set, per-vertex UV is geo-referenced into the coverage and each tile picks its
     /// ortho cell by its centre's geo position (MVP: one cell per tile). Null (default) = legacy local UV.</param>
+    /// <param name="orthoTileIndexOffset">Added to every tile's ortho cell index so this mesh's cells sit
+    /// AFTER another set in the renderer's flat ortho list (e.g. a high-zoom near-field patch appended past
+    /// the base scene's cells). 0 (default) = no shift.</param>
     public static IReadOnlyList<TerrainMesh3D> BuildTiles(
         DemRaster raster,
         TerrainMeshOptions? options = null,
@@ -226,7 +229,8 @@ public sealed class TerrainMesh3D
         GeoPoint? projectionAnchor = null,
         DemRaster? edgeHeightSource = null,
         int edgeMatchRows = 1,
-        OrthoCoverage? orthoCoverage = null)
+        OrthoCoverage? orthoCoverage = null,
+        int orthoTileIndexOffset = 0)
     {
         ArgumentNullException.ThrowIfNull(raster);
         if (maxTileSide < 1)
@@ -274,7 +278,7 @@ public sealed class TerrainMesh3D
                     int c1 = Math.Min(c0 + maxTileSide, cols - 1);
                     tiles.Add(BuildBlock(
                         raster, options, frame, c0, c1, r0, r1, anchor, anchorOffset,
-                        OrthoCell.Full(cols, rows), edgeHeightSource, edgeMatchRows, orthoCoverage));
+                        OrthoCell.Full(cols, rows), edgeHeightSource, edgeMatchRows, orthoCoverage, orthoTileIndexOffset));
                 }
             }
 
@@ -304,7 +308,7 @@ public sealed class TerrainMesh3D
                     for (int c0 = cellC0; c0 < cellC1; c0 += maxTileSide)
                     {
                         int c1 = Math.Min(c0 + maxTileSide, cellC1);
-                        tiles.Add(BuildBlock(raster, options, frame, c0, c1, r0, r1, anchor, anchorOffset, cell, edgeHeightSource, edgeMatchRows));
+                        tiles.Add(BuildBlock(raster, options, frame, c0, c1, r0, r1, anchor, anchorOffset, cell, edgeHeightSource, edgeMatchRows, orthoTileIndexOffset: orthoTileIndexOffset));
                     }
                 }
             }
@@ -353,7 +357,8 @@ public sealed class TerrainMesh3D
         OrthoCell orthoCell = default,
         DemRaster? edgeHeightSource = null,
         int edgeMatchRows = 1,
-        OrthoCoverage? orthoCoverage = null)
+        OrthoCoverage? orthoCoverage = null,
+        int orthoTileIndexOffset = 0)
     {
         int cols = raster.Columns;
         int rows = raster.Rows;
@@ -391,6 +396,10 @@ public sealed class TerrainMesh3D
             double centreLat = rows > 1 ? raster.North - (centreRow / (rows - 1) * (raster.North - raster.South)) : raster.North;
             (geoCol, geoRow, geoTileIndex) = coverage.CellAt(new GeoPoint(centreLat, centreLon));
         }
+
+        // Shift the ortho cell index so this mesh's cells sit AFTER another set in the renderer's flat
+        // orthoTiles list (e.g. a high-zoom near-field patch appended past the base scene's cells).
+        geoTileIndex += orthoTileIndexOffset;
 
         // Vertex positions in the full-raster world frame. Row 0 = north edge = +Y; last row = -Y.
         for (int r = rowStart; r <= rowEnd; r++)
