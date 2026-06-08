@@ -597,6 +597,9 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <summary>Whether the avalanche slope-steepness ("Mapa nachylenia") shading is active.</summary>
     [ObservableProperty] private bool slopeMapMode;
 
+    /// <summary>Premium menu "Skały": blend a rock material onto steep faces where the top-down ortho smears.</summary>
+    [ObservableProperty] private bool rockMaterialOn = true;
+
     [ObservableProperty] private bool showTrails = true;
 
     partial void OnShowTrailsChanged(bool value) => OnTrailFilterChanged();

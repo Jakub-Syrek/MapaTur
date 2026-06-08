@@ -139,9 +139,23 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // rock, smoothstep blend zone). Stage 1: flat colour; later triplanar rock + detail normal. Skipped
         // in slope-map mode (that view wants the raw band colours).
         "  if (uSlopeMode < 0.5 && uRockStrength > 0.001) {\n" +
-        "    float rockSlopeDeg = degrees(acos(clamp(normalize(vNormal).z, 0.0, 1.0)));\n" +
+        "    vec3 rn = normalize(vNormal);\n" +
+        "    float rockSlopeDeg = degrees(acos(clamp(rn.z, 0.0, 1.0)));\n" +
         "    float rockW = smoothstep(35.0, 60.0, rockSlopeDeg) * uRockStrength;\n" +
-        "    base = mix(base, vec3(0.42, 0.40, 0.37), rockW);\n" +
+        "    if (rockW > 0.001) {\n" +
+        // Triplanar procedural rock detail: sample cheap value noise on the three world-axis planes and
+        // blend by |normal|, so it follows the surface and does NOT stretch on vertical faces (the whole
+        // point — unlike the top-down ortho). Two octaves modulate the rock luminance into varied stone
+        // instead of a flat plate. Gated to rocky fragments so the extra taps don't cost on gentle ground.
+        "      vec3 an = abs(rn); float bw = an.x + an.y + an.z + 0.0001;\n" +
+        "      float sc = 0.35;\n" + // cycles per metre (~3 m features); 2nd octave at 2.7x
+        "      float nA = noiseT(vWorldPos.yz * sc) + 0.5 * noiseT(vWorldPos.yz * sc * 2.7);\n" +
+        "      float nB = noiseT(vWorldPos.zx * sc) + 0.5 * noiseT(vWorldPos.zx * sc * 2.7);\n" +
+        "      float nC = noiseT(vWorldPos.xy * sc) + 0.5 * noiseT(vWorldPos.xy * sc * 2.7);\n" +
+        "      float rk = ((nA * an.x) + (nB * an.y) + (nC * an.z)) / bw / 1.5;\n" + // 0..1
+        "      vec3 rockCol = vec3(0.42, 0.40, 0.37) * (0.60 + 0.80 * rk);\n" +
+        "      base = mix(base, rockCol, rockW);\n" +
+        "    }\n" +
         "  }\n" +
         // Avalanche slope-steepness map: replace the base colour with the band colour for this fragment's
         // slope angle (n.z = cos(slope)). Banding mirrors SlopeClassification; the lighting below still

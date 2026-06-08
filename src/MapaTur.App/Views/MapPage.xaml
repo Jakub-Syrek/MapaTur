@@ -39,6 +39,7 @@
                              ShowPeakNames="{Binding ShowPeakNames}"
                              ControlsVisible="{Binding ChromeVisible}"
                              SlopeMapEnabled="{Binding SlopeMapMode}"
+                             RockMaterialEnabled="{Binding RockMaterialOn}"
                              MsaaEnabled="{Binding AntiAliasingOn}"
                              DebugEnabled="{Binding ShowDebugOverlay}"
                              CameraState="{Binding CameraState, Mode=TwoWay}"
@@ -177,6 +178,13 @@
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                         <Label Grid.Column="0" Text="Nazwy szczytów" Style="{StaticResource GlassLabel}" />
                         <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowPeakNames}" />
+                    </Grid>
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <VerticalStackLayout Grid.Column="0" Spacing="0">
+                            <Label Text="Skały" Style="{StaticResource GlassLabel}" />
+                            <Label Text="materiał skały na stromiznach (zamiast rozmytego ortho)" Style="{StaticResource GlassCaption}" FontSize="10" />
+                        </VerticalStackLayout>
+                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding RockMaterialOn}" />
                     </Grid>
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                         <VerticalStackLayout Grid.Column="0" Spacing="0">

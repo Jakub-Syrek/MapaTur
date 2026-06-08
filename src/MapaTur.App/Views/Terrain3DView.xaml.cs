@@ -182,6 +182,20 @@ public partial class Terrain3DView : ContentView
         set => SetValue(ShowOrthoProperty, value);
     }
 
+    /// <summary>
+    /// Whether the rock material is blended onto steep faces (premium menu "Skały"). When false the steep
+    /// walls keep the raw orthophoto (which smears) — useful for an A/B of the blend.
+    /// </summary>
+    public static readonly BindableProperty RockMaterialEnabledProperty = BindableProperty.Create(
+        nameof(RockMaterialEnabled), typeof(bool), typeof(Terrain3DView), true,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
+
+    public bool RockMaterialEnabled
+    {
+        get => (bool)GetValue(RockMaterialEnabledProperty);
+        set => SetValue(RockMaterialEnabledProperty, value);
+    }
+
     /// <summary>Whether MSAA anti-aliasing is used (premium menu render-quality profile).</summary>
     public static readonly BindableProperty MsaaEnabledProperty = BindableProperty.Create(
         nameof(MsaaEnabled), typeof(bool), typeof(Terrain3DView), true,
@@ -1960,6 +1974,7 @@ public partial class Terrain3DView : ContentView
             glRenderer.OrthoEnabled = ShowOrtho; // premium menu "Ortofoto" toggle (textures stay resident)
             glRenderer.MsaaEnabled = MsaaEnabled; // premium menu render-quality profile (AA on/off)
             glRenderer.SlopeMapEnabled = SlopeMapEnabled; // premium menu "Mapa nachylenia" (slope-steepness shading)
+            glRenderer.RockStrength = RockMaterialEnabled ? 1f : 0f; // premium menu "Skały" (rock material on steep faces)
 
             // Push a changed ortho image to the GL renderer once (it uploads on the GL thread next Render).
             if (orthoPathDirty)
