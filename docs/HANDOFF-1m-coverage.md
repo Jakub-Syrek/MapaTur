@@ -212,7 +212,11 @@ Pierwsze spisanie tego dokumentu: **2026-06-09** (sesja wody; LOD/streaming NIE 
 
 ## 15. OTWARTE TEMATY
 
-**P0 (krytyczne dla „szerszego pokrycia"):**
+**✅ POSTĘP P0 (sesja 2026-06-09) — FUNDAMENT KOMPLETNY, device-validated, wszystko na `main`:**
+`WorldOriginPolicy` (`7c7a532`) + `DemTileResidencyPlanner` (`b267e45`) [pure, TDD] · no-op origin-probe (`bc434c3`) · `uModelOffset` plumbing (`40983d4`) · dual-frame globalizacja proceduralnych wejść (`8163cf5`) · **kamera-względny render / floating origin** (`034d7ce`). Render-frame precyzja rozwiązana: teren+woda w ramie `camera.Target` (małe liczby), szum przypięty do świata przez `vStableWorldPos`, etykiety/overlaye spójne. **Re-anchor dyskretny okazał się zbędny dla precyzji renderu (ciągły camera-relative go zastępuje); policy/residency zostają do zarządzania KAFLAMI w streamingu.**
+➡️ **NASTĘPNE = P1 streaming** (niżej). 2D↔3D clamp też niżej.
+
+**P0 (pozostałe — jeśli kiedyś potrzebne):**
 - **Wspólny world-origin dla wielu kafli (shared-frame rework).** Opis: dodać ramę świata niezależną od pojedynczego rastra (scene-local origin), tak by wiele kafli DEM (1 m blisko + 30 m dalej) żyło w jednym układzie float blisko kamery; przepiąć `TerrainMesh3D.Build(origin)`, `Terrain3DView.Tiles` (dynamiczny zbiór), `CameraFocusSync`, `MapPage.SyncCameraToMap/SyncMapToCamera`. **Koszt: DUŻY. Ryzyko: WYSOKIE** (destabilizacja działających Tatr: persystencja kamery, overlay, 2D↔3D). **Zależności:** brak nowych; foundations są. **Kierunek:** origin = bieżący look-at/centrum widoku (nie GPS 0,0); kafle liczone względem niego; reanchoryzacja gdy kamera odjedzie za daleko (re-center, nie per-window). Najpierw na 30 m (tańszy mesh), dopiero potem 1 m. TDD warstwy projekcji, walidacja na urządzeniu po każdym kroku.
 
 **P1 (ważne):**
