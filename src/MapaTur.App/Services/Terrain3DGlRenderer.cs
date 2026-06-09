@@ -34,16 +34,22 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "layout(location=2) in vec3 aNormal;\n" +
         "layout(location=3) in vec2 aTex;\n" +
         "uniform mat4 uMvp;\n" +
-        // Wider-coverage scene origin: a per-mesh translation that re-expresses a mesh built about its own
-        // anchor into the current shared scene origin (= GeoToWorld(meshAnchor, sceneOrigin)). Applied to BOTH
-        // gl_Position and vWorldPos so lighting/fog/water (which use uCameraPos) stay in the same frame. Today
-        // every mesh shares the scene origin so this is (0,0,0) — a no-op until the scene re-anchors (P0 step 2).
+        // Wider-coverage TWO-FRAME scheme (so a future re-anchor never disturbs procedural effects):
+        //   uModelOffset  → RENDER frame (small, near the camera): drives gl_Position + vWorldPos, which feed the
+        //                   VIEW-DEPENDENT terms (view direction, camera distance, fog). Re-anchor moves this.
+        //   uStableOffset → STABLE/global frame: drives vStableWorldPos, which feeds ALL procedural sampling
+        //                   (noise, ripples, rock/material, cloud field, water shape). Re-anchor MUST NOT move it.
+        // Today every mesh shares the scene origin so BOTH offsets are (0,0,0) → vWorldPos == vStableWorldPos == aPos
+        // → a strict no-op. They diverge only once the scene re-anchors (P0 step 6), keeping geometry near the
+        // camera (precision) while noise stays pinned to the world (no drift).
         "uniform vec3 uModelOffset;\n" +
+        "uniform vec3 uStableOffset;\n" +
         "out vec4 vColor;\n" +
         "out vec3 vNormal;\n" +
         "out vec2 vTex;\n" +
         "out vec3 vWorldPos;\n" +
-        "void main(){ vColor = aColor; vNormal = aNormal; vTex = aTex; vec3 worldPos = aPos + uModelOffset; vWorldPos = worldPos; gl_Position = uMvp * vec4(worldPos, 1.0); }\n";
+        "out vec3 vStableWorldPos;\n" +
+        "void main(){ vColor = aColor; vNormal = aNormal; vTex = aTex; vec3 worldPos = aPos + uModelOffset; vWorldPos = worldPos; vStableWorldPos = aPos + uStableOffset; gl_Position = uMvp * vec4(worldPos, 1.0); }\n";
 
     // Per-pixel Lambert lighting + exponential-fog aerial perspective. shade = ambient + (1-ambient) *
     // max(0, dot(N, L)). When an ortho image is bound (uUseOrtho=1) the surface colour is sampled from it
@@ -57,7 +63,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "in vec4 vColor;\n" +
         "in vec3 vNormal;\n" +
         "in vec2 vTex;\n" +
-        "in vec3 vWorldPos;\n" +
+        "in vec3 vWorldPos;\n" +          // RENDER frame — view-dependent terms only (view dir, camera distance, fog)
+        "in vec3 vStableWorldPos;\n" +    // STABLE/global frame — all procedural sampling (noise/ripple/rock/cloud/water shape)
         "uniform vec3 uLightDir;\n" +
         "uniform float uAmbient;\n" +
         "uniform vec3 uSunColor;\n" +    // direct-sun colour (warm at sunset, white at noon)
@@ -129,10 +136,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // depth-faded alpha (shallow shore semi-transparent). Flat normal → no patchwork; polygon → no spill.
         "  if (uDebugPoly > 0.5) {\n" +
         "    vec3 viewW = normalize(uCameraPos - vWorldPos);\n" +
-        "    float depthF = 1.0 - smoothstep(uLakeRadius * 0.15, uLakeRadius * 0.95, distance(vWorldPos.xy, uLakeCenter));\n" + // SMOOTH radial (no fan creases)
+        "    float depthF = 1.0 - smoothstep(uLakeRadius * 0.15, uLakeRadius * 0.95, distance(vStableWorldPos.xy, uLakeCenter));\n" + // SMOOTH radial (stable frame: lake shape pinned to the world)
 
         "    float tW = uCloudTime;\n" +
-        "    vec2 wp = (vWorldPos.xy * 0.045) + (uCloudWind * tW * 0.5) + (tW * vec2(0.08, 0.05));\n" +
+        "    vec2 wp = (vStableWorldPos.xy * 0.045) + (uCloudWind * tW * 0.5) + (tW * vec2(0.08, 0.05));\n" +
         "    float we = 0.55;\n" +
         "    float wx = noiseT(wp + vec2(we, 0.0)) - noiseT(wp - vec2(we, 0.0));\n" +
         "    float wy = noiseT(wp + vec2(0.0, we)) - noiseT(wp - vec2(0.0, we));\n" +
@@ -165,7 +172,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  if (uCloudShadow > 0.001 && uCloudCoverage > 0.001 && uLightDir.z > 0.12) {\n" +
         "    float tt = (uCloudAltitude - vWorldPos.z) / uLightDir.z;\n" +
         "    if (tt > 0.0) {\n" +
-        "      vec2 cp = vWorldPos.xy + (uLightDir.xy * tt);\n" +
+        "      vec2 cp = vStableWorldPos.xy + (uLightDir.xy * tt);\n" +
         "      vec2 p = cp * uCloudNoiseScale + uCloudWind * uCloudTime;\n" +
         "      vec2 warp = vec2(fbmT(p * 0.5 + uCloudTime * 0.010),\n" +
         "                       fbmT(p * 0.5 + vec2(5.2, 1.3) + uCloudTime * 0.012));\n" +
@@ -189,13 +196,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  if (rockW > 0.001) {\n" +
         "    vec3 an = abs(shN); float bw = an.x + an.y + an.z + 0.0001;\n" +
         "    float sc = 0.35;\n" + // cycles per metre (~3 m granite blotches); 2nd octave at 2.7x
-        "    float nA = noiseT(vWorldPos.yz * sc) + 0.5 * noiseT(vWorldPos.yz * sc * 2.7);\n" +
-        "    float nB = noiseT(vWorldPos.zx * sc) + 0.5 * noiseT(vWorldPos.zx * sc * 2.7);\n" +
-        "    float nC = noiseT(vWorldPos.xy * sc) + 0.5 * noiseT(vWorldPos.xy * sc * 2.7);\n" +
+        "    float nA = noiseT(vStableWorldPos.yz * sc) + 0.5 * noiseT(vStableWorldPos.yz * sc * 2.7);\n" +
+        "    float nB = noiseT(vStableWorldPos.zx * sc) + 0.5 * noiseT(vStableWorldPos.zx * sc * 2.7);\n" +
+        "    float nC = noiseT(vStableWorldPos.xy * sc) + 0.5 * noiseT(vStableWorldPos.xy * sc * 2.7);\n" +
         "    rk = clamp((((((nA * an.x) + (nB * an.y) + (nC * an.z)) / bw) / 1.5) - 0.5) * 1.55 + 0.5, 0.0, 1.0);\n" +
         // Detail normal: central-difference the noise on the dominant world plane, project the tilt into the
         // surface tangent (subtract the normal component), and bend the shading normal by it. Bounded by rockW.
-        "    vec2 dp = (an.z >= an.x && an.z >= an.y) ? vWorldPos.xy : ((an.x >= an.y) ? vWorldPos.yz : vWorldPos.zx);\n" +
+        "    vec2 dp = (an.z >= an.x && an.z >= an.y) ? vStableWorldPos.xy : ((an.x >= an.y) ? vStableWorldPos.yz : vStableWorldPos.zx);\n" +
         "    float e = 0.8;\n" +
         "    float gx = noiseT((dp + vec2(e, 0.0)) * sc) - noiseT((dp - vec2(e, 0.0)) * sc);\n" +
         "    float gy = noiseT((dp + vec2(0.0, e)) * sc) - noiseT((dp - vec2(0.0, e)) * sc);\n" +
@@ -565,6 +572,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private uint program;
     private int mvpLocation = -1;
     private int modelOffsetLocation = -1;
+    private int stableOffsetLocation = -1;
     private int debugPolyLocation = -1;
     private int lakeCenterLocation = -1;
     private int lakeRadiusLocation = -1;
@@ -917,6 +925,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             programReady = false;
             mvpLocation = -1;
             modelOffsetLocation = -1;
+            stableOffsetLocation = -1;
             lightDirLocation = -1;
             ambientLocation = -1;
             sunColorLocation = -1;
@@ -1223,10 +1232,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             mvp.M41, mvp.M42, mvp.M43, mvp.M44,
         };
         gl.UniformMatrix4(mvpLocation, 1, false, m);
-        // Scene-origin model offset (wider-coverage P0). Today every mesh shares the scene origin, so this is
-        // zero for the whole terrain program (terrain tiles, lake water, reflection pre-pass) — a no-op until
-        // the scene re-anchors in step 2. Set once here; not changed by any pass.
+        // Scene-origin offsets (wider-coverage P0). Today every mesh shares the scene origin, so BOTH are zero
+        // for the whole terrain program (terrain tiles, lake water, reflection pre-pass) — a strict no-op until
+        // the scene re-anchors. uModelOffset = render frame (gl_Position/vWorldPos); uStableOffset = stable frame
+        // for procedural sampling (vStableWorldPos). Set once here; not changed by any pass.
         gl.Uniform3(modelOffsetLocation, 0f, 0f, 0f);
+        gl.Uniform3(stableOffsetLocation, 0f, 0f, 0f);
 
         // Per-pixel lighting: the Atmosphere instance, when provided, overrides the per-tile baked
         // light direction + ambient so the time-of-day slider drives shading live. Without an
@@ -2206,6 +2217,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.DetachShader(program, fs);
         mvpLocation = g.GetUniformLocation(program, "uMvp");
         modelOffsetLocation = g.GetUniformLocation(program, "uModelOffset");
+        stableOffsetLocation = g.GetUniformLocation(program, "uStableOffset");
         debugPolyLocation = g.GetUniformLocation(program, "uDebugPoly");
         lakeCenterLocation = g.GetUniformLocation(program, "uLakeCenter");
         lakeRadiusLocation = g.GetUniformLocation(program, "uLakeRadius");
