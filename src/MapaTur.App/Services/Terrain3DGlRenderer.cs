@@ -562,8 +562,6 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int debugPolyLocation = -1;
     private int lakeCenterLocation = -1;
     private int lakeRadiusLocation = -1;
-    private Vector2 debugLakeCenter;
-    private float debugLakeRadius = 1f;
 
     // Planar water reflection: uniform locations + a half-resolution colour target (texture + depth RB) the
     // pre-pass renders the mirrored terrain into, which the lake mesh then samples. Behind ReflectionEnabled.
@@ -586,58 +584,22 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     public bool ReflectionEnabled { get; set; } = true;
 
     // DEBUG: Morskie Oko real outline from OSM (way 27952583), to check how the polygon aligns with the ortho.
-    private static readonly (double Lat, double Lon)[] DebugMorskieOko =
+    // Lake-water draw ranges: one per in-view lake — offset+count into the shared water VBO, plus the lake's
+    // world-XY centroid + radius for the shader's smooth radial depth. Rebuilt each frame by BuildLakeWater.
+    private readonly struct LakeDraw
     {
-        (49.2008602, 20.0719867), (49.2008385, 20.0720343), (49.2007931, 20.072035), (49.20075, 20.0719695), (49.2007328, 20.0719674),
-        (49.2006782, 20.0720643), (49.2006267, 20.0721558), (49.2005318, 20.0723724), (49.2001921, 20.0729049),
-        (49.1999439, 20.0732066), (49.1995946, 20.0736494), (49.1993328, 20.0738332), (49.1991969, 20.0738332),
-        (49.1990919, 20.0737615), (49.1989784, 20.0736539), (49.1988341, 20.073519), (49.1985616, 20.0734887),
-        (49.1985206, 20.0734022), (49.1984588, 20.0733551), (49.1981623, 20.073604), (49.1980522, 20.0735939),
-        (49.1979904, 20.0736521), (49.1979256, 20.0738486), (49.1979064, 20.0739861), (49.1978502, 20.0740865),
-        (49.1977858, 20.0741135), (49.1976962, 20.0740699), (49.1976442, 20.073994), (49.1975876, 20.0739796),
-        (49.1975148, 20.0740156), (49.1974522, 20.0739735), (49.1974161, 20.0738698), (49.1973407, 20.0737648),
-        (49.1972763, 20.0735549), (49.1971974, 20.0734912), (49.1971136, 20.0734426), (49.197003, 20.0734695),
-        (49.1968808, 20.0734565), (49.1968241, 20.0733664), (49.1967447, 20.0732916), (49.1966617, 20.0732365),
-        (49.1965074, 20.073258), (49.1963902, 20.0731816), (49.1962404, 20.0731432), (49.1961347, 20.073179), (49.1960263, 20.0732031),
-        (49.1957552, 20.0732408), (49.1956147, 20.0732019), (49.1955122, 20.0731301), (49.195508, 20.0731216),
-        (49.1955165, 20.0729952), (49.1954682, 20.0729661), (49.195408, 20.0729382), (49.1953911, 20.0728876),
-        (49.1953536, 20.0727527), (49.1952741, 20.0726427), (49.1951878, 20.0725966), (49.1950389, 20.0725938),
-        (49.1949418, 20.0725061), (49.1948475, 20.0723789), (49.194821, 20.072188), (49.1947665, 20.0720639), (49.1946039, 20.0717747),
-        (49.1945779, 20.0716208), (49.1945437, 20.0715917), (49.1944849, 20.071577), (49.1942667, 20.0715303),
-        (49.1942274, 20.0714917), (49.1941697, 20.0714349), (49.1940465, 20.0714653), (49.193994, 20.0715226),
-        (49.1937887, 20.0715283), (49.1937278, 20.071496), (49.1936796, 20.0714158), (49.1936657, 20.0713847),
-        (49.1937265, 20.0713189), (49.1938376, 20.0712045), (49.1938482, 20.0709971), (49.19388, 20.0708601), (49.1938832, 20.0707063),
-        (49.1938933, 20.0705775), (49.1938398, 20.0704219), (49.1938138, 20.0702345), (49.1937538, 20.0701413),
-        (49.1937398, 20.070042), (49.1937593, 20.0699745), (49.1937328, 20.069822), (49.1936842, 20.0698021), (49.1936501, 20.0696948),
-        (49.1936431, 20.0695943), (49.1936619, 20.0694471), (49.1936315, 20.0692437), (49.1936121, 20.0691579),
-        (49.1936386, 20.0690907), (49.1936666, 20.0690838), (49.1937188, 20.0690192), (49.1937521, 20.0689386),
-        (49.193766, 20.0688254), (49.1937807, 20.0686921), (49.1938619, 20.0686367), (49.1938882, 20.0684214),
-        (49.1939514, 20.0683207), (49.1941272, 20.0680407), (49.1942367, 20.067917), (49.1943708, 20.0675338),
-        (49.1943906, 20.0673719), (49.1944885, 20.0672529), (49.1945097, 20.0670537), (49.1946223, 20.0667405),
-        (49.1947065, 20.0661136), (49.1947267, 20.0658509), (49.19472, 20.0657492), (49.1947361, 20.0656127), (49.1947888, 20.0655529),
-        (49.1948349, 20.0654947), (49.1948788, 20.065411), (49.1949364, 20.065381), (49.1950105, 20.0653531), (49.1951515, 20.0653171),
-        (49.195313, 20.0653335), (49.1953811, 20.0653496), (49.195437, 20.0653629), (49.1957249, 20.0655594), (49.1957751, 20.065576),
-        (49.1958122, 20.0655883), (49.1958847, 20.0655594), (49.1959671, 20.0655037), (49.1960366, 20.0655399),
-        (49.1961051, 20.0656429), (49.1961533, 20.0657624), (49.1962656, 20.0658786), (49.196345, 20.0659977),
-        (49.1963908, 20.0661193), (49.1964093, 20.0662973), (49.1964359, 20.0663963), (49.1965031, 20.0664648),
-        (49.1966265, 20.066546), (49.1966798, 20.0666399), (49.196764, 20.0669218), (49.1968529, 20.0672146), (49.196915, 20.067393),
-        (49.1970007, 20.0675125), (49.1971236, 20.067524), (49.1971875, 20.0674885), (49.1972323, 20.0674948),
-        (49.1973324, 20.0676179), (49.1974136, 20.0676173), (49.1974667, 20.0675629), (49.1975458, 20.0675805),
-        (49.1976066, 20.0675282), (49.1976502, 20.0674778), (49.1977227, 20.0674684), (49.1977896, 20.067353),
-        (49.197849, 20.0673194), (49.197894, 20.0673263), (49.1979788, 20.0674102), (49.1980778, 20.0675081), (49.1982191, 20.0676157),
-        (49.1983658, 20.0676785), (49.1985016, 20.0677614), (49.1986616, 20.0677471), (49.1987794, 20.0677839),
-        (49.1988806, 20.0678721), (49.1989177, 20.0679464), (49.1990313, 20.0679687), (49.1991028, 20.0680302),
-        (49.1991866, 20.0680092), (49.1992977, 20.0680694), (49.1993595, 20.0681038), (49.1994025, 20.0680663),
-        (49.1994835, 20.0681135), (49.1995307, 20.068234), (49.1995884, 20.0683027), (49.1996357, 20.0683203),
-        (49.1996612, 20.0682913), (49.1997165, 20.0683107), (49.1997391, 20.0683519), (49.199833, 20.0684081),
-        (49.1999166, 20.0685607), (49.1999317, 20.0685767), (49.1999464, 20.0685923), (49.1999682, 20.0686169),
-        (49.200048, 20.0687752), (49.2000923, 20.0688633), (49.2001693, 20.0690772), (49.2002763, 20.0692545),
-        (49.2005391, 20.0696033), (49.2006251, 20.0698014), (49.2007054, 20.0700587), (49.2007844, 20.0701335),
-        (49.2008885, 20.0701564), (49.2009757, 20.0702439), (49.20104, 20.0703553), (49.2010694, 20.0705159), (49.2010976, 20.0705999),
-        (49.2011019, 20.0708102), (49.2010615, 20.0709903), (49.2009781, 20.0711897), (49.2009015, 20.071377),
-        (49.2008484, 20.0715716), (49.2008393, 20.0717414), (49.2008619, 20.071863), (49.2008619, 20.0719417),
-        (49.2008602, 20.0719867),
-    };
+        public LakeDraw(int vertexOffset, int vertexCount, Vector2 center, float radius)
+        {
+            VertexOffset = vertexOffset; VertexCount = vertexCount; Center = center; Radius = radius;
+        }
+
+        public int VertexOffset { get; }
+        public int VertexCount { get; }
+        public Vector2 Center { get; }
+        public float Radius { get; }
+    }
+
+    private readonly List<LakeDraw> lakeDraws = new();
     private uint debugPolyVao;
     private uint debugPolyVbo;
     private int debugPolyVertexCount;
@@ -1469,25 +1431,26 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.DrawElements(PrimitiveType.Triangles, (uint)tile.IndexCount, DrawElementsType.UnsignedShort, (void*)0);
         }
 
-        // DEBUG: Morskie Oko OSM outline as a flat magenta overlay, to eyeball how the polygon aligns with the
-        // orthophoto lake. Drawn over the terrain, blended, depth-test on (terrain clips it like real water would).
-        BuildDebugPoly(gl, tiles);
-        if (debugPolyVertexCount > 0)
+        // Lake water: real OSM outlines (MountainLakeData) for every tarn within the loaded terrain, each at its
+        // own elevation, drawn over the terrain. Blended, depth-test ON so the basin clips it where the bed rises
+        // above the water plane. Depth-write is ON (not off): a lake's triangles are all coplanar at one plane Z,
+        // so with DepthFunc=Less the FIRST triangle at a pixel writes that depth and any OVERLAPPING coplanar
+        // triangle (same Z, not less) is rejected — each water pixel blends exactly ONCE, killing the bright
+        // double-blend seams that survive ear-clipping. Each lake is shaded with its own centroid + radius.
+        BuildLakeWater(gl, tiles);
+        if (debugPolyVertexCount > 0 && lakeDraws.Count > 0)
         {
-            // Lake water fill: blended over the terrain (shallow shore semi-transparent), depth-test ON so the
-            // basin clips it where the bed rises above the water plane. Depth-write is ON (not off): the water
-            // triangles are all coplanar at the same plane Z, so with DepthFunc=Less the FIRST triangle at a
-            // pixel writes that depth and any OVERLAPPING coplanar triangle (same Z, not less) is rejected — so
-            // each water pixel is blended exactly ONCE. This kills the bright double-blend seams that survive
-            // ear-clipping where a few thin triangles still overlap (the residual of the old centroid-fan rays).
             gl.Enable(EnableCap.Blend);
             gl.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
             gl.DepthMask(true);
             gl.Uniform1(debugPolyLocation, 1f);
-            gl.Uniform2(lakeCenterLocation, debugLakeCenter.X, debugLakeCenter.Y);
-            gl.Uniform1(lakeRadiusLocation, debugLakeRadius);
             gl.BindVertexArray(debugPolyVao);
-            gl.DrawArrays(PrimitiveType.Triangles, 0, (uint)debugPolyVertexCount);
+            foreach (LakeDraw lake in lakeDraws)
+            {
+                gl.Uniform2(lakeCenterLocation, lake.Center.X, lake.Center.Y);
+                gl.Uniform1(lakeRadiusLocation, lake.Radius);
+                gl.DrawArrays(PrimitiveType.Triangles, lake.VertexOffset, (uint)lake.VertexCount);
+            }
             gl.Uniform1(debugPolyLocation, 0f);
             gl.BindVertexArray(0);
             gl.DepthMask(true);
@@ -2027,54 +1990,82 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
     // DEBUG: builds a flat triangle-fan from the Morskie Oko OSM outline at the lake level, in the terrain vertex
     // layout (only position matters; the shader paints it flat magenta). Lets us eyeball polygon-vs-ortho alignment.
-    private unsafe void BuildDebugPoly(GL g, IReadOnlyList<TerrainMesh3D> tiles)
+    // Builds the lake-water mesh for every named lake whose centroid sits within the loaded terrain (from the
+    // bundled MountainLakeData / OSM outlines). Each lake's ring is ear-clipped into a flat fan-free mesh at its
+    // own water elevation and appended to one shared VBO; per-lake (offset, count, centroid, radius) ranges are
+    // recorded in lakeDraws so the draw loop can shade each with its own smooth radial depth.
+    private unsafe void BuildLakeWater(GL g, IReadOnlyList<TerrainMesh3D> tiles)
     {
+        lakeDraws.Clear();
+        debugPolyVertexCount = 0;
         if (tiles.Count == 0)
         {
-            debugPolyVertexCount = 0;
             return;
         }
-        const float waterElev = 1395f + 4f; // Morskie Oko + small lift
+
+        // Only lakes within the loaded terrain extent — so water never floats over un-loaded ground (empty in
+        // the Beskidy base view; Morskie Oko + neighbours in the Tatra LOD demo). Union of all tile bounds.
+        MapBounds extent = tiles[0].Bounds;
+        for (int i = 1; i < tiles.Count; i++) { extent = extent.Union(tiles[i].Bounds); }
+
         const int stride = 12;
-        var pts = DebugMorskieOko;
-        int m = pts.Length - 1; // drop the closing duplicate point
-        var w2 = new Vector2[m];
-        var w3 = new Vector3[m];
-        for (int i = 0; i < m; i++)
+        var verts = new List<float>(4096);
+        foreach (MountainLake lake in MountainLakeData.WithinBounds(extent))
         {
-            Vector3 wv = tiles[0].GeoToWorld(new GeoPoint(pts[i].Lat, pts[i].Lon), waterElev);
-            w3[i] = wv; w2[i] = new Vector2(wv.X, wv.Y);
+            IReadOnlyList<GeoPoint> ring = lake.Outline;
+            int m = ring.Count;
+            if (m < 3)
+            {
+                continue;
+            }
+            float waterElevM = (float)lake.ElevationMeters + 4f; // small lift so the plane sits just above the bed
+            var w2 = new Vector2[m];
+            var w3 = new Vector3[m];
+            for (int i = 0; i < m; i++)
+            {
+                Vector3 wv = tiles[0].GeoToWorld(ring[i], waterElevM);
+                w3[i] = wv; w2[i] = new Vector2(wv.X, wv.Y);
+            }
+
+            // Ear-clip into NON-OVERLAPPING triangles (a centroid fan overlaps itself in concave bays → bright rays).
+            List<int> tris = EarClipXy(w2);
+            if (tris.Count == 0)
+            {
+                continue;
+            }
+
+            int startVertex = verts.Count / stride;
+            foreach (int idx in tris)
+            {
+                Vector3 w = w3[idx];
+                verts.Add(w.X); verts.Add(w.Y); verts.Add(w.Z);
+                verts.Add(0f); verts.Add(0f); verts.Add(0f); verts.Add(1f);
+                verts.Add(0f); verts.Add(0f); verts.Add(1f);
+                verts.Add(0f); verts.Add(0f);
+            }
+
+            float cx = 0, cy = 0;
+            for (int i = 0; i < m; i++) { cx += w2[i].X; cy += w2[i].Y; }
+            cx /= m; cy /= m;
+            var center = new Vector2(cx, cy);
+            float maxR = 1f;
+            for (int i = 0; i < m; i++) { maxR = MathF.Max(maxR, Vector2.Distance(center, w2[i])); }
+
+            lakeDraws.Add(new LakeDraw(startVertex, tris.Count, center, maxR));
         }
 
-        // Ear-clip into NON-OVERLAPPING triangles. A centroid fan overlaps itself in the concave bays, and the
-        // overlap double-blends into bright rays — ear-clipping tiles the polygon cleanly. Depth is computed in
-        // the fragment (smooth radial), so the vertex colour is unused here.
-        List<int> tris = EarClipXy(w2);
-
-        int needed = tris.Count * stride;
-        if (debugPolyFloats is null || debugPolyFloats.Length < needed)
-        {
-            debugPolyFloats = new float[needed];
-        }
-        float[] buf = debugPolyFloats;
-        int n = 0;
-        foreach (int idx in tris)
-        {
-            Vector3 w = w3[idx];
-            buf[n++] = w.X; buf[n++] = w.Y; buf[n++] = w.Z;
-            buf[n++] = 0f; buf[n++] = 0f; buf[n++] = 0f; buf[n++] = 1f;
-            buf[n++] = 0f; buf[n++] = 0f; buf[n++] = 1f;
-            buf[n++] = 0f; buf[n++] = 0f;
-        }
+        int n = verts.Count;
         debugPolyVertexCount = n / stride;
-
-        float cx = 0, cy = 0;
-        foreach (var p in w2) { cx += p.X; cy += p.Y; }
-        cx /= m; cy /= m;
-        debugLakeCenter = new Vector2(cx, cy);
-        float maxR = 1f;
-        foreach (var p in w2) { maxR = MathF.Max(maxR, Vector2.Distance(new Vector2(cx, cy), p)); }
-        debugLakeRadius = maxR;
+        if (n == 0)
+        {
+            return;
+        }
+        if (debugPolyFloats is null || debugPolyFloats.Length < n)
+        {
+            debugPolyFloats = new float[n];
+        }
+        verts.CopyTo(debugPolyFloats);
+        float[] buf = debugPolyFloats;
 
         if (debugPolyVao == 0)
         {
