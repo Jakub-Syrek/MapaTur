@@ -597,6 +597,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// <summary>When <c>true</c>, lakes get a real planar reflection of the terrain (else a cheap gradient).</summary>
     public bool ReflectionEnabled { get; set; } = true;
 
+    // Wider-coverage P0 step 6: render the terrain + lake water in a camera-relative frame (origin = the look-at
+    // target) so vertices and the view translation stay small (float precision for far/streamed scene origins).
+    // mvpRender = Translate(R)·mvp with uModelOffset = -R cancel EXACTLY (the on-screen image is identical), while
+    // uStableOffset stays 0 so all procedural sampling (vStableWorldPos) keeps the absolute world frame — no
+    // noise drift. The reflection pre-pass and the line/forest programs keep the absolute frame and co-render.
+    // KILL-SWITCH: set false to fall straight back to the absolute-frame behaviour.
+    private const bool CameraRelativeTerrainOrigin = true;
+
     // DEBUG: Morskie Oko real outline from OSM (way 27952583), to check how the polygon aligns with the ortho.
     // Lake-water draw ranges: one per in-view lake — offset+count into the shared water VBO, plus the lake's
     // world-XY centroid + radius for the shader's smooth radial depth. Rebuilt each frame by BuildLakeWater.
@@ -1412,6 +1420,24 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.BindTexture(TextureTarget.Texture2D, reflectionColorTex);
             gl.Uniform1(reflectionTexLocation, 1);
             gl.Uniform1(reflectionEnabledLocation, 1f);
+        }
+
+        // Camera-relative terrain frame (P0 step 6). The reflection pre-pass above ran in the ABSOLUTE frame
+        // (uModelOffset=0, absolute reflMvp) — leave it untouched. From here on the main terrain draw + lake water
+        // use the render frame: mvpRender = Translate(R)·mvp and uModelOffset = -R cancel exactly (image identical),
+        // uCameraPos shifts by -R so the view-dependent terms stay correct, and uStableOffset stays 0 so procedural
+        // sampling keeps the absolute world. Line/forest programs keep their own absolute MVP and co-render.
+        if (CameraRelativeTerrainOrigin)
+        {
+            Vector3 r = camera.Target;
+            Matrix4x4 mvpRender = Matrix4x4.CreateTranslation(r) * mvp;
+            m[0] = mvpRender.M11; m[1] = mvpRender.M12; m[2] = mvpRender.M13; m[3] = mvpRender.M14;
+            m[4] = mvpRender.M21; m[5] = mvpRender.M22; m[6] = mvpRender.M23; m[7] = mvpRender.M24;
+            m[8] = mvpRender.M31; m[9] = mvpRender.M32; m[10] = mvpRender.M33; m[11] = mvpRender.M34;
+            m[12] = mvpRender.M41; m[13] = mvpRender.M42; m[14] = mvpRender.M43; m[15] = mvpRender.M44;
+            gl.UniformMatrix4(mvpLocation, 1, false, m);
+            gl.Uniform3(modelOffsetLocation, -r.X, -r.Y, -r.Z);
+            gl.Uniform3(terrainCameraPosLocation, cameraWorldPos.X - r.X, cameraWorldPos.Y - r.Y, cameraWorldPos.Z - r.Z);
         }
 
         // Drape the ortho: bind each mesh tile's own cell texture (OrthoTileIndex) so a multi-cell ortho
