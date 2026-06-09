@@ -87,6 +87,7 @@ Pierwsze spisanie tego dokumentu: **2026-06-09** (sesja wody; LOD/streaming NIE 
 3. **Hipoteza:** „Per-tile mixed-zoom przez NAKŁADAJĄCE się regiony per-zoom (z16 na z14 na bazie)." **Sfalsyfikowane (4b):** trzy near-koplanarne powierzchnie → **pionowe kurtyny/żaluzje**. **Status: 🔴 OBALONE.** → jedna zszyta powierzchnia (single-patch), potem prawdziwy multi-res ze SKIRTEM (4c).
 4. **Hipoteza:** „«Pixele» w foreground naprawi streaming ostrzejszego ortho (ESRI z17)." **Sfalsyfikowane:** ESRI z17 nad Tatrami = upsampled z15 (860 B blank); bundlowane już 0,9 m/px; smar = top-down ortho na pionowych ścianach. **Status: 🔴/⚫ OBALONE+PORZUCONE.** → materiał skały (triplanar).
 5. **Hipoteza (do sprawdzenia, jeszcze nie obalona):** „Shared world-origin wprowadzę bez destabilizacji działających Tatr." **Status: 🟡 HIPOTEZA — RYZYKOWNA** (patrz §6, §13).
+6. **Hipoteza:** „Re-anchor origin (droga A) da się zwalidować w LOD demo testem «scena ma nie drgnąć»." **Sfalsyfikowane analizą kodu (2026-06-09):** proceduralny szum w terrain fragment shaderze jest próbkowany na **absolutnym `vWorldPos`** (zmarszczki `vWorldPos.xy*0.045`, granit `vWorldPos.yz*sc`, cień chmur `vWorldPos.xy+…`). Re-anchor zmienia liczbowe `vWorldPos` → te wzory się PRZESUWAJĄ (chmury/zmarszczki/ziarno skały „skaczą"), więc no-jump NIE przejdzie na warstwie szumu. Dodatkowo w skończonym demo kamera jest blisko origin → **zero korzyści precyzyjnej**, sam artefakt. **Status: 🔴 OBALONE jako krok izolowany.** Wniosek: re-anchor ma sens TYLKO przy dalekim roamingu/streamingu (§5), i wymaga **dwóch ram**: render-frame (mała, dla `gl_Position`/precyzji) ORAZ stabilnej ramy absolutnej dla próbkowania szumu (chmury/woda/skała), inaczej szum dryfuje przy każdym re-anchorze.
 
 ---
 
@@ -100,6 +101,7 @@ Pierwsze spisanie tego dokumentu: **2026-06-09** (sesja wody; LOD/streaming NIE 
 - **Scene-local origin w float** — NIGDY wielkie współrzędne GPS wprost (jitter). To jest sedno problemu skalowania.
 - **Roughness = lokalna KRZYWIZNA** (`|z−średnia 4 sąsiadów|`, P95), NIE odchylenie-od-quada (myli głębię z poszarpaniem); `neighborDistance` ~8 (skala grani), inaczej boost martwy.
 - **GLES:** brak stencila; MSAA+blend na nakładających się trójkątach = jasne szwy; nie czyta depth.
+- **Re-anchor wymaga DWÓCH ram współrzędnych:** render-frame (mała, blisko kamery, dla `gl_Position` = precyzja float) + stabilna rama absolutna dla **proceduralnego szumu** (chmury/zmarszczki/granit próbkują `vWorldPos`). Jedno `vWorldPos` nie wystarczy: jeśli służy i do projekcji, i do szumu, to re-anchor albo psuje precyzję, albo dryfuje szum. `uModelOffset` (krok 2b.2) musi docelowo wpływać TYLKO na `gl_Position`, a osobny stabilny coord zasilać szum. **Re-anchor jest bez sensu w skończonym LOD demo (kamera blisko origin) — testować/wdrażać go DOPIERO przy streamingu/dalekim roamingu (§15 P1).**
 
 ---
 
