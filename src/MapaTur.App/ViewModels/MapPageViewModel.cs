@@ -2039,6 +2039,14 @@ public sealed partial class MapPageViewModel : ObservableObject
     // the measurement on device before any geometry is touched. The real (few-km) value arrives in step 2.
     private const double OriginReanchorThresholdMeters = 1e9;
 
+    // Wider-coverage P1 streaming PROBE (read-only): plan the base tiles the view would stream + the residency
+    // load/keep/evict decision, and LOG them — no fetch, no swap. Validates the streaming pipeline on real
+    // device bounds before any tile loading is wired (mirrors the no-op origin probe).
+    private const int BaseStreamingMaxTiles = 64;
+    private const int BaseStreamingMinZoom = 9;
+    private const int BaseStreamingMaxZoom = 14;
+    private readonly DemTileResidencyPlanner baseStreamingProbePlanner = new(96);
+
     // Krok 4 (screen-space-error LOD): the detail patch follows the look-at point (raycast through the
     // screen centre, Krok 1) and its zoom adapts to the on-screen error (Krok 2/3) instead of a fixed z16.
     private const int LodBaseZoom = 13;                                   // static base zoom (~6 m; z12 shaved summit apexes → distant peaks too blunt vs real)
@@ -2338,6 +2346,22 @@ public sealed partial class MapPageViewModel : ObservableObject
         logger.LogInformation(
             "LOD focus [{Source}]: target {TLat:F4},{TLon:F4} → {FLat:F4},{FLon:F4}; cam→look-at {Dist:F0} m → detail z{Zoom}",
             focusSource, targetGeo.Latitude, targetGeo.Longitude, focus.Latitude, focus.Longitude, cameraToLookAt, detailZoom);
+
+        // Wider-coverage P1 streaming PROBE (NO-OP): plan the base tiles this view would stream + the residency
+        // load/keep/evict decision and LOG them. No fetch, no swap — just validates the streaming planner on real
+        // device bounds before tile loading is wired.
+        double streamMpp = viewportHeight > 0
+            ? (2.0 * cameraToLookAt * Math.Tan(camera.FieldOfViewYRadians * 0.5)) / viewportHeight
+            : 30.0;
+        double streamHalfWidth = Math.Clamp(cameraToLookAt, 1000.0, 30000.0);
+        StreamingTilePlan streamPlan = StreamingTilePlanner.Plan(
+            LodTerrainWindow.Around(focus, streamHalfWidth), streamMpp, focus.Latitude,
+            BaseStreamingMaxTiles, BaseStreamingMinZoom, BaseStreamingMaxZoom);
+        DemTileResidencyPlan streamResidency = baseStreamingProbePlanner.Plan(streamPlan.Tiles);
+        logger.LogInformation(
+            "LOD stream-probe (NO-OP): z{Zoom} desired={Desired} load={Load} evict={Evict} resident={Res} (mpp={Mpp:F1}, half={Half:F0}m)",
+            streamPlan.Zoom, streamPlan.Tiles.Count, streamResidency.ToLoad.Count, streamResidency.ToEvict.Count,
+            baseStreamingProbePlanner.Resident.Count, streamMpp, streamHalfWidth);
 
         lodDetailLoading = true;
         lastLodDetailReloadUtc = DateTime.UtcNow;
