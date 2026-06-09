@@ -132,7 +132,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    float wx = noiseT(wp + vec2(we, 0.0)) - noiseT(wp - vec2(we, 0.0));\n" +
         "    float wy = noiseT(wp + vec2(0.0, we)) - noiseT(wp - vec2(0.0, we));\n" +
         "    float rippleFade = mix(0.4, 1.0, 1.0 - smoothstep(600.0, 2600.0, length(uCameraPos - vWorldPos)));\n" +
-        "    vec3 wn = normalize(vec3(vec2(wx, wy) * 0.045 * rippleFade, 1.0));\n" + // calmer ripple → less aliasing
+        "    vec3 wn = normalize(vec3(vec2(wx, wy) * 0.075 * rippleFade, 1.0));\n" + // more surface tilt → reads as a wind-rippled lake, not smooth resin
         "    vec3 bottomCol = mix(vec3(0.18, 0.38, 0.40), vec3(0.03, 0.08, 0.16), depthF);\n" + // darker own-colour (less blue paint), keep turquoise rim hue
         "    vec3 reflFlat = reflect(-viewW, vec3(0.0, 0.0, 1.0));\n" +
         "    float skyAmt = smoothstep(-0.05, 0.50, reflFlat.z);\n" +
@@ -140,11 +140,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Real mirrored-terrain reflection: sample the pre-pass texture at this fragment's screen position +
         // a small ripple-driven wobble, tinted toward water-blue so it reads as a LAKE, not a glass mirror.
         "    if (uReflectionEnabled > 0.5) {\n" +
-        "      vec2 rUv = (gl_FragCoord.xy / uViewportPx) + (vec2(wx, wy) * 0.012 * rippleFade);\n" +
+        "      vec2 rUv = (gl_FragCoord.xy / uViewportPx) + (vec2(wx, wy) * 0.020 * rippleFade);\n" + // stronger ripple wobble breaks the mesh/LOD traces in the reflection
         "      vec3 mtn = texture(uReflectionTex, clamp(rUv, 0.001, 0.999)).rgb;\n" +
-        "      reflCol = mix(mtn, vec3(0.12, 0.28, 0.38), 0.20);\n" +
+        "      reflCol = mix(mtn, vec3(0.12, 0.28, 0.38), 0.10);\n" + // lighter blue wash → punchier, less milky reflection
         "    }\n" +
-        "    float fresW = clamp(pow(1.0 - max(dot(wn, viewW), 0.0), 3.0), 0.42, 0.97);\n" + // reflection-leaning Fresnel (mirror the user liked); reflects even face-on
+        "    float fresW = clamp(pow(1.0 - max(dot(wn, viewW), 0.0), 4.0), 0.22, 0.97);\n" + // sharper Fresnel + lower floor → clear/dark water face-on, strong mirror at grazing edges (contrast)
         "    vec3 wcol = mix(bottomCol, reflCol, fresW);\n" +
         "    wcol = clamp(wcol, 0.0, 1.0);\n" + // sun-glint still OFF (re-add as an isolated next step; it twice caused a bright streak/confetti)
         "    float waterAlpha = mix(0.15, 0.60, smoothstep(0.0, 0.5, depthF));\n" + // shore kept glassy (0.15, unchanged); deep ~27% less opaque
