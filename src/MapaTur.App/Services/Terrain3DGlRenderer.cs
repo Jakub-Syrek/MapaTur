@@ -34,11 +34,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "layout(location=2) in vec3 aNormal;\n" +
         "layout(location=3) in vec2 aTex;\n" +
         "uniform mat4 uMvp;\n" +
+        // Wider-coverage scene origin: a per-mesh translation that re-expresses a mesh built about its own
+        // anchor into the current shared scene origin (= GeoToWorld(meshAnchor, sceneOrigin)). Applied to BOTH
+        // gl_Position and vWorldPos so lighting/fog/water (which use uCameraPos) stay in the same frame. Today
+        // every mesh shares the scene origin so this is (0,0,0) — a no-op until the scene re-anchors (P0 step 2).
+        "uniform vec3 uModelOffset;\n" +
         "out vec4 vColor;\n" +
         "out vec3 vNormal;\n" +
         "out vec2 vTex;\n" +
         "out vec3 vWorldPos;\n" +
-        "void main(){ vColor = aColor; vNormal = aNormal; vTex = aTex; vWorldPos = aPos; gl_Position = uMvp * vec4(aPos, 1.0); }\n";
+        "void main(){ vColor = aColor; vNormal = aNormal; vTex = aTex; vec3 worldPos = aPos + uModelOffset; vWorldPos = worldPos; gl_Position = uMvp * vec4(worldPos, 1.0); }\n";
 
     // Per-pixel Lambert lighting + exponential-fog aerial perspective. shade = ambient + (1-ambient) *
     // max(0, dot(N, L)). When an ortho image is bound (uUseOrtho=1) the surface colour is sampled from it
@@ -99,8 +104,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform float uDebugPoly;\n" +          // 1 = the lake-water fill pass
         "uniform vec2 uLakeCenter;\n" +          // lake centroid (world XY) — for a SMOOTH radial depth (no fan-edge creases)
         "uniform float uLakeRadius;\n" +         // lake max radius (m), for the depth falloff
-        // Planar water reflection: a pre-pass renders the terrain mirrored about the lake plane into a texture;
-        // the lake mesh then samples it (screen-space, ripple-distorted) so the real peaks reflect in the water.
+                                                 // Planar water reflection: a pre-pass renders the terrain mirrored about the lake plane into a texture;
+                                                 // the lake mesh then samples it (screen-space, ripple-distorted) so the real peaks reflect in the water.
         "uniform float uReflectionPass;\n" +     // 1 while rendering the mirrored reflection texture (clip below water)
         "uniform float uWaterClipZ;\n" +         // world-Z of the lake plane; in the reflection pass, fragments below it are discarded
         "uniform sampler2D uReflectionTex;\n" +  // the mirrored-terrain reflection texture (sampled by the lake mesh)
@@ -137,8 +142,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    vec3 reflFlat = reflect(-viewW, vec3(0.0, 0.0, 1.0));\n" +
         "    float skyAmt = smoothstep(-0.05, 0.50, reflFlat.z);\n" +
         "    vec3 reflCol = mix(vec3(0.12, 0.15, 0.18), mix(uSkyAmbient, vec3(0.42, 0.64, 0.82), 0.62), skyAmt);\n" + // sky-gradient FALLBACK
-        // Real mirrored-terrain reflection: sample the pre-pass texture at this fragment's screen position +
-        // a small ripple-driven wobble, tinted toward water-blue so it reads as a LAKE, not a glass mirror.
+                                                                                                                      // Real mirrored-terrain reflection: sample the pre-pass texture at this fragment's screen position +
+                                                                                                                      // a small ripple-driven wobble, tinted toward water-blue so it reads as a LAKE, not a glass mirror.
         "    if (uReflectionEnabled > 0.5) {\n" +
         "      vec2 rUv = (gl_FragCoord.xy / uViewportPx) + (vec2(wx, wy) * 0.020 * rippleFade);\n" + // stronger ripple wobble breaks the mesh/LOD traces in the reflection
         "      vec3 mtn = texture(uReflectionTex, clamp(rUv, 0.001, 0.999)).rgb;\n" +
@@ -559,6 +564,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private GL? gl;
     private uint program;
     private int mvpLocation = -1;
+    private int modelOffsetLocation = -1;
     private int debugPolyLocation = -1;
     private int lakeCenterLocation = -1;
     private int lakeRadiusLocation = -1;
@@ -910,6 +916,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             lastRoadMesh = null;
             programReady = false;
             mvpLocation = -1;
+            modelOffsetLocation = -1;
             lightDirLocation = -1;
             ambientLocation = -1;
             sunColorLocation = -1;
@@ -1216,6 +1223,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             mvp.M41, mvp.M42, mvp.M43, mvp.M44,
         };
         gl.UniformMatrix4(mvpLocation, 1, false, m);
+        // Scene-origin model offset (wider-coverage P0). Today every mesh shares the scene origin, so this is
+        // zero for the whole terrain program (terrain tiles, lake water, reflection pre-pass) — a no-op until
+        // the scene re-anchors in step 2. Set once here; not changed by any pass.
+        gl.Uniform3(modelOffsetLocation, 0f, 0f, 0f);
 
         // Per-pixel lighting: the Atmosphere instance, when provided, overrides the per-tile baked
         // light direction + ambient so the time-of-day slider drives shading live. Without an
@@ -2194,6 +2205,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.DetachShader(program, vs);
         g.DetachShader(program, fs);
         mvpLocation = g.GetUniformLocation(program, "uMvp");
+        modelOffsetLocation = g.GetUniformLocation(program, "uModelOffset");
         debugPolyLocation = g.GetUniformLocation(program, "uDebugPoly");
         lakeCenterLocation = g.GetUniformLocation(program, "uLakeCenter");
         lakeRadiusLocation = g.GetUniformLocation(program, "uLakeRadius");
