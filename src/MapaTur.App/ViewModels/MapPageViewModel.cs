@@ -1863,7 +1863,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             IsBusy = true;
             StatusMessage = "Pobieranie Tatr offline…";
-            logger.LogInformation("Offline Tatra download start: z{Zoom}", TatraOfflineRegion.DownloadZoom);
+            logger.LogInformation("Offline Tatra download start: base z{Base}+z14+detail z{Detail}", LodBaseZoom, TatraOfflineRegion.DownloadZoom);
 
             var progress = new Progress<OfflineDownloadProgress>(p =>
             {
@@ -1872,15 +1872,25 @@ public sealed partial class MapPageViewModel : ObservableObject
                 StatusMessage = $"Pobieranie Tatr offline… {percent}% ({p.Completed}/{p.Total}{failed})";
             });
 
-            OfflineDownloadResult result = await offlineDownloader.DownloadAsync(
-                TatraOfflineRegion.Bounds, TatraOfflineRegion.DownloadZoom, progress).ConfigureAwait(true);
+            // Download the SMOOTH base zooms (z13/z14) over the whole region AND the 1 m detail (z16). The wide
+            // z13 is what lets the LOD base load cache-only (offline, smooth, wide — no online fetch, no loading
+            // stripes); z16 is the near-field 1 m. Coarse→fine so the base is usable first.
+            int[] zooms = { LodBaseZoom, 14, TatraOfflineRegion.DownloadZoom };
+            int totDownloaded = 0, totCached = 0, totFailed = 0, totTotal = 0;
+            foreach (int z in zooms)
+            {
+                StatusMessage = $"Pobieranie Tatr offline z{z}…";
+                OfflineDownloadResult r = await offlineDownloader.DownloadAsync(
+                    TatraOfflineRegion.Bounds, z, progress).ConfigureAwait(true);
+                totDownloaded += r.Downloaded; totCached += r.AlreadyCached; totFailed += r.Failed; totTotal += r.Total;
+                logger.LogInformation(
+                    "Offline z{Zoom}: {Downloaded} new, {Cached} cached, {Failed} skipped of {Total}",
+                    z, r.Downloaded, r.AlreadyCached, r.Failed, r.Total);
+            }
 
-            logger.LogInformation(
-                "Offline Tatra download done: {Downloaded} new, {Cached} cached, {Failed} skipped of {Total}",
-                result.Downloaded, result.AlreadyCached, result.Failed, result.Total);
-            StatusMessage = result.Failed == 0
-                ? $"Tatry offline gotowe: {result.Total} kafli 1 m na dysku"
-                : $"Tatry offline: {result.Total - result.Failed}/{result.Total} kafli (sieć/pokrycie — ponów, by dobrać resztę)";
+            StatusMessage = totFailed == 0
+                ? $"Tatry offline gotowe: {totTotal} kafli (baza z13/14 + 1 m z16) na dysku"
+                : $"Tatry offline: {totTotal - totFailed}/{totTotal} kafli (sieć/pokrycie — ponów, by dobrać resztę)";
         }
         catch (Exception ex)
         {
@@ -2050,7 +2060,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     // Krok 4 (screen-space-error LOD): the detail patch follows the look-at point (raycast through the
     // screen centre, Krok 1) and its zoom adapts to the on-screen error (Krok 2/3) instead of a fixed z16.
     private const int LodBaseZoom = 13;                                   // static base zoom (~6 m; z12 shaved summit apexes → distant peaks too blunt vs real)
-    private const double LodBaseHalfWidthMeters = 6000.0;                  // wider-coverage: static base half-extent (was 3000 → 6 km; 6000 → 12 km roam radius). SubsampleRasterForRenderer caps verts, so this trades base resolution for reach.
+    private const double LodBaseHalfWidthMeters = 6000.0;                  // static base half-extent = 12 km (the clean sweet-spot). A single static base can't be BOTH wide and sharp — at 24 km the vertex budget decimates it 4x and the periphery degrades (coarse facets + ortho clamp-stretch beyond its coverage). True wider coverage = dynamic streaming (fine near look-at, coarse far), not a wider static mesh. The base reads cache-first so once "Pobierz Tatry offline" pulled the wide z13 this 12 km loads offline (no loading stripes).
     private const int NearDetailZoom = 16;                                // finest detail zoom (GUGiK native 1 m)
     private static readonly int[] DetailZoomCandidates = { 16, 14, 12 };  // finest → coarsest, fed to ScreenSpaceLod
     private const double DetailMaxErrorPixels = 2.0;                      // per-tile screen-space error budget
