@@ -99,6 +99,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform float uDebugPoly;\n" +          // 1 = the lake-water fill pass
         "uniform vec2 uLakeCenter;\n" +          // lake centroid (world XY) — for a SMOOTH radial depth (no fan-edge creases)
         "uniform float uLakeRadius;\n" +         // lake max radius (m), for the depth falloff
+        // Planar water reflection: a pre-pass renders the terrain mirrored about the lake plane into a texture;
+        // the lake mesh then samples it (screen-space, ripple-distorted) so the real peaks reflect in the water.
+        "uniform float uReflectionPass;\n" +     // 1 while rendering the mirrored reflection texture (clip below water)
+        "uniform float uWaterClipZ;\n" +         // world-Z of the lake plane; in the reflection pass, fragments below it are discarded
+        "uniform sampler2D uReflectionTex;\n" +  // the mirrored-terrain reflection texture (sampled by the lake mesh)
+        "uniform float uReflectionEnabled;\n" +  // 1 = sample the real reflection; 0 = use the cheap sky-gradient fallback
+        "uniform vec2 uViewportPx;\n" +          // main viewport size in pixels (for the screen-space reflection UV)
         "out vec4 fragColor;\n" +
         "float hashT(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n" +
         "float noiseT(vec2 p){\n" +
@@ -109,6 +116,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "}\n" +
         "float fbmT(vec2 p){ float v=0.0,a=0.5; for(int i=0;i<5;i++){ v+=a*noiseT(p); p*=2.0; a*=0.5;} return v; }\n" +
         "void main(){\n" +
+        // Reflection pre-pass: we're rendering the terrain MIRRORED about the lake plane into the reflection
+        // texture. Discard anything below the waterline so only the above-water peaks end up in the reflection.
+        "  if (uReflectionPass > 0.5 && vWorldPos.z < uWaterClipZ) { discard; }\n" +
         // Lake water (drawn as the polygon fill, uDebugPoly=1): depth-tinted bottom (turquoise rim → navy centre
         // via vColor.r), Fresnel mix with a sky-gradient reflection, gentle ripples + a tight sun glint, and a
         // depth-faded alpha (shallow shore semi-transparent). Flat normal → no patchwork; polygon → no spill.
@@ -123,14 +133,21 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    float wy = noiseT(wp + vec2(0.0, we)) - noiseT(wp - vec2(0.0, we));\n" +
         "    float rippleFade = mix(0.4, 1.0, 1.0 - smoothstep(600.0, 2600.0, length(uCameraPos - vWorldPos)));\n" +
         "    vec3 wn = normalize(vec3(vec2(wx, wy) * 0.045 * rippleFade, 1.0));\n" + // calmer ripple → less aliasing
-        "    vec3 bottomCol = mix(vec3(0.22, 0.46, 0.48), vec3(0.04, 0.12, 0.22), depthF);\n" + // softer (less neon) turquoise rim
+        "    vec3 bottomCol = mix(vec3(0.18, 0.38, 0.40), vec3(0.03, 0.08, 0.16), depthF);\n" + // darker own-colour (less blue paint), keep turquoise rim hue
         "    vec3 reflFlat = reflect(-viewW, vec3(0.0, 0.0, 1.0));\n" +
         "    float skyAmt = smoothstep(-0.05, 0.50, reflFlat.z);\n" +
-        "    vec3 reflCol = mix(vec3(0.10, 0.12, 0.14), mix(uSkyAmbient, vec3(0.32, 0.56, 0.72), 0.5), skyAmt);\n" +
-        "    float fresW = clamp(pow(1.0 - max(dot(wn, viewW), 0.0), 4.0), 0.18, 0.97);\n" +
+        "    vec3 reflCol = mix(vec3(0.12, 0.15, 0.18), mix(uSkyAmbient, vec3(0.42, 0.64, 0.82), 0.62), skyAmt);\n" + // sky-gradient FALLBACK
+        // Real mirrored-terrain reflection: sample the pre-pass texture at this fragment's screen position +
+        // a small ripple-driven wobble, tinted toward water-blue so it reads as a LAKE, not a glass mirror.
+        "    if (uReflectionEnabled > 0.5) {\n" +
+        "      vec2 rUv = (gl_FragCoord.xy / uViewportPx) + (vec2(wx, wy) * 0.012 * rippleFade);\n" +
+        "      vec3 mtn = texture(uReflectionTex, clamp(rUv, 0.001, 0.999)).rgb;\n" +
+        "      reflCol = mix(mtn, vec3(0.12, 0.28, 0.38), 0.20);\n" +
+        "    }\n" +
+        "    float fresW = clamp(pow(1.0 - max(dot(wn, viewW), 0.0), 3.0), 0.42, 0.97);\n" + // reflection-leaning Fresnel (mirror the user liked); reflects even face-on
         "    vec3 wcol = mix(bottomCol, reflCol, fresW);\n" +
-        "    wcol = clamp(wcol, 0.0, 1.0);\n" + // sun-glint removed (it formed a bright streak across the lake)
-        "    float waterAlpha = mix(0.15, 0.82, smoothstep(0.0, 0.5, depthF));\n" + // more glassy/transparent overall, clearest at the shore
+        "    wcol = clamp(wcol, 0.0, 1.0);\n" + // sun-glint still OFF (re-add as an isolated next step; it twice caused a bright streak/confetti)
+        "    float waterAlpha = mix(0.15, 0.60, smoothstep(0.0, 0.5, depthF));\n" + // shore kept glassy (0.15, unchanged); deep ~27% less opaque
 
         "    fragColor = vec4(wcol, waterAlpha);\n" +
         "    return;\n" +
@@ -547,6 +564,26 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int lakeRadiusLocation = -1;
     private Vector2 debugLakeCenter;
     private float debugLakeRadius = 1f;
+
+    // Planar water reflection: uniform locations + a half-resolution colour target (texture + depth RB) the
+    // pre-pass renders the mirrored terrain into, which the lake mesh then samples. Behind ReflectionEnabled.
+    private int reflectionPassLocation = -1;
+    private int waterClipZLocation = -1;
+    private int reflectionTexLocation = -1;
+    private int reflectionEnabledLocation = -1;
+    private int viewportPxLocation = -1;
+    private uint reflectionFbo;
+    private uint reflectionColorTex;
+    private uint reflectionDepthRb;
+    private int reflectionTexW;
+    private int reflectionTexH;
+    private bool reflectionUnsupported;
+
+    /// <summary>Representative lake elevation (m a.s.l.) for the single reflection plane — Morskie Oko.</summary>
+    private const float ReflectionLakeElevationM = 1395f + 4f; // matches the water mesh's waterElev
+
+    /// <summary>When <c>true</c>, lakes get a real planar reflection of the terrain (else a cheap gradient).</summary>
+    public bool ReflectionEnabled { get; set; } = true;
 
     // DEBUG: Morskie Oko real outline from OSM (way 27952583), to check how the polygon aligns with the ortho.
     private static readonly (double Lat, double Lon)[] DebugMorskieOko =
@@ -1038,6 +1075,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             presentWidth = 0;
             presentHeight = 0;
             presentUnsupported = false;
+            // The planar-reflection target belonged to the dead context — drop the handles so it's rebuilt fresh.
+            reflectionFbo = 0;
+            reflectionColorTex = 0;
+            reflectionDepthRb = 0;
+            reflectionTexW = 0;
+            reflectionTexH = 0;
+            reflectionUnsupported = false;
         }
 
         EnsureProgram(gl);
@@ -1300,6 +1344,92 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform1(terrainFogDensityLocation, fogDensity);
         gl.Uniform3(terrainCameraPosLocation, cameraWorldPos.X, cameraWorldPos.Y, cameraWorldPos.Z);
 
+        // ── Planar water reflection pre-pass ───────────────────────────────────────────────────────
+        // Render the terrain MIRRORED about the lake plane into a half-res texture, clipping everything below
+        // the waterline, then restore the scene framebuffer. The lake mesh samples this texture (screen-space,
+        // ripple-distorted) so the real peaks reflect in the water. One representative plane height is used
+        // (Morskie Oko), so other lakes would reflect approximately. Behind ReflectionEnabled.
+        gl.Uniform2(viewportPxLocation, (float)vpWidth, (float)vpHeight);
+        gl.Uniform1(reflectionPassLocation, 0f);
+        gl.Uniform1(reflectionEnabledLocation, 0f);
+        bool reflectionDrawn = false;
+        if (ReflectionEnabled && tiles.Count > 0 && EnsureReflectionTarget(gl, vpWidth, vpHeight))
+        {
+            float reflExaggeration = tiles[0].VerticalExaggeration;
+            float waterZ = ReflectionLakeElevationM * reflExaggeration;
+
+            // Reflection matrix: mirror world-Z about the lake plane (z → 2*waterZ − z), then the normal MVP.
+            Matrix4x4 reflectMatrix = Matrix4x4.Identity;
+            reflectMatrix.M33 = -1f;
+            reflectMatrix.M43 = 2f * waterZ;
+            Matrix4x4 reflMvp = reflectMatrix * mvp;
+
+            gl.BindFramebuffer(FramebufferTarget.Framebuffer, reflectionFbo);
+            gl.Viewport(0, 0, (uint)reflectionTexW, (uint)reflectionTexH);
+            gl.ClearColor(SkyR, SkyG, SkyB, 1f);
+            gl.Clear((uint)(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit));
+            gl.Uniform1(reflectionPassLocation, 1f);
+            gl.Uniform1(waterClipZLocation, waterZ);
+            m[0] = reflMvp.M11; m[1] = reflMvp.M12; m[2] = reflMvp.M13; m[3] = reflMvp.M14;
+            m[4] = reflMvp.M21; m[5] = reflMvp.M22; m[6] = reflMvp.M23; m[7] = reflMvp.M24;
+            m[8] = reflMvp.M31; m[9] = reflMvp.M32; m[10] = reflMvp.M33; m[11] = reflMvp.M34;
+            m[12] = reflMvp.M41; m[13] = reflMvp.M42; m[14] = reflMvp.M43; m[15] = reflMvp.M44;
+            gl.UniformMatrix4(mvpLocation, 1, false, m);
+            // Reflect with the SAME ortho/biome shading as the main view, so the reflected peaks match their
+            // real colours.
+            bool reflAnyOrtho = orthoTiles.Count > 0 && OrthoEnabled;
+            gl.ActiveTexture(TextureUnit.Texture0);
+            gl.Uniform1(orthoSamplerLocation, 0);
+            uint reflBound = 0;
+            foreach (KeyValuePair<TerrainMesh3D, TileBuffers> entry in tileBuffers)
+            {
+                OrthoTile? ot = null;
+                if (reflAnyOrtho)
+                {
+                    int idx = entry.Key.OrthoTileIndex;
+                    if ((uint)idx < (uint)orthoTiles.Count && orthoTiles[idx].Texture != 0)
+                    {
+                        ot = orthoTiles[idx];
+                    }
+                }
+                if (ot is not null)
+                {
+                    if (ot.Texture != reflBound)
+                    {
+                        gl.BindTexture(TextureTarget.Texture2D, ot.Texture);
+                        reflBound = ot.Texture;
+                    }
+                    gl.Uniform2(orthoTexelLocation, ot.Width > 0 ? 1f / ot.Width : 0f, ot.Height > 0 ? 1f / ot.Height : 0f);
+                    gl.Uniform1(sharpenLocation, OrthoSharpenStrength);
+                    gl.Uniform1(useOrthoLocation, 1);
+                }
+                else
+                {
+                    gl.Uniform1(useOrthoLocation, 0);
+                }
+                gl.BindVertexArray(entry.Value.Vao);
+                gl.DrawElements(PrimitiveType.Triangles, (uint)entry.Value.IndexCount, DrawElementsType.UnsignedShort, (void*)0);
+            }
+
+            // Restore the scene framebuffer + viewport + the main MVP, and reset the reflection-pass flag.
+            gl.BindFramebuffer(FramebufferTarget.Framebuffer, useMsaa ? msaaFbo : presentFbo);
+            gl.Viewport(0, 0, (uint)vpWidth, (uint)vpHeight);
+            gl.Uniform1(reflectionPassLocation, 0f);
+            m[0] = mvp.M11; m[1] = mvp.M12; m[2] = mvp.M13; m[3] = mvp.M14;
+            m[4] = mvp.M21; m[5] = mvp.M22; m[6] = mvp.M23; m[7] = mvp.M24;
+            m[8] = mvp.M31; m[9] = mvp.M32; m[10] = mvp.M33; m[11] = mvp.M34;
+            m[12] = mvp.M41; m[13] = mvp.M42; m[14] = mvp.M43; m[15] = mvp.M44;
+            gl.UniformMatrix4(mvpLocation, 1, false, m);
+            reflectionDrawn = true;
+        }
+        if (reflectionDrawn)
+        {
+            gl.ActiveTexture(TextureUnit.Texture1);
+            gl.BindTexture(TextureTarget.Texture2D, reflectionColorTex);
+            gl.Uniform1(reflectionTexLocation, 1);
+            gl.Uniform1(reflectionEnabledLocation, 1f);
+        }
+
         // Drape the ortho: bind each mesh tile's own cell texture (OrthoTileIndex) so a multi-cell ortho
         // stays sharp. Without textures the shader uses the hypsometric tint.
         bool anyOrtho = orthoTiles.Count > 0 && OrthoEnabled;
@@ -1344,11 +1474,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         BuildDebugPoly(gl, tiles);
         if (debugPolyVertexCount > 0)
         {
-            // Lake water fill: blended over the terrain (shallow shore semi-transparent), depth-write OFF, depth-
-            // test ON so the basin clips it where the bed rises above the water plane.
+            // Lake water fill: blended over the terrain (shallow shore semi-transparent), depth-test ON so the
+            // basin clips it where the bed rises above the water plane. Depth-write is ON (not off): the water
+            // triangles are all coplanar at the same plane Z, so with DepthFunc=Less the FIRST triangle at a
+            // pixel writes that depth and any OVERLAPPING coplanar triangle (same Z, not less) is rejected — so
+            // each water pixel is blended exactly ONCE. This kills the bright double-blend seams that survive
+            // ear-clipping where a few thin triangles still overlap (the residual of the old centroid-fan rays).
             gl.Enable(EnableCap.Blend);
             gl.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
-            gl.DepthMask(false);
+            gl.DepthMask(true);
             gl.Uniform1(debugPolyLocation, 1f);
             gl.Uniform2(lakeCenterLocation, debugLakeCenter.X, debugLakeCenter.Y);
             gl.Uniform1(lakeRadiusLocation, debugLakeRadius);
@@ -1498,6 +1632,76 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             Array.Copy(flipRow, 0, dst, bottom, stride);
         }
 
+        return true;
+    }
+
+    /// <summary>
+    /// Ensures the planar-reflection target (half-resolution colour texture + depth RB) exists at the given
+    /// size. Returns false if reflections are unsupported (incomplete FBO) so the caller skips the pre-pass.
+    /// </summary>
+    private bool EnsureReflectionTarget(GL g, int width, int height)
+    {
+        if (reflectionUnsupported)
+        {
+            return false;
+        }
+
+        // Half-res: the reflection is ripple-distorted and only seen on the lake, so full res is wasted.
+        int w = Math.Max(16, width / 2);
+        int h = Math.Max(16, height / 2);
+        if (reflectionFbo != 0 && reflectionTexW == w && reflectionTexH == h)
+        {
+            return true;
+        }
+
+        if (reflectionFbo != 0)
+        {
+            g.DeleteFramebuffer(reflectionFbo);
+            g.DeleteTexture(reflectionColorTex);
+            g.DeleteRenderbuffer(reflectionDepthRb);
+            reflectionFbo = 0;
+            reflectionColorTex = 0;
+            reflectionDepthRb = 0;
+        }
+
+        reflectionColorTex = g.GenTexture();
+        g.BindTexture(TextureTarget.Texture2D, reflectionColorTex);
+        unsafe
+        {
+            g.TexImage2D(TextureTarget.Texture2D, 0, (int)InternalFormat.Rgba8, (uint)w, (uint)h, 0, PixelFormat.Rgba, PixelType.UnsignedByte, null);
+        }
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+        g.BindTexture(TextureTarget.Texture2D, 0);
+
+        reflectionDepthRb = g.GenRenderbuffer();
+        g.BindRenderbuffer(RenderbufferTarget.Renderbuffer, reflectionDepthRb);
+        g.RenderbufferStorage(RenderbufferTarget.Renderbuffer, InternalFormat.DepthComponent16, (uint)w, (uint)h);
+        g.BindRenderbuffer(RenderbufferTarget.Renderbuffer, 0);
+
+        reflectionFbo = g.GenFramebuffer();
+        g.BindFramebuffer(FramebufferTarget.Framebuffer, reflectionFbo);
+        g.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, reflectionColorTex, 0);
+        g.FramebufferRenderbuffer(FramebufferTarget.Framebuffer, FramebufferAttachment.DepthAttachment, RenderbufferTarget.Renderbuffer, reflectionDepthRb);
+        GLEnum status = g.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
+        g.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+        if (status != GLEnum.FramebufferComplete)
+        {
+            Log.Information("[GL3D] reflection framebuffer incomplete ({Status}) — planar reflection disabled", status);
+            g.DeleteFramebuffer(reflectionFbo);
+            g.DeleteTexture(reflectionColorTex);
+            g.DeleteRenderbuffer(reflectionDepthRb);
+            reflectionFbo = 0;
+            reflectionColorTex = 0;
+            reflectionDepthRb = 0;
+            reflectionUnsupported = true;
+            return false;
+        }
+
+        reflectionTexW = w;
+        reflectionTexH = h;
         return true;
     }
 
@@ -2002,6 +2206,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         debugPolyLocation = g.GetUniformLocation(program, "uDebugPoly");
         lakeCenterLocation = g.GetUniformLocation(program, "uLakeCenter");
         lakeRadiusLocation = g.GetUniformLocation(program, "uLakeRadius");
+        reflectionPassLocation = g.GetUniformLocation(program, "uReflectionPass");
+        waterClipZLocation = g.GetUniformLocation(program, "uWaterClipZ");
+        reflectionTexLocation = g.GetUniformLocation(program, "uReflectionTex");
+        reflectionEnabledLocation = g.GetUniformLocation(program, "uReflectionEnabled");
+        viewportPxLocation = g.GetUniformLocation(program, "uViewportPx");
         lightDirLocation = g.GetUniformLocation(program, "uLightDir");
         ambientLocation = g.GetUniformLocation(program, "uAmbient");
         sunColorLocation = g.GetUniformLocation(program, "uSunColor");
@@ -3204,6 +3413,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         presentFbo = 0;
         presentColorTex = 0;
         presentDepthRb = 0;
+        gl.DeleteFramebuffer(reflectionFbo);
+        gl.DeleteTexture(reflectionColorTex);
+        gl.DeleteRenderbuffer(reflectionDepthRb);
+        reflectionFbo = 0;
+        reflectionColorTex = 0;
+        reflectionDepthRb = 0;
+        reflectionTexW = 0;
+        reflectionTexH = 0;
         foreach (OrthoTile t in orthoTiles)
         {
             if (t.Texture != 0)
