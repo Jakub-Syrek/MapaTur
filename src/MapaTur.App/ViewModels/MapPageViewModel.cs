@@ -1927,7 +1927,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             // bumped from z12 (~12 m) because z12 SHAVED the sharp summit apexes, so distant peaks read blunter
             // than the real Tatras. The 1 m detail still sharpens whatever you look at; this keeps the SKYLINE
             // peaks faithful too. fillNoData: false so a missing tile holes to the sky, not a flat green plate.
-            DemRaster? baseRaster = await regionDemLoader.LoadRegionAsync(LodTerrainWindow.Around(center, 3000), LodBaseZoom, fillNoData: false).ConfigureAwait(true);
+            DemRaster? baseRaster = await regionDemLoader.LoadRegionAsync(LodTerrainWindow.Around(center, LodBaseHalfWidthMeters), LodBaseZoom, fillNoData: false).ConfigureAwait(true);
             if (baseRaster is null)
             {
                 StatusMessage = "LOD demo: brak bazy (sieć?)";
@@ -2050,6 +2050,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     // Krok 4 (screen-space-error LOD): the detail patch follows the look-at point (raycast through the
     // screen centre, Krok 1) and its zoom adapts to the on-screen error (Krok 2/3) instead of a fixed z16.
     private const int LodBaseZoom = 13;                                   // static base zoom (~6 m; z12 shaved summit apexes → distant peaks too blunt vs real)
+    private const double LodBaseHalfWidthMeters = 6000.0;                  // wider-coverage: static base half-extent (was 3000 → 6 km; 6000 → 12 km roam radius). SubsampleRasterForRenderer caps verts, so this trades base resolution for reach.
     private const int NearDetailZoom = 16;                                // finest detail zoom (GUGiK native 1 m)
     private static readonly int[] DetailZoomCandidates = { 16, 14, 12 };  // finest → coarsest, fed to ScreenSpaceLod
     private const double DetailMaxErrorPixels = 2.0;                      // per-tile screen-space error budget
