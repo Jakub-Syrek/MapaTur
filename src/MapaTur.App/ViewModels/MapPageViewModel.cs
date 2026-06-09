@@ -2034,6 +2034,11 @@ public sealed partial class MapPageViewModel : ObservableObject
     private const double LodDetailReloadThresholdMeters = 700;            // re-centre after ~700 m drift (the 2 km patch has headroom)
     private static readonly TimeSpan LodDetailReloadCooldown = TimeSpan.FromMilliseconds(1200);
 
+    // Wider-coverage P0 (shared world origin). STEP 1 = NO-OP: this threshold is deliberately enormous so
+    // WorldOriginPolicy NEVER re-anchors and nothing moves — we only log the camera↔origin drift to confirm
+    // the measurement on device before any geometry is touched. The real (few-km) value arrives in step 2.
+    private const double OriginReanchorThresholdMeters = 1e9;
+
     // Krok 4 (screen-space-error LOD): the detail patch follows the look-at point (raycast through the
     // screen centre, Krok 1) and its zoom adapts to the on-screen error (Krok 2/3) instead of a fixed z16.
     private const int LodBaseZoom = 13;                                   // static base zoom (~6 m; z12 shaved summit apexes → distant peaks too blunt vs real)
@@ -2296,6 +2301,16 @@ public sealed partial class MapPageViewModel : ObservableObject
         System.Numerics.Vector3? effectiveLookAt = freshLookAt ?? lastValidLookAtWorld;
         GeoPoint focus = effectiveLookAt is { } w ? LocalTangentProjection.WorldToGeo(w, lodAnchor) : targetGeo;
         string focusSource = freshLookAt is not null ? "look-at" : effectiveLookAt is not null ? "last-valid" : "target";
+
+        // Wider-coverage P0 step 1 — NO-OP DIAGNOSTIC. Measure how far the camera's look-at has drifted from the
+        // scene origin (lodAnchor) and what the re-anchor policy would decide. The threshold is enormous so the
+        // decision is ALWAYS "don't re-anchor": the result is read ONLY for this log line — no origin moves, no
+        // ExistingShift is applied, no geometry changes. This just proves the measurement on device (step 2 acts).
+        WorldOriginDecision originProbe = WorldOriginPolicy.Evaluate(lodAnchor, focus, OriginReanchorThresholdMeters);
+        double originDriftMeters = LocalTangentProjection.GeoToWorld(focus, 0f, lodAnchor, 1f).Length();
+        logger.LogInformation(
+            "LOD origin-probe (NO-OP): origin {OLat:F4},{OLon:F4} → focus {FLat:F4},{FLon:F4}; drift {Drift:F0} m; wouldReanchor={Re}",
+            lodAnchor.Latitude, lodAnchor.Longitude, focus.Latitude, focus.Longitude, originDriftMeters, originProbe.ShouldReanchor);
 
         if (!LodTerrainWindow.ShouldReload(lodDetailCentre, focus, LodDetailReloadThresholdMeters))
         {
