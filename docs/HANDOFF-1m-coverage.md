@@ -22,11 +22,16 @@ Pierwsze spisanie tego dokumentu: **2026-06-09** (sesja wody; LOD/streaming NIE 
   `{y}.tif`); streamer jest **cache-only** → 0 detalu → goła, zgrubna baza pokazała swoje pasy wszędzie.
   Fix `bbaf04e`: sufiks `_{px}` **tylko gdy supersampling**; zwykłe kafle zachowują `{y}.tif`. **NIGDY nie
   zmieniaj formatu klucza cache DEM bez migracji** — cicho zabija detal 1 m.
-- 🟢 **Pas zgrubnej bazy przy grazing jest WRODZONY** (aniso-minifikacja drapowanego zdjęcia 2D, footprint-sliver
-  poza 16× sprzętowym). Sampler tego NIE naprawi — sprawdzone i OBALONE: treść mipów, POT 8192×4096,
-  CPU box-mipy, aniso on/off, sharpen, LOD-bias, `textureLod` izotropowy, manual multi-tap `textureGrad`,
-  metryka eigenvalues. Jedyne co usuwa = fade ortho→biom (traci foto). **Realne maskowanie = detal z16 na
-  wierzchu.** Nie wracać do polowania na to w samplerze.
+- 🟢 **Równoległe „strata" paski = clamp UV na granicy komórek ortho** (NIE grazing — ta hipoteza OBALONA,
+  ~30 buildów stracone). `BuildTiles` (ścieżka ortho-on-LOD bazy) tiluje po `maxTileSide`, **nie wyrównując
+  do siatki 4×2 komórek** → blok przekraczający granicę komórki bierze 1 komórkę z centrum → wierzchołki po
+  drugiej stronie klampują UV → **krawędziowy rząd tekseli komórki rozciąga się** w idealnie równoległe paski
+  niezależne od rzeźby; szersza baza 12 km zaczęła przekraczać granicę (lat 49.25). Fix `197cde6`: `BuildTiles`
+  tnie raster na granicach komórek (`BuildTileCuts`) → blok zawsze w jednej komórce → brak clampu → **foto
+  zachowane wszędzie** (bez fade-do-biomu). Dowód: `uDebugUv=2` clamp-viz → pas świecił ZIELONO (V pinned).
+  OBALONE (nie pomogło): treść mipów, POT, CPU-mipy, aniso on/off, sharpen, LOD-bias, `textureLod`, manual
+  multi-tap `textureGrad`, eigenvalues, base/detal Z-fight. **Lekcja: „równoległe + przez całą mapę + niezależne
+  od wysokości + po zmianie zasięgu" ⇒ DANE/UV/tiling, nie sampler/kąt. Testuj clamp/tile-id viz od razu.**
 - 🟢 **Washboard bazy = osobny, realny bug naprawiony u źródła** (`bbaf04e`): GUGiK WCS przy 256 px/z13
   (~19 m/px, reprojekcja 2180→3857) wypala ukośny washboard w wysokościach (dowód: hillshade 256 px = pasy,
   ten sam bbox 1024 px = gładko). `DemTileSupersampler` over-requestuje grube kafle (~5 m/px, cap ×4) i
