@@ -36,6 +36,7 @@
                              UserLocation="{Binding UserLocation}"
                              Atmosphere="{Binding Atmosphere}"
                              ShowOrtho="{Binding ShowOrtho}"
+                             LodOrthoCoverageBounds="{Binding LodOrthoCoverageBounds}"
                              ShowPeakNames="{Binding ShowPeakNames}"
                              ControlsVisible="{Binding ChromeVisible}"
                              SlopeMapEnabled="{Binding SlopeMapMode}"

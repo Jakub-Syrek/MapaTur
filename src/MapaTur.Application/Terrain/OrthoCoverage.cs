@@ -26,6 +26,13 @@ public sealed record OrthoCoverage(MapBounds Bounds, int GridCols, int GridRows)
     private double GlobalV(GeoPoint point) => Clamp01((North - point.Latitude) / (North - South));
 
     /// <summary>
+    /// True when the point lies within the ortho's geographic coverage. A mesh tile whose centre is OUTSIDE
+    /// must NOT sample the ortho — CellAt/LocalUv clamp out-of-coverage points to the edge cell, so the edge
+    /// texels stretch along the terrain (the "geological strata" seam banding). Such tiles render hypsometric.
+    /// </summary>
+    public bool Covers(GeoPoint point) => Bounds.Contains(point);
+
+    /// <summary>
     /// The ortho grid cell a point falls in, and its flat tile index (<c>row * GridCols + col</c>). Points
     /// outside the coverage clamp to the nearest edge cell.
     /// </summary>

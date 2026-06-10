@@ -182,6 +182,18 @@ public partial class Terrain3DView : ContentView
         set => SetValue(ShowOrthoProperty, value);
     }
 
+    // Geographic extent the LOD ortho covers; the renderer fades ortho→hypsometric beyond it (kills the
+    // stretched-edge "strata" bands on a base wider than the ortho). Null = no cull. Bound from the VM.
+    public static readonly BindableProperty LodOrthoCoverageBoundsProperty = BindableProperty.Create(
+        nameof(LodOrthoCoverageBounds), typeof(MapaTur.Domain.Geography.MapBounds?), typeof(Terrain3DView), null,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
+
+    public MapaTur.Domain.Geography.MapBounds? LodOrthoCoverageBounds
+    {
+        get => (MapaTur.Domain.Geography.MapBounds?)GetValue(LodOrthoCoverageBoundsProperty);
+        set => SetValue(LodOrthoCoverageBoundsProperty, value);
+    }
+
     /// <summary>
     /// Whether the rock material is blended onto steep faces (premium menu "Skały"). When false the steep
     /// walls keep the raw orthophoto (which smears) — useful for an A/B of the blend.
@@ -1990,6 +2002,9 @@ public partial class Terrain3DView : ContentView
             glRenderer.SlopeMapEnabled = SlopeMapEnabled; // premium menu "Mapa nachylenia" (slope-steepness shading)
             glRenderer.RockStrength = RockMaterialEnabled ? 1f : 0f; // premium menu "Skały" (rock material on steep faces)
             glRenderer.BiomeMaterialEnabled = BiomeMaterialEnabled; // premium menu "Biomy" (elevation-zone material)
+            // Ortho coverage cull: fade ortho → hypsometric beyond where the bundled ortho actually covers, so a
+            // base wider than the ortho doesn't stretch clamped edge texels into "strata" bands. Null → no cull.
+            glRenderer.SetOrthoCoverageGeoBounds(LodOrthoCoverageBounds, 300f);
 
             // Push a changed ortho image to the GL renderer once (it uploads on the GL thread next Render).
             if (orthoPathDirty)

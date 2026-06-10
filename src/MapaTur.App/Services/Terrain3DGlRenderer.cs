@@ -72,9 +72,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform sampler2D uOrtho;\n" +
         "uniform int uUseOrtho;\n" +
         "uniform vec2 uOrthoTexel;\n" + // (1/width, 1/height) of the bound ortho texture
+        "uniform vec2 uOrthoMinXY;\n" +     // ortho coverage AABB (world XY about the scene anchor) — beyond it the UV clamps
+        "uniform vec2 uOrthoMaxXY;\n" +
+        "uniform float uOrthoBlendMeters;\n" + // soft fade ortho→hypsometric at the coverage edge; 0 = no cull (pure ortho)
         "uniform float uSlopeMode;\n" +     // 1 = avalanche slope-steepness map (overrides ortho/hypsometric)
         "uniform vec3 uSlopePalette[8];\n" + // band colours (0-20…80-90°), from SlopePalette
         "uniform float uSharpen;\n" +   // unsharp-mask strength; 0 = off
+        "uniform float uDebugUv;\n" +   // DIAGNOSTIC: 1 = render the raw ortho UV as colour (R=U, G=V)
         "uniform float uRockStrength;\n" + // rock-material-on-steep blend strength; 0 = off (pure ortho)
         "uniform vec3 uFogColor;\n" +
         "uniform float uFogDensity;\n" + // per-metre exponential; 0 = no aerial perspective
@@ -217,15 +221,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  if (uUseOrtho == 1) {\n" +
         "    vec3 c = texture(uOrtho, vTex).rgb;\n" +
         "    if (uSharpen > 0.0) {\n" +
-        // 4-tap unsharp mask: boost the centre over the local average to crisp up edges that
-        // mipmap/anisotropic minification softens. Cheap (4 extra taps) and clamped to [0,1].
+        // 4-tap unsharp mask: crisp up edges that mip/aniso minification softens. Clamped to [0,1].
         "      vec3 blur = (texture(uOrtho, vTex + vec2(uOrthoTexel.x, 0.0)).rgb\n" +
         "                 + texture(uOrtho, vTex - vec2(uOrthoTexel.x, 0.0)).rgb\n" +
         "                 + texture(uOrtho, vTex + vec2(0.0, uOrthoTexel.y)).rgb\n" +
         "                 + texture(uOrtho, vTex - vec2(0.0, uOrthoTexel.y)).rgb) * 0.25;\n" +
         "      c = clamp(c + (uSharpen * (c - blur)), 0.0, 1.0);\n" +
         "    }\n" +
-        "    base = c;\n" +
+        // Coverage blend: beyond the ortho's geographic coverage, fade ortho -> hypsometric (vColor) over
+        // uOrthoBlendMeters; fully outside = hypsometric. Stable world frame so it's camera-relative-correct.
+        "    vec2 cd = min(vStableWorldPos.xy - uOrthoMinXY, uOrthoMaxXY - vStableWorldPos.xy);\n" +
+        "    float ow = (uOrthoBlendMeters > 0.0) ? clamp(min(cd.x, cd.y) / uOrthoBlendMeters, 0.0, 1.0) : 1.0;\n" +
+        "    base = mix(vColor.rgb, c, ow);\n" +
         "  } else {\n" +
         "    base = vColor.rgb;\n" +
         "  }\n" +
@@ -303,6 +310,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  float dist = length(vWorldPos - uCameraPos);\n" +
         "  float fogAmount = 1.0 - exp(-dist * uFogDensity);\n" +
         "  fragColor = vec4(mix(lit, uFogColor, fogAmount), 1.0);\n" +
+        // DIAGNOSTIC overlay: render the raw ortho UV as colour (R=U, G=V). A clean smooth gradient per cell = UV
+        // is fine → flat bands are texture sampling (mip/aniso/content). A striped/sawtooth pattern = UV is broken.
+        "  if (uDebugUv > 0.5 && uUseOrtho == 1) {\n" +
+        "    fragColor = vec4(vTex.x, vTex.y, 0.0, 1.0);\n" +
+        "  }\n" +
         "}\n";
 
     // Sky pass: a fullscreen triangle whose fragment shader reconstructs a world-space view
@@ -634,6 +646,23 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int useOrthoLocation = -1;
     private int orthoTexelLocation = -1;
     private int sharpenLocation = -1;
+    private int debugUvLocation = -1;
+    private int orthoMinXyLocation = -1;
+    private int orthoMaxXyLocation = -1;
+    private int orthoBlendLocation = -1;
+    private System.Numerics.Vector2 orthoCoverageMin;
+    private System.Numerics.Vector2 orthoCoverageMax;
+    private MapaTur.Domain.Geography.MapBounds? orthoCoverageGeo; // null = no cull (pure ortho everywhere)
+    private float orthoCoverageBlendMeters;
+
+    /// <summary>Ortho coverage geographic bounds + soft edge-blend width. The renderer converts the bounds to
+    /// world XY each frame (via the tiles' anchor) and the shader fades ortho→hypsometric beyond them — fixing
+    /// the stretched-edge "strata" bands where a base is wider than its ortho. Null bounds disables the cull.</summary>
+    public void SetOrthoCoverageGeoBounds(MapaTur.Domain.Geography.MapBounds? geoBounds, float blendMeters)
+    {
+        orthoCoverageGeo = geoBounds;
+        orthoCoverageBlendMeters = blendMeters;
+    }
     private int slopeModeLocation = -1;
     private int rockStrengthLocation = -1;
     private int slopePaletteLocation = -1;
@@ -942,6 +971,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             useOrthoLocation = -1;
             orthoTexelLocation = -1;
             sharpenLocation = -1;
+            debugUvLocation = -1;
+            orthoMinXyLocation = -1;
+            orthoMaxXyLocation = -1;
+            orthoBlendLocation = -1;
             slopeModeLocation = -1;
             rockStrengthLocation = -1;
             slopePaletteLocation = -1;
@@ -1246,6 +1279,22 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // for procedural sampling (vStableWorldPos). Set once here; not changed by any pass.
         gl.Uniform3(modelOffsetLocation, 0f, 0f, 0f);
         gl.Uniform3(stableOffsetLocation, 0f, 0f, 0f);
+        gl.Uniform1(debugUvLocation, 0f); // UV viz off (proved smooth)
+        // Ortho coverage AABB + soft edge blend. Convert the coverage geo-bounds to world XY via the tiles'
+        // anchor; beyond it the ortho UV clamps into stretched edge texels (strata bands) → the shader fades to
+        // hypsometric instead. No coverage bounds (or no tiles) → blend 0 = no cull (pure ortho).
+        float orthoBlend = 0f;
+        if (orthoCoverageGeo is { } covGeo && tiles.Count > 0 && orthoCoverageBlendMeters > 0f)
+        {
+            Vector3 sw = tiles[0].GeoToWorld(covGeo.SouthWest, 0f);
+            Vector3 ne = tiles[0].GeoToWorld(covGeo.NorthEast, 0f);
+            orthoCoverageMin = new System.Numerics.Vector2(Math.Min(sw.X, ne.X), Math.Min(sw.Y, ne.Y));
+            orthoCoverageMax = new System.Numerics.Vector2(Math.Max(sw.X, ne.X), Math.Max(sw.Y, ne.Y));
+            orthoBlend = orthoCoverageBlendMeters;
+        }
+        gl.Uniform2(orthoMinXyLocation, orthoCoverageMin.X, orthoCoverageMin.Y);
+        gl.Uniform2(orthoMaxXyLocation, orthoCoverageMax.X, orthoCoverageMax.Y);
+        gl.Uniform1(orthoBlendLocation, orthoBlend);
 
         // Per-pixel lighting: the Atmosphere instance, when provided, overrides the per-tile baked
         // light direction + ambient so the time-of-day slider drives shading live. Without an
@@ -1977,7 +2026,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         // Trilinear (mipmapped) minification + anisotropy — the ortho is seen at grazing angles where
         // plain bilinear shimmers and smears into blocks. ClampToEdge so adjacent cell textures meet
-        // seamlessly at the shared seam.
+        // seamlessly at the shared seam. The mobile cells are power-of-two so GenerateMipmap halves cleanly.
         g.GenerateMipmap(TextureTarget.Texture2D);
         g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
         g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
@@ -2262,6 +2311,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         slopeModeLocation = g.GetUniformLocation(program, "uSlopeMode");
         slopePaletteLocation = g.GetUniformLocation(program, "uSlopePalette");
         sharpenLocation = g.GetUniformLocation(program, "uSharpen");
+        debugUvLocation = g.GetUniformLocation(program, "uDebugUv");
+        orthoMinXyLocation = g.GetUniformLocation(program, "uOrthoMinXY");
+        orthoMaxXyLocation = g.GetUniformLocation(program, "uOrthoMaxXY");
+        orthoBlendLocation = g.GetUniformLocation(program, "uOrthoBlendMeters");
         rockStrengthLocation = g.GetUniformLocation(program, "uRockStrength");
         biomeModeLocation = g.GetUniformLocation(program, "uBiomeMode");
         biomeScreeSlopeLocation = g.GetUniformLocation(program, "uBiomeScreeSlopeDeg");

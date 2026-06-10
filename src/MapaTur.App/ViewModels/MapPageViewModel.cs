@@ -1981,6 +1981,9 @@ public sealed partial class MapPageViewModel : ObservableObject
             }
 
             lodOrthoCoverage = orthoCoverage; // shared with the per-tile detail build
+            // Tell the renderer where the ortho actually covers, so the wider base fades to hypsometric beyond it
+            // (instead of stretching clamped edge texels = the "strata" seam bands). Null when no bundled ortho.
+            LodOrthoCoverageBounds = orthoCoverage?.Bounds;
 
             var baseTiles = await Task.Run(() => TerrainMesh3D.BuildTiles(baseRaster, options, orthoCoverage: orthoCoverage)).ConfigureAwait(true);
             var combined = new List<TerrainMesh3D>(baseTiles);
@@ -2036,6 +2039,11 @@ public sealed partial class MapPageViewModel : ObservableObject
 
     private IReadOnlyList<TerrainMesh3D>? lodBaseTiles;
     private MapaTur.Application.Terrain.OrthoCoverage? lodOrthoCoverage; // ortho coverage for the current LOD scene (null = hypsometric)
+
+    /// <summary>Geographic extent the LOD ortho actually covers (null = none). The 3D view hands this to the
+    /// renderer so a base wider than the ortho fades to hypsometric beyond it instead of stretching edge texels.</summary>
+    [ObservableProperty]
+    private MapaTur.Domain.Geography.MapBounds? lodOrthoCoverageBounds;
     private IReadOnlyList<NamedSummit>? tatraGazetteer;                  // bundled OSM natural=peak merged with the curated fallback; loaded once
     private GeoPoint lodAnchor;
     private GeoPoint lodDetailCentre;
@@ -2060,7 +2068,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     // Krok 4 (screen-space-error LOD): the detail patch follows the look-at point (raycast through the
     // screen centre, Krok 1) and its zoom adapts to the on-screen error (Krok 2/3) instead of a fixed z16.
     private const int LodBaseZoom = 13;                                   // static base zoom (~6 m; z12 shaved summit apexes → distant peaks too blunt vs real)
-    private const double LodBaseHalfWidthMeters = 6000.0;                  // static base half-extent = 12 km (the clean sweet-spot). A single static base can't be BOTH wide and sharp — at 24 km the vertex budget decimates it 4x and the periphery degrades (coarse facets + ortho clamp-stretch beyond its coverage). True wider coverage = dynamic streaming (fine near look-at, coarse far), not a wider static mesh. The base reads cache-first so once "Pobierz Tatry offline" pulled the wide z13 this 12 km loads offline (no loading stripes).
+    private const double LodBaseHalfWidthMeters = 6000.0;                  // wider static base = 12 km. The terrain beyond the bundled-ortho core would otherwise sample clamped/stretched edge texels (the "strata" seam stripes); fixed by rendering out-of-ortho-coverage tiles HYPSOMETRIC instead (OrthoCoverage.Covers → -1 in BuildTiles).
     private const int NearDetailZoom = 16;                                // finest detail zoom (GUGiK native 1 m)
     private static readonly int[] DetailZoomCandidates = { 16, 14, 12 };  // finest → coarsest, fed to ScreenSpaceLod
     private const double DetailMaxErrorPixels = 2.0;                      // per-tile screen-space error budget

@@ -394,12 +394,27 @@ public sealed class TerrainMesh3D
             double centreRow = (rowStart + rowEnd) * 0.5;
             double centreLon = cols > 1 ? raster.West + (centreCol / (cols - 1) * (raster.East - raster.West)) : raster.West;
             double centreLat = rows > 1 ? raster.North - (centreRow / (rows - 1) * (raster.North - raster.South)) : raster.North;
-            (geoCol, geoRow, geoTileIndex) = coverage.CellAt(new GeoPoint(centreLat, centreLon));
+            var centre = new GeoPoint(centreLat, centreLon);
+            if (coverage.Covers(centre))
+            {
+                (geoCol, geoRow, geoTileIndex) = coverage.CellAt(centre);
+            }
+            else
+            {
+                // Tile centre is OUTSIDE the ortho coverage — sampling CellAt/LocalUv here would clamp to the
+                // edge texels and stretch them along the slope (the seam "strata" stripes). -1 makes the renderer
+                // fall back to the per-vertex hypsometric colour for this tile instead.
+                geoTileIndex = -1;
+            }
         }
 
         // Shift the ortho cell index so this mesh's cells sit AFTER another set in the renderer's flat
-        // orthoTiles list (e.g. a high-zoom near-field patch appended past the base scene's cells).
-        geoTileIndex += orthoTileIndexOffset;
+        // orthoTiles list (e.g. a high-zoom near-field patch appended past the base scene's cells). An
+        // out-of-coverage tile (-1) stays out — no ortho, hypsometric.
+        if (geoTileIndex >= 0)
+        {
+            geoTileIndex += orthoTileIndexOffset;
+        }
 
         // Vertex positions in the full-raster world frame. Row 0 = north edge = +Y; last row = -Y.
         for (int r = rowStart; r <= rowEnd; r++)
