@@ -166,6 +166,36 @@ public sealed class TerrainMesh3D
     }
 
     /// <summary>
+    /// Inclusive tile-edge indices over [0, extent-1] that (a) include every supplied <paramref name="boundaries"/>
+    /// (e.g. ortho cell edges, so no tile straddles one) and (b) keep every segment ≤ <paramref name="step"/>
+    /// (the maxTileSide budget). Consecutive entries are shared seams for <see cref="BuildBlock"/>.
+    /// </summary>
+    private static int[] BuildTileCuts(int extent, int step, SortedSet<int> boundaries)
+    {
+        var anchors = new SortedSet<int> { 0, extent - 1 };
+        foreach (int b in boundaries)
+        {
+            anchors.Add(b);
+        }
+
+        var cuts = new List<int> { 0 };
+        var sorted = new List<int>(anchors);
+        for (int i = 0; i < sorted.Count - 1; i++)
+        {
+            int p = sorted[i];
+            int end = sorted[i + 1];
+            while (end - p > step)
+            {
+                p += step;
+                cuts.Add(p);
+            }
+            cuts.Add(end);
+        }
+
+        return cuts.ToArray();
+    }
+
+    /// <summary>
     /// Builds a single terrain mesh from a DEM raster. The raster must fit within the 16-bit index
     /// limit (≤ 65 536 vertices); larger rasters must use <see cref="BuildTiles"/>.
     /// </summary>
@@ -270,14 +300,48 @@ public sealed class TerrainMesh3D
         // the coverage (MVP: one cell per block, by the block centre — no per-cell cutting yet).
         if (orthoCoverage is not null)
         {
-            for (int r0 = 0; r0 < rows - 1; r0 += maxTileSide)
+            // Cut the raster at the ortho CELL boundaries as well as the maxTileSide grid, so a block never
+            // STRADDLES a cell boundary. A straddling block picks one cell by its centre and clamps the UV of
+            // its far-side vertices — stretching that cell's edge row of texels into long parallel "strata"
+            // stripes (independent of relief, along the cell-grid line). Keeping every block inside one cell
+            // makes its per-vertex UV stay in [0,1] (no clamp). Blocks fully outside coverage still resolve to
+            // hypsometric via the centre test in BuildBlock.
+            double covW = orthoCoverage.Bounds.SouthWest.Longitude;
+            double covE = orthoCoverage.Bounds.NorthEast.Longitude;
+            double covS = orthoCoverage.Bounds.SouthWest.Latitude;
+            double covN = orthoCoverage.Bounds.NorthEast.Latitude;
+            var colBoundaries = new SortedSet<int>();
+            for (int i = 1; i < orthoCoverage.GridCols; i++)
             {
-                int r1 = Math.Min(r0 + maxTileSide, rows - 1);
-                for (int c0 = 0; c0 < cols - 1; c0 += maxTileSide)
+                double lon = covW + (i * (covE - covW) / orthoCoverage.GridCols);
+                int col = (int)Math.Round((lon - raster.West) / (raster.East - raster.West) * (cols - 1));
+                if (col > 0 && col < cols - 1)
                 {
-                    int c1 = Math.Min(c0 + maxTileSide, cols - 1);
+                    colBoundaries.Add(col);
+                }
+            }
+
+            var rowBoundaries = new SortedSet<int>();
+            for (int i = 1; i < orthoCoverage.GridRows; i++)
+            {
+                double lat = covN - (i * (covN - covS) / orthoCoverage.GridRows);
+                int row = (int)Math.Round((raster.North - lat) / (raster.North - raster.South) * (rows - 1));
+                if (row > 0 && row < rows - 1)
+                {
+                    rowBoundaries.Add(row);
+                }
+            }
+
+            int[] colCuts = BuildTileCuts(cols, maxTileSide, colBoundaries);
+            int[] rowCuts = BuildTileCuts(rows, maxTileSide, rowBoundaries);
+            for (int ri = 0; ri < rowCuts.Length - 1; ri++)
+            {
+                int r0 = rowCuts[ri];
+                int r1 = rowCuts[ri + 1];
+                for (int ci = 0; ci < colCuts.Length - 1; ci++)
+                {
                     tiles.Add(BuildBlock(
-                        raster, options, frame, c0, c1, r0, r1, anchor, anchorOffset,
+                        raster, options, frame, colCuts[ci], colCuts[ci + 1], r0, r1, anchor, anchorOffset,
                         OrthoCell.Full(cols, rows), edgeHeightSource, edgeMatchRows, orthoCoverage, orthoTileIndexOffset));
                 }
             }

@@ -312,7 +312,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  fragColor = vec4(mix(lit, uFogColor, fogAmount), 1.0);\n" +
         // DIAGNOSTIC overlay: render the raw ortho UV as colour (R=U, G=V). A clean smooth gradient per cell = UV
         // is fine → flat bands are texture sampling (mip/aniso/content). A striped/sawtooth pattern = UV is broken.
-        "  if (uDebugUv > 0.5 && uUseOrtho == 1) {\n" +
+        "  if (uDebugUv > 1.5 && uUseOrtho == 1) {\n" +
+        // DIAGNOSTIC clamp viz: RED where U is pinned to a cell edge, GREEN where V is — i.e. the ortho UV
+        // clamped (out-of-coverage edge-texel stretch). If the stripe band lights up here, it is the clamp.
+        "    float cu = (vTex.x <= 0.003 || vTex.x >= 0.997) ? 1.0 : 0.0;\n" +
+        "    float cv = (vTex.y <= 0.003 || vTex.y >= 0.997) ? 1.0 : 0.0;\n" +
+        "    fragColor = vec4(cu, cv, 0.0, 1.0);\n" +
+        "  } else if (uDebugUv > 0.5 && uUseOrtho == 1) {\n" +
         "    fragColor = vec4(vTex.x, vTex.y, 0.0, 1.0);\n" +
         "  }\n" +
         "}\n";
@@ -1279,7 +1285,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // for procedural sampling (vStableWorldPos). Set once here; not changed by any pass.
         gl.Uniform3(modelOffsetLocation, 0f, 0f, 0f);
         gl.Uniform3(stableOffsetLocation, 0f, 0f, 0f);
-        gl.Uniform1(debugUvLocation, 0f); // UV viz off (proved smooth)
+        gl.Uniform1(debugUvLocation, 0f); // UV/clamp viz off
         // Ortho coverage AABB + soft edge blend. Convert the coverage geo-bounds to world XY via the tiles'
         // anchor; beyond it the ortho UV clamps into stretched edge texels (strata bands) → the shader fades to
         // hypsometric instead. No coverage bounds (or no tiles) → blend 0 = no cull (pure ortho).
