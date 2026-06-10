@@ -494,6 +494,12 @@ testdata/maps/overlay-proof-*.jpg
 testdata/maps/gugik-*.jpg
 testdata/maps/gugik-*.png
 
+# Diagnostic scratch: device screenshots + texture/hillshade dumps from on-device debugging.
+testdata/maps/device-*.png
+testdata/maps/dev-*.png
+testdata/maps/dev-*.tif
+testdata/maps/*-hs.png
+
 # User-supplied / commercial map archives (license-restricted, don't redistribute).
 # The auto-loader scans <repo>/maps and <repo>/dem as preferred roots; both stay local-only.
 # Anchor to repo root so testdata/maps/ (which holds the regenerator scripts and tiny demo

@@ -56,6 +56,22 @@ public sealed class GugikNmtDemTileSourceTests : IDisposable
         url.Should().Contain("COVERAGE=DTM_PL-KRON86-NH_TIFF");
         url.Should().Contain("CRS=EPSG:3857");
         url.Should().Contain("FORMAT=image/tiff");
+        // Coarse z10 tile → anti-washboard over-request clamps to ×4 → a 1024 px dense grid.
+        url.Should().Contain("WIDTH=1024");
+        url.Should().Contain("HEIGHT=1024");
+    }
+
+    [Fact]
+    public async Task GetTileAsync_FineTile_RequestsBaseGridWithoutSupersampling()
+    {
+        // A z16 tile covers only a few hundred metres, already near the native 1 m grid, so no over-request.
+        var fineTile = new DemTileKey(16, 571 * 64, 332 * 64); // same area as InsidePoland (z10) at z16
+        var handler = new StubHandler(_ => Ok(BuildTiff(2, 2, Quad)));
+        var source = NewSource(handler);
+
+        await source.GetTileAsync(fineTile);
+
+        string url = handler.Calls[0].ToString();
         url.Should().Contain("WIDTH=256");
         url.Should().Contain("HEIGHT=256");
     }
@@ -238,11 +254,13 @@ public sealed class GugikNmtDemTileSourceTests : IDisposable
     private string ExpectedCachePath()
     {
         var inv = CultureInfo.InvariantCulture;
+        // InsidePoland is a coarse z10 tile (~23 km of ground), so the anti-washboard over-request clamps
+        // to the max factor (×4 of the 256 base) → 1024 px, which the cache filename records.
         return Path.Combine(
             cacheDir,
             InsidePoland.Zoom.ToString(inv),
             InsidePoland.X.ToString(inv),
-            $"{InsidePoland.Y.ToString(inv)}.tif");
+            $"{InsidePoland.Y.ToString(inv)}_1024.tif");
     }
 
     private static HttpResponseMessage Ok(byte[] body)

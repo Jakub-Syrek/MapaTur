@@ -69,9 +69,14 @@ def main() -> int:
         total_in += size_in
         with Image.open(src) as img:
             sw, sh = img.size
-            new_w = TARGET_WIDTH
-            new_h = round(sh * (new_w / sw))
-            print(f"  {src.name}: {sw}×{sh} -> {new_w}×{new_h}", flush=True)
+            # POWER-OF-TWO dimensions: GenerateMipmap on a non-PoT texture (the old 8192×5462) halves the odd
+            # height with a floor, drifting half a texel per mip and baking a diagonal "washboard" into the
+            # higher mip levels — which then stripes the draped ortho at grazing angles. 8192×4096 keeps the
+            # horizontal sampling and gives a clean PoT mip chain in both axes. UV is normalised 0..1 per cell,
+            # so the slightly different texel aspect maps correctly with no geometry change.
+            new_w = TARGET_WIDTH        # 8192 = 2^13
+            new_h = 4096                # 2^12 (was round(sh*new_w/sw) ≈ 5462, non-PoT)
+            print(f"  {src.name}: {sw}×{sh} -> {new_w}×{new_h} (PoT)", flush=True)
             resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
         # `img` is closed by the `with`; drop the original frame from RAM
         # before encoding the smaller one back out.

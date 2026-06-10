@@ -38,6 +38,14 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
     private const float NoDataFloor = -10000f;
     private const float NoDataSentinel = -32768f;
 
+    // Anti-washboard: when a tile covers a lot of ground, requesting it at the plain tile grid makes the
+    // WCS resample its 1 m source on a coarse grid (≈19 m/px at z13) across an EPSG:2180→3857 reprojection,
+    // baking a diagonal ripple into the heights (whose derivative — the lighting normal — then stripes the
+    // foothills). We over-request at ~this resolution where the server resamples gently, then area-average
+    // back down to tileSize. Detail tiles (already near native 1 m) resolve to factor 1 and are untouched.
+    private const double TargetMetersPerPixel = 5.0;
+    private const int MaxSupersampleFactor = 4;
+
     private readonly HttpClient httpClient;
     private readonly string cacheDirectory;
     private readonly string endpoint;
@@ -85,7 +93,8 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
             return null;
         }
 
-        byte[]? tiff = await ReadOrDownloadAsync(key, cancellationToken).ConfigureAwait(false);
+        int fetchPx = FetchPixelsFor(key);
+        byte[]? tiff = await ReadOrDownloadAsync(key, fetchPx, cancellationToken).ConfigureAwait(false);
         if (tiff is null)
         {
             return null;
@@ -104,6 +113,18 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
 
         float[] samples = SanitizeNoData(grid.Samples);
         var bounds = new MapBounds(new GeoPoint(south, west), new GeoPoint(north, east));
+
+        // If we over-requested (factor > 1), area-average the dense buffer back to tileSize — a proper
+        // low-pass that removes the WCS coarse-grid washboard without adding mesh vertices. Only when the
+        // server actually returned the dense grid we asked for; otherwise pass the decoded raster through.
+        int factor = fetchPx / this.tileSize;
+        if (factor > 1 && grid.Width == fetchPx && grid.Height == fetchPx)
+        {
+            float[] averaged = MapaTur.Application.Terrain.DemTileSupersampler.AreaAverageDownsample(
+                samples, this.tileSize, factor, NoDataSentinel);
+            return new DemRaster(this.tileSize, this.tileSize, bounds, averaged, NoDataSentinel);
+        }
+
         return new DemRaster(grid.Width, grid.Height, bounds, samples, NoDataSentinel);
     }
 
@@ -123,7 +144,7 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
         return samples;
     }
 
-    private async Task<byte[]?> ReadOrDownloadAsync(DemTileKey key, CancellationToken cancellationToken)
+    private async Task<byte[]?> ReadOrDownloadAsync(DemTileKey key, int fetchPx, CancellationToken cancellationToken)
     {
         string path = CachePath(key);
         if (File.Exists(path))
@@ -131,7 +152,7 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
             return await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
         }
 
-        byte[]? tiff = await DownloadAsync(key, cancellationToken).ConfigureAwait(false);
+        byte[]? tiff = await DownloadAsync(key, fetchPx, cancellationToken).ConfigureAwait(false);
         if (tiff is null)
         {
             return null;
@@ -142,9 +163,9 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
         return tiff;
     }
 
-    private async Task<byte[]?> DownloadAsync(DemTileKey key, CancellationToken cancellationToken)
+    private async Task<byte[]?> DownloadAsync(DemTileKey key, int fetchPx, CancellationToken cancellationToken)
     {
-        var uri = new Uri(BuildUrl(key));
+        var uri = new Uri(BuildUrl(key, fetchPx));
         try
         {
             using var response = await httpClient.GetAsync(uri, cancellationToken).ConfigureAwait(false);
@@ -166,16 +187,26 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
         }
     }
 
-    private string BuildUrl(DemTileKey key)
+    private string BuildUrl(DemTileKey key, int fetchPx)
     {
         var inv = CultureInfo.InvariantCulture;
         var (minX, minY, maxX, maxY) = SlippyTileMath.Tile3857Bounds(key.X, key.Y, key.Zoom);
         string bbox = string.Create(inv, $"{minX},{minY},{maxX},{maxY}");
-        string size = this.tileSize.ToString(inv);
+        string size = fetchPx.ToString(inv);
 
         return $"{this.endpoint}?SERVICE=WCS&VERSION=1.0.0&REQUEST=GetCoverage" +
                $"&COVERAGE={this.coverageId}&CRS=EPSG:3857&BBOX={bbox}" +
                $"&WIDTH={size}&HEIGHT={size}&FORMAT=image/tiff";
+    }
+
+    // Over-request factor for this tile's ground size, so the WCS resamples gently (see TargetMetersPerPixel).
+    // Deterministic per tile (depends only on zoom), so the cache key stays stable.
+    private int FetchPixelsFor(DemTileKey key)
+    {
+        var (minX, _, maxX, _) = SlippyTileMath.Tile3857Bounds(key.X, key.Y, key.Zoom);
+        int factor = MapaTur.Application.Terrain.DemTileSupersampler.SupersampleFactor(
+            maxX - minX, this.tileSize, TargetMetersPerPixel, MaxSupersampleFactor);
+        return this.tileSize * factor;
     }
 
     /// <summary>
@@ -188,10 +219,14 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
     private string CachePath(DemTileKey key)
     {
         var inv = CultureInfo.InvariantCulture;
-        return Path.Combine(
-            this.cacheDirectory,
-            key.Zoom.ToString(inv),
-            key.X.ToString(inv),
-            $"{key.Y.ToString(inv)}.tif");
+        int fetchPx = FetchPixelsFor(key);
+        // Supersampled (anti-washboard) tiles get a resolution suffix so they don't collide with an older
+        // coarse-grid entry. Tiles fetched at the plain tile size keep the LEGACY name ({y}.tif) so the
+        // existing offline detail cache (z16 etc., downloaded before supersampling) is still found — otherwise
+        // the cache-only LOD streamer can't load the 1 m detail and the coarse base shows through striped.
+        string name = fetchPx == this.tileSize
+            ? $"{key.Y.ToString(inv)}.tif"
+            : $"{key.Y.ToString(inv)}_{fetchPx.ToString(inv)}.tif";
+        return Path.Combine(this.cacheDirectory, key.Zoom.ToString(inv), key.X.ToString(inv), name);
     }
 }
