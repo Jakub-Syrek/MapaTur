@@ -13,6 +13,35 @@ Pierwsze spisanie tego dokumentu: **2026-06-09** (sesja wody; LOD/streaming NIE 
 
 ---
 
+## SESJA 2026-06-10 — „paski" na ortho LOD: regresja detalu + washboard bazy (ROZSTRZYGNIĘTE)
+
+> Pełny rozbiór: pamięć `ortho-grazing-stripes.md`. Skrót:
+
+- 🟢 **Pasy „wszędzie" = REGRESJA, nie bug renderu.** Zmiana klucza cache w `GugikNmtDemTileSource`
+  (`{y}.tif`→`{y}_{px}.tif`, dla anti-washboardu) **osierociła offline'owy cache detalu z16** (4924 kafle na
+  `{y}.tif`); streamer jest **cache-only** → 0 detalu → goła, zgrubna baza pokazała swoje pasy wszędzie.
+  Fix `bbaf04e`: sufiks `_{px}` **tylko gdy supersampling**; zwykłe kafle zachowują `{y}.tif`. **NIGDY nie
+  zmieniaj formatu klucza cache DEM bez migracji** — cicho zabija detal 1 m.
+- 🟢 **Pas zgrubnej bazy przy grazing jest WRODZONY** (aniso-minifikacja drapowanego zdjęcia 2D, footprint-sliver
+  poza 16× sprzętowym). Sampler tego NIE naprawi — sprawdzone i OBALONE: treść mipów, POT 8192×4096,
+  CPU box-mipy, aniso on/off, sharpen, LOD-bias, `textureLod` izotropowy, manual multi-tap `textureGrad`,
+  metryka eigenvalues. Jedyne co usuwa = fade ortho→biom (traci foto). **Realne maskowanie = detal z16 na
+  wierzchu.** Nie wracać do polowania na to w samplerze.
+- 🟢 **Washboard bazy = osobny, realny bug naprawiony u źródła** (`bbaf04e`): GUGiK WCS przy 256 px/z13
+  (~19 m/px, reprojekcja 2180→3857) wypala ukośny washboard w wysokościach (dowód: hillshade 256 px = pasy,
+  ten sam bbox 1024 px = gładko). `DemTileSupersampler` over-requestuje grube kafle (~5 m/px, cap ×4) i
+  **area-average** w dół (bez extra wierzchołków). Detal (≈1 m natywne) → factor 1, nietknięty. 7 testów.
+- 🟢 **Coverage cull/blend + szersza baza 12 km** (`4eced86`): teren poza pokryciem ortho → hipsometria
+  zamiast rozciągniętych edge-texeli; miękki blend na granicy; bindable `LodOrthoCoverageBounds`.
+- Diagnostyka która DZIAŁAŁA: render ortho-OFF (gładko⇒geometria OK), **red-tint gałęzi `footAniso>16`**
+  (czerwień legła 1:1 na pasach ⇒ to grazing-aniso; rób ss PO ustawieniu kamery, nie 1 s po starcie),
+  **hillshade surowego kafla z telefonu** (`adb exec-out run-as … cat` — binarnie; NIE `>` przez PowerShell).
+  Test base-only musi też ustawić `IsLodStreaming=false`.
+- Stan: mobile ortho = **PoT 8192×4096** (czyste mipy z GenerateMipmap). Daleki pas bazy przy grazing zostaje
+  (wrodzony, zaakceptowany). Tip `4eced86`. Cały kod debug z tej sesji usunięty.
+
+---
+
 ## 0. JAK CZYTAĆ TEN DOKUMENT (kontekst dla „szerszego pokrycia")
 
 „Szersze pokrycie 1 m" to **NIE** dodanie kolejnego efektu do istniejącego okna LOD. To zmiana **architektury ramy świata** (jeden raster wyśrodkowany → wiele kafli we wspólnym origin) + **dynamiczny streaming kafli pod widok**. Większość ryzyka leży w **kamerze / synchronizacji 2D↔3D / projekcji overlayów**, NIE w samym rysowaniu terenu. Najpierw przeczytaj sekcje **6 (RCA — czemu padło moving-window)**, **7 (lekcje)** i **15 (otwarte tematy, P0 = shared origin)**.
