@@ -2253,15 +2253,11 @@ public sealed partial class MapPageViewModel : ObservableObject
             double farStep1 = step1Distances.Count == 0 ? -1 : step1Distances.Max();
 
             var meshTimer = System.Diagnostics.Stopwatch.StartNew();
-            var meshes = new List<TerrainMesh3D>();
-            foreach (PerTileLodDecision d in plan)
-            {
-                DemRaster crop = holed.Crop(d.ColStart, d.RowStart, d.Columns, d.Rows);
-                DemRaster subsampled = crop.Subsample(d.SubsampleStep);
-                meshes.AddRange(TerrainMesh3D.BuildTiles(
-                    subsampled, detailOptions, maxTileSide: PerTileMaxTileSide, projectionAnchor: anchor,
-                    orthoCoverage: lodOrthoCoverage));
-            }
+            // Crack-free: build every tile straight from the FULL window raster at its own step on the shared
+            // absolute grid (NOT independent crops + per-crop subsample, which made different-step tiles' edges
+            // land at different world positions → see-through cracks). Edges weld to coarser neighbours.
+            var meshes = new List<TerrainMesh3D>(TerrainMesh3D.BuildAdaptiveTiles(
+                holed, plan, detailOptions, projectionAnchor: anchor, orthoCoverage: lodOrthoCoverage));
 
             meshTimer.Stop();
             totalTimer.Stop();
