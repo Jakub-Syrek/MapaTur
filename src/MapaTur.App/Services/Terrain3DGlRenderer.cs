@@ -217,6 +217,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  float lambert = max(0.0, dot(shN, uLightDir));\n" +
         "  float sunlit = lambert * (1.0 - uAmbient) * (1.0 - (sunShadow * uCloudShadow));\n" +
         "  vec3 lightSum = (uSkyAmbient * uAmbient) + (uSunColor * sunlit);\n" +
+        // Ambient FLOOR: steep faces turned from the sun (lambert=0) otherwise collapse to lightSum≈0 → near-BLACK
+        // (the "czarne dziury/kropki" — proven: an unlit render has 0 black px). max() lifts ONLY the deepest
+        // shadows to a cool sky-fill minimum, leaving every brighter sun/shadow gradient (the 3D relief) intact.
+        "  lightSum = max(lightSum, uSkyAmbient * 0.45);\n" +
         "  vec3 base;\n" +
         "  if (uUseOrtho == 1) {\n" +
         "    vec3 c = texture(uOrtho, vTex).rgb;\n" +

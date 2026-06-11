@@ -44,7 +44,7 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
     // foothills). We over-request at ~this resolution where the server resamples gently, then area-average
     // back down to tileSize. Detail tiles (already near native 1 m) resolve to factor 1 and are untouched.
     private const double TargetMetersPerPixel = 5.0;
-    private const int MaxSupersampleFactor = 4;
+    private const int MaxSupersampleFactor = 1; // supersampler OFF (user decision): the over-request + downsample baked a moiré ring-grid ("paski") into the base; factor 1 = native, clean. Base re-fetches once (new cache name).
 
     private readonly HttpClient httpClient;
     private readonly string cacheDirectory;
@@ -120,7 +120,11 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
         int factor = fetchPx / this.tileSize;
         if (factor > 1 && grid.Width == fetchPx && grid.Height == fetchPx)
         {
-            float[] averaged = MapaTur.Application.Terrain.DemTileSupersampler.AreaAverageDownsample(
+            // Gaussian (overlapping) downsample, not a plain box: the box left a moiré ring-grid ("obwódki")
+            // on the base — disjoint blocks can't smooth across boundaries and the box passes WCS ripple that
+            // aliases. Gaussian low-pass at the output Nyquist removes it without flattening real terrain. Same
+            // factor/fetchPx → same cache key, so this needs NO re-fetch of already-cached tiles.
+            float[] averaged = MapaTur.Application.Terrain.DemTileSupersampler.LowPassDownsample(
                 samples, this.tileSize, factor, NoDataSentinel);
             return new DemRaster(this.tileSize, this.tileSize, bounds, averaged, NoDataSentinel);
         }

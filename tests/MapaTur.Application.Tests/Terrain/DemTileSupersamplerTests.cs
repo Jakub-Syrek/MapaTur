@@ -90,4 +90,62 @@ public sealed class DemTileSupersamplerTests
 
         result.Should().Equal(highRes);
     }
+
+    // LowPassDownsample replaces the box average: a Gaussian-weighted, OVERLAPPING window that removes the
+    // moiré ring-grid the box left (disjoint blocks + leaky low-pass → aliased WCS ripple = "obwódki").
+
+    [Fact]
+    public void LowPassDownsample_ConstantGrid_ReturnsConstant()
+    {
+        // Flat terrain must stay flat (no distortion), edges included.
+        var highRes = new float[8 * 8];
+        Array.Fill(highRes, 100f);
+
+        float[] result = DemTileSupersampler.LowPassDownsample(highRes, baseN: 4, factor: 2, noData: -32768f);
+
+        result.Should().HaveCount(16);
+        foreach (float v in result)
+        {
+            v.Should().BeApproximately(100f, 0.001f);
+        }
+    }
+
+    [Fact]
+    public void LowPassDownsample_FactorOne_ReturnsCopyOfInput()
+    {
+        float[] highRes = { 1f, 2f, 3f, 4f };
+
+        float[] result = DemTileSupersampler.LowPassDownsample(highRes, baseN: 2, factor: 1, noData: -32768f);
+
+        result.Should().Equal(highRes);
+    }
+
+    [Fact]
+    public void LowPassDownsample_AllNoDataNeighbourhood_StaysNoData()
+    {
+        var highRes = new float[4 * 4];
+        Array.Fill(highRes, -32768f);
+
+        float[] result = DemTileSupersampler.LowPassDownsample(highRes, baseN: 2, factor: 2, noData: -32768f);
+
+        result.Should().OnlyContain(v => v == -32768f);
+    }
+
+    [Fact]
+    public void LowPassDownsample_OverlapsBlocks_SpreadingAcrossBoundaries_UnlikeBox()
+    {
+        // A single high-res spike. The box average confines it to its one block; the Gaussian window overlaps
+        // neighbouring blocks, so the spike's energy bleeds into an ADJACENT output cell — that overlap is what
+        // dissolves the block-boundary moiré. baseN=3, factor=2 → highN=6; spike at (row 3, col 3).
+        var highRes = new float[6 * 6];
+        highRes[(3 * 6) + 3] = 100f;
+
+        float[] box = DemTileSupersampler.AreaAverageDownsample(highRes, baseN: 3, factor: 2, noData: -32768f);
+        float[] low = DemTileSupersampler.LowPassDownsample(highRes, baseN: 3, factor: 2, noData: -32768f);
+
+        // Output cell (row 2, col 1): the box keeps it 0 (different block); the Gaussian leaks the spike into it.
+        int adjacent = (2 * 3) + 1;
+        box[adjacent].Should().Be(0f);
+        low[adjacent].Should().BeGreaterThan(0f);
+    }
 }
