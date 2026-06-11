@@ -178,18 +178,21 @@ public sealed class TerrainMesh3D
             anchors.Add(b);
         }
 
-        var cuts = new List<int> { 0 };
+        // Split each gap BETWEEN mandatory anchors (raster edges + cell boundaries) into EQUAL parts, each
+        // ≤ step. Equal parts avoid a tiny leftover "sliver" tile next to a boundary (a fixed step grid +
+        // remainder leaves 1–2-column slivers that render as a dashed dark line along the cell edge).
+        var cuts = new SortedSet<int>();
         var sorted = new List<int>(anchors);
         for (int i = 0; i < sorted.Count - 1; i++)
         {
-            int p = sorted[i];
-            int end = sorted[i + 1];
-            while (end - p > step)
+            int a = sorted[i];
+            int b = sorted[i + 1];
+            int span = b - a;
+            int parts = Math.Max(1, (int)Math.Ceiling((double)span / step));
+            for (int k = 0; k <= parts; k++)
             {
-                p += step;
-                cuts.Add(p);
+                cuts.Add(a + (int)Math.Round((double)span * k / parts));
             }
-            cuts.Add(end);
         }
 
         return cuts.ToArray();
