@@ -37,6 +37,7 @@
                              Atmosphere="{Binding Atmosphere}"
                              ShowOrtho="{Binding ShowOrtho}"
                              LodOrthoCoverageBounds="{Binding LodOrthoCoverageBounds}"
+                             LodDetailBounds="{Binding LodDetailBounds}"
                              ShowPeakNames="{Binding ShowPeakNames}"
                              ControlsVisible="{Binding ChromeVisible}"
                              SlopeMapEnabled="{Binding SlopeMapMode}"
@@ -473,16 +474,30 @@
                 </VerticalStackLayout>
             </Border>
 
-            <!-- Busy + status: a slim frosted pill, only while something is loading. -->
-            <Border Style="{StaticResource GlassBar}" Padding="14,8" HorizontalOptions="Center"
-                    IsVisible="{Binding IsBusy}">
-                <HorizontalStackLayout Spacing="10">
-                    <ActivityIndicator IsRunning="{Binding IsBusy}" Color="{StaticResource GlassAccent}"
-                                       WidthRequest="16" HeightRequest="16" VerticalOptions="Center" />
-                    <Label Text="{Binding StatusMessage}" Style="{StaticResource GlassCaption}" MaximumWidthRequest="280" LineBreakMode="TailTruncation" />
-                </HorizontalStackLayout>
-            </Border>
         </VerticalStackLayout>
+
+        <!-- ON-MAP busy + status pill (the ONLY one — the old settings-stack twin showed alongside it).
+             Driven by IsStatusPillVisible, not IsBusy: pops on every status change and LINGERS a few
+             seconds after the work ends, so the final success/error message is actually readable. -->
+        <Border Style="{StaticResource GlassBar}" Padding="14,8"
+                HorizontalOptions="Center" VerticalOptions="End" Margin="0,0,0,96"
+                InputTransparent="True"
+                IsVisible="{Binding IsStatusPillVisible}">
+            <HorizontalStackLayout Spacing="10">
+                <ActivityIndicator IsRunning="{Binding IsBusy}" IsVisible="{Binding IsBusy}" Color="{StaticResource GlassAccent}"
+                                   WidthRequest="16" HeightRequest="16" VerticalOptions="Center" />
+                <Label Text="{Binding StatusMessage}" Style="{StaticResource GlassCaption}" MaximumWidthRequest="300" LineBreakMode="TailTruncation" />
+            </HorizontalStackLayout>
+        </Border>
+
+        <!-- Quiet "LOD active" badge: permanent proof the 1 m detail streaming is on (the LOD scene looks
+             almost identical to the plain map, so without this there is no way to tell from the screen). -->
+        <Border Style="{StaticResource GlassBar}" Padding="10,5"
+                HorizontalOptions="Start" VerticalOptions="End" Margin="12,0,0,96"
+                InputTransparent="True"
+                IsVisible="{Binding IsLodStreaming}">
+            <Label Text="LOD 1 m" Style="{StaticResource GlassCaption}" />
+        </Border>
 
         <!-- Marker details card: styled popup shown when a POI / climbing marker is tapped. -->
         <Grid IsVisible="{Binding IsMarkerPopupVisible}"

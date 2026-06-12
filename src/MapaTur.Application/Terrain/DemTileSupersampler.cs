@@ -105,4 +105,91 @@ public static class DemTileSupersampler
 
         return result;
     }
+
+    /// <summary>
+    /// Like <see cref="AreaAverageDownsample"/> but uses a Gaussian-weighted, OVERLAPPING window instead of a
+    /// disjoint box average. The plain box leaves a moiré ring-grid: disjoint blocks can't smooth across block
+    /// boundaries, and the box is a leaky low-pass that passes high-frequency WCS reprojection ripple which then
+    /// ALIASES to a coarse grid. A Gaussian whose σ sits at the output Nyquist removes that ripple BEFORE
+    /// decimating (proper anti-alias), and the overlapping window kills the block-boundary moiré — while real
+    /// terrain at the output resolution is preserved. NoData is excluded; an all-NoData neighbourhood stays
+    /// NoData. Factor 1 returns a copy unchanged. Same output grid + caller's cache key as the box version, so
+    /// switching the downsample needs NO re-fetch.
+    /// </summary>
+    /// <param name="highRes">Row-major high-resolution samples, length (baseN·factor)².</param>
+    /// <param name="baseN">Output grid size.</param>
+    /// <param name="factor">Over-request multiple (≥1) = the decimation ratio.</param>
+    /// <param name="noData">Sentinel marking missing samples.</param>
+    public static float[] LowPassDownsample(float[] highRes, int baseN, int factor, float noData)
+    {
+        ArgumentNullException.ThrowIfNull(highRes);
+        if (baseN <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(baseN), baseN, "Must be positive.");
+        }
+
+        if (factor < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(factor), factor, "Must be at least 1.");
+        }
+
+        int highN = baseN * factor;
+        if (highRes.Length != highN * highN)
+        {
+            throw new ArgumentException(
+                $"Expected {highN * highN} samples (baseN·factor squared), got {highRes.Length}.", nameof(highRes));
+        }
+
+        if (factor == 1)
+        {
+            return (float[])highRes.Clone();
+        }
+
+        // σ a bit above the output Nyquist (factor·0.7) — strong enough to fully dissolve the residual moiré
+        // ring-grid, still narrow enough that real z13-scale relief survives (the 1 m detail carries near-field).
+        // Window ±2σ.
+        double sigma = factor * 0.9;
+        double twoSigmaSq = 2.0 * sigma * sigma;
+        int radius = (int)Math.Ceiling(2.0 * sigma);
+
+        var result = new float[baseN * baseN];
+        for (int br = 0; br < baseN; br++)
+        {
+            // Block centre in high-res coordinates (fractional for even factors).
+            double cr = (br * factor) + ((factor - 1) * 0.5);
+            int sr0 = Math.Max(0, (int)Math.Floor(cr) - radius);
+            int sr1 = Math.Min(highN - 1, (int)Math.Ceiling(cr) + radius);
+            for (int bc = 0; bc < baseN; bc++)
+            {
+                double cc = (bc * factor) + ((factor - 1) * 0.5);
+                int sc0 = Math.Max(0, (int)Math.Floor(cc) - radius);
+                int sc1 = Math.Min(highN - 1, (int)Math.Ceiling(cc) + radius);
+
+                double sum = 0;
+                double wsum = 0;
+                for (int sr = sr0; sr <= sr1; sr++)
+                {
+                    double dr = sr - cr;
+                    int rowBase = sr * highN;
+                    for (int sc = sc0; sc <= sc1; sc++)
+                    {
+                        float v = highRes[rowBase + sc];
+                        if (v == noData)
+                        {
+                            continue;
+                        }
+
+                        double dc = sc - cc;
+                        double w = Math.Exp(-((dr * dr) + (dc * dc)) / twoSigmaSq);
+                        sum += v * w;
+                        wsum += w;
+                    }
+                }
+
+                result[(br * baseN) + bc] = wsum > 0 ? (float)(sum / wsum) : noData;
+            }
+        }
+
+        return result;
+    }
 }

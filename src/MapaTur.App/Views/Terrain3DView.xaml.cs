@@ -194,6 +194,19 @@ public partial class Terrain3DView : ContentView
         set => SetValue(LodOrthoCoverageBoundsProperty, value);
     }
 
+    // Geographic extent of the CURRENT streamed 1 m detail window (null = none). The renderer keeps the
+    // legacy lake-water seating inside it (fine basins are real there) and seats/skips lakes against the
+    // coarse base elsewhere, so water planes can't poke through coarse-filled basins. Bound from the VM.
+    public static readonly BindableProperty LodDetailBoundsProperty = BindableProperty.Create(
+        nameof(LodDetailBounds), typeof(MapaTur.Domain.Geography.MapBounds?), typeof(Terrain3DView), null,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
+
+    public MapaTur.Domain.Geography.MapBounds? LodDetailBounds
+    {
+        get => (MapaTur.Domain.Geography.MapBounds?)GetValue(LodDetailBoundsProperty);
+        set => SetValue(LodDetailBoundsProperty, value);
+    }
+
     /// <summary>
     /// Whether the rock material is blended onto steep faces (premium menu "Skały"). When false the steep
     /// walls keep the raw orthophoto (which smears) — useful for an A/B of the blend.
@@ -2005,6 +2018,7 @@ public partial class Terrain3DView : ContentView
             // Ortho coverage cull: fade ortho → hypsometric beyond where the bundled ortho actually covers, so a
             // base wider than the ortho doesn't stretch clamped edge texels into "strata" bands. Null → no cull.
             glRenderer.SetOrthoCoverageGeoBounds(LodOrthoCoverageBounds, 300f);
+            glRenderer.LakeFineBounds = LodDetailBounds; // lakes inside the 1 m detail keep legacy seating
 
             // Push a changed ortho image to the GL renderer once (it uploads on the GL thread next Render).
             if (orthoPathDirty)

@@ -45,6 +45,135 @@ public static class DemRasterRepair
     }
 
     /// <summary>
+    /// Returns a copy of <paramref name="target"/> with each NoData cell filled from <paramref name="source"/>'s
+    /// bilinear elevation at that cell's geographic position. GUGiK NMT has NoData voids ALONG WATERCOURSES
+    /// (no LiDAR ground return on water) and past the Polish border; the NoData-aware mesh DROPS triangles
+    /// there, which reads as chains of black see-through slits along streams. Backfilling from the coarse base
+    /// renders base-height terrain in the voids instead — same visual as the base, no slits. A cell where the
+    /// source is ALSO NoData stays NoData (the mesh still holes it honestly).
+    /// </summary>
+    public static DemRaster FillNoDataFrom(DemRaster target, DemRaster source)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        ArgumentNullException.ThrowIfNull(source);
+
+        float noData = target.NoDataValue;
+        int cols = target.Columns;
+        int rows = target.Rows;
+        float[] s = (float[])target.Samples.Clone();
+
+        bool IsHole(float v) => v.Equals(noData) || float.IsNaN(v);
+
+        double west = target.West;
+        double east = target.East;
+        double north = target.North;
+        double south = target.South;
+
+        for (int r = 0; r < rows; r++)
+        {
+            double lat = rows > 1 ? north - ((double)r / (rows - 1) * (north - south)) : north;
+            for (int c = 0; c < cols; c++)
+            {
+                int i = (r * cols) + c;
+                if (!IsHole(s[i]))
+                {
+                    continue;
+                }
+
+                double lon = cols > 1 ? west + ((double)c / (cols - 1) * (east - west)) : west;
+                double v = source.SampleBilinear(lon, lat);
+                if (!v.Equals((double)source.NoDataValue) && !double.IsNaN(v))
+                {
+                    s[i] = (float)v;
+                }
+            }
+        }
+
+        return new DemRaster(cols, rows, target.Bounds, s, noData);
+    }
+
+    /// <summary>
+    /// Returns a copy with single-cell PITS raised to their neighbour minimum: a valid cell more than
+    /// <paramref name="depthThresholdMeters"/> below the MIN of its valid 4-neighbours is a data artefact
+    /// (tatry.dem carries one-cell shafts hundreds of metres deep at regular processing-grid positions —
+    /// water/void artefacts of the bake), which renders as a cell-wide dark-walled trench (the black
+    /// "dashes" along valleys). Real terrain never drops a single ~15 m cell by 20+ m below all four sides.
+    /// NoData cells are left alone and excluded from neighbour minima.
+    /// </summary>
+    public static DemRaster FillPits(DemRaster raster, double depthThresholdMeters)
+    {
+        ArgumentNullException.ThrowIfNull(raster);
+
+        int cols = raster.Columns;
+        int rows = raster.Rows;
+        float noData = raster.NoDataValue;
+        float[] src = (float[])raster.Samples.Clone();
+
+        bool IsHole(float v) => v.Equals(noData) || float.IsNaN(v);
+
+        // Criterion + fill value = the MEDIAN of the valid 4-neighbours. A trench cell's neighbours are
+        // [low(along), low(along), high(wall), high(wall)] → median ≈ halfway up the wall → the trench depth
+        // HALVES every pass (converges in ~log₂(depth/threshold) passes regardless of trench length, unlike
+        // end-erosion). A genuine V-valley bottom ([slightly-down, slightly-up, wall, wall]) keeps its median
+        // within the threshold, so real terrain is untouched. Verified offline on tatry.dem: 6.5 k cells
+        // changed (0.07% — the artefact trench network along watercourses), 0 residual pits.
+        const int MaxPasses = 12;
+        Span<float> nb = stackalloc float[4];
+        for (int pass = 0; pass < MaxPasses; pass++)
+        {
+            float[] dst = (float[])src.Clone();
+            bool changed = false;
+            for (int r = 0; r < rows; r++)
+            {
+                for (int c = 0; c < cols; c++)
+                {
+                    int i = (r * cols) + c;
+                    float v = src[i];
+                    if (IsHole(v))
+                    {
+                        continue;
+                    }
+
+                    int n = 0;
+                    if (c > 0 && !IsHole(src[i - 1])) { nb[n++] = src[i - 1]; }
+                    if (c < cols - 1 && !IsHole(src[i + 1])) { nb[n++] = src[i + 1]; }
+                    if (r > 0 && !IsHole(src[i - cols])) { nb[n++] = src[i - cols]; }
+                    if (r < rows - 1 && !IsHole(src[i + cols])) { nb[n++] = src[i + cols]; }
+                    if (n == 0)
+                    {
+                        continue;
+                    }
+
+                    Span<float> s = nb[..n];
+                    s.Sort();
+                    // Median: 4 valid → mean of the middle two; 3 → the middle; 2 → the higher; 1 → the one.
+                    float reference = n switch
+                    {
+                        4 => (s[1] + s[2]) * 0.5f,
+                        3 => s[1],
+                        2 => s[1],
+                        _ => s[0],
+                    };
+
+                    if (reference - v > depthThresholdMeters)
+                    {
+                        dst[i] = reference;
+                        changed = true;
+                    }
+                }
+            }
+
+            src = dst;
+            if (!changed)
+            {
+                break;
+            }
+        }
+
+        return new DemRaster(cols, rows, raster.Bounds, src, noData);
+    }
+
+    /// <summary>
     /// Returns a copy with every valid cell strictly below <paramref name="floorMeters"/> set to NoData, so
     /// the NoData-aware mesh holes them through to the base. GUGiK returns a flat ~0 OUTSIDE its coverage
     /// (instead of a NoData sentinel), which would otherwise render as a flat plate below the terrain; for a

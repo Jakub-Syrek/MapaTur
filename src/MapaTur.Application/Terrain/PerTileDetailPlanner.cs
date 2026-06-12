@@ -12,7 +12,14 @@ namespace MapaTur.Application.Terrain;
 /// <param name="Columns">Crop width in cells.</param>
 /// <param name="Rows">Crop height in cells.</param>
 /// <param name="SubsampleStep">Decimation stride to render the crop at (1 = full detail, 2/4/8 = coarser).</param>
-public sealed record PerTileLodDecision(int ColStart, int RowStart, int Columns, int Rows, int SubsampleStep);
+/// <param name="EdgeStepNorth">Subsample step of the north grid neighbour (0 = none). Lets the crack-free
+/// builder weld a finer tile's shared edge to a coarser neighbour's vertices (no T-junction); same/finer/absent → 0.</param>
+/// <param name="EdgeStepSouth">Subsample step of the south grid neighbour (0 = none); see <paramref name="EdgeStepNorth"/>.</param>
+/// <param name="EdgeStepWest">Subsample step of the west grid neighbour (0 = none); see <paramref name="EdgeStepNorth"/>.</param>
+/// <param name="EdgeStepEast">Subsample step of the east grid neighbour (0 = none); see <paramref name="EdgeStepNorth"/>.</param>
+public sealed record PerTileLodDecision(
+    int ColStart, int RowStart, int Columns, int Rows, int SubsampleStep,
+    int EdgeStepNorth = 0, int EdgeStepSouth = 0, int EdgeStepWest = 0, int EdgeStepEast = 0);
 
 /// <summary>Per-tile diagnostics (aligned 1:1 with <see cref="PerTilePlanResult.Tiles"/>) for on-device tuning.</summary>
 /// <param name="FinalStep">Subsample step actually assigned (after the vertex budget).</param>
@@ -205,13 +212,34 @@ public static class PerTileDetailPlanner
 
         IReadOnlyList<int> levels = VertexBudget.ConstrainToBudget(entries, maxVertices);
 
+        // Final steps first — needed to read each tile's grid neighbours' steps for edge welding.
+        int nCols = colBounds.Length - 1;
+        int nRows = rowBounds.Length - 1;
+        var finalSteps = new int[windows.Count];
+        for (int i = 0; i < windows.Count; i++)
+        {
+            finalSteps[i] = subsampleStepsFinestFirst[levels[i]];
+        }
+
         var decisions = new List<PerTileLodDecision>(windows.Count);
         var infos = new List<PerTileLodInfo>(windows.Count);
         for (int i = 0; i < windows.Count; i++)
         {
             (int ColStart, int RowStart, int Columns, int Rows) w = windows[i];
-            int finalStep = subsampleStepsFinestFirst[levels[i]];
-            decisions.Add(new PerTileLodDecision(w.ColStart, w.RowStart, w.Columns, w.Rows, finalStep));
+            int finalStep = finalSteps[i];
+            int gr = i / nCols;
+            int gc = i % nCols;
+
+            // Each edge carries the grid neighbour's step (0 = no neighbour) so the crack-free builder welds a
+            // finer tile's shared edge to a coarser neighbour's anchors. The partition stays exact (owned cells);
+            // BuildAdaptiveTiles reads one extra boundary cell from the full raster to meet the next tile.
+            int north = gr > 0 ? finalSteps[((gr - 1) * nCols) + gc] : 0;
+            int south = gr < nRows - 1 ? finalSteps[((gr + 1) * nCols) + gc] : 0;
+            int west = gc > 0 ? finalSteps[(gr * nCols) + (gc - 1)] : 0;
+            int east = gc < nCols - 1 ? finalSteps[(gr * nCols) + (gc + 1)] : 0;
+
+            decisions.Add(new PerTileLodDecision(
+                w.ColStart, w.RowStart, w.Columns, w.Rows, finalStep, north, south, west, east));
             infos.Add(new PerTileLodInfo(
                 finalStep, subsampleStepsFinestFirst[desiredByTile[i]], roughnessByTile[i], factorByTile[i], distanceByTile[i]));
         }
