@@ -2106,8 +2106,26 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // bundled MountainLakeData / OSM outlines). Each lake's ring is ear-clipped into a flat fan-free mesh at its
     // own water elevation and appended to one shared VBO; per-lake (offset, count, centroid, radius) ranges are
     // recorded in lakeDraws so the draw loop can shade each with its own smooth radial depth.
+    // Lake-water rebuild cache: the mesh depends only on (tiles, raster, LakeFineBounds) — with the
+    // OSM-wide table (171 tarns vs the old 12) re-ear-clipping every lake EVERY FRAME would burn CPU/GC,
+    // so the geometry is rebuilt only when the terrain it is seated against actually changes.
+    private object? lakeWaterTilesRef;
+    private object? lakeWaterRasterRef;
+    private MapaTur.Domain.Geography.MapBounds? lakeWaterFineBounds;
+
     private unsafe void BuildLakeWater(GL g, IReadOnlyList<TerrainMesh3D> tiles, MapaTur.Domain.Terrain.DemRaster? raster)
     {
+        if (ReferenceEquals(tiles, lakeWaterTilesRef)
+            && ReferenceEquals(raster, lakeWaterRasterRef)
+            && Equals(LakeFineBounds, lakeWaterFineBounds))
+        {
+            return; // same terrain inputs — the uploaded VBO and lakeDraws are still valid
+        }
+
+        lakeWaterTilesRef = tiles;
+        lakeWaterRasterRef = raster;
+        lakeWaterFineBounds = LakeFineBounds;
+
         lakeDraws.Clear();
         debugPolyVertexCount = 0;
         if (tiles.Count == 0)
