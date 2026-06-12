@@ -2279,8 +2279,15 @@ public sealed partial class MapPageViewModel : ObservableObject
     // 1 m detail window matches the source instead of a uniformly blunted subsample (whose shifted ridge
     // poked out past the window edge as a second, paler ridge line). ~2 M verts total at tatry.dem scale,
     // less than the old uniform 2160×1100 base. Rings are static per demo entry (centred on the entry focus).
+    // DESKTOP: no rings — the near radius swallows the whole range, so the base is NATIVE 15 m EVERYWHERE
+    // (~9.5 M verts, ~450 MB of VBO — desktop-class GPU territory, far over any phone budget).
+#if WINDOWS
+    private const double LodRingNearRadiusMeters = 1_000_000.0;
+    private const double LodRingMidRadiusMeters = 2_000_000.0;
+#else
     private const double LodRingNearRadiusMeters = 6000.0;
     private const double LodRingMidRadiusMeters = 14000.0;
+#endif
     private const int NearDetailZoom = 16;                                // finest detail zoom (GUGiK native 1 m)
     private static readonly int[] DetailZoomCandidates = { 16, 14, 12 };  // finest → coarsest, fed to ScreenSpaceLod
     private const double DetailMaxErrorPixels = 2.0;                      // per-tile screen-space error budget
@@ -2302,11 +2309,19 @@ public sealed partial class MapPageViewModel : ObservableObject
     private static readonly int[] PerTileSubsampleSteps = { 1, 2, 4, 8 };// finest → coarsest stride per tile
     private const float PerTileSkirtDepthMeters = 25f;                   // vertical curtain hides inter-tile (and window→base) seams
     private const int PerTileMaxTileSide = 250;                          // skirt + 16-bit index limit
+#if WINDOWS
+    private const long PerTileVertexBudget = 6_000_000;                 // desktop GPU: 4× the phone budget — 1 m holds across the whole (larger) window
+#else
     private const long PerTileVertexBudget = 1_500_000;                  // hard cap on total detail verts (FPS safety)
+#endif
     private const int PerTileRoughnessStride = 4;                        // sample every 4th cell for roughness (cost ÷16, metric scale kept)
     private const int PerTileRoughnessNeighborDistance = 8;              // measure curvature over ±8 cells (~10 m) so ridge roughness registers (±1 reads ~0)
     private const int PerTileNormalSmoothingRadius = 3;                  // normal low-pass radius (1 = sharp; >1 softens 1 m facets, heights untouched) — A/B knob
+#if WINDOWS
+    private const double PerTileWindowRadiusMeters = 3500.0;            // desktop: ~2.3× the phone window — "1 m everywhere you look", budget scaled to match
+#else
     private const double PerTileWindowRadiusMeters = 1500.0;             // detail window radius (smaller than 2000 = same budget on less area = sharper foreground)
+#endif
     private const double PerTileCameraBubbleRadiusMeters = 250.0;        // near-camera tiles forced fine regardless of look-at (no blocky foreground under a low camera)
     private const int PerTileCameraBubbleStep = 2;                       // coarsest step allowed inside the camera bubble
 

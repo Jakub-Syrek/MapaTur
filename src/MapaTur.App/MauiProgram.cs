@@ -212,6 +212,9 @@ public static class MauiProgram
         {
             var httpFactory = sp.GetRequiredService<System.Net.Http.IHttpClientFactory>();
             string cacheRoot = Path.Combine(FileSystem.AppDataDirectory, "dem-cache");
+            // The cache can be SEEDED out-of-band (phone ↔ desktop tile copies), so log where this
+            // process actually resolves it — a path mismatch here silently disables all 1 m detail.
+            Log.Information("GUGiK DEM cache root: {Root}", Path.Combine(cacheRoot, "gugik"));
             return new GugikNmtDemTileSource(
                 httpFactory.CreateClient("dem-gugik"),
                 Path.Combine(cacheRoot, "gugik"),

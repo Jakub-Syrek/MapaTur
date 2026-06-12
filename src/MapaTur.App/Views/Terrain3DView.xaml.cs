@@ -1775,6 +1775,7 @@ public partial class Terrain3DView : ContentView
     private const float KeyOrbitPixelStep = 16f;
     private const float KeyPanPixelStep = 24f;
     private const float KeyZoomFactor = 1.1f;
+    private const float KeyTiltPixelStep = 10f; // ~2.9° per repeat — view pitch (R/F, PgUp/PgDn)
 
     private void OnCanvasHandlerChanged(object? sender, EventArgs e)
     {
@@ -1977,6 +1978,17 @@ public partial class Terrain3DView : ContentView
                 break;
             case Windows.System.VirtualKey.E:
                 controller.ApplyVertical(-KeyPanPixelStep);
+                break;
+
+            // View pitch — tilt the gaze in place (same ApplyLookAround as the ⊺/ꓕ pad buttons, so the
+            // camera position stays put). R / PgUp look up, F / PgDn look down.
+            case Windows.System.VirtualKey.R:
+            case Windows.System.VirtualKey.PageUp:
+                controller.ApplyLookAround(0f, -KeyTiltPixelStep);
+                break;
+            case Windows.System.VirtualKey.F:
+            case Windows.System.VirtualKey.PageDown:
+                controller.ApplyLookAround(0f, KeyTiltPixelStep);
                 break;
 
             // Zoom in / out with +/- (both numpad and main-row variants).
