@@ -6,6 +6,9 @@
 # dotenv files
 .env
 
+# Local scratch dirs (device screenshots, tile dumps)
+.tmp-*/
+
 # User-specific files
 *.rsuser
 *.suo

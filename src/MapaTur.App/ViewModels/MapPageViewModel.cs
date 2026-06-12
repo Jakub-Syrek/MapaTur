@@ -1678,6 +1678,12 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// </summary>
     private async Task BuildSceneFromRasterAsync(DemRaster raster, string label)
     {
+        // Despike FIRST (off the UI thread): tatry.dem carries one-cell pits hundreds of metres deep along
+        // watercourses (bake artefacts) that render as dark-walled trench "dashes". The LOD demo pipeline
+        // already despikes; the auto-loaded MAIN map must too, or the same DEM shows holes here.
+        DemRaster loadedRaster = raster;
+        raster = await Task.Run(() => DemRasterRepair.FillPits(loadedRaster, depthThresholdMeters: 20.0)).ConfigureAwait(true);
+
         // CPU-Skia 3D path (mobile + non-Windows desktop) can't keep an interactive frame rate on
         // ~9 M-vertex LiDAR meshes — orbit/pinch stutter — so subsample the loaded DEM down to a
         // vertex budget the CPU rasteriser handles cleanly. Step is the smallest stride that
@@ -1921,6 +1927,9 @@ public sealed partial class MapPageViewModel : ObservableObject
 
         if (IsBusy)
         {
+            // Another scene load (e.g. the startup auto-load) is running — say so instead of silently doing
+            // nothing (a silent return made the button look DEAD: "przycisk nie działa").
+            StatusMessage = "Trwa ładowanie mapy — spróbuj za chwilę";
             return;
         }
 
@@ -1937,7 +1946,14 @@ public sealed partial class MapPageViewModel : ObservableObject
             // bumped from z12 (~12 m) because z12 SHAVED the sharp summit apexes, so distant peaks read blunter
             // than the real Tatras. The 1 m detail still sharpens whatever you look at; this keeps the SKYLINE
             // peaks faithful too. fillNoData: false so a missing tile holes to the sky, not a flat green plate.
-            DemRaster? baseRaster = await regionDemLoader.LoadRegionAsync(LodTerrainWindow.Around(center, LodBaseHalfWidthMeters), LodBaseZoom, fillNoData: false).ConfigureAwait(true);
+            // Base = the LOCAL whole-Tatra DEM (tatry.dem, ~30 m): covers ALL the Tatras offline + instantly,
+            // with no base streaming, no missing tiles, and no GUGiK z13 supersampler ring-grid (the local DEM
+            // doesn't go through GUGiK at all). The 1 m detail still streams near the look-at. Falls back to the
+            // online z13 window only when the local DEM isn't installed.
+            string? localDemPath = autoLoader.Discover().DemPath;
+            DemRaster? baseRaster = localDemPath is not null
+                ? await Task.Run(() => DemRasterReader.Read(localDemPath)).ConfigureAwait(true)
+                : await regionDemLoader.LoadRegionAsync(LodTerrainWindow.Around(center, LodBaseHalfWidthMeters), LodBaseZoom, fillNoData: false).ConfigureAwait(true);
             if (baseRaster is null)
             {
                 StatusMessage = "LOD demo: brak bazy (sieć?)";
@@ -1946,12 +1962,24 @@ public sealed partial class MapPageViewModel : ObservableObject
 
             // Real coarse base (no artificial blockiness now that the overlay is proven). The 1 m detail
             // near the camera blends into it seamlessly; the base carries the distance.
-            baseRaster = SubsampleRasterForRenderer(baseRaster);
-            // Base coverage cleanup: GUGiK flat-0 out-of-coverage → NoData, then FILL interior gaps but keep
-            // the edge-connected out-of-coverage as a hole (→ sky). No flat green plate, no white see-through
-            // windows in the base (it's the bottom layer — interior gaps must not become holes).
-            baseRaster = DemRasterRepair.HoleBelow(baseRaster, DetailCoverageFloorMeters);
-            baseRaster = DemRasterRepair.FillInteriorKeepEdgeGaps(baseRaster);
+            // Whole-Tatra base prep is heavy (subsample ~9.5 M cells, hole, flood-fill) — run it OFF the UI thread
+            // so entering the demo doesn't FREEZE. The local DEM is the whole range, far bigger than the old
+            // online window, so on the UI thread this stalled the LOD entry ("nie wchodzi demo").
+            DemRaster loadedBase = baseRaster;
+            baseRaster = await Task.Run(() =>
+            {
+                // Despike FIRST, on the FULL raster: tatry.dem carries one-cell pits hundreds of metres deep at
+                // regular processing-grid positions (water/void bake artefacts) — on the rendered base each is a
+                // cell-wide dark-walled shaft (the black "dashes" along valleys). Before the stride subsample,
+                // or the stride could sample a pit cell whose true neighbours are then ~50 m away.
+                DemRaster r = DemRasterRepair.FillPits(loadedBase, depthThresholdMeters: 20.0);
+                // Real coarse base; the 1 m detail near the camera blends in, the base carries the distance.
+                r = SubsampleRasterForRenderer(r);
+                // GUGiK flat-0 out-of-coverage → NoData, then fill interior gaps but keep edge-connected gaps as
+                // holes (→ sky). No flat green plate, no see-through windows in the bottom layer.
+                r = DemRasterRepair.HoleBelow(r, DetailCoverageFloorMeters);
+                return DemRasterRepair.FillInteriorKeepEdgeGaps(r);
+            }).ConfigureAwait(true);
             var baseCentre = new GeoPoint(
                 (baseRaster.North + baseRaster.South) / 2.0, (baseRaster.East + baseRaster.West) / 2.0);
             (double bMin, double bMax) = baseRaster.GetElevationRange();
@@ -1988,14 +2016,16 @@ public sealed partial class MapPageViewModel : ObservableObject
             var baseTiles = await Task.Run(() => TerrainMesh3D.BuildTiles(baseRaster, options, orthoCoverage: orthoCoverage)).ConfigureAwait(true);
             var combined = new List<TerrainMesh3D>(baseTiles);
 
+            // Set the LOD base BEFORE building the detail: the detail backfills its NoData voids (GUGiK has
+            // none on watercourses/the Slovak side) AND edge-matches from TerrainRaster — both need the base.
+            TerrainRaster = baseRaster;
+
             // Initial detail ring centred on the base centre, anchored to the same scene origin (finest z16).
             IReadOnlyList<TerrainMesh3D>? detailTiles = await BuildDetailTilesAsync(baseCentre, baseCentre, NearDetailZoom).ConfigureAwait(true);
             if (detailTiles is not null)
             {
                 combined.AddRange(detailTiles);
             }
-
-            TerrainRaster = baseRaster;
             // Landmarks: name + seat the known Tatra summits on the LOD base so peaks (Rysy, Mięguszowiecki,
             // Mnich, Kozi Wierch, …) are labelled in the demo too. Detect on a coarse copy (the dominance scan
             // is O(cells×window²)); the gazetteer guarantees every named summit in view shows, seated on the
@@ -2044,6 +2074,12 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// renderer so a base wider than the ortho fades to hypsometric beyond it instead of stretching edge texels.</summary>
     [ObservableProperty]
     private MapaTur.Domain.Geography.MapBounds? lodOrthoCoverageBounds;
+
+    /// <summary>Geographic bounds of the CURRENT streamed 1 m detail window (null = none). The renderer keeps
+    /// the proven legacy lake-water seating inside it (the fine basin is real there) and seats/skips lakes
+    /// against the coarse base elsewhere, so water planes can't poke through coarse-filled basins.</summary>
+    [ObservableProperty]
+    private MapaTur.Domain.Geography.MapBounds? lodDetailBounds;
     private IReadOnlyList<NamedSummit>? tatraGazetteer;                  // bundled OSM natural=peak merged with the curated fallback; loaded once
     private GeoPoint lodAnchor;
     private GeoPoint lodDetailCentre;
@@ -2068,13 +2104,14 @@ public sealed partial class MapPageViewModel : ObservableObject
     // Krok 4 (screen-space-error LOD): the detail patch follows the look-at point (raycast through the
     // screen centre, Krok 1) and its zoom adapts to the on-screen error (Krok 2/3) instead of a fixed z16.
     private const int LodBaseZoom = 13;                                   // static base zoom (~6 m; z12 shaved summit apexes → distant peaks too blunt vs real)
-    private const double LodBaseHalfWidthMeters = 6000.0;                  // wider static base = 12 km. The terrain beyond the bundled-ortho core would otherwise sample clamped/stretched edge texels (the "strata" seam stripes); fixed by rendering out-of-ortho-coverage tiles HYPSOMETRIC instead (OrthoCoverage.Covers → -1 in BuildTiles).
+    private const double LodBaseHalfWidthMeters = 6000.0;                  // FALLBACK ONLY: online z13 window radius used if the local whole-Tatra tatry.dem isn't installed. The normal LOD base is the local DEM (whole Tatras, ~30 m), so this rarely fires.
     private const int NearDetailZoom = 16;                                // finest detail zoom (GUGiK native 1 m)
     private static readonly int[] DetailZoomCandidates = { 16, 14, 12 };  // finest → coarsest, fed to ScreenSpaceLod
     private const double DetailMaxErrorPixels = 2.0;                      // per-tile screen-space error budget
     private const int BaseDetailZoomFloor = 12;                          // chosen zoom at/below base (z12) ⇒ no detail patch
     private const double DetailCoverageFloorMeters = 100.0;              // below this ⇒ GUGiK out-of-coverage flat-0 → hole (Tatra-context guard)
     private const int DetailEdgeMatchRows = 8;                           // morph band: blend the patch perimeter into the base over N rows
+    private const int PerTileEdgeMatchRows = 40;                         // per-tile window-perimeter morph band, in FULL-RES z16 cells (~2.4 m) ≈ 100 m — melts the patch edge into the ~45 m-cell whole-Tatra base (no step/"duplicated ridge" at the window boundary)
     // Look-at fallback: if the screen-centre ray hits sky (looking horizontally across a ridge), probe lower in
     // the frame so detail still streams to the terrain the camera is flying toward instead of falling back to
     // the off-screen target. Centre column, so aspect-independent.
@@ -2147,6 +2184,14 @@ public sealed partial class MapPageViewModel : ObservableObject
             return null;
         }
 
+        // Backfill the detail's NoData voids from the coarse base: GUGiK NMT has voids ALONG WATERCOURSES
+        // (no LiDAR ground return on water) and past the border — dropped triangles there read as chains of
+        // black see-through slits along streams. Base-height terrain in the voids keeps the base's visual.
+        if (TerrainRaster is { } detailBase)
+        {
+            detail = DemRasterRepair.FillNoDataFrom(detail, detailBase);
+        }
+
         // Cap the detail so each reload stays smooth while flying (a 4 km z16 patch is ~7 M verts; ~1.5 M
         // keeps it clearly finer than the base yet quick to rebuild + upload).
         detail = DemRasterDownsampler.SubsampleToMaxCells(detail, maxCells: 1_500_000);
@@ -2167,6 +2212,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         // Edge matching (Krok 4c): morph the patch's outer band into the coarse base over several rows so it
         // melts in instead of stepping down to it ("hard boundary").
         DemRaster? baseForEdges = TerrainRaster;
+        LodDetailBounds = window; // fine detail covers this area → lake water keeps its proven legacy seating here
         return await Task.Run(() =>
             TerrainMesh3D.BuildTiles(detail, detailOptions, projectionAnchor: anchor, edgeHeightSource: baseForEdges, edgeMatchRows: DetailEdgeMatchRows)).ConfigureAwait(true);
     }
@@ -2211,7 +2257,8 @@ public sealed partial class MapPageViewModel : ObservableObject
             NormalSmoothingRadius = PerTileNormalSmoothingRadius,
         };
 
-        return await Task.Run(() =>
+        DemRaster? perTileBase = TerrainRaster; // captured on the UI thread for the worker below
+        IReadOnlyList<TerrainMesh3D>? perTileResult = await Task.Run(() =>
         {
             var totalTimer = System.Diagnostics.Stopwatch.StartNew();
             DemRaster holed = DemRasterRepair.HoleBelow(loaded, DetailCoverageFloorMeters);
@@ -2219,6 +2266,14 @@ public sealed partial class MapPageViewModel : ObservableObject
             {
                 logger.LogInformation("LOD per-tile @ {Lat:F4},{Lon:F4}: no 1 m coverage — keeping base", focus.Latitude, focus.Longitude);
                 return null;
+            }
+
+            // Backfill NoData voids from the coarse base (GUGiK voids on watercourses / past the border):
+            // dropped triangles there read as chains of black see-through slits along streams. Base-height
+            // terrain in the voids keeps the base's visual; a fully-empty patch already returned null above.
+            if (perTileBase is { } baseRaster)
+            {
+                holed = DemRasterRepair.FillNoDataFrom(holed, baseRaster);
             }
 
             PerTilePlanResult planResult = PerTileDetailPlanner.PlanDetailed(
@@ -2256,6 +2311,11 @@ public sealed partial class MapPageViewModel : ObservableObject
             // Crack-free: build every tile straight from the FULL window raster at its own step on the shared
             // absolute grid (NOT independent crops + per-crop subsample, which made different-step tiles' edges
             // land at different world positions → see-through cracks). Edges weld to coarser neighbours.
+            // NOTE: deliberately NO edgeHeightSource here. Morphing the window perimeter toward the coarse base
+            // looked right on paper, but where the boundary crosses a RIDGE the base's crest is displaced, so
+            // the morph dragged the detail edge down the base's flank — an artificial NOTCH (black gap) at the
+            // boundary, worse than the un-morphed step (verified on device). The boundary mismatch is instead
+            // minimized by a finer base (vertex budget) — silhouettes then nearly coincide.
             var meshes = new List<TerrainMesh3D>(TerrainMesh3D.BuildAdaptiveTiles(
                 holed, plan, detailOptions, projectionAnchor: anchor, orthoCoverage: lodOrthoCoverage));
 
@@ -2277,6 +2337,13 @@ public sealed partial class MapPageViewModel : ObservableObject
 
             return (IReadOnlyList<TerrainMesh3D>?)meshes;
         }).ConfigureAwait(true);
+
+        if (perTileResult is not null)
+        {
+            LodDetailBounds = window; // fine detail covers this area → lake water keeps its legacy seating here
+        }
+
+        return perTileResult;
     }
 
     /// <summary>

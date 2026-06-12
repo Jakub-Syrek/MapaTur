@@ -69,6 +69,27 @@ public sealed class TerrainMesh3DAdaptiveTests
     }
 
     [Fact]
+    public void BuildAdaptiveTiles_WithEdgeHeightSource_PinsTheWindowPerimeterToTheBase()
+    {
+        // The streamed per-tile patch must MELT into the coarse base at the WINDOW edge (the initial single
+        // patch already did) — otherwise the patch boundary shows as a step/double silhouette where the coarse
+        // base ridge is displaced from the fine one ("zduplikowana grań"). Perimeter vertices take the base
+        // height; the interior keeps full detail. Internal tile seams (away from the window edge) stay detail.
+        DemRaster detail = Ramp(6); // detail heights 100..118+
+        var flat = new float[6 * 6];
+        Array.Fill(flat, 500f);
+        var baseLayer = new DemRaster(6, 6, Bounds, flat); // coarse base far above the detail
+        var plan = new List<PerTileLodDecision> { new(0, 0, 6, 6, 1) };
+
+        TerrainMesh3D mesh = TerrainMesh3D.BuildAdaptiveTiles(
+            detail, plan, new TerrainMeshOptions { VerticalExaggeration = 1f },
+            edgeHeightSource: baseLayer, edgeMatchRows: 1)[0];
+
+        mesh.Vertices[0].Z.Should().BeApproximately(500f, 0.5f, "the window-perimeter vertex is pinned to the base");
+        mesh.Vertices[(2 * 6) + 2].Z.Should().BeLessThan(150f, "an interior vertex keeps the detail height");
+    }
+
+    [Fact]
     public void BuildAdaptiveTiles_CoarserNeighbourEdge_WeldsInBetweenVerticesAway()
     {
         // A step-1 tile whose EAST neighbour is step 2 (EdgeStepEast=2) must WELD its east-edge in-between rows to

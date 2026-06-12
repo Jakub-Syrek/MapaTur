@@ -37,6 +37,7 @@
                              Atmosphere="{Binding Atmosphere}"
                              ShowOrtho="{Binding ShowOrtho}"
                              LodOrthoCoverageBounds="{Binding LodOrthoCoverageBounds}"
+                             LodDetailBounds="{Binding LodDetailBounds}"
                              ShowPeakNames="{Binding ShowPeakNames}"
                              ControlsVisible="{Binding ChromeVisible}"
                              SlopeMapEnabled="{Binding SlopeMapMode}"
@@ -483,6 +484,19 @@
                 </HorizontalStackLayout>
             </Border>
         </VerticalStackLayout>
+
+        <!-- ON-MAP busy + status pill: ALWAYS visible while anything loads (the settings-panel pill is hidden
+             when the panel is closed, so e.g. tapping "LOD demo" gave NO feedback at all — it looked dead). -->
+        <Border Style="{StaticResource GlassBar}" Padding="14,8"
+                HorizontalOptions="Center" VerticalOptions="End" Margin="0,0,0,96"
+                InputTransparent="True"
+                IsVisible="{Binding IsBusy}">
+            <HorizontalStackLayout Spacing="10">
+                <ActivityIndicator IsRunning="{Binding IsBusy}" Color="{StaticResource GlassAccent}"
+                                   WidthRequest="16" HeightRequest="16" VerticalOptions="Center" />
+                <Label Text="{Binding StatusMessage}" Style="{StaticResource GlassCaption}" MaximumWidthRequest="300" LineBreakMode="TailTruncation" />
+            </HorizontalStackLayout>
+        </Border>
 
         <!-- Marker details card: styled popup shown when a POI / climbing marker is tapped. -->
         <Grid IsVisible="{Binding IsMarkerPopupVisible}"

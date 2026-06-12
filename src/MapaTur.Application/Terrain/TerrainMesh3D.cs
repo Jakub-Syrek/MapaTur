@@ -495,13 +495,20 @@ public sealed class TerrainMesh3D
     /// <param name="projectionAnchor">Shared world-frame origin (the LOD scene anchor).</param>
     /// <param name="orthoCoverage">Optional ortho coverage for geo-referenced UV.</param>
     /// <param name="orthoTileIndexOffset">Added to each tile's ortho cell index (appended past the base cells).</param>
+    /// <param name="edgeHeightSource">Optional coarse base to morph the WINDOW-perimeter band toward (the
+    /// distance-from-edge test uses full-raster coordinates, so only blocks touching the window edge morph —
+    /// internal tile seams keep full detail). Without it the patch boundary steps against a coarse base
+    /// (displaced silhouette = a "duplicated ridge").</param>
+    /// <param name="edgeMatchRows">Width (in raster cells) of the perimeter morph band; 1 pins only the edge.</param>
     public static IReadOnlyList<TerrainMesh3D> BuildAdaptiveTiles(
         DemRaster raster,
         IReadOnlyList<PerTileLodDecision> plan,
         TerrainMeshOptions? options = null,
         GeoPoint? projectionAnchor = null,
         OrthoCoverage? orthoCoverage = null,
-        int orthoTileIndexOffset = 0)
+        int orthoTileIndexOffset = 0,
+        DemRaster? edgeHeightSource = null,
+        int edgeMatchRows = 1)
     {
         ArgumentNullException.ThrowIfNull(raster);
         ArgumentNullException.ThrowIfNull(plan);
@@ -548,7 +555,7 @@ public sealed class TerrainMesh3D
                     int rE = sc1 == colEndT ? Ratio(d.EdgeStepEast) : 1;
                     tiles.Add(BuildBlock(
                         raster, options, frame, sc0, sc1, sr0, sr1, anchor, anchorOffset,
-                        default, null, 1, orthoCoverage, orthoTileIndexOffset, rN, rS, rW, rE, step));
+                        default, edgeHeightSource, edgeMatchRows, orthoCoverage, orthoTileIndexOffset, rN, rS, rW, rE, step));
                 }
             }
         }

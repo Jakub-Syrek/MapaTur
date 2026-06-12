@@ -162,4 +162,126 @@ public sealed class DemRasterRepairTests
 
         result.Samples.Should().Equal(1f, 2f, 3f, 4f);
     }
+
+    // FillNoDataFrom: GUGiK NMT z16 has NoData voids ALONG WATERCOURSES (no LiDAR ground return on water) and
+    // on the Slovak side. The detail mesh DROPS triangles at NoData → chains of black see-through slits along
+    // streams. Backfilling each NoData cell from the coarse base raster (bilinear at the same geo position)
+    // renders base-height terrain there instead — no slits, the visual stays the base's.
+
+    private static readonly float[] Flat200Source = { 200f, 200f, 200f, 200f };
+
+    [Fact]
+    public void FillNoDataFrom_FillsNoDataCells_FromTheSourceAtTheSameGeoPosition()
+    {
+        // Target: 3×3 over the same bounds as the flat-200 source; centre cell is a void.
+        var s = new float[9];
+        Array.Fill(s, 50f);
+        s[4] = ND;
+        var target = Make(3, 3, s);
+        var source = Make(2, 2, (float[])Flat200Source.Clone());
+
+        var result = DemRasterRepair.FillNoDataFrom(target, source);
+
+        result.Samples[4].Should().BeApproximately(200f, 0.01f, "the void takes the source's elevation there");
+    }
+
+    [Fact]
+    public void FillNoDataFrom_LeavesValidCellsUntouched()
+    {
+        var s = new float[9];
+        Array.Fill(s, 50f);
+        s[4] = ND;
+        var target = Make(3, 3, s);
+        var source = Make(2, 2, (float[])Flat200Source.Clone());
+
+        var result = DemRasterRepair.FillNoDataFrom(target, source);
+
+        for (int i = 0; i < 9; i++)
+        {
+            if (i != 4)
+            {
+                result.Samples[i].Should().Be(50f, "valid detail cells keep their own (finer) elevation");
+            }
+        }
+    }
+
+    // FillPits: tatry.dem carries single-cell PITS at regular processing-grid positions (cells hundreds of
+    // metres below ALL neighbours — water/void artefacts from the bake, e.g. elev 6 m in 400 m surroundings).
+    // On the coarse base each pit renders as a cell-wide dark-walled shaft = the black "dashes" along valleys.
+    // A cell more than the threshold below the MIN of its valid 4-neighbours is an artefact → raise it to that
+    // neighbour minimum. Real terrain never drops a single 15 m cell by 20+ m below all four sides.
+
+    [Fact]
+    public void FillPits_RaisesASingleCellPit_ToTheNeighbourMinimum()
+    {
+        var s = new float[9];
+        Array.Fill(s, 500f);
+        s[4] = 6f; // 494 m deep one-cell shaft — the tatry.dem artefact
+        var raster = Make(3, 3, s);
+
+        var result = DemRasterRepair.FillPits(raster, depthThresholdMeters: 20.0);
+
+        result.Samples[4].Should().Be(500f, "an artefact pit is raised to its neighbour minimum");
+    }
+
+    [Fact]
+    public void FillPits_KeepsARealDepression_WithinTheThreshold()
+    {
+        var s = new float[9];
+        Array.Fill(s, 500f);
+        s[4] = 490f; // a 10 m hollow — genuine terrain, below the 20 m threshold
+        var raster = Make(3, 3, s);
+
+        var result = DemRasterRepair.FillPits(raster, depthThresholdMeters: 20.0);
+
+        result.Samples[4].Should().Be(490f, "a genuine hollow is left untouched");
+    }
+
+    [Fact]
+    public void FillPits_RaisesATwoCellTrench_BothCells()
+    {
+        // A 2-cell trench: each pit cell's LOWEST neighbour is the other pit cell, so a plain neighbour-min
+        // criterion misses both. The second-lowest valid neighbour (a real wall) catches them.
+        var s = new float[12];
+        Array.Fill(s, 500f);
+        s[5] = 10f; // (c1,r1)
+        s[6] = 12f; // (c2,r1) — adjacent in the same row (4×3 raster)
+        var raster = new DemRaster(4, 3, new MapBounds(new GeoPoint(49.0, 19.0), new GeoPoint(50.0, 20.0)), s, ND);
+
+        var result = DemRasterRepair.FillPits(raster, depthThresholdMeters: 20.0);
+
+        result.Samples[5].Should().Be(500f, "trench cells are raised against the second-lowest neighbour");
+        result.Samples[6].Should().Be(500f);
+    }
+
+    [Fact]
+    public void FillPits_IgnoresNoDataNeighbours_AndLeavesNoDataCellsAlone()
+    {
+        var s = new float[9];
+        Array.Fill(s, 500f);
+        s[1] = ND;  // a NoData neighbour must not poison the min
+        s[4] = 6f;  // pit with one NoData neighbour
+        s[8] = ND;  // NoData cell itself stays NoData
+        var raster = Make(3, 3, s);
+
+        var result = DemRasterRepair.FillPits(raster, depthThresholdMeters: 20.0);
+
+        result.Samples[4].Should().Be(500f, "the min uses only valid neighbours");
+        result.Samples[8].Should().Be(ND, "NoData cells are not touched");
+    }
+
+    [Fact]
+    public void FillNoDataFrom_SourceAlsoNoData_LeavesTheCellNoData()
+    {
+        var s = new float[9];
+        Array.Fill(s, 50f);
+        s[4] = ND;
+        var target = Make(3, 3, s);
+        var srcSamples = new[] { ND, ND, ND, ND };
+        var source = Make(2, 2, srcSamples);
+
+        var result = DemRasterRepair.FillNoDataFrom(target, source);
+
+        result.Samples[4].Should().Be(ND, "no fallback available — the mesh still holes it to the sky honestly");
+    }
 }

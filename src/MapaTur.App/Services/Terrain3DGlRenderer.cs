@@ -881,6 +881,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// </summary>
     public bool OrthoEnabled { get; set; } = true;
 
+    /// <summary>Geographic extent covered by the streamed 1 m detail (null = none). Lakes inside keep the
+    /// proven legacy water seating (their fine basin is real); lakes outside are seated/skipped against the
+    /// loaded coarse raster so a water plane can't poke through a coarse-filled basin as dark slivers.</summary>
+    public MapaTur.Domain.Geography.MapBounds? LakeFineBounds { get; set; }
+
     /// <summary>
     /// When <c>true</c>, the terrain is shaded by the avalanche slope-steepness palette (overriding the
     /// ortho/hypsometric base and suppressing snow). Driven by the premium menu's "Mapa nachylenia" switch.
@@ -1544,7 +1549,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // so with DepthFunc=Less the FIRST triangle at a pixel writes that depth and any OVERLAPPING coplanar
         // triangle (same Z, not less) is rejected — each water pixel blends exactly ONCE, killing the bright
         // double-blend seams that survive ear-clipping. Each lake is shaded with its own centroid + radius.
-        BuildLakeWater(gl, tiles);
+        BuildLakeWater(gl, tiles, raster);
         if (debugPolyVertexCount > 0 && lakeDraws.Count > 0)
         {
             gl.Enable(EnableCap.Blend);
@@ -2101,7 +2106,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // bundled MountainLakeData / OSM outlines). Each lake's ring is ear-clipped into a flat fan-free mesh at its
     // own water elevation and appended to one shared VBO; per-lake (offset, count, centroid, radius) ranges are
     // recorded in lakeDraws so the draw loop can shade each with its own smooth radial depth.
-    private unsafe void BuildLakeWater(GL g, IReadOnlyList<TerrainMesh3D> tiles)
+    private unsafe void BuildLakeWater(GL g, IReadOnlyList<TerrainMesh3D> tiles, MapaTur.Domain.Terrain.DemRaster? raster)
     {
         lakeDraws.Clear();
         debugPolyVertexCount = 0;
@@ -2125,7 +2130,36 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             {
                 continue;
             }
-            float waterElevM = (float)lake.ElevationMeters + 4f; // small lift so the plane sits just above the bed
+            // Seat the plane against the terrain ACTUALLY LOADED at the lake. Inside the fine-detail window
+            // (LakeFineBounds) the basin is real → proven legacy seating. Elsewhere, a coarse base may have
+            // FILLED the basin (slopes average into the subsampled cells) — a blind plane then pokes through
+            // the shifted slopes inside the outline as chains of dark slivers ("dziury") → seat from the
+            // raster sample, or skip the lake at this LOD (the streamed 1 m detail restores it up close).
+            double cLat = 0, cLon = 0;
+            for (int i = 0; i < m; i++) { cLat += ring[i].Latitude; cLon += ring[i].Longitude; }
+            var centroidGeo = new MapaTur.Domain.Geography.GeoPoint(cLat / m, cLon / m);
+            float waterElevM;
+            if (raster is null || (LakeFineBounds is { } fine && fine.Contains(centroidGeo)))
+            {
+                waterElevM = (float)lake.ElevationMeters + 4f; // legacy: just above the (accurate) bed
+            }
+            else
+            {
+                double terrain = raster.SampleBilinear(centroidGeo.Longitude, centroidGeo.Latitude);
+                if (terrain == raster.NoDataValue)
+                {
+                    terrain = double.NaN;
+                }
+
+                float? seat = MapaTur.Application.Terrain.LakeWaterSeating.Seat(lake.ElevationMeters, terrain);
+                if (seat is null)
+                {
+                    continue; // basin filled at this LOD — skip (no dark slivers through coarse slopes)
+                }
+
+                waterElevM = seat.Value;
+            }
+
             var w2 = new Vector2[m];
             var w3 = new Vector3[m];
             for (int i = 0; i < m; i++)
