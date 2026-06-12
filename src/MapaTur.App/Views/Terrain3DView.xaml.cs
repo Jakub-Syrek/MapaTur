@@ -853,6 +853,11 @@ public partial class Terrain3DView : ContentView
     // hugs the real terrain at whatever vertical exaggeration is set; a Catmull-Rom spline smooths
     // the ridge line and an ease-in/out keeps the start/stop gentle. Drives the camera directly
     // (free-fly via Target + derived orbit angles), bypassing the orbit controller + its clamps.
+    // Leg 1 (slow, slalom): the classic Orla Perć ridge. Leg 2 (the long hops read as a fast
+    // transfer): drop over Dolina Białej Wody, over Rysy, across the border to Gerlach, then along
+    // the Velická-valley rim to the Łomnica finale — the Slovak side now carries 1 m DMR 5.0 detail,
+    // so the grand finale flies over real LiDAR walls. Equal TIME per spline segment makes the short
+    // Orla Perć hops majestic and the multi-kilometre valley hops cinematic-fast, by construction.
     private static readonly (double Lat, double Lon)[] OrlaPercWaypoints =
     {
         (49.2193, 20.0179), // Zawrat (pass — flight start)
@@ -862,7 +867,15 @@ public partial class Terrain3DView : ContentView
         (49.2249, 20.0389), // Zadni Granat
         (49.2258, 20.0436), // Skrajny Granat
         (49.2270, 20.0506), // Buczynowe Turnie
-        (49.2283, 20.0586), // Krzyżne (flight end)
+        (49.2283, 20.0586), // Krzyżne (end of the Orla Perć leg)
+        (49.2120, 20.0750), // over Dolina Białej Wody (the transfer begins)
+        (49.1900, 20.0850), // Żabia Grań
+        (49.1795, 20.0881), // Rysy
+        (49.1700, 20.1100), // Vysoká / Ciężka dolina (across the border)
+        (49.1641, 20.1343), // Gerlach (2655 m)
+        (49.1750, 20.1650), // rim of Dolina Wielicka (Polski Grzebień side)
+        (49.1830, 20.1900), // Sławkowski Szczyt
+        (49.1956, 20.2117), // Łomnica (2634 m — flight end)
     };
 
     // Real-metre clearance the LOCAL camera floor keeps the eye above the terrain directly beneath it: the
@@ -875,7 +888,7 @@ public partial class Terrain3DView : ContentView
     // above this (raise / zoom-out is capped), keeping the view over the terrain rather than in space.
     private const double CameraCeilingMeters = 8_000.0;
 
-    private const double FlightDurationSeconds = 24.0; // shorter = the ridge slides by faster (more sense of flight)
+    private const double FlightDurationSeconds = 50.0; // ~3.3 s per spline segment, matching the old Orla Perć pace over the extended route
     private const float FlightSlalomAmplitude = 950f;  // world-metres of side-to-side weave (large so it reads at the stand-off distance)
     private const float FlightSlalomWeaves = 3.0f;     // number of left-right swings along the ridge
     private const float FlightCameraHeight = 2600f;    // world-Z above the ridge — far enough above the (2.6×-exaggerated) spiky crest to never dive into a face
@@ -1978,6 +1991,12 @@ public partial class Terrain3DView : ContentView
                 break;
             case Windows.System.VirtualKey.E:
                 controller.ApplyVertical(-KeyPanPixelStep);
+                break;
+
+            // F9 starts the cinematic fly-through (Orla Perć → Gerlach → Łomnica) — same entry point
+            // as the Widok panel's 🎬 button, handy for demos and for driving the app programmatically.
+            case Windows.System.VirtualKey.F9:
+                StartOrlaPercFlight();
                 break;
 
             // View pitch — tilt the gaze in place (same ApplyLookAround as the ⊺/ꓕ pad buttons, so the
