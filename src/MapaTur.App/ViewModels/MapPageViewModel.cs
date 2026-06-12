@@ -1986,7 +1986,17 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// streaming. Both layers from the offline cache where available. No-op without a region loader.
     /// </summary>
     [RelayCommand]
-    private async Task LoadLodDemoAsync()
+    private Task LoadLodDemoAsync() => BuildLodSceneAsync(reframeCamera: true);
+
+    /// <summary>
+    /// Builds THE Tatra scene: ring-LOD native base (FillPits + hole repair) + 1 m detail streaming +
+    /// landmarks + lakes. Started automatically at the end of auto-load (the LOD pipeline IS the main
+    /// experience — see <see cref="AutoStartLodPipeline"/>); the historical "LOD demo" entry point is
+    /// the same method with a camera reframe.
+    /// </summary>
+    /// <param name="reframeCamera">True = reframe onto the new scene (the old demo-button behaviour);
+    /// false = keep the current/restored camera (startup path — the per-DEM saved pose must survive).</param>
+    private async Task BuildLodSceneAsync(bool reframeCamera)
     {
         if (regionDemLoader is null)
         {
@@ -2155,7 +2165,10 @@ public sealed partial class MapPageViewModel : ObservableObject
             TerrainTiles = combined;
             OnPropertyChanged(nameof(TerrainFrame));
             Is3DMode = true;
-            TerrainReframeRequested?.Invoke(this, EventArgs.Empty);
+            if (reframeCamera)
+            {
+                TerrainReframeRequested?.Invoke(this, EventArgs.Empty);
+            }
 
             // Base is framed + static; turn on detail streaming so the 1 m ring follows the camera focus
             // (Etap 3) — the view stops reframing on detail swaps so the camera roams the base freely.
@@ -2959,6 +2972,16 @@ public sealed partial class MapPageViewModel : ObservableObject
                 Is3DMode = true;
             }
 #endif
+
+            // The LOD pipeline IS the main experience now: ring-LOD native base + FillPits + 1 m detail
+            // streaming (GUGiK on the PL side, DMR 5.0 on the SK side) + lakes. Upgrade the scene IN PLACE
+            // right after the fast legacy mesh is up, WITHOUT reframing — the per-DEM restored camera must
+            // survive a normal launch. On ANY failure the legacy scene simply stays (the pre-unification
+            // behaviour), so this is strictly additive.
+            if (AutoStartLodPipeline && discovery.DemPath is not null && TerrainTiles is not null)
+            {
+                await BuildLodSceneAsync(reframeCamera: false).ConfigureAwait(true);
+            }
         }
         catch (Exception ex)
         {
@@ -2966,6 +2989,10 @@ public sealed partial class MapPageViewModel : ObservableObject
             // Auto-load is best-effort; manual pickers remain available.
         }
     }
+
+    // Kill-switch for the unified startup: false = the legacy uniform 2× base stays the launch scene
+    // and the full LOD pipeline never auto-starts (it remains reachable only programmatically).
+    private static readonly bool AutoStartLodPipeline = true;
 
     /// <summary>
     /// Reads each basemap archive's metadata (max zoom + bounds) so the planner can rank
