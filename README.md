@@ -7,7 +7,7 @@
 [![MAUI](https://img.shields.io/badge/.NET%20MAUI-Android%20%7C%20iOS%20%7C%20Windows%20%7C%20macOS-512BD4?logo=dotnet&logoColor=white)](https://learn.microsoft.com/dotnet/maui/)
 [![3D engine](https://img.shields.io/badge/3D-OpenGL%20ES%203.0%20%C2%B7%20ANGLE%20%2F%20D3D11-CC3333)](docs/3d-terrain.md)
 [![Mapsui](https://img.shields.io/badge/maps-Mapsui%20%2B%20SkiaSharp-2E7D32)](https://mapsui.com/)
-[![Tests](https://img.shields.io/badge/tests-893%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1034%20passing-brightgreen)](#testing)
 [![Architecture](https://img.shields.io/badge/architecture-Clean-success)](#architecture)
 [![Top language](https://img.shields.io/github/languages/top/Jakub-Syrek/MapaTur)](#)
 [![Code size](https://img.shields.io/github/languages/code-size/Jakub-Syrek/MapaTur)](#)
@@ -32,10 +32,13 @@ points on the map, and the app plans an **A\*-optimal route** along marked PTTK 
 GPX for any GPS device.
 
 Its standout feature is an **interactive 3D terrain view**: a from-scratch **OpenGL ES 3.0** renderer
-(ANGLE → Direct3D 11 on Windows) draws a Copernicus ~30 m DEM with a real depth buffer, **per-pixel
-lighting** and **MSAA**, optionally draped with a **high-resolution orthophoto** (Polish + Slovak imagery
-composited across the border). Hiking trails, roads and the planned route are draped and depth-occluded by
-the ridges; named summits and mountain POIs are labelled. No telemetry, no accounts, no ads.
+(ANGLE → Direct3D 11 on Windows) draws the whole Tatra range with **airborne-LiDAR 1 m detail on BOTH
+sides of the border** — GUGiK NMT on the Polish side, ÚGKK DMR 5.0 on the Slovak side — streamed to
+wherever the camera looks over a ring-LOD base, with a real depth buffer, **per-pixel lighting** and
+**MSAA**, draped with a **high-resolution orthophoto** (GUGiK + Slovak ZBGIS national imagery composited
+along the border ridge). 171 Tatra tarns render real water (depth tint, ripples, planar reflection);
+hiking trails, roads and the planned route are draped and depth-occluded by the ridges; named summits
+(356, from OSM) and mountain POIs are labelled. No telemetry, no accounts, no ads.
 
 ## Features
 
@@ -52,11 +55,13 @@ the ridges; named summits and mountain POIs are labelled. No telemetry, no accou
 | Accessibility (semantic labels, AA contrast) | ✅ Verified | Screen-reader hints on toolbar; heading level on status |
 | **Interactive 3D terrain (GPU)** | ✅ Verified | OpenGL ES 3.0 / ANGLE renderer, 24-bit depth buffer; orbit / look-around / pan, mouse + keyboard + on-screen pads — see [`docs/3d-terrain.md`](docs/3d-terrain.md) |
 | High-resolution DEM terrain mesh | ✅ Verified | Copernicus GLO-30 (~30 m), tiled to beat the 16-bit index limit; hypsometric ramp + Lambert hillshade + vertical exaggeration |
-| **Streaming 1 m detail LOD (GUGiK NMT)** | ✅ Verified | Persistent ~30 m base + a **1 m** detail patch that follows the gaze (screen-space-error LOD); **per-tile roughness** keeps ridges/walls sharp while smooth ground coarsens, under a hard vertex budget; crack-free via skirts, planning off the UI thread |
+| **Streaming 1 m detail LOD — PL + SK LiDAR** | ✅ Verified | Persistent whole-Tatra base + a **1 m** detail patch that follows the gaze (screen-space-error LOD); **GUGiK NMT** on the Polish side, **ÚGKK DMR 5.0** baked into the same tile cache on the Slovak side; **per-tile roughness** keeps ridges/walls sharp while smooth ground coarsens, under a hard vertex budget; crack-free via skirts, planning off the UI thread |
+| **Ring-LOD whole-Tatra base** | ✅ Verified | The static base renders the local DEM at per-tile steps — native cells out to 6 km from the demo focus, ×2 to 14 km, ×4 beyond — via the crack-free welded tiler; sharper base silhouettes at no extra vertex cost |
+| **Mountain lake water (171 tarns)** | ✅ Verified | OSM-generated gazetteer (PL + SK, named + unnamed); each tarn ear-clipped at its own waterline with depth-tinted bottom, wind ripples and a planar terrain reflection; seated against the loaded terrain so coarse-LOD basins never leak |
 | Depth-occluded 3D trail & route overlays | ✅ Verified | Screen-space ribbon lines, hidden behind ridges, clipped to the DEM edge |
 | Named summit overlay | ✅ Verified | DEM peak detection + WGS84 gazetteer (incl. Orla Perć), published elevations, label de-collision |
 | Mountain POIs (huts / shelters / chalets / viewpoints) | ✅ Verified | Overpass download; colour-coded markers + labels on 2D map and 3D view (viewpoints as a lookout-tower glyph); per-kind show/hide filter |
-| Orthophoto terrain drape | ✅ Verified | Aerial imagery sampled per-pixel over the DEM — GUGiK Geoportal (PL) + ÚGKK ZBGIS (SK) composited cross-border; mipmaps + anisotropic filtering |
+| Orthophoto terrain drape | ✅ Verified | Aerial imagery sampled per-pixel over the DEM — GUGiK Ortofotomapa (PL) + ÚGKK ZBGIS Ortofotomozaika (SK) composited along the border ridge (colour-matched, feathered, clipped to the national footprints); Esri World Imagery fallback; mipmaps + anisotropic filtering |
 | Road overlay (OSM highways) | ✅ Verified | Viewport Overpass download; grey depth-tested ribbons in 3D + 2D layer, independent show/hide |
 | Hillshade base layer | ✅ Verified | Multi-layer MBTiles loader + Copernicus hillshade pipeline |
 | **Time-of-day atmosphere** | ✅ Verified | Procedural world-space sky dome, sun disc + Mie halo, aerial-perspective fog; a "Czas" slider drives a deterministic Tatra-latitude solar arc (sunrise → noon → golden hour → night), persisted |
@@ -78,7 +83,9 @@ The 3D view is a **custom real-time renderer**, not an off-the-shelf 3D engine:
 - **Texture-bridge composition** — the renderer draws into an off-screen colour-texture FBO that it owns; the texture handle is wrapped via `SKImage.FromTexture` (`GRBackendTexture` + `GRGlTextureInfo`) and composed by Skia with `DrawImage`. Sidesteps Android's FBO-0 collision and unifies the Windows / Android render path (no `#if` branch in the renderer).
 - **24-bit depth buffer** for hardware occlusion — no painter's algorithm, correct from any angle, full DEM resolution.
 - **Tiled mesh** (≤65 536-vertex tiles) built from a Copernicus GLO-30 (~30 m) DEM, with adjustable vertical exaggeration.
-- **Streaming level-of-detail (Model 1)** — over the persistent ~30 m base, a **GUGiK NMT 1 m** detail patch streams to the *look-at* point (raycast through the screen centre, not the camera). The window is split into a grid and each tile's resolution is chosen by **screen-space error × terrain roughness** (local curvature measured at ridge scale): sharp ridges/walls hold full 1 m detail from farther out while smooth valleys step down, all under a **hard vertex budget** for stable FPS, with **skirts** hiding the seams between resolutions. The whole plan + mesh build runs on a background thread so flying never stutters, and rich on-device telemetry (per-tile step histogram + timings) drives the tuning.
+- **Streaming level-of-detail (Model 1)** — over the persistent whole-Tatra base, a **1 m LiDAR** detail patch streams to the *look-at* point (raycast through the screen centre, not the camera): **GUGiK NMT** serves the Polish side, and the Slovak side is pre-baked from **ÚGKK DMR 5.0** into the same tile-cache format (so one code path serves both). The window is split into a grid and each tile's resolution is chosen by **screen-space error × terrain roughness** (local curvature measured at ridge scale): sharp ridges/walls hold full 1 m detail from farther out while smooth valleys step down, all under a **hard vertex budget** for stable FPS, with **skirts** hiding the seams between resolutions. The whole plan + mesh build runs on a background thread so flying never stutters, and rich on-device telemetry (per-tile step histogram + timings) drives the tuning.
+- **Ring-LOD base** — the static base itself renders at per-tile steps planned by focus distance (native grid out to 6 km, ×2 to 14 km, ×4 beyond; tiles forced to cut at orthophoto cell boundaries so no UV ever clamps), welded crack-free by the same chunked-LOD tiler as the detail.
+- **Lake water on every tarn** — a gazetteer of **171 Tatra lakes generated from OSM** (`natural=water` filtered by DEM-sampled elevation, both sides of the border); each outline is ear-clipped into a flat mesh at its own waterline, shaded with a depth-tinted bottom, wind ripples and a **planar reflection** of the mirrored terrain, and seated against the terrain actually loaded at that LOD so a coarse-filled basin skips cleanly instead of leaking dark slivers.
 - **Per-pixel lighting** (Lambert shading evaluated per fragment from interpolated normals) and **4× MSAA** for smooth slopes and ridgelines.
 - **Orthophoto drape** (optional): a high-resolution aerial image sampled per-pixel over the terrain, with mipmaps + anisotropic filtering; falls back to a hypsometric ramp + hillshade when no image is bundled.
 - **Trails, roads & route as depth-tested screen-space ribbons** (occluded by ridges, clipped to the DEM); **named summits and mountain POIs** with de-cluttered labels (2D overlay drawn by Skia over the GL terrain).
@@ -117,7 +124,7 @@ Dependency direction is inward only: `App → Application → Domain`, `Infrastr
 | UI framework | .NET MAUI (.NET 10) | One codebase across Android / iOS / Windows / macOS |
 | 2D map rendering | [Mapsui](https://mapsui.com/) + BruTile | Cross-platform 2D map, SkiaSharp-backed |
 | 3D terrain rendering | Custom OpenGL ES 3.0 renderer ([Silk.NET](https://github.com/dotnet/Silk.NET) bindings, ANGLE/D3D11) on `SKGLView` | GPU depth buffer + shaders; Skia stays for 2D overlays |
-| Elevation data | Copernicus DEM GLO-30 (~30 m) → custom `.dem` binary | Tiled terrain mesh, generated offline by a Python script |
+| Elevation data | Copernicus GLO-30 (~30 m) base + **GUGiK NMT 1 m** (PL) + **ÚGKK DMR 5.0 1 m** (SK) → custom `.dem` binary / float32 GeoTIFF tile cache | Whole-Tatra local DEM + LiDAR detail on both sides of the border; bake scripts in `testdata/maps/` |
 | Geometry | NetTopologySuite | Industry-standard topology operations |
 | Storage | SQLite (Microsoft.Data.Sqlite + BruTile.MbTiles) | Embedded, file-based, no server |
 | Routing | Custom A\* with pluggable cost functions | Tobler hiking function for hiker-accurate ETA |
@@ -183,14 +190,14 @@ dotnet test
 | Suite | Tests | Focus |
 |---|---|---|
 | `MapaTur.Domain.Tests` | 134 | Value objects, aggregates (Route), elevation math, DEM (+ crop), POI tags + colours |
-| `MapaTur.Application.Tests` | 651 | Overpass queries (trails/POI/roads), 3D terrain math + camera + atmosphere, screen-space LOD + per-tile roughness planner + vertex budget + normal smoothing, route planner + use cases |
-| `MapaTur.Infrastructure.Tests` | 86 | TCX/Overpass/POI/road parsers, MBTiles + DEM readers, SQLite (trails/climbing/POI), GPX |
+| `MapaTur.Application.Tests` | 784 | Overpass queries (trails/POI/roads), 3D terrain math + camera + atmosphere, screen-space LOD + per-tile roughness planner + ring-base planner + vertex budget + normal smoothing, DEM repair (pit despike / hole fill), lake seating + OSM lake-gazetteer invariants, route planner + use cases |
+| `MapaTur.Infrastructure.Tests` | 94 | TCX/Overpass/POI/road parsers, MBTiles + DEM readers, GUGiK WCS tile source + cache, SQLite (trails/climbing/POI), GPX |
 | `MapaTur.Routing.Tests` | 22 | Tobler function, distance/time cost functions, graph snapping, A\* correctness |
-| **Total** | **893** | xUnit + FluentAssertions + NSubstitute + FsCheck |
+| **Total** | **1034** | xUnit + FluentAssertions + NSubstitute + FsCheck |
 
 ## Roadmap
 
-Milestones tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md). Initial milestones (M0–M6), hillshade (M7), climbing POIs (M8), the **3D terrain GPU engine (M9)** and the **streaming 1 m detail LOD with per-tile roughness** are complete and verified live on real Tatra data (Samsung S25 Ultra). Active line of work: pre-bundled offline trail dataset, elevation-aware routing, and signed store builds.
+Milestones tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md). Initial milestones (M0–M6), hillshade (M7), climbing POIs (M8), the **3D terrain GPU engine (M9)**, the **streaming 1 m detail LOD with per-tile roughness**, the **whole-Tatra ring-LOD base**, **Slovak-side 1 m detail (DMR 5.0)**, the **GUGiK + ZBGIS cross-border ortho hybrid** and the **OSM lake gazetteer (water on all 171 tarns)** are complete and verified live on real Tatra data (Samsung S25 Ultra). Active line of work: rock material on steep slopes, elevation-aware routing, and signed store builds.
 
 ## Contributing
 
@@ -205,9 +212,12 @@ Issues and pull requests are welcome at [github.com/Jakub-Syrek/MapaTur](https:/
 
 ## Acknowledgments
 
-- [OpenStreetMap](https://www.openstreetmap.org/) contributors — trail & POI data
+- [OpenStreetMap](https://www.openstreetmap.org/) contributors (ODbL) — trail, POI, summit & lake-outline data
 - [Overpass API](https://overpass-api.de/) — OSM query endpoint
-- [Copernicus DEM GLO-30](https://spacedata.copernicus.eu/) (ESA / AWS Open Data) — elevation model for the 3D terrain
+- [Copernicus DEM GLO-30](https://spacedata.copernicus.eu/) (ESA / AWS Open Data) — base elevation model
+- [GUGiK](https://www.geoportal.gov.pl/) (Główny Urząd Geodezji i Kartografii) — NMT 1 m LiDAR elevation (WCS) and Ortofotomapa (WMS) for the Polish side
+- [ÚGKK SR / GKÚ Bratislava](https://www.geoportal.sk/) — DMR 5.0 1 m LiDAR elevation (open data) and ZBGIS Ortofotomozaika (CC-BY) for the Slovak side
+- Esri **World Imagery** (Maxar, Earthstar Geographics, GIS User Community) — orthophoto fallback outside the national footprints
 - [Mapsui](https://mapsui.com/) — 2D map rendering library
 - [SkiaSharp](https://github.com/mono/SkiaSharp) — graphics backend + GL surface host
 - [Silk.NET](https://github.com/dotnet/Silk.NET) — OpenGL ES bindings; [ANGLE](https://github.com/google/angle) — GLES→Direct3D translation

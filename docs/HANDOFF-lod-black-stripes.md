@@ -1,3 +1,8 @@
+> **SUPERSEDED (2026-06-12).** Wszystko z tego handoffu jest ROZWIAZANE i zmergowane do main
+> (75d031f + 4d98bdb + 3dbd75e): baza calych Tatr + pierscienie, FillPits, jeziora, pasek statusu,
+> hybryda ortho GUGiK+ZBGIS (''podwojna gran'' = szew ortho na grani granicznej, NIE geometria),
+> slowacki detal 1 m z DMR 5.0. Aktualna dokumentacja: docs/terrain-data-pipeline.md.
+
 # HANDOFF — LOD demo: bugi ROZWIĄZANE + rozszerzenie na całe Tatry W TOKU (2026-06-11, noc)
 
 > **START TUTAJ.** Trzy poranne bugi (paski, czarne dziury, pęknięcia kafli) są **ROZWIĄZANE i potwierdzone

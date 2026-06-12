@@ -56,9 +56,10 @@ public sealed class GugikNmtDemTileSourceTests : IDisposable
         url.Should().Contain("COVERAGE=DTM_PL-KRON86-NH_TIFF");
         url.Should().Contain("CRS=EPSG:3857");
         url.Should().Contain("FORMAT=image/tiff");
-        // Coarse z10 tile → anti-washboard over-request clamps to ×4 → a 1024 px dense grid.
-        url.Should().Contain("WIDTH=1024");
-        url.Should().Contain("HEIGHT=1024");
+        // Supersampling is OFF (MaxSupersampleFactor = 1): the anti-washboard over-request baked a moiré
+        // ring-grid into the base, so every tile fetches at the plain tile grid regardless of zoom.
+        url.Should().Contain("WIDTH=256");
+        url.Should().Contain("HEIGHT=256");
     }
 
     [Fact]
@@ -254,13 +255,14 @@ public sealed class GugikNmtDemTileSourceTests : IDisposable
     private string ExpectedCachePath()
     {
         var inv = CultureInfo.InvariantCulture;
-        // InsidePoland is a coarse z10 tile (~23 km of ground), so the anti-washboard over-request clamps
-        // to the max factor (×4 of the 256 base) → 1024 px, which the cache filename records.
+        // Supersampling is OFF (MaxSupersampleFactor = 1), so every tile fetches at the plain 256 px grid
+        // and keeps the LEGACY cache name ({y}.tif, no resolution suffix) — the name the pre-supersampling
+        // offline detail cache used, which MUST stay stable (a silent rekey orphans the offline z16 set).
         return Path.Combine(
             cacheDir,
             InsidePoland.Zoom.ToString(inv),
             InsidePoland.X.ToString(inv),
-            $"{InsidePoland.Y.ToString(inv)}_1024.tif");
+            $"{InsidePoland.Y.ToString(inv)}.tif");
     }
 
     private static HttpResponseMessage Ok(byte[] body)
