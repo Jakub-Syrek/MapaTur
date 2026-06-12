@@ -71,6 +71,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform vec3 uSkyAmbient;\n" +  // ambient sky-fill colour for shadowed slopes
         "uniform sampler2D uOrtho;\n" +
         "uniform int uUseOrtho;\n" +
+        "uniform float uOrthoGlobalFade;\n" +  // 1 = full ortho, 0 = hypsometric ("2D map" mode fade)
         "uniform vec2 uOrthoTexel;\n" + // (1/width, 1/height) of the bound ortho texture
         "uniform vec2 uOrthoMinXY;\n" +     // ortho coverage AABB (world XY about the scene anchor) — beyond it the UV clamps
         "uniform vec2 uOrthoMaxXY;\n" +
@@ -236,6 +237,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // uOrthoBlendMeters; fully outside = hypsometric. Stable world frame so it's camera-relative-correct.
         "    vec2 cd = min(vStableWorldPos.xy - uOrthoMinXY, uOrthoMaxXY - vStableWorldPos.xy);\n" +
         "    float ow = (uOrthoBlendMeters > 0.0) ? clamp(min(cd.x, cd.y) / uOrthoBlendMeters, 0.0, 1.0) : 1.0;\n" +
+        "    ow *= uOrthoGlobalFade;\n" +      // "2D map" mode: fade the whole photo to hypsometric
         "    base = mix(vColor.rgb, c, ow);\n" +
         "  } else {\n" +
         "    base = vColor.rgb;\n" +
@@ -654,6 +656,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int skyAmbientLocation = -1;
     private int orthoSamplerLocation = -1;
     private int useOrthoLocation = -1;
+    private int orthoGlobalFadeLocation = -1;
     private int orthoTexelLocation = -1;
     private int sharpenLocation = -1;
     private int debugUvLocation = -1;
@@ -881,6 +884,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// </summary>
     public bool OrthoEnabled { get; set; } = true;
 
+    /// <summary>
+    /// Global ortho ↔ hypsometric blend: 1 = full orthophoto (normal 3D view), 0 = pure hypsometric
+    /// colours. Driven per frame by the "2D map" mode so the photo fades out as the camera climbs into
+    /// the top-down map view and fades back on descent. Multiplies into the per-fragment coverage blend.
+    /// </summary>
+    public float OrthoGlobalFade { get; set; } = 1f;
+
     /// <summary>Geographic extent covered by the streamed 1 m detail (null = none). Lakes inside keep the
     /// proven legacy water seating (their fine basin is real); lakes outside are seated/skipped against the
     /// loaded coarse raster so a water plane can't poke through a coarse-filled basin as dark slivers.</summary>
@@ -984,6 +994,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             skyAmbientLocation = -1;
             orthoSamplerLocation = -1;
             useOrthoLocation = -1;
+            orthoGlobalFadeLocation = -1;
             orthoTexelLocation = -1;
             sharpenLocation = -1;
             debugUvLocation = -1;
@@ -1458,6 +1469,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     gl.Uniform2(orthoTexelLocation, ot.Width > 0 ? 1f / ot.Width : 0f, ot.Height > 0 ? 1f / ot.Height : 0f);
                     gl.Uniform1(sharpenLocation, OrthoSharpenStrength);
                     gl.Uniform1(useOrthoLocation, 1);
+                    gl.Uniform1(orthoGlobalFadeLocation, OrthoGlobalFade);
                 }
                 else
                 {
@@ -1533,6 +1545,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 gl.Uniform2(orthoTexelLocation, ot.Width > 0 ? 1f / ot.Width : 0f, ot.Height > 0 ? 1f / ot.Height : 0f);
                 gl.Uniform1(sharpenLocation, OrthoSharpenStrength);
                 gl.Uniform1(useOrthoLocation, 1);
+                gl.Uniform1(orthoGlobalFadeLocation, OrthoGlobalFade);
             }
             else
             {
@@ -2369,6 +2382,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         skyAmbientLocation = g.GetUniformLocation(program, "uSkyAmbient");
         orthoSamplerLocation = g.GetUniformLocation(program, "uOrtho");
         useOrthoLocation = g.GetUniformLocation(program, "uUseOrtho");
+        orthoGlobalFadeLocation = g.GetUniformLocation(program, "uOrthoGlobalFade");
         orthoTexelLocation = g.GetUniformLocation(program, "uOrthoTexel");
         slopeModeLocation = g.GetUniformLocation(program, "uSlopeMode");
         slopePaletteLocation = g.GetUniformLocation(program, "uSlopePalette");

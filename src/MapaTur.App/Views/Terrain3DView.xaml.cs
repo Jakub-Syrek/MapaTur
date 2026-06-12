@@ -282,6 +282,20 @@ public partial class Terrain3DView : ContentView
     private double smoothedFps;
     private int debugStatCounter;
 
+    // "2D map" mode: climbing to the altitude ceiling morphs the 3D view into a top-down hypsometric
+    // map (pitch to nadir, ortho faded out) for fast repositioning; descending restores the pitch the
+    // user had on entry — at the new location. The policy is pure (TopDownMapMode, unit-tested); this
+    // view feeds it the REAL eye altitude + frame delta and applies the resulting pitch + ortho fade.
+    private readonly MapaTur.Application.Terrain.TopDownMapMode mapMode = new();
+    private readonly System.Diagnostics.Stopwatch mapModeClock = System.Diagnostics.Stopwatch.StartNew();
+    private double mapModeLastSeconds;
+    private const float NadirPitchRadians = (MathF.PI / 2f) - 0.02f; // matches Terrain3DController.MaxPitch
+
+    // Altitude ceiling while the "2D map" mode is active: high enough that holding "raise" past the 3D
+    // ceiling keeps zooming the map out until the whole range fits, while "lower" zooms back in and
+    // finally drops through the exit altitude into the restored 3D view.
+    private const double MapModeCeilingMeters = 60_000.0;
+
     // Smoothed FPS + scene counts, refreshed a few times a second while the debug HUD is on.
     private void UpdateDebugStats(int tileCount)
     {
@@ -1199,14 +1213,17 @@ public partial class Terrain3DView : ContentView
 
         // Hard altitude ceiling: the eye may not rise above CameraCeilingMeters of REAL altitude (× Pion to
         // world-Z), so raise / zoom-out can't fly the camera off above the scene. Combined with the floor it
-        // pins the camera into a sane vertical band over the map.
-        controller.CameraCeilingZ = (float)(CameraCeilingMeters * frame.VerticalExaggeration);
+        // pins the camera into a sane vertical band over the map. In "2D map" mode the ceiling LIFTS to
+        // MapModeCeilingMeters: keeping the raise pad pressed past the 3D ceiling becomes the map's
+        // zoom-out (and lowering zooms back in, all the way down through the exit altitude into 3D).
+        double ceilingMeters = mapMode.IsActive ? MapModeCeilingMeters : CameraCeilingMeters;
+        controller.CameraCeilingZ = (float)(ceilingMeters * frame.VerticalExaggeration);
 
         // The legacy MaxTargetElevation was a FIXED 8000 *world units* — at Pion 3.4× that is only ~2353 m of
         // REAL altitude, BELOW the peaks, so "raise"/zoom-out hit it long before the ceiling and the camera
         // couldn't even climb above the mountains ("4 km is very low"). Scale the look-point cap with the
         // exaggeration too, with headroom above the ceiling, so the eye-ceiling above is the real limiter.
-        controller.MaxTargetElevation = (float)((CameraCeilingMeters + 2_000.0) * frame.VerticalExaggeration);
+        controller.MaxTargetElevation = (float)((ceilingMeters + 2_000.0) * frame.VerticalExaggeration);
 
         // ENFORCE the dynamic floor + bounds EVERY frame, not just on the gestures that opt in. ApplyOrbit
         // deliberately skips the floor (to avoid juddering the distance on small pitch changes), so a rotation
@@ -1216,6 +1233,44 @@ public partial class Terrain3DView : ContentView
         // position, keeps the eye above the map however it got there (orbit, a restored stale camera, …), so
         // the camera can never see the inside of the terrain and there is nothing in there to render.
         controller.ClampToBounds();
+
+        // "2D map" mode: feed the policy the REAL eye altitude (world-Z ÷ Pion). While the morph is in
+        // flight (Blend > 0) the mode OWNS the pitch — swinging it from the saved entry pitch to nadir on
+        // the way up, and back to the exact saved pitch on the way down, so the user re-enters 3D at the
+        // new location under the angle they were looking from. The ortho ↔ hypsometric fade follows the
+        // same eased blend in the GL renderer (OrthoGlobalFade).
+        double mapNow = mapModeClock.Elapsed.TotalSeconds;
+        double mapDt = Math.Clamp(mapNow - mapModeLastSeconds, 0.0, 0.1);
+        mapModeLastSeconds = mapNow;
+        mapMode.Update(
+            Camera.Position.Z / frame.VerticalExaggeration, mapDt, Camera.PitchRadians, Camera.AzimuthRadians);
+        // Map-mode speed boost: pan, raise/lower (the map's zoom) AND rotation run ×2 at full map view,
+        // ramping with the blend so the hand-off is seamless. PanSensitivity scales ApplyPan + ApplyVertical.
+        controller.PanSensitivity = 0.001f * (1f + mapMode.Blend);
+        controller.OrbitSensitivity = 0.005f * (1f + mapMode.Blend);
+        if (mapMode.Blend > 0f)
+        {
+            float t = mapMode.Blend;
+            float eased = t * t * (3f - (2f * t)); // smoothstep — no pitch snap at either end
+            Camera.PitchRadians = mapMode.SavedPitchRadians + ((NadirPitchRadians - mapMode.SavedPitchRadians) * eased);
+            // The azimuth stays LIVE in map mode: rotating the map (the ↻↺ pads / orbit drag) is a
+            // deliberate orientation choice, so descending keeps it — the pitch override above is what
+            // guarantees the entry GAZE TILT comes back; only the heading follows the user's map rotation.
+
+            // FOLD the rig once fully in map view: target on the ground plane, ALL altitude in Distance.
+            // Entry leaves the altitude split between Target.Z (raised by the Wys pads) and the orbit
+            // distance — pinch-in then only shrinks the distance and BOTTOMS OUT at the sky-high target
+            // ("opuszczanie nie działa"). Folded, the pads and pinch turn the SAME dial, so descending
+            // always passes the exit altitude and lands back in 3D.
+            if (mapMode.IsActive && t >= 0.999f)
+            {
+                float eyeZ = Camera.Position.Z;
+                Camera.Target = new Vector3(Camera.Target.X, Camera.Target.Y, 0f);
+                Camera.Distance = Math.Clamp(eyeZ, controller.MinDistance, controller.MaxDistance);
+            }
+
+            controller.ClampToBounds();
+        }
 
         // Project the overlays once — needed by both the GPU and Skia paths. The stateful projectors reuse
         // their world cache + screen buffers, so during a gesture this is just the per-frame screen
@@ -2011,6 +2066,9 @@ public partial class Terrain3DView : ContentView
         {
             glRenderer ??= new Services.Terrain3DGlRenderer();
             glRenderer.OrthoEnabled = ShowOrtho; // premium menu "Ortofoto" toggle (textures stay resident)
+            // "2D map" mode fade: 1 = full ortho (normal 3D), 0 = pure hypsometric (top-down map view).
+            float mapT = mapMode.Blend;
+            glRenderer.OrthoGlobalFade = 1f - (mapT * mapT * (3f - (2f * mapT)));
             glRenderer.MsaaEnabled = MsaaEnabled; // premium menu render-quality profile (AA on/off)
             glRenderer.SlopeMapEnabled = SlopeMapEnabled; // premium menu "Mapa nachylenia" (slope-steepness shading)
             glRenderer.RockStrength = RockMaterialEnabled ? 1f : 0f; // premium menu "Skały" (rock material on steep faces)
