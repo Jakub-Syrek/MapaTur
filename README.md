@@ -7,7 +7,7 @@
 [![MAUI](https://img.shields.io/badge/.NET%20MAUI-Android%20%7C%20iOS%20%7C%20Windows%20%7C%20macOS-512BD4?logo=dotnet&logoColor=white)](https://learn.microsoft.com/dotnet/maui/)
 [![3D engine](https://img.shields.io/badge/3D-OpenGL%20ES%203.0%20%C2%B7%20ANGLE%20%2F%20D3D11-CC3333)](docs/3d-terrain.md)
 [![Mapsui](https://img.shields.io/badge/maps-Mapsui%20%2B%20SkiaSharp-2E7D32)](https://mapsui.com/)
-[![Tests](https://img.shields.io/badge/tests-1034%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1092%20passing-brightgreen)](#testing)
 [![Architecture](https://img.shields.io/badge/architecture-Clean-success)](#architecture)
 [![Top language](https://img.shields.io/github/languages/top/Jakub-Syrek/MapaTur)](#)
 [![Code size](https://img.shields.io/github/languages/code-size/Jakub-Syrek/MapaTur)](#)
@@ -23,6 +23,13 @@
 </p>
 
 *The same engine streaming 1 m detail to the gaze over the Rysy / Mięguszowieckie ridge — Samsung S25 Ultra (Adreno 830, GLES 3.2). Raw OpenGL ES 3.0 draws the terrain mesh, **8 ortho cells (8192×5462 RGBA8, ~1.9 GB VRAM after mipmaps)**, and depth-tested trail ribbons into a 4× MSAA off-screen FBO; the resolve target is a **single-sampled colour-texture FBO whose GL handle is wrapped via `SKImage.FromTexture`** (`GRBackendTexture` + `GRGlTextureInfo`) and composed into SkiaSharp's canvas with `DrawImage`. That texture hand-off sidesteps Android's FBO-0 collision (where Skia's compositor would otherwise repaint its empty surface over our output) and lets the same code path drive Windows ANGLE and Android natively — no platform-specific render branch.*
+
+<p align="center">
+  <img src="docs/screenshots/3d-tatry-trails.png" alt="MapaTur 3D — PTTK hiking trails, named summits and mountain POIs draped on the live 1 m terrain over the Orla Perć ridge" width="49%" />
+  <img src="docs/screenshots/3d-tatry-relief.png" alt="MapaTur 3D — bare 1 m airborne-LiDAR relief of the central Tatras with glacial tarns" width="49%" />
+</p>
+
+*Left: marked PTTK hiking trails, named summits and mountain POIs **densified and seated on the 1 m terrain** so each line hugs the relief instead of cutting across it — toggle layers (trails, summit names, POI categories) live from the data panel. Right: the bare relief with glacial tarns. Windows desktop (ANGLE → Direct3D 11).*
 
 ## About
 
@@ -189,11 +196,11 @@ dotnet test
 
 | Suite | Tests | Focus |
 |---|---|---|
-| `MapaTur.Domain.Tests` | 134 | Value objects, aggregates (Route), elevation math, DEM (+ crop), POI tags + colours |
-| `MapaTur.Application.Tests` | 784 | Overpass queries (trails/POI/roads), 3D terrain math + camera + atmosphere, screen-space LOD + per-tile roughness planner + ring-base planner + vertex budget + normal smoothing, DEM repair (pit despike / hole fill), lake seating + OSM lake-gazetteer invariants, route planner + use cases |
-| `MapaTur.Infrastructure.Tests` | 94 | TCX/Overpass/POI/road parsers, MBTiles + DEM readers, GUGiK WCS tile source + cache, SQLite (trails/climbing/POI), GPX |
+| `MapaTur.Domain.Tests` | 139 | Value objects, aggregates (Route), elevation math, DEM (+ crop), POI tags + colours |
+| `MapaTur.Application.Tests` | 833 | Overpass queries (trails/POI/roads), 3D terrain math + camera + atmosphere, screen-space LOD + per-tile roughness planner + ring-base planner + vertex budget + normal smoothing, DEM repair (pit despike / hole fill), lake seating + OSM lake-gazetteer invariants, multi-stop route planner + use cases, **route summary + fit-to-route framing, overlay polyline densification + 1 m detail-elevation seating** |
+| `MapaTur.Infrastructure.Tests` | 98 | TCX/Overpass/POI/road parsers, MBTiles + DEM readers, GUGiK WCS tile source + cache, SQLite (trails/climbing/POI), GPX |
 | `MapaTur.Routing.Tests` | 22 | Tobler function, distance/time cost functions, graph snapping, A\* correctness |
-| **Total** | **1034** | xUnit + FluentAssertions + NSubstitute + FsCheck |
+| **Total** | **1092** | xUnit + FluentAssertions + NSubstitute + FsCheck |
 
 ## Roadmap
 
