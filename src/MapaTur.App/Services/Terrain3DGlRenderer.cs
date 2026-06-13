@@ -510,6 +510,83 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  fragColor = vec4(lit, a);\n" +
         "}\n";
 
+    // ── Cumulus puffs (Tier 2 clouds) ────────────────────────────────────────────────────────────────
+    // Scattered camera-facing billboards drawn ABOVE the terrain — puffy white cumulus in a blue sky, the
+    // look in the user's reference photos (not the inversion "sea of clouds" sheet, which stays separate).
+    // Each puff is a single quad with a fully procedural fragment (no atlas / no bake): a cauliflower density
+    // field, a lit-top → shaded-base gradient and a sun-side "silver lining" rim — the cheap volume cues.
+    // Vertical billboard (up = world Z) so the flat cumulus base + rounded top read correctly. Drifts with
+    // the wind in the vertex shader; depth-tested so foreground peaks occlude clouds behind them.
+    private const string CumulusVertexShaderSource =
+        "#version 300 es\n" +
+        "layout(location=0) in vec2 aCard;\n" +        // quad corner [-1,1]
+        "layout(location=1) in vec3 aOffset;\n" +      // puff offset from the field centre (x,y) + vertical (z)
+        "layout(location=2) in vec2 aSizeSeed;\n" +    // x=radius(m), y=seed
+        "uniform mat4 uMvp;\n" +
+        "uniform vec3 uCameraPos;\n" +
+        "uniform vec2 uFieldCenter;\n" +   // world XY the field is centred on (scene centre)
+        "uniform float uBaseAltitude;\n" + // world Z of the cumulus condensation base
+        "uniform vec2 uDrift;\n" +         // wind * time (m) — clouds slide downwind
+        "out vec2 vCard;\n" +
+        "out float vSeed;\n" +
+        "out vec3 vWorldPos;\n" +
+        "void main(){\n" +
+        "  float s = aSizeSeed.x;\n" +
+        "  vSeed = aSizeSeed.y;\n" +
+        "  vec3 center = vec3(uFieldCenter + aOffset.xy + uDrift, uBaseAltitude + aOffset.z);\n" +
+        "  vec3 toEye = uCameraPos - center;\n" +
+        "  vec3 horiz = vec3(toEye.xy, 0.0);\n" +
+        "  float hl = length(horiz);\n" +
+        "  vec3 right = hl > 1e-4 ? normalize(vec3(-horiz.y, horiz.x, 0.0)) : vec3(1.0, 0.0, 0.0);\n" +
+        "  vec3 up = vec3(0.0, 0.0, 1.0);\n" +
+        // Cumulus are broader than tall: widen the horizontal axis, and lift the quad so its centre sits
+        // above the base (so the flat bottom lands ~on the condensation level).
+        "  vec3 world = center + (right * (aCard.x * s * 1.4)) + (up * ((aCard.y * 0.85 + 0.55) * s));\n" +
+        "  vWorldPos = world;\n" +
+        "  vCard = aCard;\n" +
+        "  gl_Position = uMvp * vec4(world, 1.0);\n" +
+        "}\n";
+
+    private const string CumulusFragmentShaderSource =
+        "#version 300 es\n" +
+        "precision highp float;\n" +
+        "in vec2 vCard;\n" +
+        "in float vSeed;\n" +
+        "in vec3 vWorldPos;\n" +
+        "uniform vec3 uCameraPos;\n" +
+        "uniform vec3 uSunDir;\n" +
+        "uniform vec3 uCloudLit;\n" +    // sun-lit top colour
+        "uniform vec3 uCloudShadow;\n" + // shaded base colour
+        "uniform vec3 uFogColor;\n" +
+        "uniform float uFogDensity;\n" +
+        "uniform float uOpacity;\n" +
+        "out vec4 fragColor;\n" +
+        "float h21(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n" +
+        "float n2(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);\n" +
+        "  return mix(mix(h21(i), h21(i+vec2(1,0)), f.x), mix(h21(i+vec2(0,1)), h21(i+vec2(1,1)), f.x), f.y); }\n" +
+        "float fbm(vec2 p){ float v=0.0, a=0.55; for(int i=0;i<4;i++){ v+=a*n2(p); p=p*2.03+vec2(1.7,9.2); a*=0.5; } return v; }\n" +
+        "void main(){\n" +
+        "  vec2 c = vCard;\n" +
+        // Cauliflower edge: a seeded fBm pushes the round silhouette in and out → lumpy puffs, not a disc.
+        "  float lump = fbm(c * 2.2 + vec2(vSeed * 17.0, vSeed * 9.0));\n" +
+        "  float r = length(vec2(c.x, (c.y + 0.12) * 1.08));\n" +
+        "  float field = (1.0 - r) + ((lump - 0.5) * 0.95);\n" +
+        "  float baseFlat = smoothstep(-1.0, -0.32, c.y);\n" + // soft flat bottom (condensation level)
+        "  float density = smoothstep(0.16, 0.60, field) * baseFlat;\n" +
+        "  if (density < 0.02) { discard; }\n" +
+        // Lit top → shaded base (the puff's own vertical axis stands in for the sun-from-above term).
+        "  float topLit = smoothstep(-0.45, 0.9, c.y + (lump - 0.5) * 0.7);\n" +
+        "  vec3 col = mix(uCloudShadow, uCloudLit, topLit);\n" +
+        // Silver lining: looking toward the sun through a thin cloud edge → a bright forward-scatter rim.
+        "  vec3 viewDir = normalize(vWorldPos - uCameraPos);\n" +
+        "  float toSun = max(dot(viewDir, uSunDir), 0.0);\n" +
+        "  col += uCloudLit * (pow(toSun, 5.0) * smoothstep(0.5, 0.95, r) * 1.7);\n" +
+        // Aerial-perspective fog, matching the terrain, so distant clouds melt into the horizon haze.
+        "  float dist = length(vWorldPos - uCameraPos);\n" +
+        "  col = mix(col, uFogColor, 1.0 - exp(-dist * uFogDensity));\n" +
+        "  fragColor = vec4(col, clamp(density, 0.0, 1.0) * uOpacity);\n" +
+        "}\n";
+
     // Fragment shader for the line/ribbon program (trails/route/roads): vertex colour + the SAME aerial-
     // perspective fog the terrain uses, so distant lines fade into the horizon haze instead of staying vivid
     // bright lines over the hazed far terrain (the "szlaki w niebie" look on a wide trail download). highp so
@@ -836,6 +913,25 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int lineFogDensityLocation = -1;
     private int lineCameraPosLocation = -1;
     private int lineMaxDistLocation = -1;
+
+    // Cumulus puffs (Tier 2 clouds): one instanced billboard program + a static per-puff buffer generated once.
+    private uint cumulusProgram;
+    private int cumulusMvpLocation = -1;
+    private int cumulusCameraPosLocation = -1;
+    private int cumulusFieldCenterLocation = -1;
+    private int cumulusBaseAltitudeLocation = -1;
+    private int cumulusDriftLocation = -1;
+    private int cumulusSunDirLocation = -1;
+    private int cumulusCloudLitLocation = -1;
+    private int cumulusCloudShadowLocation = -1;
+    private int cumulusFogColorLocation = -1;
+    private int cumulusFogDensityLocation = -1;
+    private int cumulusOpacityLocation = -1;
+    private uint cumulusVao;
+    private uint cumulusQuadVbo;
+    private uint cumulusInstanceVbo;
+    private int cumulusInstanceCount;
+    private bool cumulusUnsupported; // a cumulus shader/link failure disables clouds only, never the whole engine
     private bool programReady;
 
     // Off-screen multisampled target. We render the terrain into our own MSAA colour+depth renderbuffers
@@ -1013,6 +1109,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             lastRoadRaster = null;
             lastRoadMesh = null;
             lastRoadDetail = null;
+            cumulusProgram = 0;
+            cumulusInstanceCount = 0;
+            cumulusUnsupported = false;
             programReady = false;
             mvpLocation = -1;
             modelOffsetLocation = -1;
@@ -1267,13 +1366,35 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // a gentle random wander so it never sits at exactly the same height twice.
         float sunHeight = atmosphere?.SunDirection.Z ?? 0.3f; // sin(elevation), ~-0.8..0.9
         float altNoise = (MathF.Sin((weatherT * 0.011f) + 2.0f) * 0.6f) + (MathF.Sin((weatherT * 0.023f) + 0.5f) * 0.4f); // ~[-1,1]
-        float altFraction = Math.Clamp(0.50f + (0.20f * sunHeight) + (0.10f * altNoise), 0.28f, 0.78f);
+
+        // ── Cloud REGIME: "above" (cumulus float over the peaks) ↔ "inversion" (a low sea of clouds wraps the
+        // ridges, peaks poking through). A slow, minutes-scale wander picks the lean, biased toward inversion
+        // when the sun is low — the physical dawn/dusk sea of clouds — so the time-of-day slider is a lever and
+        // the regime also drifts on its own. seaGate fades the inversion sheet in/out; cumulus do the inverse.
+        float invNoise = (MathF.Sin(weatherT * 0.020f) * 0.6f) + (MathF.Sin((weatherT * 0.034f) + 1.3f) * 0.4f); // ~[-1,1]
+        float lowSun = Math.Clamp(1f - (sunHeight * 2.2f), 0f, 1f); // 1 near/below the horizon, 0 high noon
+        float invRaw = (0.55f * (0.5f + (0.5f * invNoise))) + (0.45f * lowSun);
+        float invT = Math.Clamp((invRaw - 0.30f) / 0.40f, 0f, 1f);
+        float inversion = invT * invT * (3f - (2f * invT)); // smoothstep — lingers at both regimes
+        float seaGate = inversion;
+
+        // Inversion pulls the sheet DOWN into the valleys (peaks poke through); in the fair regime it parks
+        // high but seaCoverage gates it off anyway, leaving only cumulus.
+        float altFraction = Math.Clamp((0.62f - (0.40f * inversion)) + (0.06f * altNoise), 0.18f, 0.78f);
         float cloudAltitude = float.IsNegativeInfinity(cloudMaxZ)
             ? 0f
             : geomFrame.Center.Z + ((cloudMaxZ - geomFrame.Center.Z) * altFraction);
         float cloudHalfExtent = MathF.Max(geomFrame.HorizontalExtent * 4f, 20_000f);
         float cloudNoiseScale = 1f / MathF.Max(geomFrame.HorizontalExtent * 0.5f, 4_000f);
+        float seaCoverage = effectiveCoverage * seaGate; // the sea-of-clouds sheet only forms during inversion
         bool cloudsActive = atmosphere is not null && effectiveCoverage > 0.001f && !float.IsNegativeInfinity(cloudMaxZ);
+        // Cumulus sit over the ridges (bases ~at peak level, tops rising into the sky) — a VISIBLE level for a
+        // terrain-facing camera, NOT tied to the inversion (which would lift them off the top of the screen).
+        // The regime variety comes from their opacity (they thin as inversion deepens) + the sea-of-clouds sheet.
+        float cumulusBase = float.IsNegativeInfinity(cloudMaxZ)
+            ? 0f
+            : geomFrame.Center.Z + ((cloudMaxZ - geomFrame.Center.Z) * 0.62f) + 350f;
+        float cumulusOpacity = 0.92f * (1f - (0.55f * inversion));
         // Cloud-shadow darkening of direct sun where a cloud blocks the ray (0 = off).
         const float CloudShadowStrength = 0.55f;
 
@@ -1390,7 +1511,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform2(terrainCloudWindLocation, windVec.X, windVec.Y);
         gl.Uniform1(terrainCloudTimeLocation, weatherT);
         gl.Uniform1(terrainCloudCoverageLocation, cloudsActive ? effectiveCoverage : 0f);
-        gl.Uniform1(terrainCloudShadowLocation, cloudsActive ? CloudShadowStrength : 0f);
+        gl.Uniform1(terrainCloudShadowLocation, (cloudsActive ? CloudShadowStrength : 0f) * seaGate);
 
         // Snow cover: the snowline (world-Z) + soft band scale with the mesh Z range (so they track Pion),
         // and the slope-angle cosines hold snow on gentle ground while baring rock on steep faces. All four
@@ -1661,7 +1782,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // after the terrain so the depth test lets peaks poke through and veils the valleys. Geometry
         // + field params come from the precomputed cloud locals so the layer matches the shadows the
         // terrain pass already cast. Alpha-blended, depth-write off (must not occlude later overlays).
-        if (cloudsActive)
+        if (cloudsActive && seaCoverage > 0.001f)
         {
             // Colour: warm-tinted near sunset (toward the horizon hue), bright white when the sun is
             // high, dimmed at night. Built from the atmosphere so it matches the sky.
@@ -1679,7 +1800,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.Uniform1(cloudHalfExtentLocation, cloudHalfExtent);
             gl.Uniform1(cloudAltitudeLocation, cloudAltitude);
             gl.Uniform1(cloudTimeLocation, weatherT);
-            gl.Uniform1(cloudCoverageLocation, effectiveCoverage);
+            gl.Uniform1(cloudCoverageLocation, seaCoverage);
             gl.Uniform3(cloudColorLocation, cloudCol.X, cloudCol.Y, cloudCol.Z);
             gl.Uniform1(cloudNoiseScaleLocation, cloudNoiseScale);
             gl.Uniform2(cloudWindLocation, windVec.X, windVec.Y);
@@ -1692,6 +1813,32 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.BindVertexArray(0);
             gl.DepthMask(true);
             gl.Disable(EnableCap.Blend);
+        }
+
+        // Cumulus puffs (Tier 2): scattered camera-facing billboards above the deck — puffy white clouds in the
+        // blue sky. Drawn after the terrain (depth-tested so peaks occlude them) with the ABSOLUTE mvp (m was
+        // restored to absolute before the line pass). A shader failure disables clouds only.
+        if (cloudsActive && !cumulusUnsupported)
+        {
+            try
+            {
+                EnsureCumulusProgram(gl);
+            }
+            catch (Exception ex)
+            {
+                cumulusUnsupported = true;
+                Log.Warning(ex, "[GL3D] cumulus clouds disabled (shader/link failure)");
+            }
+
+            if (!cumulusUnsupported && cumulusOpacity > 0.02f)
+            {
+                var cumDrift = new Vector2(windVec.X * weatherT * 0.5f, windVec.Y * weatherT * 0.5f);
+                // The "Zachmurzenie" slider (effectiveCoverage) sets HOW MANY cumulus draw: 0 % = clear sky,
+                // 100 % = the full field.
+                int cumCount = (int)MathF.Round(cumulusInstanceCount * Math.Clamp(effectiveCoverage, 0f, 1f));
+                DrawCumulus(gl, m, camera, atmosphere!, new Vector2(geomFrame.Center.X, geomFrame.Center.Y),
+                    cumulusBase, cumDrift, cumulusOpacity, cumCount, fogColor, fogDensity);
+            }
         }
 
         if (useMsaa)
@@ -3449,6 +3596,137 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         Log.Information("[GL3D] forest impostor atlas baked: {Grid}×{Grid} views @ {Cell}px (mipmapped)", ForestAtlasGrid, ForestAtlasGrid, ForestAtlasCell);
     }
 
+    // Builds the static per-puff instance buffer ONCE: scattered cumulus clusters (each a handful of puffs)
+    // as (offsetX, offsetY, offsetZ, radius, seed), local to the field centre. Fixed seed → a stable cloudscape.
+    private static float[] BuildCumulusField()
+    {
+        var rng = new Random(20260613);
+        const int clusters = 26;
+        const float fieldRadius = 16000f; // m around the scene centre
+        const float deckSpread = 1400f;   // vertical spread of the cumulus deck
+        var data = new List<float>(clusters * 6 * 5);
+        for (int ci = 0; ci < clusters; ci++)
+        {
+            float cx = ((float)rng.NextDouble() * 2f - 1f) * fieldRadius;
+            float cy = ((float)rng.NextDouble() * 2f - 1f) * fieldRadius;
+            float cz = (float)rng.NextDouble() * deckSpread;
+            int puffs = 3 + rng.Next(4);                                   // 3..6 puffs per cumulus
+            float clusterScale = 380f + ((float)rng.NextDouble() * 520f);  // base puff radius (m)
+            for (int p = 0; p < puffs; p++)
+            {
+                float ox = cx + (((float)rng.NextDouble() * 2f - 1f) * clusterScale * 1.3f);
+                float oy = cy + (((float)rng.NextDouble() * 2f - 1f) * clusterScale * 1.3f);
+                float oz = cz + ((float)rng.NextDouble() * clusterScale * 0.6f); // puffs pile upward
+                float size = clusterScale * (0.6f + ((float)rng.NextDouble() * 0.7f));
+                float seed = (float)rng.NextDouble() * 10f;
+                data.Add(ox); data.Add(oy); data.Add(oz); data.Add(size); data.Add(seed);
+            }
+        }
+        return data.ToArray();
+    }
+
+    private unsafe void EnsureCumulusProgram(GL g)
+    {
+        if (cumulusProgram != 0)
+        {
+            return;
+        }
+
+        uint vs = CompileShader(g, ShaderType.VertexShader, CumulusVertexShaderSource);
+        uint fs = CompileShader(g, ShaderType.FragmentShader, CumulusFragmentShaderSource);
+        cumulusProgram = g.CreateProgram();
+        g.AttachShader(cumulusProgram, vs);
+        g.AttachShader(cumulusProgram, fs);
+        g.LinkProgram(cumulusProgram);
+        g.GetProgram(cumulusProgram, ProgramPropertyARB.LinkStatus, out int linked);
+        if (linked == 0)
+        {
+            string log = g.GetProgramInfoLog(cumulusProgram);
+            throw new InvalidOperationException("Cumulus shader link failed: " + log);
+        }
+        g.DetachShader(cumulusProgram, vs);
+        g.DetachShader(cumulusProgram, fs);
+        g.DeleteShader(vs);
+        g.DeleteShader(fs);
+        cumulusMvpLocation = g.GetUniformLocation(cumulusProgram, "uMvp");
+        cumulusCameraPosLocation = g.GetUniformLocation(cumulusProgram, "uCameraPos");
+        cumulusFieldCenterLocation = g.GetUniformLocation(cumulusProgram, "uFieldCenter");
+        cumulusBaseAltitudeLocation = g.GetUniformLocation(cumulusProgram, "uBaseAltitude");
+        cumulusDriftLocation = g.GetUniformLocation(cumulusProgram, "uDrift");
+        cumulusSunDirLocation = g.GetUniformLocation(cumulusProgram, "uSunDir");
+        cumulusCloudLitLocation = g.GetUniformLocation(cumulusProgram, "uCloudLit");
+        cumulusCloudShadowLocation = g.GetUniformLocation(cumulusProgram, "uCloudShadow");
+        cumulusFogColorLocation = g.GetUniformLocation(cumulusProgram, "uFogColor");
+        cumulusFogDensityLocation = g.GetUniformLocation(cumulusProgram, "uFogDensity");
+        cumulusOpacityLocation = g.GetUniformLocation(cumulusProgram, "uOpacity");
+
+        float[] quad = { -1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f }; // triangle strip [-1,1]²
+        cumulusVao = g.GenVertexArray();
+        g.BindVertexArray(cumulusVao);
+        cumulusQuadVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, cumulusQuadVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(quad.Length * sizeof(float)), quad, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(0); // aCard
+        g.VertexAttribPointer(0, 2, VertexAttribPointerType.Float, false, 2 * sizeof(float), (void*)0);
+
+        float[] instances = BuildCumulusField();
+        cumulusInstanceCount = instances.Length / 5;
+        cumulusInstanceVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, cumulusInstanceVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(instances.Length * sizeof(float)), instances, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(1); // aOffset (x,y,z)
+        g.VertexAttribPointer(1, 3, VertexAttribPointerType.Float, false, 5 * sizeof(float), (void*)0);
+        g.VertexAttribDivisor(1, 1);
+        g.EnableVertexAttribArray(2); // aSizeSeed
+        g.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+        g.VertexAttribDivisor(2, 1);
+        g.BindVertexArray(0);
+    }
+
+    // Draws the scattered cumulus billboards above the terrain. Alpha-blended, depth-tested (foreground peaks
+    // occlude clouds behind them), depth-write off. mvp must be the ABSOLUTE scene mvp (puffs are absolute world).
+    private void DrawCumulus(GL g, ReadOnlySpan<float> mvp, Camera3D camera, Atmosphere atmosphere,
+        Vector2 fieldCenter, float baseAltitude, Vector2 drift, float opacity, int drawCount, Vector3 fogColor, float fogDensity)
+    {
+        // drawCount lets the weather slider thin the field out: only the first N puffs are drawn (the clusters
+        // are at random positions, so the tail is a random spatial subset → fewer/more clouds, not "a wedge").
+        drawCount = Math.Clamp(drawCount, 0, cumulusInstanceCount);
+        if (cumulusProgram == 0 || drawCount == 0 || opacity <= 0.001f)
+        {
+            return;
+        }
+
+        // Lit-top / shaded-base colours from the sun, matching the sky + sea-of-clouds tinting.
+        float dayness = Math.Clamp(atmosphere.SunDirection.Z + 0.1f, 0f, 1f);
+        Vector3 white = new(1.0f, 0.99f, 0.97f);
+        Vector3 lit = Vector3.Lerp(atmosphere.SkyHorizonColor * 1.2f, white, dayness);
+        Vector3 shadow = lit * (0.45f + (0.1f * dayness));
+        shadow = new Vector3(shadow.X * 0.92f, shadow.Y * 0.97f, shadow.Z * 1.08f); // cool the underside
+
+        g.Enable(EnableCap.Blend);
+        g.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+        g.DepthMask(false);
+        g.UseProgram(cumulusProgram);
+        g.UniformMatrix4(cumulusMvpLocation, 1, false, mvp);
+        Vector3 cam = camera.Position;
+        g.Uniform3(cumulusCameraPosLocation, cam.X, cam.Y, cam.Z);
+        g.Uniform2(cumulusFieldCenterLocation, fieldCenter.X, fieldCenter.Y);
+        g.Uniform1(cumulusBaseAltitudeLocation, baseAltitude);
+        g.Uniform2(cumulusDriftLocation, drift.X, drift.Y);
+        Vector3 sun = atmosphere.SunDirection;
+        g.Uniform3(cumulusSunDirLocation, sun.X, sun.Y, sun.Z);
+        g.Uniform3(cumulusCloudLitLocation, lit.X, lit.Y, lit.Z);
+        g.Uniform3(cumulusCloudShadowLocation, shadow.X, shadow.Y, shadow.Z);
+        g.Uniform3(cumulusFogColorLocation, fogColor.X, fogColor.Y, fogColor.Z);
+        g.Uniform1(cumulusFogDensityLocation, fogDensity);
+        g.Uniform1(cumulusOpacityLocation, opacity);
+        g.BindVertexArray(cumulusVao);
+        g.DrawArraysInstanced(PrimitiveType.TriangleStrip, 0, 4, (uint)drawCount);
+        g.BindVertexArray(0);
+        g.DepthMask(true);
+        g.Disable(EnableCap.Blend);
+    }
+
     private unsafe void EnsureForestImpostorProgram(GL g)
     {
         if (forestImpostorProgram != 0)
@@ -3678,6 +3956,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.DeleteVertexArray(cloudVao);
             gl.DeleteBuffer(cloudVbo);
             gl.DeleteBuffer(cloudIbo);
+            gl.DeleteProgram(cumulusProgram);
+            gl.DeleteVertexArray(cumulusVao);
+            gl.DeleteBuffer(cumulusQuadVbo);
+            gl.DeleteBuffer(cumulusInstanceVbo);
             skyProgram = 0;
             skyVao = 0;
             skyVbo = 0;
@@ -3685,6 +3967,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             cloudVao = 0;
             cloudVbo = 0;
             cloudIbo = 0;
+            cumulusProgram = 0;
+            cumulusInstanceCount = 0;
             programReady = false;
         }
         if (forestProgram != 0)
