@@ -90,8 +90,9 @@ public sealed class Route3DWorldProjectionTests
         var mesh = BuildMesh();
         const float lift = 8f;
         var polyline = route.ToPolyline();
-        // Flat 1000 m plateau, so sampled ground elevation is exactly 1000 m.
-        var expected = mesh.GeoToWorld(polyline[0], 1000f + lift);
+        // Flat 1000 m plateau (ground = 1000 m). The lift is TRUE metres (divided by the exaggeration),
+        // so it adds a real `lift` to the world Z rather than scaling with Pion.
+        var expected = mesh.GeoToWorld(polyline[0], 1000f + (lift / mesh.VerticalExaggeration));
 
         var result = Route3DWorldProjection.ToWorld(route, BuildRaster(), mesh, lift);
 

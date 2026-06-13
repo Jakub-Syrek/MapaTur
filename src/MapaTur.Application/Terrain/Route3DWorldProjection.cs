@@ -37,11 +37,14 @@ public static class Route3DWorldProjection
 
         var polyline = route.ToPolyline();
         var world = new Vector3[polyline.Count];
+        // True-metric lift: divide by the exaggeration so GeoToWorld's Z scaling leaves the route a real
+        // routeLiftMeters above the surface (a raw lift scaled with Pion and made the line float).
+        float liftElevation = mesh.VerticalExaggeration > 0f ? routeLiftMeters / mesh.VerticalExaggeration : routeLiftMeters;
         for (int i = 0; i < polyline.Count; i++)
         {
             var geo = polyline[i];
             float groundElevation = (float)raster.SampleBilinear(geo.Longitude, geo.Latitude);
-            world[i] = mesh.GeoToWorld(geo, groundElevation + routeLiftMeters);
+            world[i] = mesh.GeoToWorld(geo, groundElevation + liftElevation);
         }
 
         return new RouteWorldLine(route, world);

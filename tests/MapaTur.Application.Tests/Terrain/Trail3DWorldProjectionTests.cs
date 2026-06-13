@@ -118,8 +118,9 @@ public sealed class Trail3DWorldProjectionTests
         var trail = BuildTrailAtCenter();
         var mesh = BuildMesh();
         const float lift = 5f;
-        // Raster is a flat 1000 m plateau, so the sampled ground elevation is exactly 1000 m.
-        var expected = mesh.GeoToWorld(trail.Geometry[1], 1000f + lift);
+        // Raster is a flat 1000 m plateau, so the sampled ground elevation is exactly 1000 m. The lift is
+        // applied as TRUE metres (divided by the exaggeration), so it adds a real `lift` to the world Z.
+        var expected = mesh.GeoToWorld(trail.Geometry[1], 1000f + (lift / mesh.VerticalExaggeration));
 
         var result = Trail3DWorldProjection.ToWorld(new[] { trail }, BuildRaster(), mesh, lift);
 

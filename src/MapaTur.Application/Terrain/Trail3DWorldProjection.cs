@@ -47,6 +47,12 @@ public static class Trail3DWorldProjection
         double demSouth = raster.South;
         double demNorth = raster.North;
 
+        // The lift is divided by the exaggeration so it stays a TRUE metric height above the surface:
+        // GeoToWorld multiplies Z by the exaggeration, so adding a raw lift to the elevation would scale
+        // it by Pion too (a 6 m lift floated ~14 m at Pion 2.3 — "szlaki latają nad terenem"). Here the
+        // pre-exaggeration lift cancels that, leaving the trail a real trailLiftMeters above the ground.
+        float liftElevation = mesh.VerticalExaggeration > 0f ? trailLiftMeters / mesh.VerticalExaggeration : trailLiftMeters;
+
         var result = new List<TrailWorldLine>(trails.Count);
         foreach (Trail trail in trails)
         {
@@ -71,7 +77,7 @@ public static class Trail3DWorldProjection
                 }
 
                 float groundElevation = (float)raster.SampleBilinear(geo.Longitude, geo.Latitude);
-                world[i] = mesh.GeoToWorld(geo, groundElevation + trailLiftMeters);
+                world[i] = mesh.GeoToWorld(geo, groundElevation + liftElevation);
             }
 
             result.Add(new TrailWorldLine(trail, world));
