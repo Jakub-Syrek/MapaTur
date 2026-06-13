@@ -213,9 +213,13 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private bool isRoutePlanningMode;
 
-    /// <summary>Raised with a geographic point the 3D camera should centre on (the route start when the
-    /// user finishes planning), so the host view can fly there.</summary>
-    public event EventHandler<GeoPoint>? RouteFocusRequested;
+    /// <summary>Raised with a camera framing the 3D view should fly to — the route start when planning is
+    /// turned off, or the whole route when the user taps "Pokaż trasę" — so the host view can frame it.</summary>
+    public event EventHandler<Application.Routing.RouteFraming>? RouteFocusRequested;
+
+    // Distance the camera sits back when flying to a single stop (planning turned off); whole-route framing
+    // sizes its own distance from the route extent (RouteCameraFraming).
+    private const double SingleStopFocusDistanceMeters = 4000.0;
 
     // Enabling planning closes the menu so the map is free to tap; the status line tells the user.
     // Turning it OFF with stops already picked centres the camera on the FIRST stop (the route start).
@@ -228,8 +232,30 @@ public sealed partial class MapPageViewModel : ObservableObject
 
         if (!value && RouteStops.Count > 0)
         {
-            RouteFocusRequested?.Invoke(this, RouteStops[0].Location);
+            RouteFocusRequested?.Invoke(
+                this, new Application.Routing.RouteFraming(RouteStops[0].Location, SingleStopFocusDistanceMeters));
         }
+    }
+
+    /// <summary>True once a route has been planned and drawn — gates the summary card + "Pokaż trasę" button.</summary>
+    [ObservableProperty]
+    private bool hasPlannedRoute;
+
+    /// <summary>One-line route summary (distance · ascent · time) shown under the stop list.</summary>
+    [ObservableProperty]
+    private string routeSummary = string.Empty;
+
+    /// <summary>Collapses the data panel and frames the 3D camera on the whole planned route ("pokaż na mapie").</summary>
+    [RelayCommand]
+    private void ShowRoute()
+    {
+        if (LastPlannedRoute is not { } route)
+        {
+            return;
+        }
+
+        ActiveSection = 0; // collapse the Dane panel so the route is unobstructed
+        RouteFocusRequested?.Invoke(this, Application.Routing.RouteCameraFraming.Fit(route.ToPolyline()));
     }
 
     /// <summary>Whether the marker details card is shown.</summary>
@@ -304,6 +330,8 @@ public sealed partial class MapPageViewModel : ObservableObject
             case "PoiViewpoints": ShowViewpoints = !ShowViewpoints; break;
             case "PoiParking": ShowParking = !ShowParking; break;
             case "PoiPasses": ShowPasses = !ShowPasses; break;
+            case "Trails": ShowTrails = !ShowTrails; break;
+            case "PeakNames": ShowPeakNames = !ShowPeakNames; break;
         }
     }
 
@@ -331,6 +359,14 @@ public sealed partial class MapPageViewModel : ObservableObject
 
     [ObservableProperty]
     private DemRaster? terrainRaster;
+
+    /// <summary>
+    /// The retained 1 m LOD detail field (raster + window). Bound to the 3D view so trail / road / route
+    /// vertices inside the detail window seat on the carved-deeper detail surface instead of floating over
+    /// it on the coarse base. Set when a detail patch is built, cleared when the area has no 1 m coverage.
+    /// </summary>
+    [ObservableProperty]
+    private DetailElevationField? detailElevation;
 
     /// <summary>
     /// Multiplier applied to elevation when building the 3D mesh. 1.0 = TRUE scale (default — the Tatras are
@@ -1725,6 +1761,8 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             LastPlannedRoute = null;
             Route3DOverlay = null;
+            HasPlannedRoute = false;
+            RouteSummary = string.Empty;
             StatusMessage = RouteStops.Count == 1
                 ? $"Start: {RouteStops[0].Name}. Dodaj kolejny przystanek."
                 : Localization.AppStrings.StatusRoutePlanningOn;
@@ -1746,6 +1784,8 @@ public sealed partial class MapPageViewModel : ObservableObject
                 StatusMessage = $"Brak szlaku między „{RouteStops[leg].Name}” a „{RouteStops[leg + 1].Name}”.";
                 LastPlannedRoute = null;
                 Route3DOverlay = null;
+                HasPlannedRoute = false;
+                RouteSummary = string.Empty;
                 routeRenderer.Clear(Map);
                 routeRenderer.RenderWaypoints(Map, stops);
                 return;
@@ -1755,12 +1795,30 @@ public sealed partial class MapPageViewModel : ObservableObject
             Route3DOverlay = result.Route;
             routeRenderer.RenderRoute(Map, result.Route);
 
+            RouteSummary = Application.Routing.RouteSummaryFormatter.Format(
+                result.Route.TotalDistanceMeters, result.Route.TotalAscentMeters, result.Route.TotalDurationSeconds);
+            HasPlannedRoute = true;
+
             double km = result.Route.TotalDistanceMeters / 1000.0;
             TimeSpan eta = TimeSpan.FromSeconds(result.Route.TotalDurationSeconds);
             StatusMessage = $"Trasa: {RouteStops.Count} pkt · {km:F1} km · +{result.Route.TotalAscentMeters:F0} m · ~{eta:hh\\:mm}";
             logger.LogInformation(
                 "Multi-stop route: {Stops} stops, {Segments} segments, {Km:F2} km",
                 RouteStops.Count, result.Route.Segments.Count, km);
+
+            // DIAGNOSTIC ("trasa nie w pobliżu punktów"): for each stop, how far the planned route actually
+            // passes from it. A large gap means that stop snapped to a far trail node — FindNearestNode has
+            // no distance cap, so an off-trail / out-of-coverage stop jumps to whatever node is nearest and
+            // the route then connects the wrong places.
+            IReadOnlyList<GeoPoint> routePolyline = result.Route.ToPolyline();
+            for (int i = 0; i < RouteStops.Count; i++)
+            {
+                Domain.Routing.RouteWaypoint s = RouteStops[i];
+                double nearestMeters = routePolyline.Min(p => p.HaversineDistanceMetersTo(s.Location));
+                logger.LogInformation(
+                    "  stop {Idx} '{Name}' ({Kind}) @ {Lat:F5},{Lon:F5} — route passes {Dist:F0} m away",
+                    i, s.Name, s.Kind, s.Location.Latitude, s.Location.Longitude, nearestMeters);
+            }
         }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
         {
@@ -2553,6 +2611,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         // melts in instead of stepping down to it ("hard boundary").
         DemRaster? baseForEdges = TerrainRaster;
         LodDetailBounds = window; // fine detail covers this area → lake water keeps its proven legacy seating here
+        DetailElevation = new DetailElevationField(detail); // seat overlays on this 1 m surface inside the window
         return await Task.Run(() =>
             TerrainMesh3D.BuildTiles(detail, detailOptions, projectionAnchor: anchor, edgeHeightSource: baseForEdges, edgeMatchRows: DetailEdgeMatchRows)).ConfigureAwait(true);
     }
@@ -2598,6 +2657,9 @@ public sealed partial class MapPageViewModel : ObservableObject
         };
 
         DemRaster? perTileBase = TerrainRaster; // captured on the UI thread for the worker below
+        // The finished detail raster (1 m + base-filled voids) is carried back out of the worker so trails /
+        // roads / route can seat on the SAME surface the tiles render. The await below is the memory barrier.
+        DemRaster? builtDetailRaster = null;
         IReadOnlyList<TerrainMesh3D>? perTileResult = await Task.Run(() =>
         {
             var totalTimer = System.Diagnostics.Stopwatch.StartNew();
@@ -2615,6 +2677,8 @@ public sealed partial class MapPageViewModel : ObservableObject
             {
                 holed = DemRasterRepair.FillNoDataFrom(holed, baseRaster);
             }
+
+            builtDetailRaster = holed; // surface the seated-surface raster for overlay elevation sampling
 
             PerTilePlanResult planResult = PerTileDetailPlanner.PlanDetailed(
                 holed, cameraPosition, anchor, exaggeration, PerTileGridN, PerTileSubsampleSteps,
@@ -2681,6 +2745,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         if (perTileResult is not null)
         {
             LodDetailBounds = window; // fine detail covers this area → lake water keeps its legacy seating here
+            DetailElevation = builtDetailRaster is not null ? new DetailElevationField(builtDetailRaster) : null;
         }
 
         return perTileResult;
@@ -2811,7 +2876,9 @@ public sealed partial class MapPageViewModel : ObservableObject
             if (detailTiles is null)
             {
                 // Off coverage (rule #12): show the base ALONE — drop the stale detail patch rather than
-                // leaving it hanging where the camera no longer is.
+                // leaving it hanging where the camera no longer is. Clear the detail field too so trails /
+                // roads / route fall back to the base everywhere instead of seating on the gone window.
+                DetailElevation = null;
                 TerrainTiles = new List<TerrainMesh3D>(lodBaseTiles);
                 OnPropertyChanged(nameof(TerrainFrame));
                 lodDetailCentre = focus;
@@ -2841,6 +2908,8 @@ public sealed partial class MapPageViewModel : ObservableObject
         RouteStops.Clear();
         LastPlannedRoute = null;
         Route3DOverlay = null;
+        HasPlannedRoute = false;
+        RouteSummary = string.Empty;
         routeRenderer.Clear(Map);
         StatusMessage = Localization.AppStrings.StatusRouteCleared;
     }

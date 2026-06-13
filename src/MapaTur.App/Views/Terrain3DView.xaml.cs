@@ -61,6 +61,21 @@ public partial class Terrain3DView : ContentView
         set => SetValue(RasterProperty, value);
     }
 
+    /// <summary>Bindable 1 m LOD detail field: when present, trail/road/route vertices inside its window
+    /// seat on the detail surface instead of the coarse base, so overlays don't float over the carved-deeper
+    /// near-field terrain. Null until the LOD pipeline has built a detail patch.</summary>
+    public static readonly BindableProperty DetailElevationProperty = BindableProperty.Create(
+        nameof(DetailElevation),
+        typeof(DetailElevationField),
+        typeof(Terrain3DView),
+        propertyChanged: OnOverlayDataChanged);
+
+    public DetailElevationField? DetailElevation
+    {
+        get => (DetailElevationField?)GetValue(DetailElevationProperty);
+        set => SetValue(DetailElevationProperty, value);
+    }
+
     /// <summary>Bindable trails overlay rendered on top of the terrain.</summary>
     public static readonly BindableProperty TrailsProperty = BindableProperty.Create(
         nameof(Trails),
@@ -282,6 +297,16 @@ public partial class Terrain3DView : ContentView
     private double smoothedFps;
     private int debugStatCounter;
 
+    // Per-frame marker-occlusion cost, surfaced in the debug HUD so the single-threaded → parallel win
+    // (and any future regression) is observable on-device. Only measured while DebugEnabled.
+    private double lastOcclusionMs;
+    private int lastOcclusionMarkers;
+
+    // Above this many on-screen markers the per-marker occlusion raycast fans out across cores; below it
+    // the thread overhead isn't worth it and we stay sequential. A clear Tatra view with POIs + peaks
+    // pushes hundreds of markers, which is where the single-threaded march dominated the frame.
+    private const int OcclusionParallelThreshold = 64;
+
     // "2D map" mode: climbing to the altitude ceiling morphs the 3D view into a top-down hypsometric
     // map (pitch to nadir, ortho faded out) for fast repositioning; descending restores the pitch the
     // user had on entry — at the new location. The policy is pure (TopDownMapMode, unit-tested); this
@@ -311,7 +336,7 @@ public partial class Terrain3DView : ContentView
         {
             debugStatCounter = 0;
             int trees = cachedForest?.Count ?? 0;
-            DebugStats = $"{smoothedFps:F0} FPS · kafle {tileCount} · drzewa {trees} · cam {Camera.Distance / 1000.0:F1} km";
+            DebugStats = $"{smoothedFps:F0} FPS · kafle {tileCount} · drzewa {trees} · cam {Camera.Distance / 1000.0:F1} km · occ {lastOcclusionMs:F1} ms/{lastOcclusionMarkers}";
         }
     }
 
@@ -1300,23 +1325,15 @@ public partial class Terrain3DView : ContentView
             controller.ClampToBounds();
         }
 
-        // Project the overlays once — needed by both the GPU and Skia paths. The stateful projectors reuse
-        // their world cache + screen buffers, so during a gesture this is just the per-frame screen
-        // transform. All project against the shared world frame (tile 0), with the same camera, so they
-        // line up whether the terrain is drawn by GL or Skia.
-        IReadOnlyList<ProjectedTrail>? projectedTrails = null;
-        if (Trails is { Count: > 0 } trailsList && Raster is not null)
-        {
-            projectedTrails = trailProjector.Project(
-                trailsList, Raster, frame, Camera, e.Info.Width, e.Info.Height);
-        }
-
-        ProjectedRoute? projectedRoute = null;
-        if (Route is not null && Raster is not null)
-        {
-            projectedRoute = routeProjector.Project(
-                Route, Raster, frame, Camera, e.Info.Width, e.Info.Height);
-        }
+        // Project the MARKER overlays (climbing / POI / peaks / GPS) up front — the GL path draws these as
+        // Skia labels composited on top of the terrain, so it needs them before presenting. Trails + the
+        // route are deliberately NOT projected here: on the GL path the GPU draws them as depth-tested
+        // ribbons, so a screen projection would be pure waste discarded every frame. They're projected
+        // lazily in the Skia fallback below, right before use. The stateful projectors reuse their world
+        // cache + screen buffers, so during a gesture this is just the per-frame screen transform, against
+        // the shared world frame (tile 0), with the same camera, so GL and Skia line up.
+        double occlusionMs = 0;
+        int occlusionMarkers = 0;
 
         IReadOnlyList<ProjectedClimbingArea>? projectedClimbing = null;
         if (ClimbingAreas is { Count: > 0 } areas && Raster is not null)
@@ -1330,7 +1347,10 @@ public partial class Terrain3DView : ContentView
         {
             projectedPois = poiProjector.Project(
                 pois, Raster, frame, Camera, e.Info.Width, e.Info.Height, PoiMarkerLiftMeters);
+            occlusionMarkers += projectedPois.Count;
+            var sw = DebugEnabled ? System.Diagnostics.Stopwatch.StartNew() : null;
             projectedPois = HideOccludedPois(projectedPois, frame);
+            if (sw is not null) { occlusionMs += sw.Elapsed.TotalMilliseconds; }
         }
 
         // Peaks carry their own DEM elevation, so projection needs no raster lookup.
@@ -1339,7 +1359,16 @@ public partial class Terrain3DView : ContentView
         {
             projectedPeaks = peakProjector.Project(
                 peaks, null, frame, Camera, e.Info.Width, e.Info.Height, PeakMarkerLiftMeters);
+            occlusionMarkers += projectedPeaks.Count;
+            var sw = DebugEnabled ? System.Diagnostics.Stopwatch.StartNew() : null;
             projectedPeaks = HideOccludedPeaks(projectedPeaks, frame);
+            if (sw is not null) { occlusionMs += sw.Elapsed.TotalMilliseconds; }
+        }
+
+        if (DebugEnabled)
+        {
+            lastOcclusionMs = occlusionMs;
+            lastOcclusionMarkers = occlusionMarkers;
         }
 
         // Single GPS fix: wrap into our reusable one-element buffer so the projector keeps its
@@ -1378,6 +1407,23 @@ public partial class Terrain3DView : ContentView
             return;
         }
 #endif
+
+        // Skia (CPU) fallback only — reached when the GL renderer is off or has failed for the session.
+        // Project the trail + route overlays NOW (the GL path above draws them on the GPU and never needs
+        // these), right before the Skia renderer consumes them.
+        IReadOnlyList<ProjectedTrail>? projectedTrails = null;
+        if (Trails is { Count: > 0 } trailsList && Raster is not null)
+        {
+            projectedTrails = trailProjector.Project(
+                trailsList, Raster, frame, Camera, e.Info.Width, e.Info.Height, detail: DetailElevation);
+        }
+
+        ProjectedRoute? projectedRoute = null;
+        if (Route is not null && Raster is not null)
+        {
+            projectedRoute = routeProjector.Project(
+                Route, Raster, frame, Camera, e.Info.Width, e.Info.Height, detail: DetailElevation);
+        }
 
         // depthMap = null disables trail / route / climbing occlusion: trails are drawn always on top
         // of the mesh (the visual the user wants) and it drops a per-frame depth-grid fill.
@@ -1557,23 +1603,47 @@ public partial class Terrain3DView : ContentView
         }
 
         System.Numerics.Vector3 cam = Camera.Position;
-        var visible = new List<ProjectedPeak>(peaks.Count);
-        foreach (ProjectedPeak p in peaks)
-        {
-            if (p.ScreenPosition is null)
-            {
-                continue;
-            }
+        int n = peaks.Count;
 
-            System.Numerics.Vector3 world = frame.GeoToWorld(p.Source.Location, (float)p.Source.ElevationMeters);
-            if (MapaTur.Application.Terrain.TerrainOcclusion.IsVisible(
-                cam, world, raster, frame.ProjectionAnchor, frame.VerticalExaggeration))
+        // Each marker's occlusion is an independent, read-only DEM raycast, so fan the march out across
+        // cores for large marker sets — this is the per-frame cost that dominated a POI-heavy Tatra view.
+        // keep[] preserves list order (declutter / draw order unchanged); small sets stay sequential to
+        // avoid thread-pool overhead.
+        var keep = new bool[n];
+        if (n >= OcclusionParallelThreshold)
+        {
+            System.Threading.Tasks.Parallel.For(0, n, i => keep[i] = IsPeakVisible(peaks[i], cam, raster, frame));
+        }
+        else
+        {
+            for (int i = 0; i < n; i++)
             {
-                visible.Add(p);
+                keep[i] = IsPeakVisible(peaks[i], cam, raster, frame);
+            }
+        }
+
+        var visible = new List<ProjectedPeak>(n);
+        for (int i = 0; i < n; i++)
+        {
+            if (keep[i])
+            {
+                visible.Add(peaks[i]);
             }
         }
 
         return visible;
+    }
+
+    private static bool IsPeakVisible(ProjectedPeak p, System.Numerics.Vector3 cam, DemRaster raster, TerrainMesh3D frame)
+    {
+        if (p.ScreenPosition is null)
+        {
+            return false; // off-screen — it won't draw, so skip its raycast
+        }
+
+        System.Numerics.Vector3 world = frame.GeoToWorld(p.Source.Location, (float)p.Source.ElevationMeters);
+        return MapaTur.Application.Terrain.TerrainOcclusion.IsVisible(
+            cam, world, raster, frame.ProjectionAnchor, frame.VerticalExaggeration);
     }
 
     // As HideOccludedPeaks, for POIs — a hut / parking / viewpoint behind a ridge hides its marker too.
@@ -1585,30 +1655,52 @@ public partial class Terrain3DView : ContentView
         }
 
         System.Numerics.Vector3 cam = Camera.Position;
-        var visible = new List<ProjectedPoi>(pois.Count);
-        foreach (ProjectedPoi p in pois)
+        float poiLift = PoiMarkerLiftMeters;
+        int n = pois.Count;
+
+        // As HideOccludedPeaks: independent read-only raycasts, fanned out across cores for large sets,
+        // list order preserved.
+        var keep = new bool[n];
+        if (n >= OcclusionParallelThreshold)
         {
-            if (p.ScreenPosition is null)
+            System.Threading.Tasks.Parallel.For(0, n, i => keep[i] = IsPoiVisible(pois[i], cam, raster, frame, poiLift));
+        }
+        else
+        {
+            for (int i = 0; i < n; i++)
             {
-                continue;
+                keep[i] = IsPoiVisible(pois[i], cam, raster, frame, poiLift);
             }
+        }
 
-            double ground = raster.SampleBilinear(p.Source.Position.Longitude, p.Source.Position.Latitude);
-            if (ground <= raster.NoDataValue)
+        var visible = new List<ProjectedPoi>(n);
+        for (int i = 0; i < n; i++)
+        {
+            if (keep[i])
             {
-                visible.Add(p); // no terrain sample — don't hide it
-                continue;
-            }
-
-            System.Numerics.Vector3 world = frame.GeoToWorld(p.Source.Position, (float)ground + PoiMarkerLiftMeters);
-            if (MapaTur.Application.Terrain.TerrainOcclusion.IsVisible(
-                cam, world, raster, frame.ProjectionAnchor, frame.VerticalExaggeration))
-            {
-                visible.Add(p);
+                visible.Add(pois[i]);
             }
         }
 
         return visible;
+    }
+
+    private static bool IsPoiVisible(ProjectedPoi p, System.Numerics.Vector3 cam, DemRaster raster, TerrainMesh3D frame, float poiLift)
+    {
+        if (p.ScreenPosition is null)
+        {
+            return false; // off-screen — won't draw
+        }
+
+        double ground = raster.SampleBilinear(p.Source.Position.Longitude, p.Source.Position.Latitude);
+        if (ground <= raster.NoDataValue)
+        {
+            return true; // no terrain sample — don't hide it
+        }
+
+        System.Numerics.Vector3 world = frame.GeoToWorld(p.Source.Position, (float)ground + poiLift);
+        return MapaTur.Application.Terrain.TerrainOcclusion.IsVisible(
+            cam, world, raster, frame.ProjectionAnchor, frame.VerticalExaggeration);
     }
 
     // Refuges that "light up" at night: everything with a roof a hiker could be inside. Viewpoints
@@ -2235,7 +2327,7 @@ public partial class Terrain3DView : ContentView
             // FBO couldn't be allocated this frame; fall back to Skia. The optional Atmosphere drives the
             // sky pass and the terrain fragment shader's aerial-perspective blend; passing null skips both.
             IReadOnlyList<TreeInstance>? forest = EnsureForest(tiles);
-            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere, forest);
+            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere, forest, DetailElevation);
             if (terrainTextureId == 0)
             {
                 return false;

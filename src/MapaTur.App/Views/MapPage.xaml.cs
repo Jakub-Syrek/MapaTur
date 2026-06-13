@@ -240,10 +240,11 @@ public partial class MapPage : ContentPage
         await viewModel.HandleMapTapAsync(point);
     }
 
-    // Finishing route planning flies the 3D camera to the route's first stop.
-    private void OnRouteFocusRequested(object? sender, GeoPoint point)
+    // Flies the 3D camera to a route framing: the first stop when planning is turned off, or the whole
+    // route (centre + fit distance) when the user taps "Pokaż trasę".
+    private void OnRouteFocusRequested(object? sender, MapaTur.Application.Routing.RouteFraming framing)
     {
-        Dispatcher.Dispatch(() => TerrainView.FocusOnGeo(point));
+        Dispatcher.Dispatch(() => TerrainView.FocusOnGeo(framing.Center, (float)framing.DistanceMeters));
     }
 
     // Premium-menu microinteraction: the frosted section panel slides down + fades in as it opens, and the

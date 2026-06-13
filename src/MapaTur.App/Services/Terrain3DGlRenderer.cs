@@ -510,13 +510,29 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  fragColor = vec4(lit, a);\n" +
         "}\n";
 
-    // Flat fragment shader for the line/ribbon program (trails/route): no lighting, just the vertex colour.
+    // Fragment shader for the line/ribbon program (trails/route/roads): vertex colour + the SAME aerial-
+    // perspective fog the terrain uses, so distant lines fade into the horizon haze instead of staying vivid
+    // bright lines over the hazed far terrain (the "szlaki w niebie" look on a wide trail download). highp so
+    // the world-space distance stays precise at tens-of-km ranges.
     private const string FragmentShaderSource =
         "#version 300 es\n" +
-        "precision mediump float;\n" +
+        "precision highp float;\n" +
         "in vec4 vColor;\n" +
+        "in vec3 vWorldPos;\n" +
+        "uniform vec3 uCameraPos;\n" +
+        "uniform vec3 uFogColor;\n" +
+        "uniform float uFogDensity;\n" +
+        "uniform float uMaxDist;\n" + // hard cull radius (m) so the far trail network isn't drawn at the horizon
         "out vec4 fragColor;\n" +
-        "void main(){ fragColor = vec4(vColor.rgb, 1.0); }\n";
+        "void main(){\n" +
+        "  float dist = length(vWorldPos - uCameraPos);\n" +
+        // Cull trails past uMaxDist outright (the distant web that floats + parallaxes at the horizon), and
+        // fade the last stretch toward the horizon haze so the cull edge isn't a hard line.
+        "  if (dist > uMaxDist) { discard; }\n" +
+        "  float edge = smoothstep(uMaxDist * 0.75, uMaxDist, dist);\n" +
+        "  float fog = max(1.0 - exp(-dist * uFogDensity), edge);\n" +
+        "  fragColor = vec4(mix(vColor.rgb, uFogColor, fog), 1.0);\n" +
+        "}\n";
 
     // Line ribbon shader: expands each segment to a quad of constant SCREEN-pixel width (ANGLE/D3D11
     // can't do wide GL lines), so trails/route stay a few px thick at any zoom. Still depth-tested.
@@ -530,8 +546,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform vec2 uViewport;\n" +
         "uniform float uHalfPx;\n" +
         "out vec4 vColor;\n" +
+        "out vec3 vWorldPos;\n" +
         "void main(){\n" +
         "  vColor = aColor;\n" +
+        "  vWorldPos = aPos;\n" +
         "  vec4 clipA = uMvp * vec4(aPos, 1.0);\n" +
         "  vec4 clipB = uMvp * vec4(aOther, 1.0);\n" +
         "  if (clipA.w <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }\n" +
@@ -814,6 +832,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int lineMvpLocation = -1;
     private int lineViewportLocation = -1;
     private int lineHalfPxLocation = -1;
+    private int lineFogColorLocation = -1;
+    private int lineFogDensityLocation = -1;
+    private int lineCameraPosLocation = -1;
+    private int lineMaxDistLocation = -1;
     private bool programReady;
 
     // Off-screen multisampled target. We render the terrain into our own MSAA colour+depth renderbuffers
@@ -849,16 +871,19 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private IReadOnlyList<Trail>? lastTrails;
     private DemRaster? lastTrailRaster;
     private TerrainMesh3D? lastTrailMesh;
+    private DetailElevationField? lastTrailDetail;
 
     private LineBuffers? routeLines;
     private Route? lastRoute;
     private DemRaster? lastRouteRaster;
     private TerrainMesh3D? lastRouteMesh;
+    private DetailElevationField? lastRouteDetail;
 
     private LineBuffers? roadLines;
     private IReadOnlyList<Trail>? lastRoads;
     private DemRaster? lastRoadRaster;
     private TerrainMesh3D? lastRoadMesh;
+    private DetailElevationField? lastRoadDetail;
 
     /// <summary>
     /// Sets (or clears, when <paramref name="rgba"/> is null) the ortho-photo texture draped over the terrain.
@@ -959,7 +984,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         Route? route,
         IReadOnlyList<Trail>? roads = null,
         Atmosphere? atmosphere = null,
-        IReadOnlyList<TreeInstance>? forest = null)
+        IReadOnlyList<TreeInstance>? forest = null,
+        DetailElevationField? detail = null)
     {
         gl ??= PlatformGl.Get();
 
@@ -976,14 +1002,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             lastTrails = null;
             lastTrailRaster = null;
             lastTrailMesh = null;
+            lastTrailDetail = null;
             routeLines = null;
             lastRoute = null;
             lastRouteRaster = null;
             lastRouteMesh = null;
+            lastRouteDetail = null;
             roadLines = null;
             lastRoads = null;
             lastRoadRaster = null;
             lastRoadMesh = null;
+            lastRoadDetail = null;
             programReady = false;
             mvpLocation = -1;
             modelOffsetLocation = -1;
@@ -1601,13 +1630,30 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         // Trails + route as depth-tested screen-space ribbons (occluded by the terrain). Switch to the line
         // program; it shares the depth state and the same MVP, plus the viewport for the pixel expansion.
+        // CRITICAL: the terrain draw above may have left m = the CAMERA-RELATIVE mvpRender (Translate(target)·mvp,
+        // paired with the terrain's uModelOffset=-target so it cancels). The line program draws ABSOLUTE world
+        // positions with NO compensating offset, so feeding it mvpRender translates every ribbon by camera.Target
+        // — including Target.Z (~1–2 km), so trails "fly with the camera" above the terrain. Restore the ABSOLUTE
+        // mvp into m before the line MVP upload.
+        m[0] = mvp.M11; m[1] = mvp.M12; m[2] = mvp.M13; m[3] = mvp.M14;
+        m[4] = mvp.M21; m[5] = mvp.M22; m[6] = mvp.M23; m[7] = mvp.M24;
+        m[8] = mvp.M31; m[9] = mvp.M32; m[10] = mvp.M33; m[11] = mvp.M34;
+        m[12] = mvp.M41; m[13] = mvp.M42; m[14] = mvp.M43; m[15] = mvp.M44;
         gl.UseProgram(lineProgram);
         gl.UniformMatrix4(lineMvpLocation, 1, false, m);
         gl.Uniform2(lineViewportLocation, (float)Math.Max(1, width), (float)Math.Max(1, height));
+        // Same aerial-perspective fog as the terrain (absolute world frame, like the forest program) so distant
+        // trails fade into the horizon haze instead of floating as bright lines over the hazed far terrain.
+        gl.Uniform3(lineFogColorLocation, fogColor.X, fogColor.Y, fogColor.Z);
+        gl.Uniform1(lineFogDensityLocation, fogDensity);
+        gl.Uniform3(lineCameraPosLocation, cameraWorldPos.X, cameraWorldPos.Y, cameraWorldPos.Z);
+        // Cull radius scales with zoom: close in, only nearby trails; zoomed out, reach farther — but never
+        // the whole 27×42 km network, which is what floated + parallaxed at the horizon.
+        gl.Uniform1(lineMaxDistLocation, (camera.Distance * 1.6f) + 4000f);
         TerrainMesh3D frame = tiles[0];
-        DrawRoadLines(gl, roads, raster, frame);
-        DrawTrailLines(gl, trails, raster, frame);
-        DrawRouteLine(gl, route, raster, frame);
+        DrawRoadLines(gl, roads, raster, frame, detail);
+        DrawTrailLines(gl, trails, raster, frame, detail);
+        DrawRouteLine(gl, route, raster, frame, detail);
 
         gl.BindVertexArray(0);
 
@@ -2546,6 +2592,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         lineMvpLocation = g.GetUniformLocation(lineProgram, "uMvp");
         lineViewportLocation = g.GetUniformLocation(lineProgram, "uViewport");
         lineHalfPxLocation = g.GetUniformLocation(lineProgram, "uHalfPx");
+        lineFogColorLocation = g.GetUniformLocation(lineProgram, "uFogColor");
+        lineFogDensityLocation = g.GetUniformLocation(lineProgram, "uFogDensity");
+        lineCameraPosLocation = g.GetUniformLocation(lineProgram, "uCameraPos");
+        lineMaxDistLocation = g.GetUniformLocation(lineProgram, "uMaxDist");
 
         g.DeleteShader(vs);
         g.DeleteShader(fs);
@@ -2662,20 +2712,24 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         tileBuffers.Clear();
     }
 
-    private void DrawTrailLines(GL g, IReadOnlyList<Trail>? trails, DemRaster? raster, TerrainMesh3D mesh)
+    private void DrawTrailLines(GL g, IReadOnlyList<Trail>? trails, DemRaster? raster, TerrainMesh3D mesh, DetailElevationField? detail)
     {
         if (trails is null || trails.Count == 0 || raster is null)
         {
             return;
         }
 
+        // The detail field is part of the cache key: as the 1 m window streams with the look-at point a new
+        // field arrives, and the seated trail heights must be rebuilt against it (else they'd stay on the
+        // stale window's surface).
         if (trailLines is null
             || !ReferenceEquals(lastTrails, trails)
             || !ReferenceEquals(lastTrailRaster, raster)
-            || !ReferenceEquals(lastTrailMesh, mesh))
+            || !ReferenceEquals(lastTrailMesh, mesh)
+            || !ReferenceEquals(lastTrailDetail, detail))
         {
             DeleteLine(g, ref trailLines);
-            IReadOnlyList<TrailWorldLine> world = Trail3DWorldProjection.ToWorld(trails, raster, mesh, TrailLiftMeters);
+            IReadOnlyList<TrailWorldLine> world = Trail3DWorldProjection.ToWorld(trails, raster, mesh, TrailLiftMeters, detail);
 
             var ribbon = new RibbonBuilder();
             foreach (TrailWorldLine line in world)
@@ -2688,12 +2742,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             lastTrails = trails;
             lastTrailRaster = raster;
             lastTrailMesh = mesh;
+            lastTrailDetail = detail;
         }
 
         DrawLine(g, trailLines, TrailHalfWidthPx);
     }
 
-    private void DrawRoadLines(GL g, IReadOnlyList<Trail>? roads, DemRaster? raster, TerrainMesh3D mesh)
+    private void DrawRoadLines(GL g, IReadOnlyList<Trail>? roads, DemRaster? raster, TerrainMesh3D mesh, DetailElevationField? detail)
     {
         if (roads is null || roads.Count == 0 || raster is null)
         {
@@ -2703,11 +2758,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         if (roadLines is null
             || !ReferenceEquals(lastRoads, roads)
             || !ReferenceEquals(lastRoadRaster, raster)
-            || !ReferenceEquals(lastRoadMesh, mesh))
+            || !ReferenceEquals(lastRoadMesh, mesh)
+            || !ReferenceEquals(lastRoadDetail, detail))
         {
             DeleteLine(g, ref roadLines);
             // Roads are unmarked Trail polylines; reuse the trail world projection, draw them all one grey.
-            IReadOnlyList<TrailWorldLine> world = Trail3DWorldProjection.ToWorld(roads, raster, mesh, RoadLiftMeters);
+            IReadOnlyList<TrailWorldLine> world = Trail3DWorldProjection.ToWorld(roads, raster, mesh, RoadLiftMeters, detail);
 
             var ribbon = new RibbonBuilder();
             foreach (TrailWorldLine line in world)
@@ -2719,12 +2775,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             lastRoads = roads;
             lastRoadRaster = raster;
             lastRoadMesh = mesh;
+            lastRoadDetail = detail;
         }
 
         DrawLine(g, roadLines, RoadHalfWidthPx);
     }
 
-    private void DrawRouteLine(GL g, Route? route, DemRaster? raster, TerrainMesh3D mesh)
+    private void DrawRouteLine(GL g, Route? route, DemRaster? raster, TerrainMesh3D mesh, DetailElevationField? detail)
     {
         if (route is null || raster is null)
         {
@@ -2734,10 +2791,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         if (routeLines is null
             || !ReferenceEquals(lastRoute, route)
             || !ReferenceEquals(lastRouteRaster, raster)
-            || !ReferenceEquals(lastRouteMesh, mesh))
+            || !ReferenceEquals(lastRouteMesh, mesh)
+            || !ReferenceEquals(lastRouteDetail, detail))
         {
             DeleteLine(g, ref routeLines);
-            RouteWorldLine world = Route3DWorldProjection.ToWorld(route, raster, mesh, RouteLiftMeters);
+            RouteWorldLine world = Route3DWorldProjection.ToWorld(route, raster, mesh, RouteLiftMeters, detail);
 
             var ribbon = new RibbonBuilder();
             ribbon.Append(world.World, 0x7C, 0x3A, 0xED); // violet, matches 2D planner
@@ -2746,6 +2804,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             lastRoute = route;
             lastRouteRaster = raster;
             lastRouteMesh = mesh;
+            lastRouteDetail = detail;
         }
 
         DrawLine(g, routeLines, RouteHalfWidthPx);

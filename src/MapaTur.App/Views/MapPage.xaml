@@ -26,6 +26,7 @@
         <views:Terrain3DView x:Name="TerrainView"
                              Tiles="{Binding TerrainTiles}"
                              Raster="{Binding TerrainRaster}"
+                             DetailElevation="{Binding DetailElevation}"
                              Trails="{Binding Trails3DOverlay}"
                              Roads="{Binding Roads3DOverlay}"
                              Route="{Binding Route3DOverlay}"
@@ -173,10 +174,6 @@
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                         <Label Grid.Column="0" Text="Ortofotomapa" Style="{StaticResource GlassLabel}" />
                         <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowOrtho}" />
-                    </Grid>
-                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                        <Label Grid.Column="0" Text="Nazwy szczytów" Style="{StaticResource GlassLabel}" />
-                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowPeakNames}" />
                     </Grid>
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                         <VerticalStackLayout Grid.Column="0" Spacing="0">
@@ -407,6 +404,18 @@
                             </CollectionView.ItemTemplate>
                         </CollectionView>
 
+                        <!-- Route result card (tourist-map style): the live summary + one-tap "show it on the
+                             map", which collapses this panel and frames the camera on the whole route. Shown
+                             only once a route is actually drawn. -->
+                        <VerticalStackLayout Spacing="8" IsVisible="{Binding HasPlannedRoute}">
+                            <Border Style="{StaticResource GlassBar}" Padding="12,9">
+                                <Label Text="{Binding RouteSummary}" Style="{StaticResource GlassLabel}"
+                                       FontSize="14" HorizontalOptions="Center" />
+                            </Border>
+                            <Button Style="{StaticResource GlassButtonAccent}" Text="🧭  Pokaż trasę"
+                                    Command="{Binding ShowRouteCommand}" />
+                        </VerticalStackLayout>
+
                         <Grid ColumnDefinitions="*,*" ColumnSpacing="8">
                             <Button Grid.Column="0" Style="{StaticResource GlassButton}" Text="🗑  Wyczyść"
                                     Command="{Binding ClearRouteCommand}" />
@@ -414,6 +423,22 @@
                                     Command="{Binding ExportRouteCommand}" IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
                         </Grid>
                     </VerticalStackLayout>
+
+                    <Label Text="WARSTWY" Style="{StaticResource GlassCaption}" />
+                    <FlexLayout Wrap="Wrap" JustifyContent="Start" AlignItems="Center">
+                        <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
+                                Background="{Binding ShowTrails, Converter={StaticResource BoolToBrush}, ConverterParameter='#5536E2FF|#14FFFFFF'}">
+                            <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
+                            <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="Trails" /></Border.GestureRecognizers>
+                            <Label Text="〰 Szlaki" Style="{StaticResource GlassLabel}" FontSize="12" />
+                        </Border>
+                        <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
+                                Background="{Binding ShowPeakNames, Converter={StaticResource BoolToBrush}, ConverterParameter='#5536E2FF|#14FFFFFF'}">
+                            <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
+                            <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="PeakNames" /></Border.GestureRecognizers>
+                            <Label Text="🗻 Nazwy szczytów" Style="{StaticResource GlassLabel}" FontSize="12" />
+                        </Border>
+                    </FlexLayout>
 
                     <Label Text="PUNKTY (POI)" Style="{StaticResource GlassCaption}" />
                     <FlexLayout Wrap="Wrap" JustifyContent="Start" AlignItems="Center">
