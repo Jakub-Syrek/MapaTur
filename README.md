@@ -14,15 +14,15 @@
 [![Last commit](https://img.shields.io/github/last-commit/Jakub-Syrek/MapaTur)](https://github.com/Jakub-Syrek/MapaTur/commits)
 [![License](https://img.shields.io/badge/License-Proprietary-blue)](#license)
 
-![MapaTur 3D terrain — orthophoto-draped Tatras](docs/screenshots/3d-tatry.png)
+![MapaTur 3D terrain — the Tatra range in 1 m LiDAR with a PL + SK orthophoto drape](docs/screenshots/3d-tatry.png)
 
-*Real-time 3D terrain: a high-resolution PL + SK orthophoto draped over the Copernicus DEM, with named summits, depth-occluded hiking trails and roads, and per-pixel lighting.*
+*Real-time 3D terrain on a Samsung S25 Ultra: the whole Tatra range over a **1 m airborne-LiDAR** elevation model (GUGiK NMT on the Polish side, ÚGKK DMR 5.0 on the Slovak side), draped with a high-resolution GUGiK + ZBGIS orthophoto, with named summits, mountain tarns and per-pixel lighting.*
 
 <p align="center">
-  <img src="docs/screenshots/3d-tatry-android.png" alt="MapaTur 3D terrain running on Android — Samsung S25 Ultra" width="320" />
+  <img src="docs/screenshots/3d-tatry-android.png" alt="MapaTur 3D terrain on Android — Rysy and the Mięguszowieckie ridge in 1 m detail" width="420" />
 </p>
 
-*The same engine on Android — Samsung S25 Ultra (Adreno 830, GLES 3.2). Raw OpenGL ES 3.0 draws the terrain mesh, **8 ortho cells (8192×5462 RGBA8, ~1.9 GB VRAM after mipmaps)**, and depth-tested trail ribbons into a 4× MSAA off-screen FBO; the resolve target is a **single-sampled colour-texture FBO whose GL handle is wrapped via `SKImage.FromTexture`** (`GRBackendTexture` + `GRGlTextureInfo`) and composed into SkiaSharp's canvas with `DrawImage`. That texture hand-off sidesteps Android's FBO-0 collision (where Skia's compositor would otherwise repaint its empty surface over our output) and lets the same code path drive Windows ANGLE and Android natively — no platform-specific render branch.*
+*The same engine streaming 1 m detail to the gaze over the Rysy / Mięguszowieckie ridge — Samsung S25 Ultra (Adreno 830, GLES 3.2). Raw OpenGL ES 3.0 draws the terrain mesh, **8 ortho cells (8192×5462 RGBA8, ~1.9 GB VRAM after mipmaps)**, and depth-tested trail ribbons into a 4× MSAA off-screen FBO; the resolve target is a **single-sampled colour-texture FBO whose GL handle is wrapped via `SKImage.FromTexture`** (`GRBackendTexture` + `GRGlTextureInfo`) and composed into SkiaSharp's canvas with `DrawImage`. That texture hand-off sidesteps Android's FBO-0 collision (where Skia's compositor would otherwise repaint its empty surface over our output) and lets the same code path drive Windows ANGLE and Android natively — no platform-specific render branch.*
 
 ## About
 
