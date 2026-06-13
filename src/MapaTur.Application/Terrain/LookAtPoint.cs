@@ -98,6 +98,33 @@ public static class LookAtPoint
         return null;
     }
 
+    /// <summary>
+    /// Resolves the terrain hit under an ARBITRARY screen pixel — the tap-to-plan ray. Same marching
+    /// parameters as <see cref="Resolve"/>; null when the pixel ray meets no real terrain (sky, off
+    /// the DEM, no-data).
+    /// </summary>
+    public static Vector3? ResolveAt(
+        Camera3D camera,
+        float pixelX,
+        float pixelY,
+        float screenWidth,
+        float screenHeight,
+        DemRaster raster,
+        GeoPoint anchor,
+        float verticalExaggeration)
+    {
+        ArgumentNullException.ThrowIfNull(camera);
+        ArgumentNullException.ThrowIfNull(raster);
+        if (screenWidth <= 0f || screenHeight <= 0f)
+        {
+            return null;
+        }
+
+        (float maxDistance, float step) = MarchParameters(camera, raster);
+        Ray ray = ScreenPointRay(camera, pixelX, pixelY, screenWidth, screenHeight);
+        return TerrainRaycaster.Intersect(ray, raster, anchor, verticalExaggeration, maxDistance, step);
+    }
+
     private static Vector3? CastAt(
         Camera3D camera, float verticalFraction, float screenWidth, float screenHeight,
         DemRaster raster, GeoPoint anchor, float verticalExaggeration, float maxDistance, float step)

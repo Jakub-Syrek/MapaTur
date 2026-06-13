@@ -86,6 +86,70 @@ public sealed class LookAtPointTests
     }
 
     [Fact]
+    public void ResolveAt_CentrePixel_MatchesResolve()
+    {
+        // The tap-to-plan resolver through the CENTRE pixel must agree with the look-at resolver.
+        var anchor = new GeoPoint(49.0, 20.0);
+        DemRaster dem = Flat(100.0, new GeoPoint(48.99, 19.99), new GeoPoint(49.01, 20.01));
+        var camera = new Camera3D
+        {
+            Target = new Vector3(0f, 0f, 100f),
+            Distance = 500f,
+            AzimuthRadians = 0.3f,
+            PitchRadians = MathF.PI / 3f,
+        };
+
+        Vector3? tap = LookAtPoint.ResolveAt(camera, 400f, 300f, 800f, 600f, dem, anchor, verticalExaggeration: 1f);
+        Vector3? look = LookAtPoint.Resolve(camera, 800f, 600f, dem, anchor, verticalExaggeration: 1f);
+
+        tap.Should().NotBeNull();
+        look.Should().NotBeNull();
+        Vector3.Distance(tap!.Value, look!.Value).Should().BeLessThan(2f);
+    }
+
+    [Fact]
+    public void ResolveAt_SkyPixel_ReturnsNull()
+    {
+        // A shallow camera: the TOP of the frame points above the horizon — a tap there is sky, not terrain.
+        var anchor = new GeoPoint(49.0, 20.0);
+        DemRaster dem = Flat(100.0, new GeoPoint(48.99, 19.99), new GeoPoint(49.01, 20.01));
+        var camera = new Camera3D
+        {
+            Target = new Vector3(0f, 0f, 100f),
+            Distance = 500f,
+            AzimuthRadians = 0f,
+            PitchRadians = MathF.PI / 12f, // 15° — top of a 45° frame looks upward
+        };
+
+        Vector3? tap = LookAtPoint.ResolveAt(camera, 400f, 0f, 800f, 600f, dem, anchor, verticalExaggeration: 1f);
+
+        tap.Should().BeNull();
+    }
+
+    [Fact]
+    public void ResolveAt_BottomPixel_HitsCloserToTheCameraThanTheCentre()
+    {
+        // The bottom of the frame looks more steeply down, so its terrain hit lies nearer the camera.
+        var anchor = new GeoPoint(49.0, 20.0);
+        DemRaster dem = Flat(100.0, new GeoPoint(48.99, 19.99), new GeoPoint(49.01, 20.01));
+        var camera = new Camera3D
+        {
+            Target = new Vector3(0f, 0f, 100f),
+            Distance = 800f,
+            AzimuthRadians = 0f,
+            PitchRadians = MathF.PI / 4f,
+        };
+
+        Vector3? centre = LookAtPoint.ResolveAt(camera, 400f, 300f, 800f, 600f, dem, anchor, verticalExaggeration: 1f);
+        Vector3? bottom = LookAtPoint.ResolveAt(camera, 400f, 599f, 800f, 600f, dem, anchor, verticalExaggeration: 1f);
+
+        centre.Should().NotBeNull();
+        bottom.Should().NotBeNull();
+        Vector3.Distance(bottom!.Value, camera.Position)
+            .Should().BeLessThan(Vector3.Distance(centre!.Value, camera.Position));
+    }
+
+    [Fact]
     public void Resolve_TargetFloatsAboveTerrain_FindsRealTerrainBeyondTarget()
     {
         // Target floats at z = 300 over terrain at z = 100. The look-at point is NOT the target —
