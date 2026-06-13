@@ -6,7 +6,9 @@
              xmlns:loc="clr-namespace:MapaTur.App.Localization"
              xmlns:views="clr-namespace:MapaTur.App.Views"
              xmlns:markers="clr-namespace:MapaTur.Application.Markers;assembly=MapaTur.Application"
+             xmlns:routing="clr-namespace:MapaTur.Domain.Routing;assembly=MapaTur.Domain"
              x:Class="MapaTur.App.Views.MapPage"
+             x:Name="PageRoot"
              x:DataType="vm:MapPageViewModel"
              Shell.NavBarIsVisible="False"
              Title="{x:Static loc:AppStrings.AppTitle}">
@@ -352,6 +354,67 @@
                         <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding IsRoutePlanningMode, Mode=TwoWay}" />
                     </Grid>
 
+                    <!-- Tourist-map route builder: pick named stops from the searchable list (or tap them on
+                         the map); they form an ordered chain routed leg-by-leg over the trails. Visible only
+                         while planning is on. -->
+                    <VerticalStackLayout Spacing="8" IsVisible="{Binding IsRoutePlanningMode}">
+                        <Label Text="DODAJ PRZYSTANEK" Style="{StaticResource GlassCaption}" />
+                        <Border Style="{StaticResource GlassBar}" Padding="10,2">
+                            <Entry Placeholder="Szukaj: szczyt, schronisko, jezioro…" Text="{Binding PlaceQuery, Mode=TwoWay}"
+                                   TextColor="White" PlaceholderColor="#88FFFFFF" BackgroundColor="Transparent" />
+                        </Border>
+
+                        <CollectionView ItemsSource="{Binding PlaceResults}" HeightRequest="168"
+                                        SelectionMode="None">
+                            <CollectionView.ItemTemplate>
+                                <DataTemplate x:DataType="routing:RouteWaypoint">
+                                    <Grid Padding="8,7" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                        <Grid.GestureRecognizers>
+                                            <TapGestureRecognizer
+                                                Command="{Binding Source={x:Reference PageRoot}, Path=BindingContext.AddStopCommand}"
+                                                CommandParameter="{Binding .}" />
+                                        </Grid.GestureRecognizers>
+                                        <Label Grid.Column="0" Text="{Binding Name}" Style="{StaticResource GlassLabel}"
+                                               FontSize="13" LineBreakMode="TailTruncation" VerticalOptions="Center" />
+                                        <Label Grid.Column="1" Text="{Binding ElevationMeters, StringFormat='{0:F0} m'}"
+                                               Style="{StaticResource GlassCaption}" FontSize="11" VerticalOptions="Center" />
+                                    </Grid>
+                                </DataTemplate>
+                            </CollectionView.ItemTemplate>
+                        </CollectionView>
+
+                        <Label Text="TRASA (KOLEJNE PRZYSTANKI)" Style="{StaticResource GlassCaption}" />
+                        <CollectionView ItemsSource="{Binding RouteStops}" HeightRequest="150" SelectionMode="None">
+                            <CollectionView.EmptyView>
+                                <Label Text="Wybierz przystanki z listy lub tapnij na mapie."
+                                       Style="{StaticResource GlassCaption}" FontSize="11" Padding="4,6" />
+                            </CollectionView.EmptyView>
+                            <CollectionView.ItemTemplate>
+                                <DataTemplate x:DataType="routing:RouteWaypoint">
+                                    <Grid Padding="8,7" ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
+                                        <Label Grid.Column="0" Text="▸" Style="{StaticResource GlassCaption}" VerticalOptions="Center" />
+                                        <Label Grid.Column="1" Text="{Binding Name}" Style="{StaticResource GlassLabel}"
+                                               FontSize="13" LineBreakMode="TailTruncation" VerticalOptions="Center" />
+                                        <Label Grid.Column="2" Text="✕" FontSize="15" TextColor="#FFB0B8" VerticalOptions="Center">
+                                            <Label.GestureRecognizers>
+                                                <TapGestureRecognizer
+                                                    Command="{Binding Source={x:Reference PageRoot}, Path=BindingContext.RemoveStopCommand}"
+                                                    CommandParameter="{Binding .}" />
+                                            </Label.GestureRecognizers>
+                                        </Label>
+                                    </Grid>
+                                </DataTemplate>
+                            </CollectionView.ItemTemplate>
+                        </CollectionView>
+
+                        <Grid ColumnDefinitions="*,*" ColumnSpacing="8">
+                            <Button Grid.Column="0" Style="{StaticResource GlassButton}" Text="🗑  Wyczyść"
+                                    Command="{Binding ClearRouteCommand}" />
+                            <Button Grid.Column="1" Style="{StaticResource GlassButton}" Text="⬇  GPX"
+                                    Command="{Binding ExportRouteCommand}" IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
+                        </Grid>
+                    </VerticalStackLayout>
+
                     <Label Text="PUNKTY (POI)" Style="{StaticResource GlassCaption}" />
                     <FlexLayout Wrap="Wrap" JustifyContent="Start" AlignItems="Center">
                         <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
@@ -383,6 +446,18 @@
                             <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                             <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="PoiViewpoints" /></Border.GestureRecognizers>
                             <Label Text="Widoki" Style="{StaticResource GlassLabel}" FontSize="12" />
+                        </Border>
+                        <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
+                                Background="{Binding ShowParking, Converter={StaticResource BoolToBrush}, ConverterParameter='#5536E2FF|#14FFFFFF'}">
+                            <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
+                            <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="PoiParking" /></Border.GestureRecognizers>
+                            <Label Text="🅿 Parkingi" Style="{StaticResource GlassLabel}" FontSize="12" />
+                        </Border>
+                        <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
+                                Background="{Binding ShowPasses, Converter={StaticResource BoolToBrush}, ConverterParameter='#5536E2FF|#14FFFFFF'}">
+                            <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
+                            <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="PoiPasses" /></Border.GestureRecognizers>
+                            <Label Text="⛰ Przełęcze" Style="{StaticResource GlassLabel}" FontSize="12" />
                         </Border>
                     </FlexLayout>
 

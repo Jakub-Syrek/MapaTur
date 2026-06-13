@@ -64,6 +64,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     private readonly IRoadOverpassClient roadOverpassClient;
     private readonly IRoadLayerRenderer roadRenderer;
     private readonly PlanRouteUseCase planRouteUseCase;
+    private readonly MultiStopRoutePlanner multiStopPlanner;
     private readonly ExportRouteToGpxUseCase exportRouteToGpxUseCase;
     private readonly ILogger<MapPageViewModel> logger;
     private readonly OnlineRegionDemLoader? regionDemLoader;
@@ -73,7 +74,6 @@ public sealed partial class MapPageViewModel : ObservableObject
     // flying, so detail streaming never triggers a WCS download. Null when no GUGiK source is wired.
     private readonly Func<DemTileKey, bool>? detailTileCached;
 
-    private readonly List<GeoPoint> waypoints = new(capacity: 2);
 
     [ObservableProperty]
     private string statusMessage = string.Empty;
@@ -213,13 +213,23 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private bool isRoutePlanningMode;
 
+    /// <summary>Raised with a geographic point the 3D camera should centre on (the route start when the
+    /// user finishes planning), so the host view can fly there.</summary>
+    public event EventHandler<GeoPoint>? RouteFocusRequested;
+
     // Enabling planning closes the menu so the map is free to tap; the status line tells the user.
+    // Turning it OFF with stops already picked centres the camera on the FIRST stop (the route start).
     partial void OnIsRoutePlanningModeChanged(bool value)
     {
         IsMenuOpen = false;
         StatusMessage = value
             ? Localization.AppStrings.StatusRoutePlanningOn
             : Localization.AppStrings.StatusRoutePlanningOff;
+
+        if (!value && RouteStops.Count > 0)
+        {
+            RouteFocusRequested?.Invoke(this, RouteStops[0].Location);
+        }
     }
 
     /// <summary>Whether the marker details card is shown.</summary>
@@ -292,6 +302,8 @@ public sealed partial class MapPageViewModel : ObservableObject
             case "PoiChalets": ShowChalets = !ShowChalets; break;
             case "PoiShelters": ShowShelters = !ShowShelters; break;
             case "PoiViewpoints": ShowViewpoints = !ShowViewpoints; break;
+            case "PoiParking": ShowParking = !ShowParking; break;
+            case "PoiPasses": ShowPasses = !ShowPasses; break;
         }
     }
 
@@ -795,6 +807,50 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private Domain.Routing.Route? route3DOverlay;
 
+    // ── Tourist-map route chain ──────────────────────────────────────────────────────────────────
+    // Route planning is now a chain of named stops (peaks / huts / lakes / tapped trail points), picked
+    // from the searchable list OR by tapping near a place on the map. Each consecutive pair is routed
+    // over the trail graph and concatenated (MultiStopRoutePlanner). The gazetteer is rebuilt whenever
+    // the peak / lake / POI sets change.
+    private PlaceGazetteer placeGazetteer = new();
+
+    /// <summary>Ordered stops the route passes through (start → … → end).</summary>
+    public System.Collections.ObjectModel.ObservableCollection<Domain.Routing.RouteWaypoint> RouteStops { get; } = new();
+
+    /// <summary>Search results for the current <see cref="PlaceQuery"/> (the place picker list).</summary>
+    public System.Collections.ObjectModel.ObservableCollection<Domain.Routing.RouteWaypoint> PlaceResults { get; } = new();
+
+    /// <summary>Search box text driving the place picker.</summary>
+    [ObservableProperty]
+    private string placeQuery = string.Empty;
+
+    // A map tap within this radius of a named place adds THAT place (so you can "tap Rysy"); farther
+    // taps add a plain trail point at the tapped spot.
+    private const double StopSnapRadiusMeters = 250.0;
+
+    partial void OnPlaceQueryChanged(string value) => RefreshPlaceResults();
+
+    private void RefreshPlaceResults()
+    {
+        PlaceResults.Clear();
+        foreach (Domain.Routing.RouteWaypoint w in placeGazetteer.Search(PlaceQuery, 30))
+        {
+            PlaceResults.Add(w);
+        }
+
+        logger.LogInformation(
+            "Place search '{Query}': gazetteer={Total}, results={Results}",
+            PlaceQuery, placeGazetteer.All.Count, PlaceResults.Count);
+    }
+
+    // Rebuilds the searchable place picker from the current named-place sets. Cheap; called after the
+    // peak / lake / POI data changes.
+    private void RebuildPlaceGazetteer()
+    {
+        placeGazetteer = new PlaceGazetteer(Peaks3DOverlay, MountainLakeData.All, rawPois);
+        RefreshPlaceResults();
+    }
+
     [ObservableProperty]
     private IReadOnlyList<MapaTur.Domain.Climbing.ClimbingArea>? climbing3DOverlay;
 
@@ -815,12 +871,18 @@ public sealed partial class MapPageViewModel : ObservableObject
     private bool showShelters = true;
     [ObservableProperty]
     private bool showViewpoints = true;
+    [ObservableProperty]
+    private bool showParking = true;
+    [ObservableProperty]
+    private bool showPasses = true;
 
     partial void OnShowHutsChanged(bool value) => ApplyPoiFilter();
     partial void OnShowWildernessHutsChanged(bool value) => ApplyPoiFilter();
     partial void OnShowChaletsChanged(bool value) => ApplyPoiFilter();
     partial void OnShowSheltersChanged(bool value) => ApplyPoiFilter();
     partial void OnShowViewpointsChanged(bool value) => ApplyPoiFilter();
+    partial void OnShowParkingChanged(bool value) => ApplyPoiFilter();
+    partial void OnShowPassesChanged(bool value) => ApplyPoiFilter();
 
     /// <summary>Returns true when a POI of the given kind is currently enabled in the type filter.</summary>
     private bool IsPoiKindVisible(MapaTur.Domain.Pois.PoiKind kind) => kind switch
@@ -830,6 +892,8 @@ public sealed partial class MapPageViewModel : ObservableObject
         MapaTur.Domain.Pois.PoiKind.Chalet => ShowChalets,
         MapaTur.Domain.Pois.PoiKind.Shelter => ShowShelters,
         MapaTur.Domain.Pois.PoiKind.Viewpoint => ShowViewpoints,
+        MapaTur.Domain.Pois.PoiKind.Parking => ShowParking,
+        MapaTur.Domain.Pois.PoiKind.Pass => ShowPasses,
         _ => true,
     };
 
@@ -906,6 +970,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             }
             rawPois = cached;
             ApplyPoiFilter();
+            RebuildPlaceGazetteer();
             logger.LogInformation("Loaded {Count} cached POIs for the loaded DEM footprint", cached.Count);
         }
         catch (Exception ex)
@@ -1007,6 +1072,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <param name="trackRenderer">Track polyline renderer.</param>
     /// <param name="trailRenderer">Trail polyline renderer.</param>
     /// <param name="routeRenderer">Planned-route polyline renderer.</param>
+    /// <param name="multiStopPlanner">Plans the chained tourist-map route through all stops.</param>
     /// <param name="climbingRenderer">Climbing-area marker renderer.</param>
     /// <param name="importTcxFileUseCase">TCX import use case.</param>
     /// <param name="overpassClient">Overpass HTTP client (trails).</param>
@@ -1049,6 +1115,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         IRoadOverpassClient roadOverpassClient,
         IRoadLayerRenderer roadRenderer,
         PlanRouteUseCase planRouteUseCase,
+        MultiStopRoutePlanner multiStopPlanner,
         ExportRouteToGpxUseCase exportRouteToGpxUseCase,
         ILogger<MapPageViewModel> logger,
         MBTilesOrthoCompositor? orthoCompositor = null,
@@ -1167,6 +1234,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         this.roadOverpassClient = roadOverpassClient;
         this.roadRenderer = roadRenderer;
         this.planRouteUseCase = planRouteUseCase;
+        this.multiStopPlanner = multiStopPlanner;
         this.exportRouteToGpxUseCase = exportRouteToGpxUseCase;
         this.logger = logger;
         Map = new Map();
@@ -1485,6 +1553,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             var pois = await poiOverpassClient.FetchPoisAsync(bounds.Value).ConfigureAwait(true);
             rawPois = pois;
             ApplyPoiFilter();
+            RebuildPlaceGazetteer();
 
             // Cache to SQLite so the POIs (and their 3D night lights) survive a restart and
             // re-load from disk at startup without another Overpass round-trip. Best-effort:
@@ -1585,45 +1654,123 @@ public sealed partial class MapPageViewModel : ObservableObject
     }
 
     /// <summary>
-    /// Called by the page when the user taps a point on the map. The first tap sets the
-    /// origin waypoint, the second triggers route planning and renders the result.
+    /// Called by the page when the user taps the map / terrain. In route-planning mode the tap ADDS a
+    /// stop to the chain: it snaps to a named place (peak / hut / lake) within
+    /// <see cref="StopSnapRadiusMeters"/>, else drops a plain trail point at the tapped spot.
     /// </summary>
     /// <param name="point">Tapped point in WGS-84 coordinates.</param>
     /// <returns>A task representing the asynchronous operation.</returns>
     public async Task HandleMapTapAsync(GeoPoint point)
     {
-        if (IsBusy)
+        if (IsBusy || !IsRoutePlanningMode)
         {
             return;
         }
 
-        // Route planning is an explicit mode now: a plain map tap only drops waypoints when the user has
-        // turned planning on (from the ☰ menu). Otherwise the tap does nothing — so browsing / tapping
-        // markers no longer accidentally starts a route.
-        if (!IsRoutePlanningMode)
+        Domain.Routing.RouteWaypoint stop = SnapToPlace(point)
+            ?? new Domain.Routing.RouteWaypoint("Punkt na szlaku", point, Domain.Routing.WaypointKind.TrailPoint);
+        await AddStopAsync(stop).ConfigureAwait(true);
+    }
+
+    // Nearest named place within the snap radius, or null when the tap is in open terrain.
+    private Domain.Routing.RouteWaypoint? SnapToPlace(GeoPoint point)
+    {
+        Domain.Routing.RouteWaypoint? best = null;
+        double bestMeters = StopSnapRadiusMeters;
+        foreach (Domain.Routing.RouteWaypoint candidate in placeGazetteer.All)
+        {
+            double meters = point.HaversineDistanceMetersTo(candidate.Location);
+            if (meters <= bestMeters)
+            {
+                bestMeters = meters;
+                best = candidate;
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>Appends a stop to the route chain and re-plans (from the picker list or a map tap).</summary>
+    [RelayCommand]
+    private async Task AddStopAsync(Domain.Routing.RouteWaypoint waypoint)
+    {
+        if (waypoint is null)
         {
             return;
         }
 
-        if (waypoints.Count >= 2)
+        RouteStops.Add(waypoint);
+        await ReplanRouteAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>Removes a stop from the chain and re-plans the shorter route.</summary>
+    [RelayCommand]
+    private async Task RemoveStopAsync(Domain.Routing.RouteWaypoint waypoint)
+    {
+        if (waypoint is null || !RouteStops.Remove(waypoint))
         {
-            // Third tap restarts the workflow.
-            waypoints.Clear();
+            return;
+        }
+
+        await ReplanRouteAsync().ConfigureAwait(true);
+    }
+
+    // Renders the current stop markers, then (with ≥2 stops) plans the chained route over the trail
+    // graph and renders it. A leg with no path names the gap so the user knows where the chain broke.
+    private async Task ReplanRouteAsync()
+    {
+        routeRenderer.RenderWaypoints(Map, RouteStops.Select(s => s.Location).ToList());
+
+        if (RouteStops.Count < 2)
+        {
             LastPlannedRoute = null;
             Route3DOverlay = null;
-            routeRenderer.Clear(Map);
-        }
-
-        waypoints.Add(point);
-        routeRenderer.RenderWaypoints(Map, waypoints);
-
-        if (waypoints.Count == 1)
-        {
-            StatusMessage = Localization.AppStrings.StatusOriginSet;
+            StatusMessage = RouteStops.Count == 1
+                ? $"Start: {RouteStops[0].Name}. Dodaj kolejny przystanek."
+                : Localization.AppStrings.StatusRoutePlanningOn;
             return;
         }
 
-        await PlanRouteForWaypointsAsync().ConfigureAwait(true);
+        try
+        {
+            IsBusy = true;
+            StatusMessage = Localization.AppStrings.StatusPlanningRoute;
+
+            List<GeoPoint> stops = RouteStops.Select(s => s.Location).ToList();
+            MultiStopRouteResult result = await Task.Run(
+                () => multiStopPlanner.PlanAsync(stops, RouteProfile.FastestTime)).ConfigureAwait(true);
+
+            if (result.Route is null)
+            {
+                int leg = result.FailedLegIndex ?? 0;
+                StatusMessage = $"Brak szlaku między „{RouteStops[leg].Name}” a „{RouteStops[leg + 1].Name}”.";
+                LastPlannedRoute = null;
+                Route3DOverlay = null;
+                routeRenderer.Clear(Map);
+                routeRenderer.RenderWaypoints(Map, stops);
+                return;
+            }
+
+            LastPlannedRoute = result.Route;
+            Route3DOverlay = result.Route;
+            routeRenderer.RenderRoute(Map, result.Route);
+
+            double km = result.Route.TotalDistanceMeters / 1000.0;
+            TimeSpan eta = TimeSpan.FromSeconds(result.Route.TotalDurationSeconds);
+            StatusMessage = $"Trasa: {RouteStops.Count} pkt · {km:F1} km · +{result.Route.TotalAscentMeters:F0} m · ~{eta:hh\\:mm}";
+            logger.LogInformation(
+                "Multi-stop route: {Stops} stops, {Segments} segments, {Km:F2} km",
+                RouteStops.Count, result.Route.Segments.Count, km);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
+        {
+            StatusMessage = $"Nie udało się wyznaczyć trasy: {ex.Message}";
+            logger.LogError(ex, "Multi-stop route planning failed");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
     }
 
     /// <summary>
@@ -1787,6 +1934,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         IReadOnlyList<NamedSummit> gazetteer = await GetTatraGazetteerAsync().ConfigureAwait(true);
         Peaks3DOverlay = await Task.Run(() =>
             PeakNamer.MergeWithGazetteer(PeakDetector.Detect(peakRaster, peakOptions), gazetteer, raster)).ConfigureAwait(true);
+        RebuildPlaceGazetteer();
         logger.LogInformation("Loaded DEM {Label} ({Cols}x{Rows})", label, raster.Columns, raster.Rows);
         StatusMessage = $"{Localization.AppStrings.StatusDemLoaded}: {label}";
     }
@@ -2158,6 +2306,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             // in the radius — so a low summit (e.g. Mnich) no longer borrows a taller neighbour's ridge.
             Peaks3DOverlay = await Task.Run(() =>
                 PeakNamer.MergeWithGazetteer(PeakDetector.Detect(lodPeakRaster, lodPeakOptions), lodGazetteer, baseRaster)).ConfigureAwait(true);
+            RebuildPlaceGazetteer();
             lodBaseTiles = baseTiles;
             lodAnchor = baseCentre;
             lodDetailCentre = baseCentre;
@@ -2685,11 +2834,11 @@ public sealed partial class MapPageViewModel : ObservableObject
         }
     }
 
-    /// <summary>Clears any planned route and waypoints.</summary>
+    /// <summary>Clears the route chain — all stops, the drawn line and the planned result.</summary>
     [RelayCommand]
     public void ClearRoute()
     {
-        waypoints.Clear();
+        RouteStops.Clear();
         LastPlannedRoute = null;
         Route3DOverlay = null;
         routeRenderer.Clear(Map);
@@ -2726,47 +2875,6 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             StatusMessage = $"Could not write GPX file: {ex.Message}";
             logger.LogError(ex, "GPX export failed");
-        }
-    }
-
-    private async Task PlanRouteForWaypointsAsync()
-    {
-        try
-        {
-            IsBusy = true;
-            StatusMessage = Localization.AppStrings.StatusPlanningRoute;
-
-            var request = new RouteRequest(waypoints[0], waypoints[1], RouteProfile.FastestTime);
-            // Push graph build + A* off the UI thread. The use case is CPU-bound past
-            // its first await; without Task.Run the window freezes on big trail sets.
-            var route = await Task.Run(() => planRouteUseCase.HandleAsync(request)).ConfigureAwait(true);
-
-            if (route is null)
-            {
-                StatusMessage = Localization.AppStrings.StatusNoRouteFound;
-                return;
-            }
-
-            LastPlannedRoute = route;
-            Route3DOverlay = route;
-            routeRenderer.RenderRoute(Map, route);
-
-            double distanceKilometers = route.TotalDistanceMeters / 1000.0;
-            TimeSpan duration = TimeSpan.FromSeconds(route.TotalDurationSeconds);
-            StatusMessage = $"Route: {distanceKilometers:F2} km, +{route.TotalAscentMeters:F0} m / -{route.TotalDescentMeters:F0} m, ~{duration:hh\\:mm}.";
-            logger.LogInformation(
-                "Planned route with {SegmentCount} segments, {Km:F2} km",
-                route.Segments.Count,
-                distanceKilometers);
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
-        {
-            StatusMessage = $"Could not plan route: {ex.Message}";
-            logger.LogError(ex, "Route planning failed");
-        }
-        finally
-        {
-            IsBusy = false;
         }
     }
 
@@ -3065,12 +3173,6 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// </summary>
     private MapBounds? ComputeDownloadBounds()
     {
-        var viewport = ViewportBounds.FromMercatorExtent(GetCurrentExtent());
-        if (viewport is null)
-        {
-            return null;
-        }
-
         // Coverage = Małopolska (unioned with any larger loaded basemap), matching the render/trail clip.
         MapBounds coverage = MalopolskaRegion;
         if (basemapBounds is { } basemap)
@@ -3078,8 +3180,29 @@ public sealed partial class MapPageViewModel : ObservableObject
             coverage = coverage.Union(basemap);
         }
 
-        return viewport.Value.Intersect(coverage);
+        var viewport = ViewportBounds.FromMercatorExtent(GetCurrentExtent());
+        if (viewport is { } v)
+        {
+            return v.Intersect(coverage);
+        }
+
+        // 3D mode: the 2D Mapsui viewport is never sized (the map control is hidden). Falling back to the
+        // WHOLE DEM rectangle (65×33 km) flooded the map with thousands of POIs + a dense foothill road
+        // net. Use the TATRA CORE instead — the high massif + its trailhead parkings on both sides,
+        // without the Podhale foothills / towns.
+        if (TerrainRaster is not null)
+        {
+            return TatraCoreRegion.Intersect(coverage);
+        }
+
+        return null;
     }
+
+    // The high Tatra massif + its trailhead parkings (Brzeziny, Kuźnice, Kiry, Palenica, Łysa Polana,
+    // Štrbské, Tatranská Lomnica) on both sides of the border — the meaningful "around the Tatras" area
+    // for a hiker, minus the foothill towns that turn a viewport download into thousands of features.
+    private static readonly MapBounds TatraCoreRegion = new(
+        new GeoPoint(49.08, 19.78), new GeoPoint(49.32, 20.35));
 
     private MRect? GetCurrentExtent()
     {

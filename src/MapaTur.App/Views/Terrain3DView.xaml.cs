@@ -847,6 +847,21 @@ public partial class Terrain3DView : ContentView
         Canvas.InvalidateSurface();
     }
 
+    /// <summary>
+    /// Centres the camera on a geographic point (seated on the terrain), at a close framing distance.
+    /// Used to fly to the first route stop when the user finishes planning.
+    /// </summary>
+    public void FocusOnGeo(GeoPoint geo, float distance = 4000f)
+    {
+        if (WorldFrame is not { } frame)
+        {
+            return;
+        }
+
+        float elevation = Raster is { } raster ? (float)raster.SampleBilinear(geo.Longitude, geo.Latitude) : 0f;
+        FocusOnWorld(frame.GeoToWorld(geo, elevation), distance);
+    }
+
     // ── Cinematic fly-through: Orla Perć ────────────────────────────────────────────────────────
     // A scripted camera flight along the Orla Perć ridge (Zawrat → Krzyżne, W→E), weaving from side
     // to side ("slalom") over the peaks. Geo waypoints are sampled against the live DEM so the path
@@ -1315,6 +1330,7 @@ public partial class Terrain3DView : ContentView
         {
             projectedPois = poiProjector.Project(
                 pois, Raster, frame, Camera, e.Info.Width, e.Info.Height, PoiMarkerLiftMeters);
+            projectedPois = HideOccludedPois(projectedPois, frame);
         }
 
         // Peaks carry their own DEM elevation, so projection needs no raster lookup.
@@ -1323,6 +1339,7 @@ public partial class Terrain3DView : ContentView
         {
             projectedPeaks = peakProjector.Project(
                 peaks, null, frame, Camera, e.Info.Width, e.Info.Height, PeakMarkerLiftMeters);
+            projectedPeaks = HideOccludedPeaks(projectedPeaks, frame);
         }
 
         // Single GPS fix: wrap into our reusable one-element buffer so the projector keeps its
@@ -1353,7 +1370,9 @@ public partial class Terrain3DView : ContentView
         if (UseGlRenderer && TryRenderTerrainGl(canvas, tiles, e.Info.Width, e.Info.Height))
         {
             // GL already drew the (depth-occluded) trails + route; Skia only adds the markers/labels on top.
-            renderer.DrawOverlays(canvas, null, null, projectedClimbing, projectedPois, projectedPeaks, projectedUserLocation);
+            // POI text labels only when the camera is close — a far view of 1000+ POIs is a wall of text.
+            bool poiLabelsVisible = Camera.Distance < Services.Terrain3DCanvasRenderer.PoiLabelMaxDistanceWorld;
+            renderer.DrawOverlays(canvas, null, null, projectedClimbing, projectedPois, projectedPeaks, projectedUserLocation, poiLabelsVisible);
             DrawNightLights(canvas, projectedPois);
             // Recording capture for this path happens inside TryRenderTerrainGl (GL FBO readback), not here.
             return;
@@ -1527,6 +1546,71 @@ public partial class Terrain3DView : ContentView
         glowPaint.Shader = null;
     }
 
+    // Drops peak markers whose summit is hidden behind a ridge from the camera. The GL terrain is
+    // depth-buffered but these Skia labels are drawn on top with no depth test, so without this a peak
+    // label "punches through" the ridge in front of it. Off-screen markers are skipped (won't draw).
+    private IReadOnlyList<ProjectedPeak> HideOccludedPeaks(IReadOnlyList<ProjectedPeak> peaks, TerrainMesh3D frame)
+    {
+        if (Raster is not { } raster)
+        {
+            return peaks;
+        }
+
+        System.Numerics.Vector3 cam = Camera.Position;
+        var visible = new List<ProjectedPeak>(peaks.Count);
+        foreach (ProjectedPeak p in peaks)
+        {
+            if (p.ScreenPosition is null)
+            {
+                continue;
+            }
+
+            System.Numerics.Vector3 world = frame.GeoToWorld(p.Source.Location, (float)p.Source.ElevationMeters);
+            if (MapaTur.Application.Terrain.TerrainOcclusion.IsVisible(
+                cam, world, raster, frame.ProjectionAnchor, frame.VerticalExaggeration))
+            {
+                visible.Add(p);
+            }
+        }
+
+        return visible;
+    }
+
+    // As HideOccludedPeaks, for POIs — a hut / parking / viewpoint behind a ridge hides its marker too.
+    private IReadOnlyList<ProjectedPoi> HideOccludedPois(IReadOnlyList<ProjectedPoi> pois, TerrainMesh3D frame)
+    {
+        if (Raster is not { } raster)
+        {
+            return pois;
+        }
+
+        System.Numerics.Vector3 cam = Camera.Position;
+        var visible = new List<ProjectedPoi>(pois.Count);
+        foreach (ProjectedPoi p in pois)
+        {
+            if (p.ScreenPosition is null)
+            {
+                continue;
+            }
+
+            double ground = raster.SampleBilinear(p.Source.Position.Longitude, p.Source.Position.Latitude);
+            if (ground <= raster.NoDataValue)
+            {
+                visible.Add(p); // no terrain sample — don't hide it
+                continue;
+            }
+
+            System.Numerics.Vector3 world = frame.GeoToWorld(p.Source.Position, (float)ground + PoiMarkerLiftMeters);
+            if (MapaTur.Application.Terrain.TerrainOcclusion.IsVisible(
+                cam, world, raster, frame.ProjectionAnchor, frame.VerticalExaggeration))
+            {
+                visible.Add(p);
+            }
+        }
+
+        return visible;
+    }
+
     // Refuges that "light up" at night: everything with a roof a hiker could be inside. Viewpoints
     // (lookout towers / panoramas) are excluded — nobody's home to switch a lamp on.
     private static bool IsLitRefuge(Domain.Pois.PoiKind kind) => kind is
@@ -1665,14 +1749,19 @@ public partial class Terrain3DView : ContentView
         Canvas.InvalidateSurface();
     }
 
+    /// <summary>Raised when a tap lands on bare terrain (no marker under the finger): the tapped point
+    /// in WGS-84, resolved by raycasting the tap pixel into the DEM. The host decides what it means —
+    /// MapPage routes it into the same tap-to-plan waypoint flow the 2D map uses.</summary>
+    public event EventHandler<GeoPoint>? TerrainTapped;
+
     /// <summary>
-    /// A single tap on the terrain: hit-test the cached projected markers and, if one is under the
-    /// finger, raise <see cref="MarkerTapped"/> with its popup content. Taps that miss every marker do
-    /// nothing (the 3D view has no tap-to-plan, unlike the 2D map).
+    /// A single tap on the terrain: hit-test the cached projected markers first and raise
+    /// <see cref="MarkerTapped"/> for the front-most hit; otherwise raycast the tap pixel into the
+    /// terrain and raise <see cref="TerrainTapped"/> with the WGS-84 point (3D tap-to-plan).
     /// </summary>
     private void OnCanvasTapped(object? sender, TappedEventArgs e)
     {
-        if (MarkerTapped is null || IsFlying)
+        if ((MarkerTapped is null && TerrainTapped is null) || IsFlying)
         {
             return;
         }
@@ -1706,7 +1795,21 @@ public partial class Terrain3DView : ContentView
         MarkerPopupContent? content = HitTestMarkers(tapX, tapY, radiusPx);
         if (content is { } popup)
         {
-            MarkerTapped.Invoke(this, popup);
+            MarkerTapped?.Invoke(this, popup);
+            return;
+        }
+
+        // No marker under the finger → resolve the tapped TERRAIN point (tap-to-plan). The same
+        // tested ray machinery as the look-at: pixel ray → DEM march → world hit → WGS-84.
+        if (TerrainTapped is not null && WorldFrame is { } tapFrame && Raster is { } tapRaster)
+        {
+            System.Numerics.Vector3? hit = MapaTur.Application.Terrain.LookAtPoint.ResolveAt(
+                Camera, tapX, tapY, lastSurfacePixelWidth, lastSurfacePixelHeight,
+                tapRaster, tapFrame.ProjectionAnchor, tapFrame.VerticalExaggeration);
+            if (hit is { } world)
+            {
+                TerrainTapped.Invoke(this, tapFrame.WorldToGeo(world));
+            }
         }
     }
 

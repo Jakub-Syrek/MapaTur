@@ -205,7 +205,7 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         }
         if (pois is not null)
         {
-            DrawPois(canvas, pois, depthMap);
+            DrawPois(canvas, pois, depthMap, camera.Distance < PoiLabelMaxDistanceWorld);
         }
         if (peaks is not null)
         {
@@ -376,7 +376,8 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         IReadOnlyList<ProjectedClimbingArea>? climbingAreas,
         IReadOnlyList<ProjectedPoi>? pois,
         IReadOnlyList<ProjectedPeak>? peaks,
-        ProjectedUserLocation? userLocation = null)
+        ProjectedUserLocation? userLocation = null,
+        bool poiLabelsVisible = true)
     {
         ArgumentNullException.ThrowIfNull(canvas);
 
@@ -394,7 +395,7 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         }
         if (pois is not null)
         {
-            DrawPois(canvas, pois, null);
+            DrawPois(canvas, pois, null, poiLabelsVisible);
         }
         if (peaks is not null)
         {
@@ -550,7 +551,11 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         }
     }
 
-    private void DrawPois(SKCanvas canvas, IReadOnlyList<ProjectedPoi> pois, ScreenDepthMap? depthMap)
+    /// <summary>Orbit distance (world units) below which POI text labels are drawn; farther/higher than
+    /// this only the marker dot shows, so a wide view of 1000+ POIs isn't a wall of overlapping text.</summary>
+    public const float PoiLabelMaxDistanceWorld = 6000f;
+
+    private void DrawPois(SKCanvas canvas, IReadOnlyList<ProjectedPoi> pois, ScreenDepthMap? depthMap, bool showLabels)
     {
         if (pois.Count == 0)
         {
@@ -610,14 +615,17 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
                 glyphTopY = y - PoiMarkerRadiusPx;
             }
 
-            // Always label the marker so the user can tell what it is — the POI's name when tagged,
-            // otherwise its category. Halo first, then fill, for contrast against any backdrop.
-            string label = !string.IsNullOrEmpty(marker.Source.Name)
-                ? marker.Source.Name
-                : PoiKindLabel(marker.Source.Kind);
-            float labelY = glyphTopY - 4f;
-            canvas.DrawText(label, x, labelY, SKTextAlign.Center, peakFont, peakLabelHaloPaint);
-            canvas.DrawText(label, x, labelY, SKTextAlign.Center, peakFont, peakLabelFillPaint);
+            // Label only when the camera is close (showLabels) — a far/high view of a wide POI set would
+            // otherwise be an unreadable wall of overlapping text. The coloured dot / tower always shows.
+            if (showLabels)
+            {
+                string label = !string.IsNullOrEmpty(marker.Source.Name)
+                    ? marker.Source.Name
+                    : PoiKindLabel(marker.Source.Kind);
+                float labelY = glyphTopY - 4f;
+                canvas.DrawText(label, x, labelY, SKTextAlign.Center, peakFont, peakLabelHaloPaint);
+                canvas.DrawText(label, x, labelY, SKTextAlign.Center, peakFont, peakLabelFillPaint);
+            }
         }
     }
 
@@ -672,6 +680,8 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         MapaTur.Domain.Pois.PoiKind.Chalet => "Chalet",
         MapaTur.Domain.Pois.PoiKind.Shelter => "Shelter",
         MapaTur.Domain.Pois.PoiKind.Viewpoint => "Viewpoint",
+        MapaTur.Domain.Pois.PoiKind.Parking => "Parking",
+        MapaTur.Domain.Pois.PoiKind.Pass => "Przełęcz",
         _ => "POI",
     };
 

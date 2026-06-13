@@ -44,6 +44,8 @@ public partial class MapPage : ContentPage
         BindingContext = viewModel;
         MapControl.Map.Tapped += OnMapTapped;
         TerrainView.MarkerTapped += OnMarkerTapped;
+        TerrainView.TerrainTapped += OnTerrainTapped;
+        viewModel.RouteFocusRequested += OnRouteFocusRequested;
         TerrainView.RecordingSaved += OnRecordingSaved;
         TerrainView.CameraFocusMoved += OnCameraFocusMoved;
         viewModel.PropertyChanged += OnViewModelPropertyChanged;
@@ -231,6 +233,19 @@ public partial class MapPage : ContentPage
         viewModel.ShowMarkerPopup(content);
     }
 
+    // 3D tap-to-plan: a bare-terrain tap resolved to WGS-84 routes into the SAME waypoint flow as a
+    // 2D map tap, so route planning works in the primary (3D) view too.
+    private async void OnTerrainTapped(object? sender, GeoPoint point)
+    {
+        await viewModel.HandleMapTapAsync(point);
+    }
+
+    // Finishing route planning flies the 3D camera to the route's first stop.
+    private void OnRouteFocusRequested(object? sender, GeoPoint point)
+    {
+        Dispatcher.Dispatch(() => TerrainView.FocusOnGeo(point));
+    }
+
     // Premium-menu microinteraction: the frosted section panel slides down + fades in as it opens, and the
     // dim scrim cross-fades. The panel's IsVisible is binding-driven (show/hide); this just polishes the
     // entrance so sections feel like floating glass, not a hard cut. Exit is an instant hide (acceptable).
@@ -353,6 +368,17 @@ public partial class MapPage : ContentPage
         => ApplyOrientationChrome(e.DisplayInfo.Orientation);
 
     // Landscape → immersive (floating UI hidden for a clean screenshot); portrait → chrome restored.
+    // PHONE ONLY: the gesture is "turn the device sideways for a clean shot". A desktop monitor is
+    // ALWAYS landscape, so applying this there would permanently hide the whole menu + camera pads
+    // (the "nie ma strzałek ani menu" bug). On desktop the chrome is always shown.
     private void ApplyOrientationChrome(DisplayOrientation orientation)
-        => viewModel.ImmersiveMode = orientation == DisplayOrientation.Landscape;
+    {
+        if (DeviceInfo.Current.Idiom == DeviceIdiom.Desktop)
+        {
+            viewModel.ImmersiveMode = false;
+            return;
+        }
+
+        viewModel.ImmersiveMode = orientation == DisplayOrientation.Landscape;
+    }
 }

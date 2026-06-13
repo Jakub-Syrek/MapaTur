@@ -172,6 +172,7 @@ public static class MauiProgram
         services.AddSingleton<IRoutePlanner, TrailRoutePlanner>();
         services.AddSingleton<IGpxWriter, GpxWriter>();
         services.AddTransient<PlanRouteUseCase>();
+        services.AddTransient<MultiStopRoutePlanner>();
         services.AddTransient<ExportRouteToGpxUseCase>();
 
         services.AddHttpClient<IOverpassClient, OverpassHttpClient>(client =>
