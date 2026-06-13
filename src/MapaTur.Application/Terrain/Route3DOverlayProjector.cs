@@ -26,6 +26,7 @@ public sealed class Route3DOverlayProjector
     private DemRaster? cachedRaster;
     private TerrainMesh3D? cachedMesh;
     private float cachedLift;
+    private DetailElevationField? cachedDetail;
 
     private Vector3?[]? screenBuffer;
 
@@ -40,6 +41,7 @@ public sealed class Route3DOverlayProjector
     /// <param name="screenWidth">Viewport width in pixels.</param>
     /// <param name="screenHeight">Viewport height in pixels.</param>
     /// <param name="routeLiftMeters">Vertical offset added to each vertex before exaggeration so the route sits above the mesh surface.</param>
+    /// <param name="detail">Optional 1 m LOD detail field; inside its window vertices seat on the detail surface instead of the coarse base.</param>
     public ProjectedRoute Project(
         Route route,
         DemRaster raster,
@@ -47,7 +49,8 @@ public sealed class Route3DOverlayProjector
         Camera3D camera,
         float screenWidth,
         float screenHeight,
-        float routeLiftMeters = 8f)
+        float routeLiftMeters = 8f,
+        DetailElevationField? detail = null)
     {
         ArgumentNullException.ThrowIfNull(camera);
 
@@ -55,14 +58,16 @@ public sealed class Route3DOverlayProjector
             || !ReferenceEquals(cachedRoute, route)
             || !ReferenceEquals(cachedRaster, raster)
             || !ReferenceEquals(cachedMesh, mesh)
-            || cachedLift != routeLiftMeters)
+            || cachedLift != routeLiftMeters
+            || !ReferenceEquals(cachedDetail, detail))
         {
             // ToWorld validates route/raster/mesh.
-            worldCache = Route3DWorldProjection.ToWorld(route, raster, mesh, routeLiftMeters);
+            worldCache = Route3DWorldProjection.ToWorld(route, raster, mesh, routeLiftMeters, detail);
             cachedRoute = route;
             cachedRaster = raster;
             cachedMesh = mesh;
             cachedLift = routeLiftMeters;
+            cachedDetail = detail;
             hasWorld = true;
             screenBuffer = new Vector3?[worldCache.World.Count];
         }

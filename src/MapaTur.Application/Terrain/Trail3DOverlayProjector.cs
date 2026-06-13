@@ -25,6 +25,7 @@ public sealed class Trail3DOverlayProjector
     private DemRaster? cachedRaster;
     private TerrainMesh3D? cachedMesh;
     private float cachedLift;
+    private DetailElevationField? cachedDetail;
 
     private Vector3?[][]? screenBuffers;
     private ProjectedTrail[]? results;
@@ -40,6 +41,7 @@ public sealed class Trail3DOverlayProjector
     /// <param name="screenWidth">Viewport width in pixels.</param>
     /// <param name="screenHeight">Viewport height in pixels.</param>
     /// <param name="trailLiftMeters">Vertical offset added to each vertex before exaggeration so trails sit above the mesh surface.</param>
+    /// <param name="detail">Optional 1 m LOD detail field; inside its window vertices seat on the detail surface instead of the coarse base.</param>
     public IReadOnlyList<ProjectedTrail> Project(
         IReadOnlyList<Trail> trails,
         DemRaster raster,
@@ -47,7 +49,8 @@ public sealed class Trail3DOverlayProjector
         Camera3D camera,
         float screenWidth,
         float screenHeight,
-        float trailLiftMeters = 5f)
+        float trailLiftMeters = 5f,
+        DetailElevationField? detail = null)
     {
         ArgumentNullException.ThrowIfNull(camera);
 
@@ -55,14 +58,16 @@ public sealed class Trail3DOverlayProjector
             || !ReferenceEquals(cachedTrails, trails)
             || !ReferenceEquals(cachedRaster, raster)
             || !ReferenceEquals(cachedMesh, mesh)
-            || cachedLift != trailLiftMeters)
+            || cachedLift != trailLiftMeters
+            || !ReferenceEquals(cachedDetail, detail))
         {
             // ToWorld validates trails/raster/mesh.
-            worldCache = Trail3DWorldProjection.ToWorld(trails, raster, mesh, trailLiftMeters);
+            worldCache = Trail3DWorldProjection.ToWorld(trails, raster, mesh, trailLiftMeters, detail);
             cachedTrails = trails;
             cachedRaster = raster;
             cachedMesh = mesh;
             cachedLift = trailLiftMeters;
+            cachedDetail = detail;
             AllocateBuffers(worldCache);
         }
 

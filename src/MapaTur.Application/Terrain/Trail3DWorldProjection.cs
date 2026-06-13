@@ -23,6 +23,9 @@ public static class Trail3DWorldProjection
     /// <summary>Sentinel world position for a trail vertex outside the DEM — projected to a null screen point (a polyline break).</summary>
     private static readonly Vector3 OutsideDem = new(float.NaN, float.NaN, float.NaN);
 
+    /// <summary>Max spacing (m) between seated trail vertices — sparse OSM segments are subdivided to this so the line hugs the 1 m terrain.</summary>
+    private const double DensifySpacingMeters = 12.0;
+
     /// <summary>
     /// Lifts every trail vertex to its DEM elevation and converts it into mesh world space. Trails
     /// whose lon/lat bbox doesn't intersect the DEM are dropped (most downloaded trails lie outside
@@ -32,11 +35,15 @@ public static class Trail3DWorldProjection
     /// <param name="raster">Source DEM used to look up elevations along each trail.</param>
     /// <param name="mesh">Mesh whose world-space convention defines the coordinate system.</param>
     /// <param name="trailLiftMeters">Vertical offset added to each vertex (before exaggeration) so trails sit above the mesh surface.</param>
+    /// <param name="detail">Optional 1 m LOD detail field: inside its window the vertex seats on the detail
+    /// elevation (matching the rendered near-field mesh) instead of the coarse base, so trails don't float
+    /// over the deeper-carved detail surface. Outside the window / on NoData it falls back to the base.</param>
     public static IReadOnlyList<TrailWorldLine> ToWorld(
         IReadOnlyList<Trail> trails,
         DemRaster raster,
         TerrainMesh3D mesh,
-        float trailLiftMeters = 5f)
+        float trailLiftMeters = 5f,
+        DetailElevationField? detail = null)
     {
         ArgumentNullException.ThrowIfNull(trails);
         ArgumentNullException.ThrowIfNull(raster);
@@ -61,10 +68,14 @@ public static class Trail3DWorldProjection
                 continue;
             }
 
-            var world = new Vector3[trail.Geometry.Count];
-            for (int i = 0; i < trail.Geometry.Count; i++)
+            // Densify the sparse OSM geometry so every vertex sits on the fine terrain — long straight
+            // segments otherwise cut across the 1 m relief (the line floats over dips, the detail mesh
+            // occludes it over bulges, and it reads "toporne" on the filigree ground).
+            IReadOnlyList<GeoPoint> geometry = GeoPolylineDensifier.Densify(trail.Geometry, DensifySpacingMeters);
+            var world = new Vector3[geometry.Count];
+            for (int i = 0; i < geometry.Count; i++)
             {
-                var geo = trail.Geometry[i];
+                var geo = geometry[i];
 
                 // Clip to the DEM: a vertex outside the loaded raster has no terrain under it, and
                 // SampleBilinear would clamp its elevation to the edge while GeoToWorld still places it at
@@ -76,8 +87,10 @@ public static class Trail3DWorldProjection
                     continue;
                 }
 
-                float groundElevation = (float)raster.SampleBilinear(geo.Longitude, geo.Latitude);
-                world[i] = mesh.GeoToWorld(geo, groundElevation + liftElevation);
+                double ground = detail is not null && detail.TryGetElevation(geo.Longitude, geo.Latitude, out double detailElevation)
+                    ? detailElevation
+                    : raster.SampleBilinear(geo.Longitude, geo.Latitude);
+                world[i] = mesh.GeoToWorld(geo, (float)ground + liftElevation);
             }
 
             result.Add(new TrailWorldLine(trail, world));

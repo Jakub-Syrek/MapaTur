@@ -74,13 +74,14 @@ public sealed class Route3DWorldProjectionTests
     }
 
     [Fact]
-    public void ToWorld_WorldCountMatchesPolyline()
+    public void ToWorld_DensifiesSparsePolyline()
     {
+        // The route's waypoints are kilometres apart, so densification (12 m spacing) adds many vertices.
         var route = BuildRoute();
 
         var result = Route3DWorldProjection.ToWorld(route, BuildRaster(), BuildMesh());
 
-        result.World.Should().HaveCount(route.ToPolyline().Count);
+        result.World.Count.Should().BeGreaterThan(route.ToPolyline().Count);
     }
 
     [Fact]
@@ -133,5 +134,26 @@ public sealed class Route3DWorldProjectionTests
         var split = Route3DWorldProjection.ToScreen(world, camera, 800f, 600f);
 
         split.ScreenPoints.Should().Equal(legacy.ScreenPoints);
+    }
+
+    [Fact]
+    public void ToWorld_VertexInsideDetailWindow_SeatsOnDetailElevationNotBase()
+    {
+        // Mirror of the trail case: a route vertex inside the 1 m detail window seats on the carved-deeper
+        // detail (900 m); a vertex outside it keeps the base (1000 m).
+        var mesh = BuildMesh();
+        var detailSamples = new float[8 * 8];
+        Array.Fill(detailSamples, 900f);
+        var detail = new DetailElevationField(new DemRaster(
+            8, 8, new MapBounds(new GeoPoint(49.4, 19.4), new GeoPoint(49.6, 19.6)), detailSamples));
+        var inside = new GeoPoint(49.5, 19.5);
+        var outside = new GeoPoint(49.2, 19.2);
+        var route = new Route(new[] { new RouteSegment(inside, outside, 1500.0, 50.0, 0.0, 1200.0) });
+
+        var result = Route3DWorldProjection.ToWorld(route, BuildRaster(), mesh, routeLiftMeters: 0f, detail: detail);
+
+        // Densification preserves endpoints: first waypoint inside the detail window (900 m), last on base (1000 m).
+        result.World[0].Should().Be(mesh.GeoToWorld(inside, 900f));
+        result.World[^1].Should().Be(mesh.GeoToWorld(outside, 1000f));
     }
 }

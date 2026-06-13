@@ -77,14 +77,15 @@ public sealed class Route3DProjectionTests
     }
 
     [Fact]
-    public void Project_ScreenPointsCountMatchesPolylineLength()
+    public void Project_DensifiesSparsePolyline()
     {
         var route = BuildRouteAtCenter();
-        int expectedPoints = route.ToPolyline().Count;
+        int nodeCount = route.ToPolyline().Count;
 
         var result = Route3DProjection.Project(route, BuildRaster(), BuildMesh(), LookDownCamera(), 800f, 600f);
 
-        result.ScreenPoints.Should().HaveCount(expectedPoints);
+        // Sparse waypoints are densified so the line hugs the terrain → more screen points than nodes.
+        result.ScreenPoints.Count.Should().BeGreaterThan(nodeCount);
     }
 
     [Fact]

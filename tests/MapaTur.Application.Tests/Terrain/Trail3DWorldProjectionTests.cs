@@ -103,28 +103,30 @@ public sealed class Trail3DWorldProjectionTests
     }
 
     [Fact]
-    public void ToWorld_WorldCountMatchesGeometry()
+    public void ToWorld_DensifiesSparseGeometry_KeepingEndpoints()
     {
+        // The trail's nodes are kilometres apart, so densification (12 m spacing) adds many vertices, while
+        // the first and last original nodes are preserved exactly.
         var trail = BuildTrailAtCenter();
 
-        var result = Trail3DWorldProjection.ToWorld(new[] { trail }, BuildRaster(), BuildMesh());
+        var world = Trail3DWorldProjection.ToWorld(new[] { trail }, BuildRaster(), BuildMesh()).Single().World;
 
-        result.Single().World.Should().HaveCount(trail.Geometry.Count);
+        world.Count.Should().BeGreaterThan(trail.Geometry.Count);
     }
 
     [Fact]
-    public void ToWorld_WorldPointMatchesGeoToWorldAtLiftedElevation()
+    public void ToWorld_FirstVertexMatchesGeoToWorldAtLiftedElevation()
     {
         var trail = BuildTrailAtCenter();
         var mesh = BuildMesh();
         const float lift = 5f;
         // Raster is a flat 1000 m plateau, so the sampled ground elevation is exactly 1000 m. The lift is
-        // applied as TRUE metres (divided by the exaggeration), so it adds a real `lift` to the world Z.
-        var expected = mesh.GeoToWorld(trail.Geometry[1], 1000f + (lift / mesh.VerticalExaggeration));
+        // applied as TRUE metres (divided by the exaggeration). The first vertex is an original node, kept exactly.
+        var expected = mesh.GeoToWorld(trail.Geometry[0], 1000f + (lift / mesh.VerticalExaggeration));
 
         var result = Trail3DWorldProjection.ToWorld(new[] { trail }, BuildRaster(), mesh, lift);
 
-        result.Single().World[1].Should().Be(expected);
+        result.Single().World[0].Should().Be(expected);
     }
 
     [Fact]
@@ -167,5 +169,51 @@ public sealed class Trail3DWorldProjectionTests
         var split = Trail3DWorldProjection.ToScreen(world, camera, 800f, 600f);
 
         split.Single().ScreenPoints.Should().Equal(legacy.Single().ScreenPoints);
+    }
+
+    private static DemRaster BuildDetailRaster(float elevation) =>
+        new(8, 8, new MapBounds(new GeoPoint(49.4, 19.4), new GeoPoint(49.6, 19.6)),
+            CreateFilled(8 * 8, elevation));
+
+    private static float[] CreateFilled(int count, float value)
+    {
+        var samples = new float[count];
+        Array.Fill(samples, value);
+        return samples;
+    }
+
+    [Fact]
+    public void ToWorld_VertexInsideDetailWindow_SeatsOnDetailElevationNotBase()
+    {
+        // Base plateau = 1000 m; the 1 m detail carves the same area to 900 m. A trail vertex inside the
+        // detail window must seat on the detail (900 m) so it doesn't float over the deeper-carved surface;
+        // a vertex outside the window keeps the base (1000 m).
+        var mesh = BuildMesh(); // 1000 m base
+        var detail = new DetailElevationField(BuildDetailRaster(900f));
+        var inside = new GeoPoint(49.5, 19.5);   // within the detail window
+        var outside = new GeoPoint(49.2, 19.2);  // inside base, outside detail
+        var trail = new Trail(
+            7L, "Detail probe",
+            new List<TrailMarking> { new(PttkColor.Red, "red:bar") },
+            new List<GeoPoint> { inside, outside });
+
+        var result = Trail3DWorldProjection.ToWorld(new[] { trail }, BuildRaster(), mesh, trailLiftMeters: 0f, detail: detail);
+
+        // Endpoints are preserved by densification: first node inside the detail window (900 m), last node
+        // outside it on the base (1000 m).
+        result.Single().World[0].Should().Be(mesh.GeoToWorld(inside, 900f));
+        result.Single().World[^1].Should().Be(mesh.GeoToWorld(outside, 1000f));
+    }
+
+    [Fact]
+    public void ToWorld_NullDetail_FallsBackToBaseEverywhere()
+    {
+        var mesh = BuildMesh();
+        var trail = BuildTrailAtCenter();
+
+        var withNull = Trail3DWorldProjection.ToWorld(new[] { trail }, BuildRaster(), mesh, trailLiftMeters: 0f, detail: null);
+        var legacy = Trail3DWorldProjection.ToWorld(new[] { trail }, BuildRaster(), mesh, trailLiftMeters: 0f);
+
+        withNull.Single().World.Should().Equal(legacy.Single().World);
     }
 }

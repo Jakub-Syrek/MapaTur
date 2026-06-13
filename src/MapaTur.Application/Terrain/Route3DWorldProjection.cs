@@ -17,6 +17,9 @@ namespace MapaTur.Application.Terrain;
 /// </summary>
 public static class Route3DWorldProjection
 {
+    /// <summary>Max spacing (m) between seated route vertices — sparse segments are subdivided to this so the line hugs the 1 m terrain.</summary>
+    private const double DensifySpacingMeters = 12.0;
+
     /// <summary>
     /// Lifts every route vertex to its DEM elevation and converts it into mesh world space.
     /// Camera-independent — compute once and reuse across frames.
@@ -25,17 +28,22 @@ public static class Route3DWorldProjection
     /// <param name="raster">Source DEM used to look up elevations along the route.</param>
     /// <param name="mesh">Mesh whose world-space convention defines the coordinate system.</param>
     /// <param name="routeLiftMeters">Vertical offset added to each vertex (before exaggeration) so the route sits above the mesh surface. Defaults slightly higher than trails so the route wins z-fights at shared waypoints.</param>
+    /// <param name="detail">Optional 1 m LOD detail field: inside its window the vertex seats on the detail
+    /// elevation (matching the rendered near-field mesh) instead of the coarse base. See <see cref="Trail3DWorldProjection.ToWorld"/>.</param>
     public static RouteWorldLine ToWorld(
         Route route,
         DemRaster raster,
         TerrainMesh3D mesh,
-        float routeLiftMeters = 8f)
+        float routeLiftMeters = 8f,
+        DetailElevationField? detail = null)
     {
         ArgumentNullException.ThrowIfNull(route);
         ArgumentNullException.ThrowIfNull(raster);
         ArgumentNullException.ThrowIfNull(mesh);
 
-        var polyline = route.ToPolyline();
+        // Densify so the route hugs the 1 m terrain (see Trail3DWorldProjection) instead of cutting straight
+        // across the relief between sparse waypoints.
+        var polyline = GeoPolylineDensifier.Densify(route.ToPolyline(), DensifySpacingMeters);
         var world = new Vector3[polyline.Count];
         // True-metric lift: divide by the exaggeration so GeoToWorld's Z scaling leaves the route a real
         // routeLiftMeters above the surface (a raw lift scaled with Pion and made the line float).
@@ -43,8 +51,10 @@ public static class Route3DWorldProjection
         for (int i = 0; i < polyline.Count; i++)
         {
             var geo = polyline[i];
-            float groundElevation = (float)raster.SampleBilinear(geo.Longitude, geo.Latitude);
-            world[i] = mesh.GeoToWorld(geo, groundElevation + liftElevation);
+            double ground = detail is not null && detail.TryGetElevation(geo.Longitude, geo.Latitude, out double detailElevation)
+                ? detailElevation
+                : raster.SampleBilinear(geo.Longitude, geo.Latitude);
+            world[i] = mesh.GeoToWorld(geo, (float)ground + liftElevation);
         }
 
         return new RouteWorldLine(route, world);
