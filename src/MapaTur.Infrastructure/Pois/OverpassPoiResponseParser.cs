@@ -35,11 +35,26 @@ public static class OverpassPoiResponseParser
                 throw new InvalidDataException("Overpass response is missing the 'elements' array.");
             }
 
+            // First pass: gather named place nodes (hamlet / neighbourhood / locality / …). They are NOT
+            // POIs themselves — they give a nameless parking its everyday name (the parking at Brzeziny is
+            // an unnamed amenity=parking in OSM; "Brzeziny" is a nearby place node).
+            var places = new List<(GeoPoint Position, string Name)>();
+            foreach (var element in elements.EnumerateArray())
+            {
+                if (element.TryGetProperty("tags", out var t) && t.ValueKind == JsonValueKind.Object
+                    && StringTag(t, "place") is not null
+                    && StringTag(t, "name") is { Length: > 0 } placeName
+                    && TryReadPosition(element, out GeoPoint placePos))
+                {
+                    places.Add((placePos, placeName));
+                }
+            }
+
             var seenIds = new HashSet<long>();
             var pois = new List<MountainPoi>();
             foreach (var element in elements.EnumerateArray())
             {
-                if (TryBuildPoi(element, out MountainPoi poi) && seenIds.Add(poi.Id))
+                if (TryBuildPoi(element, places, out MountainPoi poi) && seenIds.Add(poi.Id))
                 {
                     pois.Add(poi);
                 }
@@ -49,7 +64,10 @@ public static class OverpassPoiResponseParser
         }
     }
 
-    private static bool TryBuildPoi(JsonElement element, out MountainPoi poi)
+    // A nameless parking borrows the name of the nearest place within this radius → "Parking {place}".
+    private const double ParkingNamingRadiusMeters = 1500.0;
+
+    private static bool TryBuildPoi(JsonElement element, IReadOnlyList<(GeoPoint Position, string Name)> places, out MountainPoi poi)
     {
         poi = null!;
 
@@ -66,7 +84,9 @@ public static class OverpassPoiResponseParser
         PoiKind? kind = PoiKindParser.FromTags(
             StringTag(tags, "tourism"),
             StringTag(tags, "amenity"),
-            StringTag(tags, "shelter_type"));
+            StringTag(tags, "shelter_type"),
+            StringTag(tags, "natural"),
+            StringTag(tags, "mountain_pass"));
         if (kind is null)
         {
             return false;
@@ -80,8 +100,34 @@ public static class OverpassPoiResponseParser
         string name = StringTag(tags, "name") ?? string.Empty;
         double? elevation = DoubleTag(tags, "ele");
 
+        // OSM parkings are usually unnamed amenity=parking. Give them the everyday name hikers use — the
+        // nearest place node (e.g. "Parking Brzeziny") — so they label on the map and are searchable as
+        // route start points; with no place nearby they stay a generic "Parking".
+        if (kind.Value == PoiKind.Parking && string.IsNullOrWhiteSpace(name))
+        {
+            string? nearest = NearestPlaceName(position, places);
+            name = nearest is null ? "Parking" : $"Parking {nearest}";
+        }
+
         poi = new MountainPoi(idElement.GetInt64(), name, position, kind.Value, elevation);
         return true;
+    }
+
+    private static string? NearestPlaceName(GeoPoint point, IReadOnlyList<(GeoPoint Position, string Name)> places)
+    {
+        string? best = null;
+        double bestMeters = ParkingNamingRadiusMeters;
+        foreach ((GeoPoint pos, string placeName) in places)
+        {
+            double meters = point.HaversineDistanceMetersTo(pos);
+            if (meters <= bestMeters)
+            {
+                bestMeters = meters;
+                best = placeName;
+            }
+        }
+
+        return best;
     }
 
     private static bool TryReadPosition(JsonElement element, out GeoPoint position)

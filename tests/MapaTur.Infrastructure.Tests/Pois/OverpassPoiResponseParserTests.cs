@@ -82,4 +82,65 @@ public sealed class OverpassPoiResponseParserTests
 
         act.Should().Throw<InvalidDataException>();
     }
+
+    [Fact]
+    public void Parse_NamelessParkingNearAPlace_IsNamedAfterTheNearestPlace()
+    {
+        // Brzeziny: OSM has a place=neighbourhood node, but the parking nearby has NO name tag.
+        // The parser should borrow the nearest place's name → "Parking Brzeziny".
+        string json = """
+        { "elements": [
+            { "type": "node", "id": 100, "lat": 49.2843, "lon": 20.0050, "tags": { "place": "neighbourhood", "name": "Brzeziny" } },
+            { "type": "node", "id": 101, "lat": 49.2840, "lon": 20.0055, "tags": { "amenity": "parking", "fee": "yes" } }
+        ] }
+        """;
+
+        var pois = OverpassPoiResponseParser.Parse(Utf8(json));
+
+        var parking = pois.Single(p => p.Kind == PoiKind.Parking);
+        parking.Name.Should().Be("Parking Brzeziny");
+    }
+
+    [Fact]
+    public void Parse_NamedParking_KeepsItsOwnName()
+    {
+        string json = """
+        { "elements": [
+            { "type": "node", "id": 200, "lat": 49.28, "lon": 20.00, "tags": { "place": "village", "name": "Zakopane" } },
+            { "type": "node", "id": 201, "lat": 49.281, "lon": 20.001, "tags": { "amenity": "parking", "name": "Parking pod Reglami" } }
+        ] }
+        """;
+
+        var pois = OverpassPoiResponseParser.Parse(Utf8(json));
+
+        pois.Single(p => p.Kind == PoiKind.Parking).Name.Should().Be("Parking pod Reglami");
+    }
+
+    [Fact]
+    public void Parse_PlaceNode_IsNotItselfAPoi()
+    {
+        string json = """
+        { "elements": [
+            { "type": "node", "id": 300, "lat": 49.28, "lon": 20.00, "tags": { "place": "neighbourhood", "name": "Brzeziny" } }
+        ] }
+        """;
+
+        OverpassPoiResponseParser.Parse(Utf8(json)).Should().BeEmpty("a place node is naming context, not a POI");
+    }
+
+    [Fact]
+    public void Parse_NamelessParkingFarFromAnyPlace_StaysGenericParking()
+    {
+        string json = """
+        { "elements": [
+            { "type": "node", "id": 400, "lat": 49.10, "lon": 20.50, "tags": { "place": "village", "name": "Faraway" } },
+            { "type": "node", "id": 401, "lat": 49.28, "lon": 20.00, "tags": { "amenity": "parking" } }
+        ] }
+        """;
+
+        var pois = OverpassPoiResponseParser.Parse(Utf8(json));
+
+        pois.Single(p => p.Kind == PoiKind.Parking).Name.Should().Be("Parking");
+    }
+
 }

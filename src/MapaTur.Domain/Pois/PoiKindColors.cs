@@ -26,6 +26,8 @@ public static class PoiKindColors
         PoiKind.Chalet => "B45309",
         PoiKind.Shelter => "0D9488",
         PoiKind.Viewpoint => "2563EB",
+        PoiKind.Parking => "475569", // slate grey — reads as infrastructure, off the warm refuge palette
+        PoiKind.Pass => "CA8A04", // amber/gold — a saddle/col, distinct from the gold PEAK glyph by shape
         _ => "DC2626",
     };
 }

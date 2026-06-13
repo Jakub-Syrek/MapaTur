@@ -12,6 +12,8 @@ public sealed class PoiKindColorsTests
     [InlineData(PoiKind.Chalet, "B45309")]
     [InlineData(PoiKind.Shelter, "0D9488")]
     [InlineData(PoiKind.Viewpoint, "2563EB")]
+    [InlineData(PoiKind.Parking, "475569")]
+    [InlineData(PoiKind.Pass, "CA8A04")]
     public void ToHex_KnownKind_ReturnsExpectedHex(PoiKind kind, string expected)
     {
         PoiKindColors.ToHex(kind).Should().Be(expected);

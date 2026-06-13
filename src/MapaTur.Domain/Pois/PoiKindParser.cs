@@ -7,10 +7,16 @@ namespace MapaTur.Domain.Pois;
 public static class PoiKindParser
 {
     /// <summary>
-    /// Classifies an OSM element from its <c>tourism</c> / <c>amenity</c> / <c>shelter_type</c> tags.
-    /// Tourism tags win over a bare <c>amenity=shelter</c> (a hut tagged as both is a hut).
+    /// Classifies an OSM element from its <c>tourism</c> / <c>amenity</c> / <c>shelter_type</c> /
+    /// <c>natural</c> / <c>mountain_pass</c> tags. Tourism tags win over a bare <c>amenity=shelter</c>
+    /// (a hut tagged as both is a hut).
     /// </summary>
-    public static PoiKind? FromTags(string? tourism, string? amenity, string? shelterType)
+    public static PoiKind? FromTags(
+        string? tourism,
+        string? amenity,
+        string? shelterType,
+        string? natural = null,
+        string? mountainPass = null)
     {
         _ = shelterType; // currently informational only; reserved for finer shelter sub-typing.
 
@@ -33,6 +39,14 @@ public static class PoiKindParser
         if (Eq(amenity, "shelter"))
         {
             return PoiKind.Shelter;
+        }
+        if (Eq(amenity, "parking"))
+        {
+            return PoiKind.Parking;
+        }
+        if (Eq(natural, "saddle") || Eq(mountainPass, "yes"))
+        {
+            return PoiKind.Pass;
         }
 
         return null;

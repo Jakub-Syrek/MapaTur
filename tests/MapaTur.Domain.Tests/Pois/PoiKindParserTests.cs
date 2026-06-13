@@ -13,6 +13,7 @@ public sealed class PoiKindParserTests
     [InlineData("viewpoint", null, null, PoiKind.Viewpoint)]
     [InlineData(null, "shelter", null, PoiKind.Shelter)]
     [InlineData(null, "shelter", "lean_to", PoiKind.Shelter)]
+    [InlineData(null, "parking", null, PoiKind.Parking)]
     public void FromTags_MapsRecognisedTags(string? tourism, string? amenity, string? shelterType, PoiKind expected)
     {
         PoiKindParser.FromTags(tourism, amenity, shelterType).Should().Be(expected);
@@ -38,5 +39,13 @@ public sealed class PoiKindParserTests
     public void FromTags_IsCaseInsensitive()
     {
         PoiKindParser.FromTags("Alpine_Hut", null, null).Should().Be(PoiKind.Hut);
+    }
+
+    [Theory]
+    [InlineData("saddle", null)]
+    [InlineData(null, "yes")]
+    public void FromTags_SaddleOrMountainPass_MapsToPass(string? natural, string? mountainPass)
+    {
+        PoiKindParser.FromTags(null, null, null, natural, mountainPass).Should().Be(PoiKind.Pass);
     }
 }

@@ -19,4 +19,10 @@ public enum PoiKind
 
     /// <summary>Scenic viewpoint (OSM <c>tourism=viewpoint</c>).</summary>
     Viewpoint,
+
+    /// <summary>Car park / trailhead parking (OSM <c>amenity=parking</c>).</summary>
+    Parking,
+
+    /// <summary>Mountain pass / saddle (OSM <c>natural=saddle</c> or <c>mountain_pass=yes</c>) — a route target.</summary>
+    Pass,
 }

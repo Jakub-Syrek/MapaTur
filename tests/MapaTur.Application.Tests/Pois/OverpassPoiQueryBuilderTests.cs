@@ -19,6 +19,10 @@ public sealed class OverpassPoiQueryBuilderTests
         query.Should().Contain("\"tourism\"=\"chalet\"");
         query.Should().Contain("\"tourism\"=\"viewpoint\"");
         query.Should().Contain("\"amenity\"=\"shelter\"");
+        query.Should().Contain("\"amenity\"=\"parking\"");
+        query.Should().Contain("node[\"place\"]");
+        query.Should().Contain("\"natural\"=\"saddle\"");
+        query.Should().Contain("\"mountain_pass\"=\"yes\"");
     }
 
     [Fact]

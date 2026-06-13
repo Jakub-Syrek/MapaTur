@@ -32,6 +32,10 @@ public static class OverpassPoiQueryBuilder
               nwr["tourism"="chalet"]({{bbox}});
               nwr["tourism"="viewpoint"]({{bbox}});
               nwr["amenity"="shelter"]({{bbox}});
+              nwr["amenity"="parking"]({{bbox}});
+              node["natural"="saddle"]({{bbox}});
+              nwr["mountain_pass"="yes"]({{bbox}});
+              node["place"]({{bbox}});
             );
             out tags center;
             """;
