@@ -720,7 +720,9 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <summary>Premium menu "Biomy": paint the base albedo by elevation-zone biomes (hala/piargi/skała/śnieg/lód).</summary>
     [ObservableProperty] private bool biomeMaterialOn;
 
-    [ObservableProperty] private bool showTrails = true;
+    // Default OFF after a fresh install — only peak names (showPeakNames) start on; the user opts in
+    // to trails and each POI category from the Dane panel.
+    [ObservableProperty] private bool showTrails;
 
     partial void OnShowTrailsChanged(bool value) => OnTrailFilterChanged();
 
@@ -896,21 +898,22 @@ public sealed partial class MapPageViewModel : ObservableObject
     // Last-downloaded POIs, kept so the per-type filter can re-apply without re-querying Overpass.
     private IReadOnlyList<MapaTur.Domain.Pois.MountainPoi>? rawPois;
 
-    // Per-kind POI visibility toggles (default all on). Unchecking all hides POIs entirely.
+    // Per-kind POI visibility toggles. Default all OFF after a fresh install — the user opts in to
+    // each category from the Dane panel (only peak names start on). Checking any reveals that kind.
     [ObservableProperty]
-    private bool showHuts = true;
+    private bool showHuts;
     [ObservableProperty]
-    private bool showWildernessHuts = true;
+    private bool showWildernessHuts;
     [ObservableProperty]
-    private bool showChalets = true;
+    private bool showChalets;
     [ObservableProperty]
-    private bool showShelters = true;
+    private bool showShelters;
     [ObservableProperty]
-    private bool showViewpoints = true;
+    private bool showViewpoints;
     [ObservableProperty]
-    private bool showParking = true;
+    private bool showParking;
     [ObservableProperty]
-    private bool showPasses = true;
+    private bool showPasses;
 
     partial void OnShowHutsChanged(bool value) => ApplyPoiFilter();
     partial void OnShowWildernessHutsChanged(bool value) => ApplyPoiFilter();

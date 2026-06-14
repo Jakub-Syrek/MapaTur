@@ -69,6 +69,23 @@
 		<AndroidKeyStore Condition="'$(AndroidSigningKeyStore)' != ''">true</AndroidKeyStore>
 	</PropertyGroup>
 
+	<!-- ── Windows desktop self-contained distributable (Inno Setup installer) ──────────────────────
+	     A self-contained, unpackaged (WindowsPackageType=None) win-x64 publish that the desktop
+	     installer wraps. Gated behind the WindowsSelfContained property so it never touches the CI
+	     Windows compile leg or the Android release. The RID/SelfContained switches live INSIDE the
+	     windows-TFM condition on purpose: a global `-r win-x64` / `-p:RuntimeIdentifier` leaks onto
+	     the net10.0-android TFM during restore, which then demands the non-existent
+	     Microsoft.NETCore.App.Runtime.Mono.win-x64 pack (NU1102). Keeping it TFM-scoped means the
+	     Android TFM is never given a RID, so its restore stays clean.
+	     Build: dotnet publish src/MapaTur.App/MapaTur.App.csproj -c Release `
+	              -f net10.0-windows10.0.19041.0 -p:WindowsSelfContained=true -->
+	<PropertyGroup Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows' and '$(WindowsSelfContained)' == 'true'">
+		<RuntimeIdentifier>win-x64</RuntimeIdentifier>
+		<SelfContained>true</SelfContained>
+		<WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+		<WindowsPackageType>None</WindowsPackageType>
+	</PropertyGroup>
+
 	<ItemGroup>
 		<!-- App Icon -->
 		<MauiIcon Include="Resources\AppIcon\appicon.svg" ForegroundFile="Resources\AppIcon\appiconfg.svg" Color="#512BD4" />
