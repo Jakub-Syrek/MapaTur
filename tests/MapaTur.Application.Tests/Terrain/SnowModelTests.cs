@@ -43,11 +43,13 @@ public sealed class SnowModelTests
     }
 
     [Fact]
-    public void Compute_Band_IsFifteenPercentOfRelief()
+    public void Compute_Band_IsTenPercentOfRelief()
     {
         SnowShadingParameters p = SnowModel.Compute(0.5f, MinZ, MaxZ);
 
-        p.BandZ.Should().BeApproximately((MaxZ - MinZ) * 0.15f, 0.01f);
+        // A tighter band (was 15%) gives a crisper, more realistic snowline — snow sits with a defined
+        // edge on the benches/gullies the terrain dictates instead of a wide hazy gradient.
+        p.BandZ.Should().BeApproximately((MaxZ - MinZ) * 0.10f, 0.01f);
     }
 
     [Fact]

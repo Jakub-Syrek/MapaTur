@@ -28,8 +28,9 @@ public static class SnowModel
     /// <summary>Slope angle (degrees) at/above which the face is fully bare rock (snow sheds off).</summary>
     public const float SnowBaresAboveDegrees = 55f;
 
-    /// <summary>Soft snowline band as a fraction of the terrain's relief.</summary>
-    private const float BandFractionOfRelief = 0.15f;
+    /// <summary>Soft snowline band as a fraction of the terrain's relief. Kept tight so the snowline reads
+    /// with a defined, realistic edge (snow holding on benches/gullies) rather than a wide hazy gradient.</summary>
+    private const float BandFractionOfRelief = 0.10f;
 
     /// <summary>
     /// Builds the snow shading parameters.

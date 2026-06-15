@@ -251,14 +251,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    vec3 bn = normalize(vNormal);\n" +
         "    float northness = clamp(bn.y, -1.0, 1.0);\n" +
         "    float biomeSlopeDeg = degrees(acos(clamp(bn.z, 0.0, 1.0)));\n" +
-        "    float effZ = vWorldPos.z + (northness * uBiomeAspectShiftZ);\n" +
+        // ABSOLUTE world-Z (stable frame), same reason as snow: uBiome*Z thresholds are absolute, so comparing
+        // them against the camera-relative vWorldPos.z made the biome bands drift with the look-at (camera tilt).
+        "    float effZ = vStableWorldPos.z + (northness * uBiomeAspectShiftZ);\n" +
         "    float bandZ = max(20.0, uBiomeAspectShiftZ * 0.4);\n" +
         "    vec3 meadow = uBiomePalette[0];\n" +
         "    vec3 scree = uBiomePalette[1];\n" +
         "    vec3 snowC = uBiomePalette[3];\n" +
         "    vec3 iceC = uBiomePalette[4];\n" +
         "    vec3 bcol = meadow;\n" +
-        "    bcol = mix(bcol, scree, smoothstep(uBiomeMeadowMaxZ - bandZ, uBiomeMeadowMaxZ + bandZ, vWorldPos.z));\n" +
+        "    bcol = mix(bcol, scree, smoothstep(uBiomeMeadowMaxZ - bandZ, uBiomeMeadowMaxZ + bandZ, vStableWorldPos.z));\n" +
         "    float toSnow = smoothstep(uBiomeSnowZ - bandZ, uBiomeSnowZ + bandZ, effZ);\n" +
         "    bcol = mix(bcol, snowC, toSnow);\n" +
         "    bcol = mix(bcol, iceC, smoothstep(uBiomeIceZ - bandZ, uBiomeIceZ + bandZ, effZ));\n" +
@@ -292,7 +294,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // a 5-octave fbmT per fragment tanked the framerate ("zarywa"); the band already softens the edge.
         "  float snowMix = 0.0;\n" +
         "  if (uSnowStrength > 0.001 && uSlopeMode < 0.5) {\n" +
-        "    float snowH = smoothstep(uSnowLineZ, uSnowLineZ + uSnowBandZ, vWorldPos.z);\n" +
+        // ELEVATION must be sampled in the STABLE/absolute frame (vStableWorldPos), NOT the render frame
+        // (vWorldPos = aPos - cameraTarget). uSnowLineZ is an ABSOLUTE world-Z (from tile Min/MaxElevationZ),
+        // so comparing it against the camera-relative vWorldPos.z made the effective snowline drift with the
+        // look-at point — i.e. the snow amount changed when you only tilted the camera. Stable frame = fixed.
+        "    float snowH = smoothstep(uSnowLineZ, uSnowLineZ + uSnowBandZ, vStableWorldPos.z);\n" +
         "    vec3 nrm = normalize(vNormal);\n" +
         // Slope drives snow holding: it lies on gentle ground and slides off steep faces, leaving bare
         // rock. n.z is cos(slope-from-vertical) — 1 flat, 0 vertical — so snow fades from full (gentle)
@@ -303,18 +309,32 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // strongest when there's only a little snow and fades to nothing at full cover — so a thin
         // dusting clings to the shaded north faces while a deep pack still blankets every aspect.
         "    float southFacing = max(0.0, -nrm.y);\n" +
-        "    float aspectMelt = southFacing * (1.0 - uSnowStrength);\n" +
+        // Softened (×0.45): aspect melt thins snow on sunny south faces, but gently — a heavy hand made the
+        // cover read as patchy north/south blotches ("łaciaty"). The pack stays mostly uniform across aspects.
+        "    float aspectMelt = southFacing * (1.0 - uSnowStrength) * 0.45;\n" +
         "    snowMix = clamp(snowH * slope * (1.0 - aspectMelt), 0.0, 1.0) * uSnowStrength;\n" +
-        "    base = mix(base, vec3(0.99, 0.99, 1.0), snowMix);\n" +
+        // NB: the snow albedo is NOT baked into `base` here — snow gets its own dedicated bright/cool
+        // lighting below (after `lit = base * lightSum`) so shadowed faces don't grey out.
         "  }\n" +
         "  vec3 lit = base * lightSum;\n" +
-        // Snow stays bright white even in shadow (very high albedo + sky/multiple scattering): lift the
-        // lit colour toward white by the snow amount, so ambient-only (shadowed) snow doesn't read grey.
-        // The base lift (0.6) is boosted toward ~0.9 at high (noon) sun via uNoonSnowLift so the intense
-        // midday light reads as bright white instead of the flat grey it showed before ("o 12 szarawo").
-        "  lit = mix(lit, vec3(1.0), snowMix * (0.6 + uNoonSnowLift));\n" +
+        // Snow shading (dedicated): snow's very high albedo + sky/multiple scattering keeps it BRIGHT even
+        // in shadow, with a cool-blue cast (real snow shadows are blue, not grey). So it reads as snow from
+        // EVERY camera angle — not white on the sun side and grey on the faces turned away. It is lit with
+        // the snow's OWN high ambient floor (full uSkyAmbient, not the rock's halved uAmbient term) plus the
+        // warm direct-sun term (sunlit), which paints alpenglow at sunset. The Lambert gradient inside
+        // `sunlit` is preserved so the relief still reads instead of a flat white sticker. Driven by the sun
+        // (not the camera), so orbiting never changes it; still scales with uSkyAmbient so night snow dims.
+        "  if (snowMix > 0.001) {\n" +
+        "    vec3 snowAlbedo = vec3(0.96, 0.98, 1.0);\n" +
+        "    vec3 snowLit = snowAlbedo * (uSkyAmbient + (uSunColor * sunlit));\n" +
+        "    snowLit = mix(snowLit, vec3(1.0), uNoonSnowLift * 0.5);\n" +   // intense midday → extra pop toward pure white
+        "    lit = mix(lit, min(snowLit, vec3(1.0)), snowMix);\n" +
+        "  }\n" +
         "  float dist = length(vWorldPos - uCameraPos);\n" +
         "  float fogAmount = 1.0 - exp(-dist * uFogDensity);\n" +
+        // Snow shrugs off aerial perspective: keep distant snowfields crisp and white instead of washing
+        // them into the horizon haze ("bez efektu mgły na śniegu").
+        "  fogAmount *= (1.0 - 0.65 * snowMix);\n" +
         "  fragColor = vec4(mix(lit, uFogColor, fogAmount), 1.0);\n" +
         // DIAGNOSTIC overlay: render the raw ortho UV as colour (R=U, G=V). A clean smooth gradient per cell = UV
         // is fine → flat bands are texture sampling (mip/aniso/content). A striped/sawtooth pattern = UV is broken.
@@ -422,9 +442,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Sun disc + halo. smoothstep gives a soft-edged disc the right pixel size; pow gives
         // the Mie-style fall-off (the "glow") that bleeds well past the disc.
         "  float sunDot = dot(viewDir, uSunDir);\n" +
-        "  float sunCore = smoothstep(0.9994, 0.99985, sunDot);\n" +
-        "  float sunHalo = pow(max(sunDot, 0.0), 80.0) * 0.55;\n" +
-        "  vec3 sun = uSunColor * (sunCore + sunHalo);\n" +
+        // Bigger, brighter disc (~4° → ~2.5° soft edge, was ~2° → ~1°) with an over-bright core, plus a
+        // wider Mie halo (pow 80 → 55, 0.55 → 0.72) so the sun reads as a real, radiant sun rather than a dot.
+        "  float sunCore = smoothstep(0.9976, 0.9991, sunDot);\n" +
+        "  float sunHalo = pow(max(sunDot, 0.0), 55.0) * 0.72;\n" +
+        "  vec3 sun = uSunColor * (sunCore * 1.3 + sunHalo);\n" +
         "  fragColor = vec4(sky + sun, 1.0);\n" +
         "}\n";
 
@@ -1494,9 +1516,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         Vector3 skyAmbient = Vector3.One;
         if (atmosphere is not null)
         {
-            // Direct sun: lift toward white a little so even a deep-orange sunset still has enough
-            // luminance to light the slopes (pure (1,0.5,0.15) × albedo can read too dark).
-            sunCol = Vector3.Lerp(atmosphere.SunColor, Vector3.One, 0.25f) * 1.15f;
+            // Direct sun: lift toward white only a little (0.15) so the sun keeps more of its warmth —
+            // golden-hour slopes (and the snow alpenglow that reuses uSunColor) read genuinely warm — while
+            // the small lift + ×1.15 still keep a deep-orange sunset luminous enough to light the slopes.
+            sunCol = Vector3.Lerp(atmosphere.SunColor, Vector3.One, 0.15f) * 1.15f;
             // Ambient fill = a bright, desaturated version of the zenith sky tint so shadowed
             // faces pick up a soft cool cast that contrasts with the warm sun.
             skyAmbient = Vector3.Lerp(atmosphere.SkyZenithColor, Vector3.One, 0.55f);
