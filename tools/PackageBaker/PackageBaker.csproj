@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Dev-ops tool: turns on-disk data (the DEM tile cache, a prebuilt ortho .mbtiles) into versioned
+       package files + a manifest.json the PackageServer serves. Outside MapaTur.slnx, relaxed analysis. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <AnalysisLevel>latest-minimum</AnalysisLevel>
+    <RootNamespace>MapaTur.PackageBaker</RootNamespace>
+    <AssemblyName>PackageBaker</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Reuse the app's package model + manifest parser so the baked manifest always matches what the app reads. -->
+    <ProjectReference Include="..\..\src\MapaTur.Application\MapaTur.Application.csproj" />
+  </ItemGroup>
+
+</Project>
