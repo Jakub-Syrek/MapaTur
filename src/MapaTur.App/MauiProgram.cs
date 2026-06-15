@@ -246,8 +246,8 @@ public static class MauiProgram
         // exact dirs the renderer already reads (DEM cache + maps), so a fresh user gets full offline data
         // without side-loading anything. The manifest URL points at the package server (Railway); the
         // per-package download URLs inside the manifest may point at a CDN without any code change.
-        // TODO: set the real Railway URL here (or via the MAPATUR_PACKAGES_BASEURL env var) once deployed.
-        const string defaultPackagesBaseUrl = "https://mapatur-packages.up.railway.app";
+        // Railway package server (override per-build via the MAPATUR_PACKAGES_BASEURL env var).
+        const string defaultPackagesBaseUrl = "https://mapatur-production.up.railway.app";
         string packagesBaseUrl =
             (Environment.GetEnvironmentVariable("MAPATUR_PACKAGES_BASEURL") ?? defaultPackagesBaseUrl).TrimEnd('/');
         services.AddHttpClient("packages", c => c.Timeout = TimeSpan.FromMinutes(10));
