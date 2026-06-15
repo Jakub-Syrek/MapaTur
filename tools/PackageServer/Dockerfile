@@ -10,8 +10,8 @@ RUN dotnet publish PackageServer.csproj -c Release -o /app /p:UseAppHost=false
 FROM mcr.microsoft.com/dotnet/aspnet:10.0
 WORKDIR /app
 COPY --from=build /app .
-# Default data dir; override with PACKAGES_DIR. Mount a persistent volume here on Railway.
+# Default data dir; override with PACKAGES_DIR. Persistence comes from a Railway Volume attached at this
+# mount path (a Docker VOLUME instruction is rejected by Railway's builder, so we don't declare one).
 ENV PACKAGES_DIR=/data
-VOLUME /data
 EXPOSE 8080
 ENTRYPOINT ["dotnet", "PackageServer.dll"]
