@@ -1,0 +1,112 @@
+<svg viewBox="0 0 980 600" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="ttl dsc">
+<title id="ttl">Model dostarczania paczek danych z serwera Railway na telefon</title>
+<desc id="dsc">Komputer bakuje paczke (zip + SHA-256 + manifest) i wypycha ja tokenem na serwer Railway z wolumenem /data. Telefon pobiera manifest, sciaga paczke wznawialnymi kawalkami przez HTTP Range, weryfikuje SHA-256, rozpakowuje do cache i renderuje teren 3D offline.</desc>
+<style>
+  .bg{fill:var(--color-background-primary,#fff)}
+  .zone{fill:none;stroke:var(--color-border-tertiary,#e6e6e6);stroke-dasharray:5 5;rx:14}
+  .card{fill:var(--color-background-primary,#fff);stroke:var(--color-border-secondary,#d2d2d2)}
+  .acc{fill:#1aa05a}
+  .accsoft{fill:#1aa05a;fill-opacity:.12;stroke:#1aa05a;stroke-opacity:.5}
+  .pend{fill:none;stroke:var(--color-border-secondary,#c8c8c8);stroke-dasharray:3 3}
+  text{font-family:system-ui,-apple-system,Segoe UI,sans-serif}
+  .h{fill:var(--color-text-secondary,#6b6b6b);font-size:12px;font-weight:700;letter-spacing:.06em}
+  .tt{fill:var(--color-text-primary,#1a1a1a);font-size:12.5px;font-weight:700}
+  .ss{fill:var(--color-text-secondary,#6f6f6f);font-size:11px}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;fill:var(--color-text-secondary,#6f6f6f);font-size:10px}
+  .lab{fill:var(--color-text-secondary,#6f6f6f);font-size:10.5px;font-weight:600}
+  .accw{fill:#fff;font-size:12px;font-weight:700}
+  .flow{stroke:var(--color-text-secondary,#9a9a9a);stroke-width:1.6;fill:none}
+  .gflow{stroke:#1aa05a;stroke-width:2;fill:none}
+</style>
+<defs>
+  <marker id="ah" markerWidth="9" markerHeight="9" refX="6.5" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#9a9a9a"/></marker>
+  <marker id="ag" markerWidth="9" markerHeight="9" refX="6.5" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#1aa05a"/></marker>
+</defs>
+
+<rect x="0" y="0" width="980" height="600" class="bg"/>
+
+<!-- ZONE A: komputer -->
+<rect x="24" y="64" width="236" height="338" class="zone" rx="14"/>
+<text x="40" y="52" class="h">KOMPUTER · BAKE (raz)</text>
+<rect x="44" y="84" width="196" height="54" class="card" rx="9"/>
+<text x="56" y="106" class="tt">Dane na dysku</text>
+<text x="56" y="124" class="ss">dem-mobile/ · 8×PNG · 516 MB</text>
+<line x1="142" y1="138" x2="142" y2="162" class="flow" marker-end="url(#ah)"/>
+<rect x="44" y="164" width="196" height="52" class="card" rx="9"/>
+<text x="56" y="185" class="tt">PackageBaker</text>
+<text x="56" y="203" class="ss">pack-dir → zip + hash</text>
+<line x1="142" y1="216" x2="142" y2="240" class="flow" marker-end="url(#ah)"/>
+<rect x="44" y="242" width="196" height="92" class="card" rx="9"/>
+<text x="56" y="263" class="tt">Artefakty</text>
+<text x="56" y="283" class="mono">tatry-ortho-v1.zip · 516 MB</text>
+<text x="56" y="300" class="mono">manifest.json</text>
+<text x="56" y="317" class="mono">sha256 da79e736…</text>
+
+<!-- ZONE B: railway -->
+<rect x="300" y="64" width="320" height="338" class="zone" rx="14"/>
+<text x="316" y="52" class="h">RAILWAY · SERWER</text>
+<rect x="320" y="84" width="280" height="54" class="card" rx="9"/>
+<text x="334" y="106" class="tt">PackageServer</text>
+<text x="334" y="124" class="ss">static · Range · HEAD</text>
+<rect x="320" y="150" width="280" height="48" class="card" rx="9"/>
+<text x="334" y="170" class="tt">Volume /data</text>
+<text x="334" y="187" class="ss">trwałe paczki + manifest</text>
+<rect x="320" y="210" width="280" height="48" class="accsoft" rx="9"/>
+<text x="334" y="230" class="tt">PUT /admin/upload</text>
+<text x="334" y="247" class="ss">seed chroniony tokenem</text>
+<rect x="320" y="284" width="280" height="30" class="card" rx="8"/>
+<text x="334" y="303" class="mono">mapatur-production.up.railway.app</text>
+
+<!-- A -> B  upload -->
+<path d="M240 288 C 272 288, 286 234, 318 234" class="gflow" marker-end="url(#ag)"/>
+<text x="246" y="276" class="lab" fill="#1aa05a">PUT ↑ 516 MB (token)</text>
+
+<!-- ZONE C: telefon -->
+<rect x="660" y="64" width="296" height="338" class="zone" rx="14"/>
+<text x="676" y="52" class="h">TELEFON · APKA (offline)</text>
+<rect x="680" y="84" width="256" height="44" class="card" rx="9"/>
+<text x="694" y="104" class="tt">1 · Katalog</text>
+<text x="694" y="120" class="ss">manifest → stan paczek</text>
+<rect x="680" y="134" width="256" height="44" class="acc" rx="9"/>
+<text x="694" y="154" class="accw">2 · Pobieranie</text>
+<text x="694" y="170" class="accw" font-weight="500" opacity=".92">HTTP Range · wznawialne</text>
+<rect x="680" y="184" width="256" height="44" class="card" rx="9"/>
+<text x="694" y="204" class="tt">3 · Weryfikacja</text>
+<text x="694" y="220" class="ss">SHA-256 == manifest</text>
+<rect x="680" y="234" width="256" height="44" class="card" rx="9"/>
+<text x="694" y="254" class="tt">4 · Rozpak</text>
+<text x="694" y="270" class="ss">zip → maps/ (drape 3D)</text>
+<rect x="680" y="284" width="256" height="44" class="accsoft" rx="9"/>
+<text x="694" y="304" class="tt">5 · Teren 3D ✓</text>
+<text x="694" y="320" class="ss">z dysku, zero streamingu</text>
+
+<!-- B -> C  download -->
+<path d="M600 150 C 632 150, 648 106, 680 106" class="gflow" marker-end="url(#ag)"/>
+<text x="612" y="96" class="lab" fill="#1aa05a">GET manifest + Range</text>
+
+<!-- BOTTOM: chunking -->
+<rect x="24" y="424" width="932" height="154" class="zone" rx="14"/>
+<text x="40" y="412" class="h">POBIERANIE = WZNAWIALNE KAWAŁKI (CHUNKING)</text>
+<text x="44" y="456" class="ss">Plik dzielony na bajtowe zakresy. Każdy chunk dopisywany do <tspan class="mono">.part</tspan>; zerwane łącze na grani → wznawia od ostatniego bajtu, nie od zera.</text>
+
+<g>
+  <rect x="44" y="486" width="400" height="26" class="acc" rx="4"/>
+  <rect x="444" y="486" width="480" height="26" class="pend" rx="4"/>
+  <line x1="124" y1="486" x2="124" y2="512" stroke="#fff" stroke-opacity=".6"/>
+  <line x1="204" y1="486" x2="204" y2="512" stroke="#fff" stroke-opacity=".6"/>
+  <line x1="284" y1="486" x2="284" y2="512" stroke="#fff" stroke-opacity=".6"/>
+  <line x1="364" y1="486" x2="364" y2="512" stroke="#fff" stroke-opacity=".6"/>
+  <line x1="524" y1="486" x2="524" y2="512" class="pend"/>
+  <line x1="604" y1="486" x2="604" y2="512" class="pend"/>
+  <line x1="684" y1="486" x2="684" y2="512" class="pend"/>
+  <line x1="764" y1="486" x2="764" y2="512" class="pend"/>
+  <line x1="844" y1="486" x2="844" y2="512" class="pend"/>
+  <line x1="444" y1="476" x2="444" y2="522" stroke="#1aa05a" stroke-width="2"/>
+  <text x="444" y="472" text-anchor="middle" class="lab" fill="#1aa05a">↻ wznowienie</text>
+</g>
+<text x="60" y="503" class="accw" font-size="11">✓ pobrane → .part</text>
+<text x="690" y="503" class="lab">○ do pobrania</text>
+<line x1="924" y1="499" x2="950" y2="499" class="gflow" marker-end="url(#ag)"/>
+<text x="44" y="540" class="mono">Range: bytes=N-    →    206 Partial Content    →    chunki po 64 KB    →    komplet → SHA-256 ✓ → rozpak</text>
+<text x="44" y="562" class="ss">Tier mobilny ortofoto = 516 MB; im więcej paczek na telefonie, tym płynniej (cache-first, bez dociągania).</text>
+</svg>

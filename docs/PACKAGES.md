@@ -5,6 +5,39 @@ regionu leżą na serwerze (Railway), aplikacja pobiera je i rozpakowuje **dokł
 renderer i tak czyta** — więc pobranie niczego nie zmienia w rysowaniu, tylko napełnia dane. Im więcej
 danych na telefonie, tym płynniej (zero streamingu, wszystko z dysku).
 
+## Stan wdrożenia (live)
+
+Serwer **postawiony i zasilony**:
+- URL: **https://mapatur-production.up.railway.app** (Railway, EU West, Root Directory `tools/PackageServer`, Volume → `/data`).
+- Aplikacja celuje w ten URL (`MauiProgram.cs` `defaultPackagesBaseUrl`; override per-build env `MAPATUR_PACKAGES_BASEURL`).
+- Wgrane: `tatry-ortho` v1 (ortofoto mobilne, 516 MB, z `dem-mobile/`).
+
+### Jak dosłać kolejną paczkę (reuse)
+
+Railway volume nie ma uploadu w UI → używamy token-gated endpointu serwera. Sekret ustaw raz:
+Railway → serwis → **Variables** → `UPLOAD_TOKEN=<sekret>`.
+
+```powershell
+$token = '<UPLOAD_TOKEN>'
+$base  = 'https://mapatur-production.up.railway.app'
+$srv   = "$env:TEMP\mapatur-srv"
+
+# 1) bake (przyklad: 1 m DEM z cache GUGiK)
+dotnet run --project tools/PackageBaker -c Release -- pack-dir "<...\dem-cache\gugik>" `
+  --id tatry-dem-1m --name "Tatry DEM 1 m" --layer Dem --version 1 --out $srv --base-url $base
+
+# 2) wypchnij zip + manifest na /data (curl -T strumieniuje z dysku)
+curl.exe -T "$srv\packages\tatry-dem-1m-v1.zip" -H "X-Upload-Token: $token" "$base/admin/upload/packages/tatry-dem-1m-v1.zip"
+curl.exe -T "$srv\manifest.json"                -H "X-Upload-Token: $token" "$base/admin/upload/manifest.json"
+
+# 3) weryfikacja
+curl.exe -s "$base/manifest.json"
+curl.exe -s -I "$base/packages/tatry-dem-1m-v1.zip"   # 200 + Accept-Ranges: bytes
+```
+
+> Bump `--version`, gdy zmieniasz dane — apka wykryje „aktualizacja dostępna" po wersji w markerze.
+> Endpoint `/admin/upload` wyłączysz, usuwając `UPLOAD_TOKEN` (wtedy 404).
+
 ## Architektura
 
 ```
