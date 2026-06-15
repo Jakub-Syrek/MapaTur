@@ -326,6 +326,30 @@ public partial class MapPage : ContentPage
         await viewModel.DownloadTatraOfflineCommand.ExecuteAsync(null);
     }
 
+    // "Download data packages": pulls the pre-baked DEM/ortho packages from the server. Sizes come from the
+    // manifest (hundreds of MB to a few GB for ortho), so we WiFi-gate this just like the offline tile pull.
+    private async void OnDownloadDataPackagesTapped(object? sender, TappedEventArgs e)
+    {
+        viewModel.ActiveSection = 0; // close the panel so the status line is visible
+
+        bool onWifi = Connectivity.Current.ConnectionProfiles.Contains(ConnectionProfile.WiFi);
+        if (!onWifi)
+        {
+            bool proceed = await DisplayAlertAsync(
+                "Brak WiFi",
+                "Paczki danych (DEM 1 m + ortofoto) potrafią ważyć od kilkuset MB do kilku GB. "
+                    + "Nie masz WiFi — pobrać teraz na danych mobilnych?",
+                "Pobierz mimo to",
+                "Anuluj");
+            if (!proceed)
+            {
+                return;
+            }
+        }
+
+        await viewModel.DownloadDataPackagesCommand.ExecuteAsync(null);
+    }
+
     private void OnFlyThroughClicked(object? sender, EventArgs e)
     {
         viewModel.ActiveSection = 0;

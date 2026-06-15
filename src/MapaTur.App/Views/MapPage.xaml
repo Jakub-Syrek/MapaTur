@@ -282,6 +282,14 @@
                         <Label Text="⬇️  Pobierz całe Tatry offline (WiFi)" Style="{StaticResource GlassLabel}"
                                FontSize="13" HorizontalOptions="Center" />
                     </Border>
+
+                    <Border Padding="12,9" StrokeThickness="1" Stroke="#35B69CFF" Margin="0,2,0,0"
+                            Background="#22B69CFF">
+                        <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
+                        <Border.GestureRecognizers><TapGestureRecognizer Tapped="OnDownloadDataPackagesTapped" /></Border.GestureRecognizers>
+                        <Label Text="📦  Pobierz paczki danych (serwer)" Style="{StaticResource GlassLabel}"
+                               FontSize="13" HorizontalOptions="Center" />
+                    </Border>
                 </VerticalStackLayout>
                 </ScrollView>
             </Border>

@@ -6,6 +6,7 @@ using MapaTur.Application.Climbing;
 using MapaTur.Application.Location;
 using MapaTur.Application.Maps;
 using MapaTur.Application.Markers;
+using MapaTur.Application.Packaging;
 using MapaTur.Application.Pois;
 using MapaTur.Application.Roads;
 using MapaTur.Application.Routing;
@@ -69,6 +70,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     private readonly ILogger<MapPageViewModel> logger;
     private readonly OnlineRegionDemLoader? regionDemLoader;
     private readonly OfflineRegionDownloader? offlineDownloader;
+    private readonly OfflinePackageService? packageService;
 
     // Cache-presence gate for the LOD render loop (Krok 4b): only already-cached 1 m tiles are loaded while
     // flying, so detail streaming never triggers a WCS download. Null when no GUGiK source is wired.
@@ -1162,7 +1164,8 @@ public sealed partial class MapPageViewModel : ObservableObject
         IUserLocationLayerRenderer? userLocationRenderer = null,
         OnlineRegionDemLoader? regionDemLoader = null,
         OfflineRegionDownloader? offlineDownloader = null,
-        GugikNmtDemTileSource? gugikDemSource = null)
+        GugikNmtDemTileSource? gugikDemSource = null,
+        OfflinePackageService? packageService = null)
     {
         ArgumentNullException.ThrowIfNull(filePicker);
         ArgumentNullException.ThrowIfNull(fileSaver);
@@ -1199,6 +1202,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         this.settingsStore = settingsStore;
         this.regionDemLoader = regionDemLoader;
         this.offlineDownloader = offlineDownloader;
+        this.packageService = packageService;
         this.detailTileCached = gugikDemSource is null ? null : gugikDemSource.IsCached;
 
         // Subscribe to the location feed once at construction. The service stays silent until the
@@ -2180,6 +2184,65 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             logger.LogError(ex, "Offline Tatra download failed");
             StatusMessage = "Błąd pobierania Tatr offline";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// Downloads the pre-baked region packages (DEM 1 m + ortho) from the package server and unpacks them into
+    /// the renderer's data dirs, so a fresh user gets full offline data with no manual side-loading. Only
+    /// missing or out-of-date packages are fetched, and each download resumes if a prior attempt was cut off.
+    /// The WiFi-or-warn gate lives in the view; this runs once the user has agreed. No-op without a service.
+    /// </summary>
+    [RelayCommand]
+    private async Task DownloadDataPackagesAsync()
+    {
+        if (packageService is null)
+        {
+            StatusMessage = "Pobieranie paczek niedostępne";
+            return;
+        }
+
+        if (IsBusy)
+        {
+            return;
+        }
+
+        try
+        {
+            IsBusy = true;
+            StatusMessage = "Sprawdzanie dostępnych paczek…";
+            IReadOnlyList<PackageStatus> catalog = await packageService.GetCatalogAsync().ConfigureAwait(true);
+            var todo = catalog.Where(p => p.State != PackageState.Installed).Select(p => p.Package).ToList();
+            if (todo.Count == 0)
+            {
+                StatusMessage = "Wszystkie paczki danych są aktualne";
+                return;
+            }
+
+            for (int i = 0; i < todo.Count; i++)
+            {
+                RegionPackage package = todo[i];
+                int index = i + 1;
+                var progress = new Progress<PackageDownloadProgress>(p =>
+                {
+                    int percent = p.TotalBytes > 0 ? (int)(100L * p.BytesReceived / p.TotalBytes) : 0;
+                    StatusMessage = $"Pobieranie {package.Name} ({index}/{todo.Count})… {percent}%";
+                });
+                logger.LogInformation("Package download start: {Id} v{Version}", package.Id, package.Version);
+                await packageService.InstallAsync(package, progress).ConfigureAwait(true);
+                logger.LogInformation("Package installed: {Id} v{Version}", package.Id, package.Version);
+            }
+
+            StatusMessage = $"Paczki danych gotowe: {todo.Count} pobrano. Uruchom ponownie, by wczytać nowe dane.";
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Data package download failed");
+            StatusMessage = "Błąd pobierania paczek danych";
         }
         finally
         {

@@ -4,6 +4,7 @@ using MapaTur.App.Views;
 using MapaTur.Application.Climbing;
 using MapaTur.Application.Location;
 using MapaTur.Application.Maps;
+using MapaTur.Application.Packaging;
 using MapaTur.Application.Pois;
 using MapaTur.Application.Roads;
 using MapaTur.Application.Routing;
@@ -12,6 +13,7 @@ using MapaTur.Application.Tracks;
 using MapaTur.Application.Trails;
 using MapaTur.Infrastructure.Climbing;
 using MapaTur.Infrastructure.Maps.MBTiles;
+using MapaTur.Infrastructure.Packaging;
 using MapaTur.Infrastructure.Pois;
 using MapaTur.Infrastructure.Roads;
 using MapaTur.Infrastructure.Routing;
@@ -239,6 +241,41 @@ public static class MauiProgram
             var gugik = sp.GetRequiredService<GugikNmtDemTileSource>();
             return new OfflineRegionDownloader(gugik, gugik.IsCached);
         });
+
+        // Region-package download: pull pre-baked DEM/ortho packages from our server and unpack them into the
+        // exact dirs the renderer already reads (DEM cache + maps), so a fresh user gets full offline data
+        // without side-loading anything. The manifest URL points at the package server (Railway); the
+        // per-package download URLs inside the manifest may point at a CDN without any code change.
+        // TODO: set the real Railway URL here (or via the MAPATUR_PACKAGES_BASEURL env var) once deployed.
+        const string defaultPackagesBaseUrl = "https://mapatur-packages.up.railway.app";
+        string packagesBaseUrl =
+            (Environment.GetEnvironmentVariable("MAPATUR_PACKAGES_BASEURL") ?? defaultPackagesBaseUrl).TrimEnd('/');
+        services.AddHttpClient("packages", c => c.Timeout = TimeSpan.FromMinutes(10));
+        services.AddSingleton<IInstalledPackageStore>(_ =>
+            new FileInstalledPackageStore(Path.Combine(FileSystem.AppDataDirectory, "packages", "installed")));
+        services.AddSingleton<IPackageContentExtractor>(_ =>
+            new PackageContentExtractor(
+                Path.Combine(FileSystem.AppDataDirectory, "dem-cache", "gugik"),
+                Path.Combine(FileSystem.AppDataDirectory, "maps")));
+        services.AddSingleton<IPackageCatalogSource>(sp =>
+        {
+            var httpFactory = sp.GetRequiredService<System.Net.Http.IHttpClientFactory>();
+            return new HttpPackageCatalogSource(
+                httpFactory.CreateClient("packages"), $"{packagesBaseUrl}/manifest.json");
+        });
+        services.AddSingleton<IPackageInstaller>(sp =>
+        {
+            var httpFactory = sp.GetRequiredService<System.Net.Http.IHttpClientFactory>();
+            return new PackageInstaller(
+                new HttpPackageFileFetcher(httpFactory.CreateClient("packages")),
+                sp.GetRequiredService<IPackageContentExtractor>(),
+                sp.GetRequiredService<IInstalledPackageStore>(),
+                Path.Combine(FileSystem.AppDataDirectory, "packages", "work"));
+        });
+        services.AddSingleton<OfflinePackageService>(sp => new OfflinePackageService(
+            sp.GetRequiredService<IPackageCatalogSource>(),
+            sp.GetRequiredService<IInstalledPackageStore>(),
+            sp.GetRequiredService<IPackageInstaller>()));
 
         services.AddTransient<MapPageViewModel>();
         services.AddTransient<MapPage>();
