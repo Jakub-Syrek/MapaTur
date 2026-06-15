@@ -38,23 +38,37 @@ public static class PackageManifestParser
             var result = new List<RegionPackage>(packages.GetArrayLength());
             foreach (JsonElement element in packages.EnumerateArray())
             {
-                result.Add(ReadPackage(element));
+                RegionPackage? package = ReadPackage(element);
+                if (package is not null)
+                {
+                    result.Add(package);
+                }
             }
 
             return new PackageManifest(result);
         }
     }
 
-    private static RegionPackage ReadPackage(JsonElement e) =>
-        new(
+    private static RegionPackage? ReadPackage(JsonElement e)
+    {
+        // Forward-compatible: a package whose layer/format THIS build doesn't recognise is SKIPPED, not fatal —
+        // a newer manifest (e.g. a layer added later) must not break an older app. A missing layer/format field
+        // is still structural and throws (via ReadString inside TryReadEnum), as do other missing fields.
+        if (!TryReadEnum(e, "layer", out PackageLayer layer) || !TryReadEnum(e, "format", out PackageFormat format))
+        {
+            return null;
+        }
+
+        return new(
             Id: ReadString(e, "id"),
             Name: ReadString(e, "name"),
-            Layer: ReadEnum<PackageLayer>(e, "layer"),
-            Format: ReadEnum<PackageFormat>(e, "format"),
+            Layer: layer,
+            Format: format,
             Version: ReadInt(e, "version"),
             SizeBytes: ReadLong(e, "sizeBytes"),
             Sha256: ReadString(e, "sha256"),
             Url: ReadString(e, "url"));
+    }
 
     private static string ReadString(JsonElement e, string name)
     {
@@ -94,15 +108,12 @@ public static class PackageManifestParser
         return l;
     }
 
-    private static TEnum ReadEnum<TEnum>(JsonElement e, string name)
+    private static bool TryReadEnum<TEnum>(JsonElement e, string name, out TEnum value)
         where TEnum : struct, Enum
     {
+        // A missing/empty field is structural → ReadString throws. An unrecognised VALUE returns false so the
+        // caller skips the package (forward compatibility), rather than failing the whole manifest.
         string raw = ReadString(e, name);
-        if (!Enum.TryParse(raw, ignoreCase: true, out TEnum value) || !Enum.IsDefined(value))
-        {
-            throw new InvalidDataException($"Package entry has an unknown {typeof(TEnum).Name} '{raw}'.");
-        }
-
-        return value;
+        return Enum.TryParse(raw, ignoreCase: true, out value) && Enum.IsDefined(value);
     }
 }

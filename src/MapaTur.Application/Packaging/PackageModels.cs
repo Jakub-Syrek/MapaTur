@@ -8,6 +8,11 @@ public enum PackageLayer
 
     /// <summary>Orthophoto / raster map imagery shipped as a single MBTiles SQLite container.</summary>
     Ortho,
+
+    /// <summary>The monolithic base terrain DEM (e.g. <c>tatry.dem</c>) shipped as a zip; unpacked into the
+    /// <c>dem/</c> data folder the auto-loader scans for <c>*.dem</c>. This is what makes a fresh install land
+    /// in 3D — without it the app falls back to the flat 2D map.</summary>
+    BaseDem,
 }
 
 /// <summary>How a package's bytes are laid out, which decides how it is installed on the device.</summary>

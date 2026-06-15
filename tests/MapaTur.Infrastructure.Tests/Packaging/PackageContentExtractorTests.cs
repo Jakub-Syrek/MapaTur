@@ -13,6 +13,7 @@ public sealed class PackageContentExtractorTests : IDisposable
     private readonly string root;
     private readonly string demCacheDir;
     private readonly string mapsDir;
+    private readonly string baseDemDir;
     private readonly string workDir;
 
     public PackageContentExtractorTests()
@@ -20,9 +21,11 @@ public sealed class PackageContentExtractorTests : IDisposable
         root = Path.Combine(Path.GetTempPath(), "mapatur-extract-tests", Guid.NewGuid().ToString("N"));
         demCacheDir = Path.Combine(root, "dem-cache", "gugik");
         mapsDir = Path.Combine(root, "maps");
+        baseDemDir = Path.Combine(root, "dem");
         workDir = Path.Combine(root, "work");
         Directory.CreateDirectory(demCacheDir);
         Directory.CreateDirectory(mapsDir);
+        Directory.CreateDirectory(baseDemDir);
         Directory.CreateDirectory(workDir);
     }
 
@@ -38,7 +41,7 @@ public sealed class PackageContentExtractorTests : IDisposable
         }
     }
 
-    private PackageContentExtractor NewExtractor() => new(demCacheDir, mapsDir);
+    private PackageContentExtractor NewExtractor() => new(demCacheDir, mapsDir, baseDemDir);
 
     private string MakeZip(string name, params (string entry, string content)[] entries)
     {
@@ -60,6 +63,9 @@ public sealed class PackageContentExtractorTests : IDisposable
     private static RegionPackage OrthoPkg() =>
         new("tatry-ortho", "Ortho", PackageLayer.Ortho, PackageFormat.MBTiles, 1, 1, "00", "https://x/ortho.mbtiles");
 
+    private static RegionPackage BaseDemPkg() =>
+        new("tatry-dem-base", "Baza", PackageLayer.BaseDem, PackageFormat.ZipTileCache, 1, 1, "00", "https://x/base.zip");
+
     [Fact]
     public async Task ExtractAsync_Dem_UnzipsTileTreeIntoCacheDir()
     {
@@ -70,6 +76,22 @@ public sealed class PackageContentExtractorTests : IDisposable
         string tile = Path.Combine(demCacheDir, "16", "1", "2.tif");
         File.Exists(tile).Should().BeTrue();
         (await File.ReadAllTextAsync(tile)).Should().Be("ELEV");
+    }
+
+    [Fact]
+    public async Task ExtractAsync_BaseDem_UnzipsDemFileIntoDemDir()
+    {
+        // The base terrain DEM (tatry.dem) must land in dem/ where the auto-loader finds *.dem → 3D on first run.
+        string archive = MakeZip("base.part", ("tatry.dem", "HEIGHTFIELD"));
+
+        await NewExtractor().ExtractAsync(archive, BaseDemPkg());
+
+        string dem = Path.Combine(baseDemDir, "tatry.dem");
+        File.Exists(dem).Should().BeTrue();
+        (await File.ReadAllTextAsync(dem)).Should().Be("HEIGHTFIELD");
+        // It must NOT pollute the DEM tile cache or the maps dir.
+        Directory.GetFiles(demCacheDir, "*", SearchOption.AllDirectories).Should().BeEmpty();
+        Directory.GetFiles(mapsDir, "*", SearchOption.AllDirectories).Should().BeEmpty();
     }
 
     [Fact]

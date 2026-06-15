@@ -256,7 +256,8 @@ public static class MauiProgram
         services.AddSingleton<IPackageContentExtractor>(_ =>
             new PackageContentExtractor(
                 Path.Combine(FileSystem.AppDataDirectory, "dem-cache", "gugik"),
-                Path.Combine(FileSystem.AppDataDirectory, "maps")));
+                Path.Combine(FileSystem.AppDataDirectory, "maps"),
+                Path.Combine(FileSystem.AppDataDirectory, "dem")));
         services.AddSingleton<IPackageCatalogSource>(sp =>
         {
             var httpFactory = sp.GetRequiredService<System.Net.Http.IHttpClientFactory>();

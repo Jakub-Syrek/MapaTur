@@ -126,15 +126,34 @@ public sealed class PackageManifestParserTests
     }
 
     [Fact]
-    public void Parse_Throws_WhenAnEnumStringIsUnknown()
+    public void Parse_SkipsPackage_WhenLayerValueIsUnknown()
     {
-        const string badLayer = """
+        // Forward compatibility: a layer this build doesn't know (e.g. added in a newer app) is skipped,
+        // so a newer manifest never breaks an older app. The known package still loads.
+        const string mixed = """
+        { "packages": [
+          { "id": "future", "name": "F", "layer": "Bathymetry", "format": "ZipTileCache",
+            "version": 1, "sizeBytes": 1, "sha256": "00", "url": "https://x" },
+          { "id": "ortho", "name": "O", "layer": "Ortho", "format": "ZipTileCache",
+            "version": 1, "sizeBytes": 1, "sha256": "00", "url": "https://y" } ] }
+        """;
+
+        PackageManifest manifest = PackageManifestParser.Parse(Utf8(mixed));
+
+        manifest.Packages.Should().ContainSingle().Which.Id.Should().Be("ortho");
+    }
+
+    [Fact]
+    public void Parse_Throws_WhenLayerFieldIsMissing()
+    {
+        // A missing layer field is structural (malformed), not a forward-compat case → still fatal.
+        const string noLayer = """
         { "packages": [ {
-            "id": "x", "name": "X", "layer": "Bathymetry", "format": "ZipTileCache",
+            "id": "x", "name": "X", "format": "ZipTileCache",
             "version": 1, "sizeBytes": 1, "sha256": "00", "url": "https://x" } ] }
         """;
 
-        Action act = () => PackageManifestParser.Parse(Utf8(badLayer));
+        Action act = () => PackageManifestParser.Parse(Utf8(noLayer));
 
         act.Should().Throw<InvalidDataException>();
     }
