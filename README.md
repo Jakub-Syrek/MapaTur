@@ -115,6 +115,9 @@ src/
 └── MapaTur.App             MAUI: MapPage + view model, OpenGL ES terrain renderer, DI bootstrap
 tests/                      880+ unit + integration tests (xUnit + FluentAssertions + FsCheck)
 testdata/                   sample-tatry.tcx, overpass-tatry-sample.json, demo MBTiles, DEM generators
+tools/                      stand-alone dev/ops utilities (NOT shipped in the app) — see tools/README.md
+├── PackageBaker            CLI: bake baked data → versioned packages + manifest.json
+└── PackageServer           HTTP server for the offline data-package catalogue + blobs (Railway)
 docs/
 ├── adr/                    architecture decision records (MADR format)
 ├── 3d-terrain.md           3D GPU renderer overview
@@ -205,6 +208,16 @@ dotnet test
 ## Roadmap
 
 Milestones tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md). Initial milestones (M0–M6), hillshade (M7), climbing POIs (M8), the **3D terrain GPU engine (M9)**, the **streaming 1 m detail LOD with per-tile roughness**, the **whole-Tatra ring-LOD base**, **Slovak-side 1 m detail (DMR 5.0)**, the **GUGiK + ZBGIS cross-border ortho hybrid** and the **OSM lake gazetteer (water on all 171 tarns)** are complete and verified live on real Tatra data (Samsung S25 Ultra). Active line of work: rock material on steep slopes, elevation-aware routing, and signed store builds.
+
+## Known data quirks
+
+**GUGiK 1 m tile-edge dropouts (the "vertical fault").** A handful of cached GUGiK NMT **z16** detail tiles come back from the WCS with a flat-**0** strip along one edge (observed on the east edge of tile `X=36425`, near Rysy / Żabi Mnich — a ~12-pixel band). Because `0 m` is a valid Polish elevation it slips through the NoData filter, so the streamed 1 m detail renders it as a thin, dead-straight, deep gash cutting down the slope — a "fault" that is **visible on the hypsometric shading, so it is geometry, not the orthophoto**. Distinguishing notes for whoever hits it again:
+
+- It is **not** a single-cell pit, so the `DemRasterRepair.FillPits` despike (which the base and now the detail run) does **not** catch a ~12-wide strip.
+- It is **not** the LOD detail-window edge (that moves with the look-at point); this one is glued to a fixed terrain location and gets *more* prominent as the 1 m detail streams in.
+- It is **not** snow shading, the ortho cell-boundary stripes, or a tile-mosaic seam (`DemTileMosaic.Stitch` fills only missing tiles, and none were missing here).
+
+The strip was repaired **surgically in the on-disk cache** by interpolating each bracketed 0-band from the neighbouring valid 1 m data (only strips with valid data on *both* sides — true out-of-coverage tiles are left for the runtime base-backfill); originals are backed up under `…/dem-cache/gugik-seam-backup`. This is a **cache point-fix**: re-downloading those tiles can reintroduce it. The durable fix is a runtime "fill narrow interior 0-strips from the 1 m neighbours" guard in `DemRasterRepair` (not yet wired in).
 
 ## Contributing
 
