@@ -36,6 +36,7 @@ import time
 import numpy as np
 import requests
 import tifffile
+from scipy.ndimage import gaussian_filter, median_filter
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.normpath(os.path.join(SCRIPT_DIR, "..", ".."))
@@ -43,7 +44,19 @@ DEM_CACHE_DIR = os.path.join(SCRIPT_DIR, ".dem-cache")
 
 # Replace the lower-res output of generate-tatry-dem-real.py — the auto-loader
 # already prefers <repo>/dem/tatry.dem over the testdata fixture.
-OUTPUT_PATH = os.path.join(REPO_ROOT, "dem", "tatry.dem")
+# Overridable via DEM_OUTPUT so a re-bake can write a side file for delta-verification
+# before overwriting the live DEM (avoids clobbering what lakes/peaks/snow sit on).
+OUTPUT_PATH = os.environ.get("DEM_OUTPUT") or os.path.join(REPO_ROOT, "dem", "tatry.dem")
+
+# Anti-alias the WCS LiDAR mosaic before it is decimated onto the target grid. The WCS
+# server-resamples the 1 m DTM to our request size across an EPSG:2180->3857 reprojection,
+# leaving a high-frequency ripple; point-sampling (bilinear) that ripple DOWN to the target
+# grid aliases it into the relief-independent "strata" stripes baked into the old tatry.dem.
+# A masked Gaussian low-pass (matched to the decimation factor) removes the ripple AND the
+# spurious one-cell pits, while preserving the macro surface lakes/peaks/snow sit on.
+# Masked so the 0.0 "no-LiDAR" cells (south of Poland) never bleed into valid data.
+LIDAR_LOWPASS_SIGMA = float(os.environ.get("DEM_LOWPASS_SIGMA", "1.2"))  # in source-mosaic pixels (~9 m)
+LIDAR_SPIKE_DROP_M = float(os.environ.get("DEM_SPIKE_DROP_M", "30.0"))  # one-cell pit deeper than this vs 3x3 median = artefact
 
 # Tatra bbox — same as the other DEM scripts so the loaded mesh frame is identical.
 WEST, SOUTH, EAST, NORTH = 19.50, 49.10, 20.40, 49.40
@@ -255,6 +268,39 @@ def bilinear_sample(
     return (top * (1.0 - dr) + bot * dr).astype(np.float32)
 
 
+def clean_lidar_mosaic(pol: np.ndarray) -> np.ndarray:
+    """Anti-alias + despike the Polish LiDAR mosaic over its VALID data only.
+
+    1. Despike: a one-cell pit more than LIDAR_SPIKE_DROP_M below its 3x3 median is a WCS
+       bake artefact (the dark "trench dashes" along watercourses) — replace it with the
+       median, killing it at the source rather than relying on the runtime FillPits.
+    2. Masked Gaussian low-pass: removes the WCS reprojection ripple so the later bilinear
+       decimation can't alias it into the relief-independent "strata" stripes. The mask keeps
+       the 0.0 no-LiDAR cells (south of Poland) from bleeding into — and pulling down — the
+       valid data along the Polish/Slovak border. Cells without LiDAR are returned untouched.
+    """
+    valid = pol > 1.0
+    if not valid.any():
+        return pol
+
+    cleaned = pol.copy()
+
+    med = median_filter(cleaned, size=3, mode="nearest")
+    spikes = valid & (cleaned < med - LIDAR_SPIKE_DROP_M)
+    n_spikes = int(spikes.sum())
+    cleaned[spikes] = med[spikes]
+
+    mask = valid.astype(np.float32)
+    blurred = gaussian_filter(cleaned * mask, LIDAR_LOWPASS_SIGMA, mode="nearest")
+    norm = gaussian_filter(mask, LIDAR_LOWPASS_SIGMA, mode="nearest")
+    low_passed = blurred / np.maximum(norm, 1e-6)
+    cleaned = np.where(valid, low_passed, pol).astype(np.float32)
+
+    print(f"  LiDAR clean: despiked {n_spikes} one-cell pits, "
+          f"masked Gaussian low-pass sigma={LIDAR_LOWPASS_SIGMA}")
+    return cleaned
+
+
 def composite_layers(
     copernicus: np.ndarray, cop_box: tuple[float, float, float, float],
     poland: np.ndarray, pol_box: tuple[float, float, float, float],
@@ -322,6 +368,7 @@ def main() -> int:
     print("Building Tatry .dem from Polish 1 m LiDAR + Copernicus GLO-30...")
     cop, cw, cs, ce, cn = load_copernicus_mosaic()
     pol, pw, ps, pe, pn = build_polish_lidar_mosaic()
+    pol = clean_lidar_mosaic(pol)
     print(f"  compositing into {TARGET_COLS}×{TARGET_ROWS} grid "
           f"(bbox {WEST},{SOUTH},{EAST},{NORTH})")
     samples = composite_layers(cop, (cw, cs, ce, cn), pol, (pw, ps, pe, pn))
