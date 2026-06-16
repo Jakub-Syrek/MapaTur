@@ -64,6 +64,11 @@ public sealed class Marker3DOverlayProjector<TSource, TProjected>
     /// <param name="screenWidth">Viewport width in pixels.</param>
     /// <param name="screenHeight">Viewport height in pixels.</param>
     /// <param name="liftMeters">Vertical offset above the surface so the marker sits clear of the ground.</param>
+    /// <param name="maxDistanceMeters">
+    /// Maximum camera-to-marker world distance (metres) for which a marker is projected; markers beyond it
+    /// get a null screen position, so the renderer skips them. Defaults to <see cref="float.PositiveInfinity"/>
+    /// (no radius limit), so callers that don't opt in are unaffected. Used by the peak-name label radius.
+    /// </param>
     public IReadOnlyList<TProjected> Project(
         IReadOnlyList<TSource> items,
         DemRaster? raster,
@@ -71,7 +76,8 @@ public sealed class Marker3DOverlayProjector<TSource, TProjected>
         Camera3D camera,
         float screenWidth,
         float screenHeight,
-        float liftMeters)
+        float liftMeters,
+        float maxDistanceMeters = float.PositiveInfinity)
     {
         ArgumentNullException.ThrowIfNull(items);
         ArgumentNullException.ThrowIfNull(mesh);
@@ -95,11 +101,19 @@ public sealed class Marker3DOverlayProjector<TSource, TProjected>
             ? camera.BuildViewProjection(screenWidth / screenHeight)
             : Matrix4x4.Identity;
 
+        bool hasRadius = !float.IsPositiveInfinity(maxDistanceMeters);
+        float maxDistanceSquared = maxDistanceMeters * maxDistanceMeters;
+        Vector3 cameraPos = camera.Position;
+
         var buffer = results!;
         for (int i = 0; i < worldCache.Count; i++)
         {
             MarkerWorldPoint<TSource> marker = worldCache[i];
-            Vector3? screen = camera.ProjectToScreen(marker.World, viewProjection, screenWidth, screenHeight);
+            // Cull markers past the label radius (squared compare avoids a sqrt): they get a null screen
+            // position, exactly like an off-screen marker, so the host skips drawing them.
+            Vector3? screen = (hasRadius && Vector3.DistanceSquared(cameraPos, marker.World) > maxDistanceSquared)
+                ? null
+                : camera.ProjectToScreen(marker.World, viewProjection, screenWidth, screenHeight);
             buffer[i] = resultFactory(marker.Source, screen);
         }
 

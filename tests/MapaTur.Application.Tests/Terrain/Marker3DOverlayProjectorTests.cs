@@ -208,4 +208,45 @@ public sealed class Marker3DOverlayProjectorTests
         projected.Should().HaveCount(eager.Count);
         projected.Single().ScreenPosition.Should().Be(eager.Single().ScreenPosition);
     }
+
+    // A summit-name instantiation, mirroring how the view wires the peak overlay.
+    private static Marker3DOverlayProjector<TerrainPeak, ProjectedPeak> PeakProjector()
+        => new(
+            (items, _, m, lift) => Peak3DProjection.ToWorld(items, m, lift),
+            (source, screen) => new ProjectedPeak(source, screen));
+
+    [Fact]
+    public void Project_MarkerBeyondLabelRadius_IsCulledToNullScreen()
+    {
+        var peaks = new[] { new TerrainPeak(new GeoPoint(49.5, 19.5), 2100.0, "Rysy") };
+
+        // The camera sits 80 km from the scene; a 1 m label radius is far below that, so the peak is
+        // beyond the radius and must be dropped (null screen) exactly like an off-screen marker.
+        var projected = PeakProjector().Project(
+            peaks, null, BuildMesh(), LookDownCamera(), 800f, 600f, 40f, maxDistanceMeters: 1f);
+
+        projected.Single().ScreenPosition.Should().BeNull();
+    }
+
+    [Fact]
+    public void Project_MarkerWithinLabelRadius_KeepsScreenPosition()
+    {
+        var peaks = new[] { new TerrainPeak(new GeoPoint(49.5, 19.5), 2100.0, "Rysy") };
+
+        var projected = PeakProjector().Project(
+            peaks, null, BuildMesh(), LookDownCamera(), 800f, 600f, 40f, maxDistanceMeters: 1_000_000f);
+
+        projected.Single().ScreenPosition.Should().NotBeNull();
+    }
+
+    [Fact]
+    public void Project_DefaultMaxDistance_DoesNotCull()
+    {
+        // No radius argument → unlimited (positive infinity) → behaves exactly as before (back-compat).
+        var peaks = new[] { new TerrainPeak(new GeoPoint(49.5, 19.5), 2100.0, "Rysy") };
+
+        var projected = PeakProjector().Project(peaks, null, BuildMesh(), LookDownCamera(), 800f, 600f, 40f);
+
+        projected.Single().ScreenPosition.Should().NotBeNull();
+    }
 }

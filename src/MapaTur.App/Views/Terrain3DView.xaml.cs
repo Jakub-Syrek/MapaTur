@@ -165,6 +165,18 @@ public partial class Terrain3DView : ContentView
         set => SetValue(ShowPeakNamesProperty, value);
     }
 
+    /// <summary>Maximum camera distance (metres) at which summit name labels are shown — peaks farther than
+    /// this are culled, so the user can trim distant label clutter via a slider. Default 15 km.</summary>
+    public static readonly BindableProperty PeakLabelRadiusMetersProperty = BindableProperty.Create(
+        nameof(PeakLabelRadiusMeters), typeof(double), typeof(Terrain3DView), 15000.0,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
+
+    public double PeakLabelRadiusMeters
+    {
+        get => (double)GetValue(PeakLabelRadiusMetersProperty);
+        set => SetValue(PeakLabelRadiusMetersProperty, value);
+    }
+
     /// <summary>Whether the on-screen camera control pads (altitude + pan/tilt) are shown. Set false in the
     /// immersive landscape mode so a phone screenshot of the scene is free of UI chrome.</summary>
     public static readonly BindableProperty ControlsVisibleProperty = BindableProperty.Create(
@@ -1358,7 +1370,8 @@ public partial class Terrain3DView : ContentView
         if (ShowPeakNames && Peaks is { Count: > 0 } peaks)
         {
             projectedPeaks = peakProjector.Project(
-                peaks, null, frame, Camera, e.Info.Width, e.Info.Height, PeakMarkerLiftMeters);
+                peaks, null, frame, Camera, e.Info.Width, e.Info.Height, PeakMarkerLiftMeters,
+                maxDistanceMeters: (float)PeakLabelRadiusMeters);
             occlusionMarkers += projectedPeaks.Count;
             var sw = DebugEnabled ? System.Diagnostics.Stopwatch.StartNew() : null;
             projectedPeaks = HideOccludedPeaks(projectedPeaks, frame);

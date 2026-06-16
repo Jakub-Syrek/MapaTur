@@ -418,6 +418,18 @@ public sealed partial class MapPageViewModel : ObservableObject
     private double forestDensity = 0.6;
 
     /// <summary>
+    /// Peak-name label radius in metres: summit name labels only show for peaks within this camera
+    /// distance, so the user can trim distant label clutter. The "Nazwy szczytów" toggle gates the whole
+    /// summit overlay; this slider sets how far it reaches. Bound into
+    /// <c>Terrain3DView.PeakLabelRadiusMeters</c>. Default 15 km. Persisted.
+    /// </summary>
+    [ObservableProperty]
+    private double peakLabelRadiusMeters = 15000;
+
+    /// <summary>Human-readable peak-label radius for the slider value chip, e.g. "15.0 km".</summary>
+    public string PeakLabelRadiusText => $"{PeakLabelRadiusMeters / 1000.0:0.0} km";
+
+    /// <summary>
     /// Live atmospheric model derived from <see cref="TimeOfDayHours"/>, <see cref="Cloudiness"/>,
     /// <see cref="Wind"/> and <see cref="Snow"/>. Recomputed whenever any change and bound straight
     /// into <c>Terrain3DView.Atmosphere</c>. Cheap to build so deriving per change is fine.
@@ -455,6 +467,14 @@ public sealed partial class MapPageViewModel : ObservableObject
         // rebuilds the tree placement when it changes. Just persist here.
         settingsStore.Forest = value;
         OnPropertyChanged(nameof(EffectiveForestDensity));
+    }
+
+    partial void OnPeakLabelRadiusMetersChanged(double value)
+    {
+        // Not part of the Atmosphere — the view binds PeakLabelRadiusMeters straight into the peak
+        // projector. Persist + refresh the value chip.
+        settingsStore.PeakLabelRadiusMeters = value;
+        OnPropertyChanged(nameof(PeakLabelRadiusText));
     }
 
     /// <summary>
@@ -1261,6 +1281,10 @@ public sealed partial class MapPageViewModel : ObservableObject
         if (settingsStore.Forest is { } savedForest)
         {
             forestDensity = Math.Clamp(savedForest, 0.0, 1.0);
+        }
+        if (settingsStore.PeakLabelRadiusMeters is { } savedPeakRadius)
+        {
+            peakLabelRadiusMeters = Math.Clamp(savedPeakRadius, 1000.0, 80_000.0);
         }
         cameraState = settingsStore.CameraState;
         this.trackRenderer = trackRenderer;
@@ -2730,7 +2754,14 @@ public sealed partial class MapPageViewModel : ObservableObject
         IReadOnlyList<TerrainMesh3D>? perTileResult = await Task.Run(() =>
         {
             var totalTimer = System.Diagnostics.Stopwatch.StartNew();
-            DemRaster holed = DemRasterRepair.HoleBelow(loaded, DetailCoverageFloorMeters);
+            // Despike the 1 m detail too. The base is FillPits'd at load (line ~2356), but GUGiK NMT 1 m
+            // carries the SAME one-cell trench-dashes along watercourses; a moderate pit that stays ABOVE
+            // the coverage floor slips past HoleBelow and renders as a dark-walled trench (seen running to
+            // the tarn near Żabi Mnich). Same proven median-of-4 repair as the base; we're already inside
+            // the worker (off the UI thread), and it runs BEFORE the per-tile subsample so a pit can't be
+            // sampled with its true neighbours stride-away.
+            DemRaster despiked = DemRasterRepair.FillPits(loaded, depthThresholdMeters: 20.0);
+            DemRaster holed = DemRasterRepair.HoleBelow(despiked, DetailCoverageFloorMeters);
             if (!DemRasterCoverage.HasTerrain(holed, minTopMeters: 100))
             {
                 logger.LogInformation("LOD per-tile @ {Lat:F4},{Lon:F4}: no 1 m coverage — keeping base", focus.Latitude, focus.Longitude);

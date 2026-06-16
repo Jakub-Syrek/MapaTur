@@ -12,6 +12,7 @@ public sealed class MauiPreferences3DSettingsStore : I3DSettingsStore
     private const string WindKey = "Terrain3D.Wind";
     private const string SnowKey = "Terrain3D.Snow";
     private const string ForestKey = "Terrain3D.Forest";
+    private const string PeakLabelRadiusKey = "Terrain3D.PeakLabelRadius";
     private const string CameraStateKey = "Terrain3D.CameraState";
     private const double SentinelMissing = double.NaN;
 
@@ -137,6 +138,27 @@ public sealed class MauiPreferences3DSettingsStore : I3DSettingsStore
             else
             {
                 Preferences.Default.Set(ForestKey, value.Value);
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public double? PeakLabelRadiusMeters
+    {
+        get
+        {
+            double value = Preferences.Default.Get(PeakLabelRadiusKey, SentinelMissing);
+            return double.IsNaN(value) ? null : value;
+        }
+        set
+        {
+            if (value is null)
+            {
+                Preferences.Default.Remove(PeakLabelRadiusKey);
+            }
+            else
+            {
+                Preferences.Default.Set(PeakLabelRadiusKey, value.Value);
             }
         }
     }

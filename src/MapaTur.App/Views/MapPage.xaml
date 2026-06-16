@@ -42,6 +42,7 @@
                              LodOrthoCoverageBounds="{Binding LodOrthoCoverageBounds}"
                              LodDetailBounds="{Binding LodDetailBounds}"
                              ShowPeakNames="{Binding ShowPeakNames}"
+                             PeakLabelRadiusMeters="{Binding PeakLabelRadiusMeters}"
                              ControlsVisible="{Binding ChromeVisible}"
                              SlopeMapEnabled="{Binding SlopeMapMode}"
                              RockMaterialEnabled="{Binding RockMaterialOn}"
@@ -447,6 +448,15 @@
                             <Label Text="🗻 Nazwy szczytów" Style="{StaticResource GlassLabel}" FontSize="12" />
                         </Border>
                     </FlexLayout>
+
+                    <!-- Peak-name label radius: only summits within this camera distance show a name. Sits right
+                         under the "Nazwy szczytów" toggle and appears only while that layer is on. -->
+                    <Grid ColumnDefinitions="64,*,52" ColumnSpacing="10" IsVisible="{Binding ShowPeakNames}">
+                        <Label Grid.Column="0" Text="Zasięg" Style="{StaticResource GlassLabel}" />
+                        <Slider Grid.Column="1" Style="{StaticResource GlassSlider}" Minimum="1000" Maximum="80000"
+                                Value="{Binding PeakLabelRadiusMeters, Mode=TwoWay}" SemanticProperties.Hint="Zasięg nazw szczytów od kamery" />
+                        <Label Grid.Column="2" Text="{Binding PeakLabelRadiusText}" Style="{StaticResource GlassValue}" />
+                    </Grid>
 
                     <Label Text="PUNKTY (POI)" Style="{StaticResource GlassCaption}" />
                     <FlexLayout Wrap="Wrap" JustifyContent="Start" AlignItems="Center">
