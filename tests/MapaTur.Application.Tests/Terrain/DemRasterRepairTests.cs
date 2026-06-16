@@ -284,4 +284,72 @@ public sealed class DemRasterRepairTests
 
         result.Samples[4].Should().Be(ND, "no fallback available — the mesh still holes it to the sky honestly");
     }
+
+    // FillNarrowZeroStrips: GUGiK NMT z16 tiles sometimes come back with a flat-0 strip along an edge (a
+    // thin coverage/processing dropout). 0 m is a valid Polish elevation so it survives the NoData filter and
+    // renders as a thin, dead-straight "fault". Bridge each run of consecutive 0-cells that is narrow AND
+    // bracketed by valid (non-0, non-NoData) cells on both sides, by linear interpolation; leave WIDE 0-voids
+    // (whole-tile GUGiK holes, e.g. over water) and edge-touching runs as 0 for the base-backfill.
+
+    [Fact]
+    public void FillNarrowZeroStrips_BridgesNarrowBracketedRun_ByLinearInterpolation()
+    {
+        // Two identical rows (DemRaster needs >=2 in each dim); the row pass bridges the 2-wide gap.
+        var samples = new[] { 10f, 0f, 0f, 20f, 10f, 0f, 0f, 20f };
+        var raster = Make(4, 2, samples);
+
+        var result = DemRasterRepair.FillNarrowZeroStrips(raster, maxWidthCells: 2);
+
+        result.Samples[1].Should().BeApproximately(13.333f, 0.01f);
+        result.Samples[2].Should().BeApproximately(16.667f, 0.01f);
+    }
+
+    [Fact]
+    public void FillNarrowZeroStrips_LeavesWideRun_ForTheBaseBackfill()
+    {
+        // A 3-wide 0-run with maxWidth 2 is a wide void (whole-tile GUGiK hole) — NOT fabricated here.
+        var samples = new[] { 10f, 0f, 0f, 0f, 20f, 10f, 0f, 0f, 0f, 20f };
+        var raster = Make(5, 2, samples);
+
+        var result = DemRasterRepair.FillNarrowZeroStrips(raster, maxWidthCells: 2);
+
+        result.Samples.Should().Equal(10f, 0f, 0f, 0f, 20f, 10f, 0f, 0f, 0f, 20f);
+    }
+
+    [Fact]
+    public void FillNarrowZeroStrips_LeavesEdgeTouchingRun_NoOneSidedExtrapolation()
+    {
+        // The leading 0-run has no valid cell to its left → not bracketed → left as 0 (no smear).
+        var samples = new[] { 0f, 0f, 10f, 20f, 0f, 0f, 10f, 20f };
+        var raster = Make(4, 2, samples);
+
+        var result = DemRasterRepair.FillNarrowZeroStrips(raster, maxWidthCells: 3);
+
+        result.Samples.Should().Equal(0f, 0f, 10f, 20f, 0f, 0f, 10f, 20f);
+    }
+
+    [Fact]
+    public void FillNarrowZeroStrips_FillsVerticalStrip_ViaTheRowPass()
+    {
+        // A vertical 0-column bracketed left/right is bridged per-row (the "fault" orientation).
+        var samples = new[] { 10f, 0f, 20f, 12f, 0f, 22f };
+        var raster = Make(3, 2, samples);
+
+        var result = DemRasterRepair.FillNarrowZeroStrips(raster, maxWidthCells: 1);
+
+        result.Samples[1].Should().Be(15f);
+        result.Samples[4].Should().Be(17f);
+    }
+
+    [Fact]
+    public void FillNarrowZeroStrips_LeavesNoDataAndNonZeroUntouched()
+    {
+        // NoData (-9999) is not a flat-0 gap, so it (and the valid cells) are left for the NoData machinery.
+        var samples = new[] { 10f, ND, 20f, 10f, ND, 20f };
+        var raster = Make(3, 2, samples);
+
+        var result = DemRasterRepair.FillNarrowZeroStrips(raster, maxWidthCells: 2);
+
+        result.Samples.Should().Equal(10f, ND, 20f, 10f, ND, 20f);
+    }
 }

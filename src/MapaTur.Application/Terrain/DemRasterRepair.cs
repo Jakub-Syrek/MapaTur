@@ -280,6 +280,83 @@ public static class DemRasterRepair
         return new DemRaster(cols, rows, raster.Bounds, s, noData);
     }
 
+    /// <summary>
+    /// Bridges NARROW flat-zero strips from the surrounding valid 1 m data. GUGiK NMT z16 tiles sometimes
+    /// come back with a flat-<c>0</c> strip along an edge (a thin coverage/processing dropout); because 0 m
+    /// is a valid Polish elevation it survives the NoData filter and renders as a thin, dead-straight,
+    /// deep-walled "fault" cutting across the terrain. This linearly interpolates each run of consecutive
+    /// 0-cells that is (a) no wider than <paramref name="maxWidthCells"/> AND (b) bracketed by valid
+    /// (non-zero, non-NoData) cells on BOTH sides — a true interior gap — first along rows (catching the
+    /// vertical tile-edge strip), then along columns. WIDE 0-voids (whole-tile GUGiK holes, e.g. over a
+    /// lake) and edge-touching (one-sided) runs are left as 0, so the downstream <see cref="HoleBelow"/> +
+    /// base-backfill renders the real coarse base there instead of a fabricated smear across the gap.
+    /// </summary>
+    /// <param name="raster">DEM whose flat-0 dropouts should be bridged.</param>
+    /// <param name="maxWidthCells">Widest 0-run (in cells) that is treated as a thin strip and interpolated.</param>
+    public static DemRaster FillNarrowZeroStrips(DemRaster raster, int maxWidthCells)
+    {
+        ArgumentNullException.ThrowIfNull(raster);
+
+        int cols = raster.Columns;
+        int rows = raster.Rows;
+        float noData = raster.NoDataValue;
+        float[] s = (float[])raster.Samples.Clone();
+
+        bool IsGap(float v) => v == 0f;
+        bool IsValid(float v) => v != 0f && !v.Equals(noData) && !float.IsNaN(v);
+
+        void BridgeLine(int start, int count, int stride)
+        {
+            int i = 0;
+            while (i < count)
+            {
+                if (!IsGap(s[start + (i * stride)]))
+                {
+                    i++;
+                    continue;
+                }
+
+                int j = i;
+                while (j < count && IsGap(s[start + (j * stride)]))
+                {
+                    j++;
+                }
+
+                // Run of gaps is [i, j-1]; bracket cells are i-1 and j.
+                bool bracketed = i > 0 && j < count
+                    && IsValid(s[start + ((i - 1) * stride)])
+                    && IsValid(s[start + (j * stride)]);
+                if (bracketed && (j - i) <= maxWidthCells)
+                {
+                    float v0 = s[start + ((i - 1) * stride)];
+                    float v1 = s[start + (j * stride)];
+                    float span = j - (i - 1);
+                    for (int k = i; k < j; k++)
+                    {
+                        float t = (k - (i - 1)) / span;
+                        s[start + (k * stride)] = v0 + ((v1 - v0) * t);
+                    }
+                }
+
+                i = j;
+            }
+        }
+
+        // Row pass bridges vertical strips (each row crosses the strip as a short gap run); column pass
+        // then bridges any horizontal strips left over.
+        for (int r = 0; r < rows; r++)
+        {
+            BridgeLine(r * cols, cols, stride: 1);
+        }
+
+        for (int c = 0; c < cols; c++)
+        {
+            BridgeLine(c, rows, stride: cols);
+        }
+
+        return new DemRaster(cols, rows, raster.Bounds, s, noData);
+    }
+
     // Walks `count` samples from `start` by `stride`, carrying the last valid value forward into holes.
     private static void FillRun(float[] s, int start, int count, int stride, Func<float, bool> isHole)
     {

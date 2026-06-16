@@ -2754,13 +2754,18 @@ public sealed partial class MapPageViewModel : ObservableObject
         IReadOnlyList<TerrainMesh3D>? perTileResult = await Task.Run(() =>
         {
             var totalTimer = System.Diagnostics.Stopwatch.StartNew();
+            // Bridge narrow flat-0 strips from the 1 m neighbours — the GUGiK z16 tile-edge dropout that
+            // renders as a thin, dead-straight vertical "fault" (0 m survives the NoData filter). ONLY narrow
+            // (<=24-cell ~ 58 m) interior strips bracketed by valid data are interpolated; WIDE 0-voids (whole
+            // GUGiK holes, e.g. over a tarn) are left for the base-backfill below, so we never fabricate a
+            // smooth patch ("square") across a real coverage gap.
+            DemRaster bridged = DemRasterRepair.FillNarrowZeroStrips(loaded, maxWidthCells: 24);
             // Despike the 1 m detail too. The base is FillPits'd at load (line ~2356), but GUGiK NMT 1 m
             // carries the SAME one-cell trench-dashes along watercourses; a moderate pit that stays ABOVE
-            // the coverage floor slips past HoleBelow and renders as a dark-walled trench (seen running to
-            // the tarn near Żabi Mnich). Same proven median-of-4 repair as the base; we're already inside
-            // the worker (off the UI thread), and it runs BEFORE the per-tile subsample so a pit can't be
-            // sampled with its true neighbours stride-away.
-            DemRaster despiked = DemRasterRepair.FillPits(loaded, depthThresholdMeters: 20.0);
+            // the coverage floor slips past HoleBelow and renders as a dark-walled trench. Same proven
+            // median-of-4 repair as the base; runs inside the worker, BEFORE the per-tile subsample so a pit
+            // can't be sampled with its true neighbours stride-away.
+            DemRaster despiked = DemRasterRepair.FillPits(bridged, depthThresholdMeters: 20.0);
             DemRaster holed = DemRasterRepair.HoleBelow(despiked, DetailCoverageFloorMeters);
             if (!DemRasterCoverage.HasTerrain(holed, minTopMeters: 100))
             {
