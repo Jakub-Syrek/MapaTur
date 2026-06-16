@@ -1,3 +1,11 @@
+## Terrain graphics — MANDATORY before baking tiles / touching the terrain pipeline
+
+Before you (re)generate or bake any DEM / ortho / z16 tiles, OR change the terrain load / repair / render
+pipeline, **read [`docs/TERRAIN-GRAPHICS-CHECKLIST.md`](docs/TERRAIN-GRAPHICS-CHECKLIST.md) and apply EVERY
+relevant item — comprehensively, across ALL render paths at once.** Do not fix one path/symptom and forget
+the siblings; that is the recurring failure that makes us re-bake in circles. After any change, run the
+checklist's verification (cache audit + visual sweep at multiple spots), not just the one location you were on.
+
 ## Testing Conventions
 
 ### TDD Workflow
