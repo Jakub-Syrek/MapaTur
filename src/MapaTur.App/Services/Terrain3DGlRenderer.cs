@@ -285,56 +285,60 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    int band = slopeDeg < 20.0 ? 0 : int(min(floor((slopeDeg - 20.0) / 10.0) + 1.0, 7.0));\n" +
         "    base = uSlopePalette[band];\n" +
         "  }\n" +
-        // Snow on top of the base colour, driven PRIMARILY BY ELEVATION: full above the snowline,
-        // fading out over the band just below it. The snowline (uSnowLineZ) sits at the highest peak when
-        // the slider is just on and drops to the valley floor at full — so snow always appears on the
-        // TOP first and recedes top-LAST. Slope only GENTLY thins it on the sheerest rock faces (mix
-        // 0.65..1.0), so steep summits still hold snow (they were wrongly stripped before). Blended toward
-        // a cool white; the lighting below shades it (sunlit bright, shadowed cool). NO per-pixel fBm —
-        // a 5-octave fbmT per fragment tanked the framerate ("zarywa"); the band already softens the edge.
+        // SNOW — a UNIFIED PHYSICAL model. Rather than multiplying ad-hoc "melt" terms, the warming
+        // influences RAISE the local snowline, exactly as in nature: the line sits HIGHER on warm, sun-hit,
+        // wind-scoured ground and LOWER in cold, shaded, sheltered hollows. Snow lies where the terrain
+        // rises above that local line. The physical inputs (Twoje: temperatura↦wysokość, nasłonecznienie):
+        //   • Elevation  → uSnowLineZ (base snowline = 0°C isotherm; the slider sets its height).
+        //   • Insolation → aspect (south faces warmer) + sun incidence (faces square to the sun warmer).
+        //   • Wind/curvature → low-freq noise scours ridges / loads hollows (proxy until real DEM curvature).
+        // Steep-face SHEDDING is kept SEPARATE and MECHANICAL (gravity/avalanche, NOT temperature). Every
+        // input is in the STABLE/absolute world frame, so the snow never changes when only the camera tilts.
         "  float snowMix = 0.0;\n" +
         "  if (uSnowStrength > 0.001 && uSlopeMode < 0.5) {\n" +
-        // ELEVATION must be sampled in the STABLE/absolute frame (vStableWorldPos), NOT the render frame
-        // (vWorldPos = aPos - cameraTarget). uSnowLineZ is an ABSOLUTE world-Z (from tile Min/MaxElevationZ),
-        // so comparing it against the camera-relative vWorldPos.z made the effective snowline drift with the
-        // look-at point — i.e. the snow amount changed when you only tilted the camera. Stable frame = fixed.
-        "    float snowH = smoothstep(uSnowLineZ, uSnowLineZ + uSnowBandZ, vStableWorldPos.z);\n" +
         "    vec3 nrm = normalize(vNormal);\n" +
-        // Slope drives snow holding: it lies on gentle ground and slides off steep faces, leaving bare
-        // rock. n.z is cos(slope-from-vertical) — 1 flat, 0 vertical — so snow fades from full (gentle)
-        // to nothing (steep) across the model's two angle thresholds. This is the "snow on one level by
-        // slope" look (rock on the steeps, white on the benches), not a flat elevation line.
-        "    float slope = smoothstep(uSnowSlopeCosBare, uSnowSlopeCosFull, nrm.z);\n" +
-        // Aspect: sunny SOUTH-facing slopes (+Y is north, so south = -Y) melt off first. The melt is
-        // strongest when there's only a little snow and fades to nothing at full cover — so a thin
-        // dusting clings to the shaded north faces while a deep pack still blankets every aspect.
-        "    float southFacing = max(0.0, -nrm.y);\n" +
-        // Softened (×0.45): aspect melt thins snow on sunny south faces, but gently — a heavy hand made the
-        // cover read as patchy north/south blotches ("łaciaty"). The pack stays mostly uniform across aspects.
-        "    float aspectMelt = southFacing * (1.0 - uSnowStrength) * 0.45;\n" +
-        "    snowMix = clamp(snowH * slope * (1.0 - aspectMelt), 0.0, 1.0) * uSnowStrength;\n" +
+        // Insolation: south-facing (+Y north → south = -nrm.y) and faces square to the sun absorb more
+        // energy → warmer → local snowline higher. Sun incidence is gated by the sun being up (uLightDir.z).
+        "    float southness = max(0.0, -nrm.y);\n" +
+        "    float sunInc = max(0.0, dot(nrm, uLightDir)) * clamp(uLightDir.z, 0.0, 1.0);\n" +
+        // Wind / curvature proxy: low-freq noise (2 cheap taps, not the 5-octave fbm that tanked FPS).
+        "    float snowN = (noiseT(vStableWorldPos.xy * 0.012) * 0.6) + (noiseT(vStableWorldPos.xy * 0.030) * 0.4);\n" +
+        // Warming weakens as the pack deepens: at the full slider every aspect is buried (uniform line →
+        // solid white); a thin cover differentiates strongly by aspect/sun/wind (natural spring patchiness).
+        "    float warmGate = 1.0 - uSnowStrength;\n" +
+        // Effective LOCAL snowline (m a.s.l.). The weights are the physical knobs, in metres of snowline lift:
+        //   aspect 260 m · sun-incidence 160 m · wind/curvature ±150 m.
+        "    float effLine = uSnowLineZ + ((((southness * 260.0) + (sunInc * 160.0)) + ((snowN - 0.5) * 300.0)) * warmGate);\n" +
+        "    float snowH = smoothstep(effLine, effLine + uSnowBandZ, vStableWorldPos.z);\n" +
+        // Mechanical shedding (NOT temperature): snow can't cling to steep faces / sharp ridges → bare rock.
+        // n.z = cos(slope): 1 flat, 0 vertical. A crisp cut on the steeps leaves the sharp ridges bare.
+        "    float slopeShed = smoothstep(uSnowSlopeCosBare, uSnowSlopeCosFull, nrm.z);\n" +
+        // Deep snow BRIDGES small steep bumps (glacier-smooth, fewer rock specks); a thin cover still bares
+        // every steep face. Lift the shed toward full-hold as the pack deepens (only the sharpest aretes stay bare).
+        "    slopeShed = slopeShed + ((1.0 - slopeShed) * uSnowStrength * 0.5);\n" +
+        "    snowMix = clamp(snowH * slopeShed, 0.0, 1.0) * uSnowStrength;\n" +
         // NB: the snow albedo is NOT baked into `base` here — snow gets its own dedicated bright/cool
         // lighting below (after `lit = base * lightSum`) so shadowed faces don't grey out.
         "  }\n" +
         "  vec3 lit = base * lightSum;\n" +
-        // Snow shading (dedicated): snow's very high albedo + sky/multiple scattering keeps it BRIGHT even
-        // in shadow, with a cool-blue cast (real snow shadows are blue, not grey). So it reads as snow from
-        // EVERY camera angle — not white on the sun side and grey on the faces turned away. It is lit with
-        // the snow's OWN high ambient floor (full uSkyAmbient, not the rock's halved uAmbient term) plus the
-        // warm direct-sun term (sunlit), which paints alpenglow at sunset. The Lambert gradient inside
-        // `sunlit` is preserved so the relief still reads instead of a flat white sticker. Driven by the sun
-        // (not the camera), so orbiting never changes it; still scales with uSkyAmbient so night snow dims.
+        // Snow shading (dedicated): high albedo + sky/multiple scattering keeps snow BRIGHT and COOL-BLUE in
+        // shadow (real snow shadows are blue, not grey), driven by the sun (not the camera) so orbiting never
+        // changes it, and scaling with uSkyAmbient so night snow dims. WINTER FORM: the sun↔shadow contrast
+        // is deepened so the snow shows its 3-D shape instead of a flat white sheet — the ambient floor is
+        // pulled DOWN (×0.65) for darker-but-still-blue shadows, and the direct-sun term is boosted (×1.4) so
+        // lit slopes pop to bright white. The two knobs: floor down / sun up = more relief, but watch for grey.
         "  if (snowMix > 0.001) {\n" +
         "    vec3 snowAlbedo = vec3(0.96, 0.98, 1.0);\n" +
-        "    vec3 snowLit = snowAlbedo * (uSkyAmbient + (uSunColor * sunlit));\n" +
+        "    vec3 snowLit = snowAlbedo * ((uSkyAmbient * 0.65) + (uSunColor * sunlit * 1.4));\n" +
         "    snowLit = mix(snowLit, vec3(1.0), uNoonSnowLift * 0.5);\n" +   // intense midday → extra pop toward pure white
         "    lit = mix(lit, min(snowLit, vec3(1.0)), snowMix);\n" +
         "  }\n" +
         "  float dist = length(vWorldPos - uCameraPos);\n" +
         "  float fogAmount = 1.0 - exp(-dist * uFogDensity);\n" +
-        // Snow shrugs off aerial perspective: keep distant snowfields crisp and white instead of washing
-        // them into the horizon haze ("bez efektu mgły na śniegu").
-        "  fogAmount *= (1.0 - 0.65 * snowMix);\n" +
+        // Snow keeps NEAR detail crisp, but DISTANT snowfields pick up cool aerial perspective — they fade
+        // into the horizon haze like the real range, instead of staying a hard white cut-out. Only a mild
+        // reduction (was a near-full block), so close snow is still sharp while far snow reads as luminous distance.
+        "  fogAmount *= (1.0 - 0.35 * snowMix);\n" +
         "  fragColor = vec4(mix(lit, uFogColor, fogAmount), 1.0);\n" +
         // DIAGNOSTIC overlay: render the raw ortho UV as colour (R=U, G=V). A clean smooth gradient per cell = UV
         // is fine → flat bands are texture sampling (mip/aniso/content). A striped/sawtooth pattern = UV is broken.

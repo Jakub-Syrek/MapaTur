@@ -43,13 +43,14 @@ public sealed class SnowModelTests
     }
 
     [Fact]
-    public void Compute_Band_IsTenPercentOfRelief()
+    public void Compute_Band_IsTightForACrispSnowline()
     {
         SnowShadingParameters p = SnowModel.Compute(0.5f, MinZ, MaxZ);
 
-        // A tighter band (was 15%) gives a crisper, more realistic snowline — snow sits with a defined
-        // edge on the benches/gullies the terrain dictates instead of a wide hazy gradient.
-        p.BandZ.Should().BeApproximately((MaxZ - MinZ) * 0.10f, 0.01f);
+        // The snowline is a DEFINED lower edge the slider moves up/down — NOT a wide elevation fade. A very
+        // tight band (3% of relief) keeps it crisp; the slope term (not a soft altitude gradient) is what
+        // breaks the line, cutting snow off on the sharp ridges and leaving bare rock on the steep faces.
+        p.BandZ.Should().BeApproximately((MaxZ - MinZ) * 0.03f, 0.01f);
     }
 
     [Fact]
