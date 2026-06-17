@@ -49,5 +49,21 @@ Prawdziwy Lumen (dynamiczne GI z ray-tracingiem) i prawdziwe Virtual Shadow Maps
 nie przenosimy 1:1 na GLES. Kroki 1–5 odtwarzają *postrzegany* rezultat o złotej godzinie na urządzeniu.
 
 ## Status
-Zadania w systemie TODO sesji: #1 (poświata), #2 (FBO), #3 (bloom), #4 (smugi), #5 (cienie).
-#3 i #4 blocked-by #2. Realizacja po kolei od #1.
+- ✅ **Krok 1 (poświata)** — `Atmosphere.SunGlowIntensity/Width` + term w shaderze nieba. Commity
+  `06e4a10` (feat) + `eed18d2` (ten TODO). Wgrane na S25 (v102), user: „jest ok".
+- ✅ **Krok 2 (fundament FBO)** — helper `PostProcessBufferSizing` (`f410488`, TDD 13 testów) +
+  etap post-process `RunPostProcess`/`EnsurePostBuffers` w rendererze (`6b28d84`, pass-through za
+  kill-switchem, graceful fallback). Desktop-log-verified: `[GL3D] post-process stage active`,
+  FBO kompletny. Reszta etapu (bloom/godrays) buduje na `RunPostProcess`.
+- ⏭️ **Następne: Krok 3 (bloom)** — bright-pass → blur (mip-chain z helpera, half-res) → additive
+  composite, w `RunPostProcess`. Próg/intensywność z `Atmosphere` (TDD).
+
+### Recepta deployu / weryfikacji (potwierdzona w tej sesji)
+- APK: `dotnet build src/MapaTur.App -f net10.0-android -c Release -p:EmbedAssembliesIntoApk=true
+  -p:ApplicationVersion=<N≥104>` **+ keystore** (`%USERPROFILE%\mapatur.keystore`, alias `mapatur`,
+  hasło w tym handoffie — bez niego `INSTALL_FAILED_UPDATE_INCOMPATIBLE`). Skasuj stary `*.apk`.
+- Build lokalny / desktop: najpierw ubij `MapaTur*` (blokady DLL); `-p:WindowsPackageType=None`.
+- Logi: **Serilog → plik** `…/win-x64/logs/mapatur-<data>.log` (desktop, dostępny na PC) — NIE logcat,
+  NIE Android external (Release nie jest debuggable → brak `run-as`). Renderer init na desktopie
+  ~40 s po starcie. Weryfikuj GL na desktopie (ten sam renderer) przez log.
+- Wszystkie commity LOKALNE, **nie pushnięte** (czekają na zgodę).
