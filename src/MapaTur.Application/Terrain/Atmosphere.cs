@@ -71,6 +71,16 @@ public sealed class Atmosphere
     /// as the sun sinks; zero at night.</summary>
     public float SunGlowWidth { get; }
 
+    /// <summary>Strength [0,1] of the screen-space bloom (bright-region bleed). Peaks at golden hour, stays
+    /// gentle in daylight, and is zero at night. Scales the additive bloom composite in the post-process
+    /// stage.</summary>
+    public float BloomIntensity { get; }
+
+    /// <summary>Normalised luminance cutoff [0.5,1] for the bloom bright-pass — pixels brighter than this
+    /// bleed. Lower (more permissive) at golden hour so the warm sky glows; higher at noon so only the
+    /// brightest highlights (sun disc, snow) bloom.</summary>
+    public float BloomThreshold { get; }
+
     /// <summary>
     /// Builds the model from a time-of-day in hours (wrapped into [0,24)) and an optional cloud
     /// coverage in [0,1]. Default coverage = 0.35 (scattered cirrus, the look that fits a
@@ -159,6 +169,16 @@ public sealed class Atmosphere
             : 0f;
         SunGlowIntensity = horizonProximity;
         SunGlowWidth = sunElevation > 0f ? 0.15f + (0.85f * horizonProximity) : 0f;
+
+        // Bloom (screen-space bright-region bleed): strongest at golden hour (low intense sun + luminous
+        // horizon sky), gentle but present in daylight (bright snow / clouds still glow), and off at night.
+        // The bright-pass threshold drops near the horizon so the warm sky blooms, and rises toward noon so
+        // only genuinely bright highlights bleed.
+        float bloomDay = MathF.Max(0f, MathF.Sin(sunElevation));
+        BloomIntensity = sunElevation > 0f
+            ? Math.Clamp((0.15f * bloomDay) + (0.85f * horizonProximity), 0f, 1f)
+            : 0f;
+        BloomThreshold = 0.65f + (0.20f * bloomDay);
     }
 
     private static float WrapToDay(float hours)

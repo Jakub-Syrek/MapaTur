@@ -481,6 +481,57 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "out vec4 fragColor;\n" +
         "void main(){ fragColor = texture(uTex, vUv); }\n";
 
+    // Bloom bright-pass: keep only the part of each pixel above the luminance threshold (soft knee via the
+    // over-threshold ratio) so the sun disc / luminous sky / lit snow pass through and everything else goes
+    // black. Output feeds the blur. Reuses PostVertexShaderSource.
+    private const string BloomBrightFragmentShaderSource =
+        "#version 300 es\n" +
+        "precision highp float;\n" +
+        "in vec2 vUv;\n" +
+        "uniform sampler2D uTex;\n" +
+        "uniform float uThreshold;\n" +
+        "out vec4 fragColor;\n" +
+        "void main(){\n" +
+        "  vec3 c = texture(uTex, vUv).rgb;\n" +
+        "  float l = dot(c, vec3(0.2126, 0.7152, 0.0722));\n" +
+        "  float k = max(l - uThreshold, 0.0) / max(l, 1e-4);\n" +
+        "  fragColor = vec4(c * k, 1.0);\n" +
+        "}\n";
+
+    // Bloom blur: linear-sampled 9-tap Gaussian (weights sum to 1). uDir is the one-axis texel step
+    // (1/width,0) for the horizontal pass, (0,1/height) for the vertical pass.
+    private const string BloomBlurFragmentShaderSource =
+        "#version 300 es\n" +
+        "precision highp float;\n" +
+        "in vec2 vUv;\n" +
+        "uniform sampler2D uTex;\n" +
+        "uniform vec2 uDir;\n" +
+        "out vec4 fragColor;\n" +
+        "void main(){\n" +
+        "  vec3 s = texture(uTex, vUv).rgb * 0.2270270270;\n" +
+        "  s += texture(uTex, vUv + uDir * 1.3846153846).rgb * 0.3162162162;\n" +
+        "  s += texture(uTex, vUv - uDir * 1.3846153846).rgb * 0.3162162162;\n" +
+        "  s += texture(uTex, vUv + uDir * 3.2307692308).rgb * 0.0702702703;\n" +
+        "  s += texture(uTex, vUv - uDir * 3.2307692308).rgb * 0.0702702703;\n" +
+        "  fragColor = vec4(s, 1.0);\n" +
+        "}\n";
+
+    // Bloom composite: the blurred bright buffer (half-res, linear-upsampled) added additively over the
+    // full-res scene, scaled by the Atmosphere-driven intensity.
+    private const string BloomCompositeFragmentShaderSource =
+        "#version 300 es\n" +
+        "precision highp float;\n" +
+        "in vec2 vUv;\n" +
+        "uniform sampler2D uScene;\n" +
+        "uniform sampler2D uBloom;\n" +
+        "uniform float uIntensity;\n" +
+        "out vec4 fragColor;\n" +
+        "void main(){\n" +
+        "  vec3 sc = texture(uScene, vUv).rgb;\n" +
+        "  vec3 bl = texture(uBloom, vUv).rgb;\n" +
+        "  fragColor = vec4(sc + (bl * uIntensity), 1.0);\n" +
+        "}\n";
+
     // Cloud-layer ("sea of clouds") program. A large horizontal quad at a fixed world altitude,
     // drawn AFTER the terrain with the depth test on (so peaks above the layer occlude it and the
     // valleys below are veiled) but depth-write off and alpha blending on. The fragment shader
@@ -1031,6 +1082,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int postTexLocation = -1;
     private bool postStageLogged; // log the post stage's FBO status once, not every frame
 
+    // Bloom: two half-resolution colour buffers (ping-pong) for the bright-pass + separable Gaussian blur,
+    // composited additively over the full-res scene into postColorTex. Half-res keeps it cheap and gives the
+    // soft spread for free on upsample. Falls back to the plain pass-through if these can't be created.
+    private uint bloomFboA, bloomTexA, bloomFboB, bloomTexB;
+    private int bloomWidth, bloomHeight; // half of the present size
+    private bool bloomUnsupported;
+    private uint bloomBrightProgram, bloomBlurProgram, bloomCompositeProgram;
+    private int bloomBrightTexLoc = -1, bloomBrightThresholdLoc = -1;
+    private int bloomBlurTexLoc = -1, bloomBlurDirLoc = -1;
+    private int bloomCompSceneLoc = -1, bloomCompBloomLoc = -1, bloomCompIntensityLoc = -1;
+    private bool bloomStageLogged;
+
     private readonly Dictionary<TerrainMesh3D, TileBuffers> tileBuffers = new();
     private IReadOnlyList<TerrainMesh3D>? lastTiles;
 
@@ -1347,6 +1410,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             postProgram = 0;
             postTexLocation = -1;
             postStageLogged = false;
+            // Bloom ping-pong buffers + programs — same context-loss handling.
+            bloomFboA = bloomTexA = bloomFboB = bloomTexB = 0;
+            bloomWidth = 0;
+            bloomHeight = 0;
+            bloomUnsupported = false;
+            bloomBrightProgram = 0;
+            bloomBlurProgram = 0;
+            bloomCompositeProgram = 0;
+            bloomBrightTexLoc = bloomBrightThresholdLoc = -1;
+            bloomBlurTexLoc = bloomBlurDirLoc = -1;
+            bloomCompSceneLoc = bloomCompBloomLoc = bloomCompIntensityLoc = -1;
+            bloomStageLogged = false;
             // The planar-reflection target belonged to the dead context — drop the handles so it's rebuilt fresh.
             reflectionFbo = 0;
             reflectionColorTex = 0;
@@ -1961,7 +2036,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         // Post-process stage (pass-through today; bloom / god rays build on it). Reads the resolved scene
         // and returns the texture the caller wraps for Skia — falls back to presentColorTex if unavailable.
-        uint finalTex = RunPostProcess(gl, presentColorTex, vpWidth, vpHeight);
+        uint finalTex = RunPostProcess(
+            gl, presentColorTex, vpWidth, vpHeight,
+            atmosphere?.BloomThreshold ?? 1f, atmosphere?.BloomIntensity ?? 0f);
 
         // Unbind everything before returning. The caller will re-establish whatever framebuffer Skia
         // expects (via GRContext.ResetContext) before sampling the texture we just produced.
@@ -2215,13 +2292,106 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         return true;
     }
 
+    /// <summary>Creates a clamped, linear-filtered RGBA8 colour texture of the given size.</summary>
+    private static uint MakeColorTexture(GL g, int w, int h)
+    {
+        uint tex = g.GenTexture();
+        g.BindTexture(TextureTarget.Texture2D, tex);
+        g.TexImage2D(
+            TextureTarget.Texture2D, 0, (int)InternalFormat.Rgba8,
+            (uint)w, (uint)h, 0, PixelFormat.Rgba, PixelType.UnsignedByte, null);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+        g.BindTexture(TextureTarget.Texture2D, 0);
+        return tex;
+    }
+
+    /// <summary>Creates a colour-only FBO wrapping <paramref name="colorTex"/> and returns its completeness status.</summary>
+    private static uint MakeColorFbo(GL g, uint colorTex, out GLEnum status)
+    {
+        uint fbo = g.GenFramebuffer();
+        g.BindFramebuffer(FramebufferTarget.Framebuffer, fbo);
+        g.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, colorTex, 0);
+        status = g.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
+        return fbo;
+    }
+
+    /// <summary>Links a fullscreen post-process program (the shared post vertex shader + the given fragment).</summary>
+    private static uint BuildPostProgram(GL g, string fragmentSource, string name)
+    {
+        uint vs = CompileShader(g, ShaderType.VertexShader, PostVertexShaderSource);
+        uint fs = CompileShader(g, ShaderType.FragmentShader, fragmentSource);
+        uint prog = g.CreateProgram();
+        g.AttachShader(prog, vs);
+        g.AttachShader(prog, fs);
+        g.LinkProgram(prog);
+        g.GetProgram(prog, ProgramPropertyARB.LinkStatus, out int linked);
+        if (linked == 0)
+        {
+            string log = g.GetProgramInfoLog(prog);
+            throw new InvalidOperationException(name + " shader link failed: " + log);
+        }
+        g.DetachShader(prog, vs);
+        g.DetachShader(prog, fs);
+        g.DeleteShader(vs);
+        g.DeleteShader(fs);
+        return prog;
+    }
+
     /// <summary>
-    /// Runs the post-process stage: samples <paramref name="sourceTex"/> through the post program into the
-    /// post FBO and returns the post colour texture. A pass-through today (the foundation for bloom / god
-    /// rays). Returns <paramref name="sourceTex"/> unchanged when post-process is disabled or unavailable,
-    /// so the scene is always presented even if the FBO can't be created.
+    /// Ensures the two half-resolution bloom ping-pong buffers match the present size. Half-res (via
+    /// <see cref="PostProcessBufferSizing.Downsample"/>) keeps the blur cheap and soft. Latches
+    /// <see cref="bloomUnsupported"/> on incompleteness so the caller falls back to the plain pass-through.
     /// </summary>
-    private uint RunPostProcess(GL g, uint sourceTex, int width, int height)
+    private bool EnsureBloomBuffers(GL g, int fullWidth, int fullHeight)
+    {
+        if (bloomUnsupported)
+        {
+            return false;
+        }
+        (int bw, int bh) = PostProcessBufferSizing.Downsample(fullWidth, fullHeight, 2);
+        if (bloomFboA != 0 && bloomWidth == bw && bloomHeight == bh)
+        {
+            return true;
+        }
+
+        g.DeleteFramebuffer(bloomFboA);
+        g.DeleteTexture(bloomTexA);
+        g.DeleteFramebuffer(bloomFboB);
+        g.DeleteTexture(bloomTexB);
+
+        bloomTexA = MakeColorTexture(g, bw, bh);
+        bloomFboA = MakeColorFbo(g, bloomTexA, out GLEnum statusA);
+        bloomTexB = MakeColorTexture(g, bw, bh);
+        bloomFboB = MakeColorFbo(g, bloomTexB, out GLEnum statusB);
+        g.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+
+        if (statusA != GLEnum.FramebufferComplete || statusB != GLEnum.FramebufferComplete)
+        {
+            Log.Information("[GL3D] bloom framebuffer incomplete (A={A}, B={B}) — bloom disabled this session", statusA, statusB);
+            g.DeleteFramebuffer(bloomFboA);
+            g.DeleteTexture(bloomTexA);
+            g.DeleteFramebuffer(bloomFboB);
+            g.DeleteTexture(bloomTexB);
+            bloomFboA = bloomTexA = bloomFboB = bloomTexB = 0;
+            bloomUnsupported = true;
+            return false;
+        }
+
+        bloomWidth = bw;
+        bloomHeight = bh;
+        return true;
+    }
+
+    /// <summary>
+    /// Runs the post-process stage and returns the texture to present. When bloom intensity is meaningful
+    /// it does bright-pass → separable blur (half-res ping-pong) → additive composite into postColorTex;
+    /// otherwise (or if any buffer/program is unavailable) it pass-throughs the scene unchanged. Always
+    /// returns a valid texture so the scene is never lost.
+    /// </summary>
+    private uint RunPostProcess(GL g, uint sourceTex, int width, int height, float bloomThreshold, float bloomIntensity)
     {
         if (!postProcessEnabled || postProgram == 0 || sourceTex == 0 || width <= 0 || height <= 0)
         {
@@ -2232,25 +2402,83 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             return sourceTex;
         }
 
-        g.BindFramebuffer(FramebufferTarget.Framebuffer, postFbo);
-        g.Viewport(0, 0, (uint)width, (uint)height);
         g.Disable(EnableCap.DepthTest);
         g.DepthMask(false);
         g.Disable(EnableCap.Blend);
-        g.UseProgram(postProgram);
-        g.ActiveTexture(TextureUnit.Texture0);
-        g.BindTexture(TextureTarget.Texture2D, sourceTex);
-        g.Uniform1(postTexLocation, 0); // sampler → texture unit 0 (int uniform, correct for sampler2D)
-        g.BindVertexArray(skyVao);      // reuse the sky pass's fullscreen triangle
-        g.DrawArrays(PrimitiveType.Triangles, 0, 3);
-        g.BindVertexArray(0);
-        g.BindTexture(TextureTarget.Texture2D, 0);
+        g.BindVertexArray(skyVao); // reuse the sky pass's fullscreen triangle for every post pass
 
-        if (!postStageLogged)
+        bool doBloom = bloomIntensity > 0.001f
+            && bloomBrightProgram != 0 && bloomBlurProgram != 0 && bloomCompositeProgram != 0
+            && EnsureBloomBuffers(g, width, height);
+
+        if (doBloom)
         {
-            Log.Information("[GL3D] post-process stage active (pass-through) {W}x{H}", width, height);
-            postStageLogged = true;
+            // 1) Bright-pass: full-res scene → half-res bloomTexA.
+            g.BindFramebuffer(FramebufferTarget.Framebuffer, bloomFboA);
+            g.Viewport(0, 0, (uint)bloomWidth, (uint)bloomHeight);
+            g.UseProgram(bloomBrightProgram);
+            g.ActiveTexture(TextureUnit.Texture0);
+            g.BindTexture(TextureTarget.Texture2D, sourceTex);
+            g.Uniform1(bloomBrightTexLoc, 0);
+            g.Uniform1(bloomBrightThresholdLoc, bloomThreshold);
+            g.DrawArrays(PrimitiveType.Triangles, 0, 3);
+
+            // 2) Horizontal blur: bloomTexA → bloomTexB.
+            g.BindFramebuffer(FramebufferTarget.Framebuffer, bloomFboB);
+            g.UseProgram(bloomBlurProgram);
+            g.BindTexture(TextureTarget.Texture2D, bloomTexA);
+            g.Uniform1(bloomBlurTexLoc, 0);
+            g.Uniform2(bloomBlurDirLoc, 1f / bloomWidth, 0f);
+            g.DrawArrays(PrimitiveType.Triangles, 0, 3);
+
+            // 3) Vertical blur: bloomTexB → bloomTexA.
+            g.BindFramebuffer(FramebufferTarget.Framebuffer, bloomFboA);
+            g.BindTexture(TextureTarget.Texture2D, bloomTexB);
+            g.Uniform2(bloomBlurDirLoc, 0f, 1f / bloomHeight);
+            g.DrawArrays(PrimitiveType.Triangles, 0, 3);
+
+            // 4) Composite: full-res scene + upsampled bloomTexA * intensity → postColorTex.
+            g.BindFramebuffer(FramebufferTarget.Framebuffer, postFbo);
+            g.Viewport(0, 0, (uint)width, (uint)height);
+            g.UseProgram(bloomCompositeProgram);
+            g.ActiveTexture(TextureUnit.Texture0);
+            g.BindTexture(TextureTarget.Texture2D, sourceTex);
+            g.Uniform1(bloomCompSceneLoc, 0);
+            g.ActiveTexture(TextureUnit.Texture1);
+            g.BindTexture(TextureTarget.Texture2D, bloomTexA);
+            g.Uniform1(bloomCompBloomLoc, 1);
+            g.Uniform1(bloomCompIntensityLoc, bloomIntensity);
+            g.DrawArrays(PrimitiveType.Triangles, 0, 3);
+            g.BindTexture(TextureTarget.Texture2D, 0);
+            g.ActiveTexture(TextureUnit.Texture0);
+            g.BindTexture(TextureTarget.Texture2D, 0);
+
+            if (!bloomStageLogged)
+            {
+                Log.Information("[GL3D] post-process: bloom active {W}x{H} (half {BW}x{BH})", width, height, bloomWidth, bloomHeight);
+                bloomStageLogged = true;
+            }
         }
+        else
+        {
+            // Pass-through (bloom off / unavailable): scene → postColorTex unchanged.
+            g.BindFramebuffer(FramebufferTarget.Framebuffer, postFbo);
+            g.Viewport(0, 0, (uint)width, (uint)height);
+            g.UseProgram(postProgram);
+            g.ActiveTexture(TextureUnit.Texture0);
+            g.BindTexture(TextureTarget.Texture2D, sourceTex);
+            g.Uniform1(postTexLocation, 0);
+            g.DrawArrays(PrimitiveType.Triangles, 0, 3);
+            g.BindTexture(TextureTarget.Texture2D, 0);
+
+            if (!postStageLogged)
+            {
+                Log.Information("[GL3D] post-process stage active (pass-through) {W}x{H}", width, height);
+                postStageLogged = true;
+            }
+        }
+
+        g.BindVertexArray(0);
         return postColorTex;
     }
 
@@ -2870,6 +3098,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.DeleteShader(pvs);
         g.DeleteShader(pfs);
         postTexLocation = g.GetUniformLocation(postProgram, "uTex");
+
+        // Bloom programs (bright-pass, separable blur, composite) — all share the post vertex shader.
+        bloomBrightProgram = BuildPostProgram(g, BloomBrightFragmentShaderSource, "Bloom bright-pass");
+        bloomBrightTexLoc = g.GetUniformLocation(bloomBrightProgram, "uTex");
+        bloomBrightThresholdLoc = g.GetUniformLocation(bloomBrightProgram, "uThreshold");
+        bloomBlurProgram = BuildPostProgram(g, BloomBlurFragmentShaderSource, "Bloom blur");
+        bloomBlurTexLoc = g.GetUniformLocation(bloomBlurProgram, "uTex");
+        bloomBlurDirLoc = g.GetUniformLocation(bloomBlurProgram, "uDir");
+        bloomCompositeProgram = BuildPostProgram(g, BloomCompositeFragmentShaderSource, "Bloom composite");
+        bloomCompSceneLoc = g.GetUniformLocation(bloomCompositeProgram, "uScene");
+        bloomCompBloomLoc = g.GetUniformLocation(bloomCompositeProgram, "uBloom");
+        bloomCompIntensityLoc = g.GetUniformLocation(bloomCompositeProgram, "uIntensity");
 
         // Cloud-layer program — horizontal quad at altitude, fBm-alpha "sea of clouds".
         uint cvs = CompileShader(g, ShaderType.VertexShader, CloudLayerVertexShaderSource);
@@ -4271,6 +4511,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.DeleteTexture(postColorTex);
         postFbo = 0;
         postColorTex = 0;
+        gl.DeleteFramebuffer(bloomFboA);
+        gl.DeleteTexture(bloomTexA);
+        gl.DeleteFramebuffer(bloomFboB);
+        gl.DeleteTexture(bloomTexB);
+        bloomFboA = bloomTexA = bloomFboB = bloomTexB = 0;
         gl.DeleteFramebuffer(reflectionFbo);
         gl.DeleteTexture(reflectionColorTex);
         gl.DeleteRenderbuffer(reflectionDepthRb);
@@ -4302,6 +4547,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.DeleteProgram(lineProgram);
             gl.DeleteProgram(skyProgram);
             gl.DeleteProgram(postProgram);
+            gl.DeleteProgram(bloomBrightProgram);
+            gl.DeleteProgram(bloomBlurProgram);
+            gl.DeleteProgram(bloomCompositeProgram);
             gl.DeleteVertexArray(skyVao);
             gl.DeleteBuffer(skyVbo);
             gl.DeleteProgram(cloudProgram);
@@ -4315,6 +4563,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             skyProgram = 0;
             postProgram = 0;
             postTexLocation = -1;
+            bloomBrightProgram = 0;
+            bloomBlurProgram = 0;
+            bloomCompositeProgram = 0;
             skyVao = 0;
             skyVbo = 0;
             cloudProgram = 0;

@@ -211,4 +211,49 @@ public sealed class AtmosphereTests
     {
         new Atmosphere(timeOfDayHours: 0f).SunGlowWidth.Should().Be(0f);
     }
+
+    [Fact]
+    public void BloomIntensity_AtGoldenHour_ExceedsNoon()
+    {
+        // Bright-region bleed is strongest when the low, intense sun and luminous horizon sky dominate
+        // the frame; a steep midday sun blooms far less.
+        var goldenHour = new Atmosphere(timeOfDayHours: 17f);
+        var noon = new Atmosphere(timeOfDayHours: 12f);
+
+        goldenHour.BloomIntensity.Should().BeGreaterThan(noon.BloomIntensity);
+    }
+
+    [Fact]
+    public void BloomIntensity_BelowHorizon_IsZero()
+    {
+        // No sun above the horizon => nothing bright enough to bleed.
+        new Atmosphere(timeOfDayHours: 0f).BloomIntensity.Should().Be(0f);
+    }
+
+    [Fact]
+    public void BloomIntensity_IsInUnitRange()
+    {
+        new Atmosphere(timeOfDayHours: 17f).BloomIntensity.Should().BeInRange(0f, 1f);
+    }
+
+    [Fact]
+    public void BloomThreshold_AtGoldenHour_IsLowerThanNoon()
+    {
+        // A more permissive (lower) bright-pass threshold at golden hour lets the warm sky bloom; at noon
+        // the threshold rises so only genuinely bright highlights (sun disc, snow) bleed.
+        var goldenHour = new Atmosphere(timeOfDayHours: 17f);
+        var noon = new Atmosphere(timeOfDayHours: 12f);
+
+        goldenHour.BloomThreshold.Should().BeLessThan(noon.BloomThreshold);
+    }
+
+    [Fact]
+    public void BloomThreshold_StaysInSaneRange()
+    {
+        // Threshold is a normalised luminance cutoff — never so low everything blooms, nor above white.
+        foreach (float hour in new[] { 6f, 12f, 17f, 23f })
+        {
+            new Atmosphere(timeOfDayHours: hour).BloomThreshold.Should().BeInRange(0.5f, 1.0f);
+        }
+    }
 }
