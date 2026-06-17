@@ -58,8 +58,13 @@ nie przenosimy 1:1 na GLES. Kroki 1–5 odtwarzają *postrzegany* rezultat o zł
 - ✅ **Krok 3 (bloom)** — `Atmosphere.BloomIntensity/Threshold` (TDD) + bright-pass → separable blur
   (half-res ping-pong) → additive composite w `RunPostProcess` (`544203f`). Desktop-log-verified
   („bloom active 1424x713 half 712x356"), na S25 v104, user: „wygląda ok".
-- ⏭️ **Następne: Krok 4 (smugi światła / god rays)** — maska okluzji → radial blur ku słońcu (screen-space)
-  → additive, w `RunPostProcess` (reużywa fundamentu). Rzut słońca do screen-space (TDD).
+- ✅ **Krok 4 (smugi światła — screen-space)** — `SunScreenProjection` (TDD) + radial blur jasnej maski ku
+  słońcu, additive w `RunPostProcess` (`fb64db0`, helper `e1f0a04`). Współdzielony bright-pass z bloomem.
+  Desktop-log-verified (buffers/program OK), na S25 v105.
+- 🔜 **Krok 5 (CSM) — W TOKU, priorytet** — user wybrał „od razu" celować w **wolumetryczne** god rays,
+  a te WYMAGAJĄ shadow map. CSM = 2-3 kaskady, depth z POV słońca, `sampler2DShadow`+PCF+bias w shaderze
+  terenu. TDD: podziały kaskad + macierze światła (ortho-fit slice'a frustuma). Daje też „lepsze cienie".
+- ⏭️ **Krok 6 (wolumetryczne god rays)** — ray-march + sampling cienia (po CSM). Zastąpi screen-space.
 
 ### Recepta deployu / weryfikacji (potwierdzona w tej sesji)
 - APK: `dotnet build src/MapaTur.App -f net10.0-android -c Release -p:EmbedAssembliesIntoApk=true
