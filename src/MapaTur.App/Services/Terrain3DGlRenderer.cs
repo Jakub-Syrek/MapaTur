@@ -1010,6 +1010,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private LineBuffers? cableLines;
     private CableCarLine? lastCableCarBuilt;
     private TerrainMesh3D? lastCableMesh;
+    private DetailElevationField? lastCableDetail;
     private float lastCableExaggeration = -1f;
 
     /// <summary>Aerialway line to overlay (sagging cables + station masts), or null for none. Drawn only
@@ -1818,7 +1819,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         DrawRoadLines(gl, roads, raster, frame, detail);
         DrawTrailLines(gl, trails, raster, frame, detail);
         DrawRouteLine(gl, route, raster, frame, detail);
-        DrawCableCar(gl, frame);
+        DrawCableCar(gl, frame, raster, detail);
 
         gl.BindVertexArray(0);
 
@@ -3007,10 +3008,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private const int CableSegments = 28;            // catenary samples per span
     private const byte CableR = 0x20, CableG = 0x20, CableB = 0x24;       // near-black cable
     private const byte StationR = 0xD0, StationG = 0x40, StationB = 0x30; // red station mast
+    private const int CabinsPerSpan = 2;             // gondolas per span (a counterweighted pair: one up, one down)
+    private const float CabinSpeed = 0.045f;         // one-way trips per second (≈22 s per ascent — visibly moving)
+    private const float CabinHangM = 12f;            // how far the cabin hangs below the cable
+    private const float CabinBodyM = 7f;             // half-length of the little horizontal cabin body bar
+    private const float CabinHalfWidthPx = 3.0f;     // cabin ribbon half-width (a touch fatter than the cable)
+    private const byte CabinR = 0xF5, CabinG = 0xC8, CabinB = 0x20;       // bright yellow gondola
 
     // Aerialway overlay (e.g. Kasprowy Wierch): sagging cables between station masts, drawn with the same
     // absolute-frame ribbon pipeline as the trails (the line MVP is already restored to absolute above).
-    private void DrawCableCar(GL g, TerrainMesh3D mesh)
+    private void DrawCableCar(GL g, TerrainMesh3D mesh, DemRaster? raster, DetailElevationField? detail)
     {
         if (!ShowCableCar || CableCar is null || CableCar.Stations.Count < 2)
         {
@@ -3018,41 +3025,105 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         float exaggeration = mesh.VerticalExaggeration;
+        IReadOnlyList<CableCarStation> st = CableCar.Stations;
+
+        // Seat each station on the ACTUAL rendered terrain (the 1 m detail where it covers the station, else the
+        // base DEM) — NOT its hand-authored "approximate" elevation. With the hardcoded value the mast base sat
+        // at (elevation − terrain)×exaggeration off the ground, so the masts floated/sank over the valley.
+        var top = new float[st.Count]; // world cable-attachment height = ground + mast
+        for (int i = 0; i < st.Count; i++)
+        {
+            top[i] = SeatGroundElevation(st[i], raster, detail) + CableMastHeightM;
+        }
+
+        // Cables + masts (static): rebuilt only when the line, mesh, exaggeration or the detail surface changes.
         if (cableLines is null
             || !ReferenceEquals(lastCableCarBuilt, CableCar)
             || !ReferenceEquals(lastCableMesh, mesh)
+            || !ReferenceEquals(lastCableDetail, detail)
             || lastCableExaggeration != exaggeration)
         {
             DeleteLine(g, ref cableLines);
             var ribbon = new RibbonBuilder();
-            IReadOnlyList<CableCarStation> st = CableCar.Stations;
 
-            // Cable: each consecutive station pair is a span; the cable hangs from one mast top to the next
-            // with a sag proportional to the span's horizontal length, so it droops over the valley.
+            // Cable: each consecutive station pair is a span; it hangs from one mast top to the next with a sag
+            // proportional to the span's horizontal length, so it droops over the valley.
             for (int i = 0; i + 1 < st.Count; i++)
             {
-                Vector3 lower = mesh.GeoToWorld(st[i].Location, (float)st[i].ElevationMeters + CableMastHeightM);
-                Vector3 upper = mesh.GeoToWorld(st[i + 1].Location, (float)st[i + 1].ElevationMeters + CableMastHeightM);
+                Vector3 lower = mesh.GeoToWorld(st[i].Location, top[i]);
+                Vector3 upper = mesh.GeoToWorld(st[i + 1].Location, top[i + 1]);
                 float horiz = new Vector2(upper.X - lower.X, upper.Y - lower.Y).Length();
                 float sagWorld = horiz * CableSagFraction * exaggeration;
                 ribbon.Append(CableCarGeometry.SampleCable(lower, upper, sagWorld, CableSegments), CableR, CableG, CableB);
             }
 
-            // Station masts: a short vertical post from the terrain up to the cable attachment height.
-            foreach (CableCarStation s in st)
+            // Station masts: a vertical post from the seated terrain up to the cable attachment height.
+            for (int i = 0; i < st.Count; i++)
             {
-                Vector3 baseW = mesh.GeoToWorld(s.Location, (float)s.ElevationMeters);
-                Vector3 topW = mesh.GeoToWorld(s.Location, (float)s.ElevationMeters + CableMastHeightM);
+                Vector3 baseW = mesh.GeoToWorld(st[i].Location, top[i] - CableMastHeightM);
+                Vector3 topW = mesh.GeoToWorld(st[i].Location, top[i]);
                 ribbon.Append(new[] { baseW, topW }, StationR, StationG, StationB);
             }
 
             cableLines = UploadLine(g, ribbon);
             lastCableCarBuilt = CableCar;
             lastCableMesh = mesh;
+            lastCableDetail = detail;
             lastCableExaggeration = exaggeration;
         }
 
         DrawLine(g, cableLines, CableHalfWidthPx);
+
+        // Moving gondolas (animated, NOT cached — they move every frame): a counterweighted pair per span shuttles
+        // along the cable; each hangs a short cabin (a hanger + a little body bar) below the cable at its position.
+        double seconds = atmosphereClock.Elapsed.TotalSeconds;
+        var cabins = new RibbonBuilder();
+        bool any = false;
+        for (int i = 0; i + 1 < st.Count; i++)
+        {
+            Vector3 lower = mesh.GeoToWorld(st[i].Location, top[i]);
+            Vector3 upper = mesh.GeoToWorld(st[i + 1].Location, top[i + 1]);
+            float horiz = new Vector2(upper.X - lower.X, upper.Y - lower.Y).Length();
+            float sagWorld = horiz * CableSagFraction * exaggeration;
+            for (int k = 0; k < CabinsPerSpan; k++)
+            {
+                float t = CableCarGeometry.CabinParameter(seconds, CabinSpeed, k, CabinsPerSpan);
+                Vector3 onCable = CableCarGeometry.PointOnSpan(lower, upper, sagWorld, t);
+                var bot = new Vector3(onCable.X, onCable.Y, onCable.Z - (CabinHangM * exaggeration));
+                float body = CabinBodyM * exaggeration;
+                cabins.Append(new[] { onCable, bot }, CabinR, CabinG, CabinB);                                  // hanger
+                cabins.Append(new[] { new Vector3(bot.X - body, bot.Y, bot.Z), new Vector3(bot.X + body, bot.Y, bot.Z) }, CabinR, CabinG, CabinB); // body bar
+                any = true;
+            }
+        }
+
+        if (any)
+        {
+            LineBuffers? cabinBuf = UploadLine(g, cabins);
+            DrawLine(g, cabinBuf, CabinHalfWidthPx);
+            DeleteLine(g, ref cabinBuf);
+        }
+    }
+
+    // Terrain elevation under a station: the 1 m detail where it covers the point (matches the drawn surface near
+    // the camera), else the base DEM, else the station's hand-authored elevation as a last resort.
+    private static float SeatGroundElevation(CableCarStation s, DemRaster? raster, DetailElevationField? detail)
+    {
+        if (detail is not null && detail.TryGetElevation(s.Location.Longitude, s.Location.Latitude, out double de))
+        {
+            return (float)de;
+        }
+
+        if (raster is not null)
+        {
+            double v = raster.SampleBilinear(s.Location.Longitude, s.Location.Latitude);
+            if (!double.IsNaN(v) && v != raster.NoDataValue)
+            {
+                return (float)v;
+            }
+        }
+
+        return (float)s.ElevationMeters;
     }
 
     // Builds screen-space ribbon geometry: each polyline segment becomes a 4-vertex quad (2 triangles).

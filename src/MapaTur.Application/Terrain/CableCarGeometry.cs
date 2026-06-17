@@ -39,4 +39,19 @@ public static class CableCarGeometry
 
         return points;
     }
+
+    /// <summary>
+    /// Position parameter t∈[0,1] of moving cabin <paramref name="index"/> of <paramref name="count"/> on a
+    /// span at time <paramref name="seconds"/>. A triangle (ping-pong) wave: a cabin shuttles lower→upper→lower
+    /// like a real reversible cable car. Cabins are phase-offset by a whole half-cycle each (2/count), so for
+    /// count=2 one runs up while the other runs down and they cross at mid-span. <paramref name="speed"/> is
+    /// one-way trips per second (e.g. 0.05 ⇒ a 20 s ascent). Always returns a value in [0,1].
+    /// </summary>
+    public static float CabinParameter(double seconds, double speed, int index, int count)
+    {
+        double offset = count > 0 ? index * (2.0 / count) : 0.0;
+        double x = (seconds * speed) + offset;
+        double m = ((x % 2.0) + 2.0) % 2.0; // wrap into [0,2)
+        return (float)(1.0 - Math.Abs(m - 1.0)); // 0 → 1 → 0 over each period of 2
+    }
 }
