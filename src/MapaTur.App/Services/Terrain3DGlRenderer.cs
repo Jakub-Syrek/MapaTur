@@ -463,6 +463,24 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  fragColor = vec4(sky + sun, 1.0);\n" +
         "}\n";
 
+    // Post-process pass: a fullscreen triangle (reusing the sky VAO's location-0 vec2 clip attribute) that
+    // samples the resolved scene texture and writes it to the post FBO. The vertex stage turns clip-space
+    // [-1,1] into [0,1] UVs; the fragment stage is currently a pass-through (bloom / god rays will extend it).
+    // Depth test is disabled for this stage, so gl_Position.z is irrelevant.
+    private const string PostVertexShaderSource =
+        "#version 300 es\n" +
+        "layout(location=0) in vec2 aClip;\n" +
+        "out vec2 vUv;\n" +
+        "void main(){ vUv = (aClip * 0.5) + 0.5; gl_Position = vec4(aClip, 0.0, 1.0); }\n";
+
+    private const string PostFragmentShaderSource =
+        "#version 300 es\n" +
+        "precision highp float;\n" +
+        "in vec2 vUv;\n" +
+        "uniform sampler2D uTex;\n" +
+        "out vec4 fragColor;\n" +
+        "void main(){ fragColor = texture(uTex, vUv); }\n";
+
     // Cloud-layer ("sea of clouds") program. A large horizontal quad at a fixed world altitude,
     // drawn AFTER the terrain with the depth test on (so peaks above the layer occlude it and the
     // valleys below are veiled) but depth-write off and alpha blending on. The fragment shader
@@ -997,6 +1015,22 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private bool presentUnsupported;
     private byte[]? flipRow; // scratch row for the vertical flip during framebuffer readback
 
+    // Post-process target: a second colour TEXTURE + FBO. After the scene is resolved into presentColorTex,
+    // the post stage runs fullscreen passes (currently a pass-through; bloom / god rays build on this) that
+    // sample presentColorTex and write here, and the caller then wraps THIS texture instead. Full-res so the
+    // pass-through stays pixel-identical; the blur pyramid (bloom) will use its own smaller buffers. Falls
+    // back to presentColorTex (postUnsupported) if the framebuffer is ever incomplete, so the scene is never
+    // lost. Reuses the sky pass's fullscreen-triangle VAO/VBO (same location-0 vec2 clip attribute).
+    private uint postFbo;
+    private uint postColorTex;
+    private int postWidth;
+    private int postHeight;
+    private bool postUnsupported;
+    private readonly bool postProcessEnabled = true; // compile-time kill-switch; bloom/god-rays will make it runtime-settable
+    private uint postProgram;
+    private int postTexLocation = -1;
+    private bool postStageLogged; // log the post stage's FBO status once, not every frame
+
     private readonly Dictionary<TerrainMesh3D, TileBuffers> tileBuffers = new();
     private IReadOnlyList<TerrainMesh3D>? lastTiles;
 
@@ -1304,6 +1338,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             presentWidth = 0;
             presentHeight = 0;
             presentUnsupported = false;
+            // Post-process FBO / colour texture / program — same context-loss handling: drop stale IDs.
+            postFbo = 0;
+            postColorTex = 0;
+            postWidth = 0;
+            postHeight = 0;
+            postUnsupported = false;
+            postProgram = 0;
+            postTexLocation = -1;
+            postStageLogged = false;
             // The planar-reflection target belonged to the dead context — drop the handles so it's rebuilt fresh.
             reflectionFbo = 0;
             reflectionColorTex = 0;
@@ -1916,10 +1959,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 BlitFramebufferFilter.Nearest);
         }
 
+        // Post-process stage (pass-through today; bloom / god rays build on it). Reads the resolved scene
+        // and returns the texture the caller wraps for Skia — falls back to presentColorTex if unavailable.
+        uint finalTex = RunPostProcess(gl, presentColorTex, vpWidth, vpHeight);
+
         // Unbind everything before returning. The caller will re-establish whatever framebuffer Skia
         // expects (via GRContext.ResetContext) before sampling the texture we just produced.
         gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
-        return presentColorTex;
+        return finalTex;
     }
 
     /// <summary>Width of the last rendered frame (the present colour texture); 0 before the first render.</summary>
@@ -2111,6 +2158,100 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         presentWidth = width;
         presentHeight = height;
         return true;
+    }
+
+    /// <summary>
+    /// Ensures the post-process target (a single full-resolution colour texture + FBO) matches the given
+    /// size. Mirrors <see cref="EnsurePresentTarget"/> but needs no depth — the post passes are fullscreen and
+    /// depth-test-free. Returns false (and latches <see cref="postUnsupported"/> for the session) when the
+    /// framebuffer is incomplete, so the caller transparently falls back to the present texture.
+    /// </summary>
+    private bool EnsurePostBuffers(GL g, int width, int height)
+    {
+        if (postUnsupported)
+        {
+            return false;
+        }
+
+        if (postFbo != 0 && postWidth == width && postHeight == height)
+        {
+            return true;
+        }
+
+        g.DeleteFramebuffer(postFbo);
+        g.DeleteTexture(postColorTex);
+
+        postColorTex = g.GenTexture();
+        g.BindTexture(TextureTarget.Texture2D, postColorTex);
+        g.TexImage2D(
+            TextureTarget.Texture2D, 0, (int)InternalFormat.Rgba8,
+            (uint)width, (uint)height, 0,
+            PixelFormat.Rgba, PixelType.UnsignedByte, null);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+        g.BindTexture(TextureTarget.Texture2D, 0);
+
+        postFbo = g.GenFramebuffer();
+        g.BindFramebuffer(FramebufferTarget.Framebuffer, postFbo);
+        g.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, postColorTex, 0);
+
+        GLEnum status = g.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
+        g.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+        if (status != GLEnum.FramebufferComplete)
+        {
+            Log.Information("[GL3D] post framebuffer incomplete ({Status}) — post-process disabled this session", status);
+            g.DeleteFramebuffer(postFbo);
+            g.DeleteTexture(postColorTex);
+            postFbo = 0;
+            postColorTex = 0;
+            postUnsupported = true;
+            return false;
+        }
+
+        postWidth = width;
+        postHeight = height;
+        return true;
+    }
+
+    /// <summary>
+    /// Runs the post-process stage: samples <paramref name="sourceTex"/> through the post program into the
+    /// post FBO and returns the post colour texture. A pass-through today (the foundation for bloom / god
+    /// rays). Returns <paramref name="sourceTex"/> unchanged when post-process is disabled or unavailable,
+    /// so the scene is always presented even if the FBO can't be created.
+    /// </summary>
+    private uint RunPostProcess(GL g, uint sourceTex, int width, int height)
+    {
+        if (!postProcessEnabled || postProgram == 0 || sourceTex == 0 || width <= 0 || height <= 0)
+        {
+            return sourceTex;
+        }
+        if (!EnsurePostBuffers(g, width, height))
+        {
+            return sourceTex;
+        }
+
+        g.BindFramebuffer(FramebufferTarget.Framebuffer, postFbo);
+        g.Viewport(0, 0, (uint)width, (uint)height);
+        g.Disable(EnableCap.DepthTest);
+        g.DepthMask(false);
+        g.Disable(EnableCap.Blend);
+        g.UseProgram(postProgram);
+        g.ActiveTexture(TextureUnit.Texture0);
+        g.BindTexture(TextureTarget.Texture2D, sourceTex);
+        g.Uniform1(postTexLocation, 0); // sampler → texture unit 0 (int uniform, correct for sampler2D)
+        g.BindVertexArray(skyVao);      // reuse the sky pass's fullscreen triangle
+        g.DrawArrays(PrimitiveType.Triangles, 0, 3);
+        g.BindVertexArray(0);
+        g.BindTexture(TextureTarget.Texture2D, 0);
+
+        if (!postStageLogged)
+        {
+            Log.Information("[GL3D] post-process stage active (pass-through) {W}x{H}", width, height);
+            postStageLogged = true;
+        }
+        return postColorTex;
     }
 
     /// <summary>
@@ -2709,6 +2850,26 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.EnableVertexAttribArray(0);
         g.VertexAttribPointer(0, 2, VertexAttribPointerType.Float, false, 2 * sizeof(float), (void*)0);
         g.BindVertexArray(0);
+
+        // Post-process program — fullscreen pass-through (foundation for bloom / god rays). Reuses the
+        // fullscreen triangle above (skyVao) for its draw.
+        uint pvs = CompileShader(g, ShaderType.VertexShader, PostVertexShaderSource);
+        uint pfs = CompileShader(g, ShaderType.FragmentShader, PostFragmentShaderSource);
+        postProgram = g.CreateProgram();
+        g.AttachShader(postProgram, pvs);
+        g.AttachShader(postProgram, pfs);
+        g.LinkProgram(postProgram);
+        g.GetProgram(postProgram, ProgramPropertyARB.LinkStatus, out int postLinked);
+        if (postLinked == 0)
+        {
+            string log = g.GetProgramInfoLog(postProgram);
+            throw new InvalidOperationException("Post-process shader link failed: " + log);
+        }
+        g.DetachShader(postProgram, pvs);
+        g.DetachShader(postProgram, pfs);
+        g.DeleteShader(pvs);
+        g.DeleteShader(pfs);
+        postTexLocation = g.GetUniformLocation(postProgram, "uTex");
 
         // Cloud-layer program — horizontal quad at altitude, fBm-alpha "sea of clouds".
         uint cvs = CompileShader(g, ShaderType.VertexShader, CloudLayerVertexShaderSource);
@@ -4106,6 +4267,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         presentFbo = 0;
         presentColorTex = 0;
         presentDepthRb = 0;
+        gl.DeleteFramebuffer(postFbo);
+        gl.DeleteTexture(postColorTex);
+        postFbo = 0;
+        postColorTex = 0;
         gl.DeleteFramebuffer(reflectionFbo);
         gl.DeleteTexture(reflectionColorTex);
         gl.DeleteRenderbuffer(reflectionDepthRb);
@@ -4136,6 +4301,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.DeleteProgram(program);
             gl.DeleteProgram(lineProgram);
             gl.DeleteProgram(skyProgram);
+            gl.DeleteProgram(postProgram);
             gl.DeleteVertexArray(skyVao);
             gl.DeleteBuffer(skyVbo);
             gl.DeleteProgram(cloudProgram);
@@ -4147,6 +4313,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.DeleteBuffer(cumulusQuadVbo);
             gl.DeleteBuffer(cumulusInstanceVbo);
             skyProgram = 0;
+            postProgram = 0;
+            postTexLocation = -1;
             skyVao = 0;
             skyVbo = 0;
             cloudProgram = 0;
