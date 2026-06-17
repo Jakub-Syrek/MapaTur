@@ -31,6 +31,7 @@ chain, called by every path, so coverage can't drift. **TODO: this consolidation
 | Repair | auto-load `1995` | base `2360` | single-patch `2665` | per-tile `2766` |
 |---|---|---|---|---|
 | `FillNarrowZeroStrips` (flat-0 edge "fault") | ✓ | ✓ | ✓ | ✓ |
+| `FillDropoutStrips` (corrupt row/col dropout trench — base only²) | ✓ | ✓ | — | — |
 | `FillPits` (single-cell trench-dash pits) | ✓ | ✓ | ✓ | ✓ |
 | `HoleBelow` (flat-0 out-of-coverage → NoData) | — | ✓ | ✓ | ✓ |
 | `FillNoDataFrom**Feathered**` (backfill voids from base, feathered boundary) | — | n/a¹ | ✓ | ✓ |
@@ -41,6 +42,10 @@ chain, called by every path, so coverage can't drift. **TODO: this consolidation
 > WIDE 1 m coverage void (NOT base flat-0 — verified: `tatry.dem` clean there) backfilled with a hard coarse
 > patch; **fixed by feathering the void↔1 m boundary** (`FillNoDataFromFeathered`, §A.6) on the detail paths.
 > All of this runs on LOAD — NO re-bake.
+>
+> ² `FillDropoutStrips` is on the BASE paths only: the corrupt strips live in `tatry.dem` (the 15 m base). The
+> z16 1 m detail is fetched per-tile from GUGiK and carries no such scanline dropouts, so the detail paths
+> don't need it. Runs on LOAD — NO re-bake. **This is the fix for the long-hunted §F.2 "fault trench".**
 
 ---
 
@@ -51,6 +56,22 @@ chain, called by every path, so coverage can't drift. **TODO: this consolidation
 2. **`FillNarrowZeroStrips(≤24 cells)`** — bridge NARROW flat-`0` strips (GUGiK z16 tile-edge dropout that
    renders as a thin, dead-straight vertical "fault") from the valid 1 m neighbours; leave WIDE 0-voids for
    the base-backfill (do NOT fabricate — that made the smooth "square").
+2b. **`FillDropoutStrips(>50 m, run ≥3)`** ★ — the resolution of §F.2. **Error class: a corrupt ROW or COLUMN
+   *strip* in `tatry.dem`** — a run of cells sitting hundreds of metres below BOTH of its perpendicular
+   neighbours (a mosaic/stitch artefact: a lidar scanline or LiDAR↔Copernicus seam that dropped a strip). It
+   renders as a **dead-straight narrow trench on the base** (e.g. the E-W cut at lat 49.229 / row 1253 by
+   Jaworowa Kopa, and shorter cuts elsewhere). Why `FillPits` does NOT fix it: a strip cell's two along-strip
+   neighbours are *also* dropped, so the 4-neighbour median only pulls it halfway and CONVERGES TO WITHIN ITS
+   ~20 m THRESHOLD — leaving a ~20-30 m residual trench. `FillDropoutStrips` finds a RUN of ≥3 consecutive
+   cells each >50 m below the line on both perpendicular sides, and replaces the whole run with the mean of
+   the two bracketing lines — one pass, no residual. The run requirement separates a systematic strip from a
+   single pit or a real V-valley bottom (left for `FillPits`). Scans BOTH orientations (rows then columns);
+   read a pre-pass snapshot so a filled cell can't corrupt a neighbour's bracket. **How to diagnose this
+   class:** do NOT just scan the raster for a *groove* (`min(±)−v` deeper-than-both, which a monotonic slope
+   and a smooth valley both pass) — scan for a horizontal/vertical **gradient SPIKE** (one row/col boundary
+   far steeper than its neighbours across many cells), then dump a cross-section: a flat line above + flat
+   line below + a single sharp low line between = a strip dropout. (Earlier mis-steps: chased it in the z16
+   *detail* and via a base DEM despike-rebake — both WRONG layer; it is the 15 m base, repaired on LOAD.)
 3. **`HoleBelow(100 m)`** — GUGiK returns flat ~0 OUTSIDE coverage; hole it so the mesh drops to the base.
 4. **`FillNoDataFrom(base)`** — backfill detail NoData voids (watercourses / past border) from the coarse base.
 5. **`FillInteriorKeepEdgeGaps`** — base only: fill interior gaps, keep edge-connected gaps as holes (→ sky).
@@ -71,10 +92,12 @@ chain, called by every path, so coverage can't drift. **TODO: this consolidation
    fetches or the offline z16 detail cache is orphaned (striped base).
 2. **DEM despike + masked low-pass** (`generate-tatry-dem-lidar.py` `clean_lidar_mosaic`, COMMITTED) — a
    legit, surface-preserving (summits ~0 m, lakes <1.7 m off) anti-moiré + one-cell-pit despike for the WCS
-   bake; **bake the DEM with it** (don't re-bake without). ⚠️ But it does NOT fix the deep "fault" trench
-   (§F.2): VERIFIED by cross-section that the base `tatry.dem` is SMOOTH at Jaworzynka (no sharp slot in the
-   15 m data), and the despike only shaves ~25 % off it. That trench lives in the **z16 1 m DETAIL**, not the
-   base — do NOT chase it via the DEM despike (an earlier despike-rebake was tried and reverted; wrong layer).
+   bake; **bake the DEM with it** (don't re-bake without). ⚠️ It does NOT fix the §F.2 trench — but the reason
+   the despike-rebake was reverted is now understood: the trench is a **corrupt row/column STRIP in `tatry.dem`**
+   (mosaic dropout), not a single-cell pit and not a z16-detail feature. The masked low-pass only shaves it;
+   the real fix is the **runtime `FillDropoutStrips`** (§A.2b), applied on LOAD — NO re-bake. (The old note here
+   claimed the trench was in the z16 1 m detail; that was WRONG — the cross-section LOOKED smooth because a
+   single corrupt row reads as one low line, easy to dismiss as a valley. See §A.2b for how to spot the class.)
 3. **Ortho "strata" stripes:** cut tiles at ortho **cell boundaries** in BOTH `TerrainMesh3D.BuildTiles`
    AND `BuildAdaptiveTiles` (`CutsWithCellBoundaries`). A block straddling a cell clamps UV → relief-independent
    stripes. *(BuildAdaptiveTiles fix currently uncommitted.)*
@@ -127,16 +150,15 @@ No datum/flightline steps in the valid data (vertical & horizontal step scans = 
 
 1. **`DemRasterRepair.RepairForMesh(...)` consolidation** — one entry point running the full chain, called by
    all 4 paths, so coverage can't drift selectively again (the root of the whack-a-mole).
-2. **★ THE OPEN BUG — deep narrow "fault" trench (Jaworzynka / Goryczkowy area).** Renders as a serrated,
-   dead-straight, near-vertical chasm; visible WITHOUT ortho (geometry), at LOD-1 m AND base-30 m views.
-   VERIFIED (cross-section): the base `tatry.dem` is SMOOTH there → it is NOT a base artefact and NOT a
-   "real valley vs bug" ambiguity. It is a **deep, dead-straight, NON-zero narrow column in the z16 1 m
-   DETAIL data** (and the detail's base-backfilled wide-voids near it inherit it). `FillNarrowZeroStrips`
-   (0-only), `FillPits` (single-cell), and `FillNoDataFrom` all MISS it. **FIX (not done):** a
-   **depth-triggered narrow-trench fill** — like `FillNarrowZeroStrips` but the gap trigger is "cell much
-   deeper than BOTH neighbours across a narrow run", interpolated from the sides; on ALL paths. **First step:
-   dump the z16 cell values across the column at lon ~19.93 to confirm width/depth/values.** (Tried and
-   REVERTED as wrong-layer: a base DEM despike-rebake, and a `FillNoDataFromFeathered` void-boundary blend.)
+2. ~~**★ THE OPEN BUG — deep narrow "fault" trench (Jaworzynka / Goryczkowy area).**~~ **✅ RESOLVED** — it was
+   a **corrupt row/column DROPOUT STRIP in `tatry.dem`** (the 15 m base), NOT the z16 detail and NOT a base
+   *despike* problem. Fixed on LOAD by **`FillDropoutStrips`** (§A.2b); root cause + diagnosis recipe live there.
+   The old hypothesis in this slot ("non-zero narrow column in the z16 detail") was WRONG and cost the most
+   time — lesson recorded in §A.2b: a single corrupt base row reads as one low line easy to dismiss as a
+   valley, and `FillPits` only halves it (leaves a ~20-30 m residual trench), so it *looks* like the base is
+   "smooth" unless you scan for a gradient SPIKE and dump the cross-section. Decisive moves that cracked it:
+   (a) the cyan detail-tint showed the trench sat OUTSIDE the detail window → it's the BASE, not a detail seam;
+   (b) reproducing the base mesh offline and scanning for the artefact rather than trusting "the DEM is smooth".
 3. **Wide-void boundary residual shading** (smooth base normals vs detailed 1 m) after `FillNoDataFromFeathered`
    removed the height step — optional normal-smoothing at the boundary if still visible.
 4. **Cloud-shadow** still samples camera-relative `vWorldPos.z` (§C.8).

@@ -357,6 +357,108 @@ public static class DemRasterRepair
         return new DemRaster(cols, rows, raster.Bounds, s, noData);
     }
 
+    /// <summary>
+    /// Repairs corrupt ROW and COLUMN dropout STRIPS — a run of cells sitting far below BOTH of its
+    /// perpendicular neighbours (a DEM mosaic/stitch artefact: a lidar scanline or LiDAR↔Copernicus seam that
+    /// dropped a strip by hundreds of metres). Unlike <see cref="FillPits"/> (single cells; and it only
+    /// converges to within its own threshold so it leaves a narrow RESIDUAL trench), this finds a horizontal
+    /// (resp. vertical) RUN of at least <paramref name="minRunCells"/> consecutive cells each more than
+    /// <paramref name="depthThresholdMeters"/> below the line on both sides, and replaces every cell in the run
+    /// with the mean of the two bracketing lines — fully flattening the strip in one pass. The run requirement
+    /// is what separates a systematic strip (a dead-straight cut) from an isolated pit or a real V-valley bottom
+    /// (left untouched for <see cref="FillPits"/>). Rows first, then columns; both read a pre-pass snapshot so a
+    /// just-filled cell never corrupts a neighbour's bracket.
+    /// </summary>
+    public static DemRaster FillDropoutStrips(DemRaster raster, double depthThresholdMeters = 50.0, int minRunCells = 3)
+    {
+        ArgumentNullException.ThrowIfNull(raster);
+
+        int cols = raster.Columns;
+        int rows = raster.Rows;
+        float noData = raster.NoDataValue;
+        float[] s = (float[])raster.Samples.Clone();
+
+        bool IsValid(float v) => !v.Equals(noData) && !float.IsNaN(v);
+
+        // ROW strips: a cell is a candidate if it sits > threshold below the rows ABOVE and BELOW it. Fill runs
+        // of >= minRunCells consecutive candidates with the mean of the bracketing rows. Snapshot so the fill
+        // reads original (un-filled) bracket values.
+        float[] snap = (float[])s.Clone();
+        bool RowCandidate(int r, int c)
+        {
+            float v = snap[(r * cols) + c], up = snap[((r - 1) * cols) + c], dn = snap[((r + 1) * cols) + c];
+            return IsValid(v) && IsValid(up) && IsValid(dn) && Math.Min(up, dn) - v > depthThresholdMeters;
+        }
+
+        for (int r = 1; r < rows - 1; r++)
+        {
+            int c = 0;
+            while (c < cols)
+            {
+                if (!RowCandidate(r, c))
+                {
+                    c++;
+                    continue;
+                }
+
+                int j = c;
+                while (j < cols && RowCandidate(r, j))
+                {
+                    j++;
+                }
+
+                if (j - c >= minRunCells)
+                {
+                    for (int k = c; k < j; k++)
+                    {
+                        s[(r * cols) + k] = (snap[((r - 1) * cols) + k] + snap[((r + 1) * cols) + k]) * 0.5f;
+                    }
+                }
+
+                c = j;
+            }
+        }
+
+        // COLUMN strips: same, perpendicular = LEFT/RIGHT, run vertical.
+        Array.Copy(s, snap, s.Length);
+        bool ColCandidate(int r, int c)
+        {
+            float v = snap[(r * cols) + c], le = snap[(r * cols) + c - 1], ri = snap[(r * cols) + c + 1];
+            return IsValid(v) && IsValid(le) && IsValid(ri) && Math.Min(le, ri) - v > depthThresholdMeters;
+        }
+
+        for (int c = 1; c < cols - 1; c++)
+        {
+            int r = 0;
+            while (r < rows)
+            {
+                if (!ColCandidate(r, c))
+                {
+                    r++;
+                    continue;
+                }
+
+                int j = r;
+                while (j < rows && ColCandidate(j, c))
+                {
+                    j++;
+                }
+
+                if (j - r >= minRunCells)
+                {
+                    for (int k = r; k < j; k++)
+                    {
+                        s[(k * cols) + c] = (snap[(k * cols) + c - 1] + snap[(k * cols) + c + 1]) * 0.5f;
+                    }
+                }
+
+                r = j;
+            }
+        }
+
+        return new DemRaster(cols, rows, raster.Bounds, s, noData);
+    }
+
     // Walks `count` samples from `start` by `stride`, carrying the last valid value forward into holes.
     private static void FillRun(float[] s, int start, int count, int stride, Func<float, bool> isHole)
     {

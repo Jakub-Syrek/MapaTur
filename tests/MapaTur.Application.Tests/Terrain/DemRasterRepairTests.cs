@@ -352,4 +352,57 @@ public sealed class DemRasterRepairTests
 
         result.Samples.Should().Equal(10f, ND, 20f, 10f, ND, 20f);
     }
+
+    [Fact]
+    public void FillDropoutStrips_FillsAWholeDropoutRow_FromTheBracketingRows()
+    {
+        // tatry.dem carries corrupt single ROWS (mosaic/stitch artefact) sitting hundreds of metres below both
+        // neighbours across most of the row — FillPits only shaves them to its ~20 m threshold, leaving a narrow
+        // residual trench in the base. FillDropoutStrips fills the whole strip from the rows above/below.
+        var samples = new float[5 * 5];
+        Array.Fill(samples, 100f);
+        for (int c = 0; c < 5; c++)
+        {
+            samples[(2 * 5) + c] = 10f; // row 2 dropped to 10 (90 m below the 100 neighbours)
+        }
+
+        var result = DemRasterRepair.FillDropoutStrips(Make(5, 5, samples), depthThresholdMeters: 50.0, minRunCells: 3);
+
+        for (int c = 0; c < 5; c++)
+        {
+            result[c, 2].Should().Be(100f, "the dropout row is interpolated from the bracketing rows (mean 100)");
+        }
+    }
+
+    [Fact]
+    public void FillDropoutStrips_FillsAWholeDropoutColumn()
+    {
+        var samples = new float[5 * 5];
+        Array.Fill(samples, 100f);
+        for (int r = 0; r < 5; r++)
+        {
+            samples[(r * 5) + 2] = 10f; // column 2 dropped
+        }
+
+        var result = DemRasterRepair.FillDropoutStrips(Make(5, 5, samples), depthThresholdMeters: 50.0, minRunCells: 3);
+
+        for (int r = 0; r < 5; r++)
+        {
+            result[2, r].Should().Be(100f, "the dropout column is interpolated from the bracketing columns");
+        }
+    }
+
+    [Fact]
+    public void FillDropoutStrips_LeavesARealNarrowFeatureUntouched()
+    {
+        // A single low cell (a pit, or the bottom of a real V-valley) is NOT a systematic strip — fewer than
+        // minFraction of the row/column is dropped — so it is left for FillPits, not flattened by this pass.
+        var samples = new float[5 * 5];
+        Array.Fill(samples, 100f);
+        samples[(2 * 5) + 2] = 10f; // one cell only (1/5 = 20% of its row/col < 35%)
+
+        var result = DemRasterRepair.FillDropoutStrips(Make(5, 5, samples), depthThresholdMeters: 50.0, minRunCells: 3);
+
+        result[2, 2].Should().Be(10f, "an isolated low cell is not a strip dropout — left untouched");
+    }
 }

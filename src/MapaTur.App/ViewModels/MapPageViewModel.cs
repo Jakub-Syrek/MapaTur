@@ -334,6 +334,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             case "PoiPasses": ShowPasses = !ShowPasses; break;
             case "Trails": ShowTrails = !ShowTrails; break;
             case "PeakNames": ShowPeakNames = !ShowPeakNames; break;
+            case "CableCar": ShowCableCar = !ShowCableCar; break;
         }
     }
 
@@ -732,6 +733,9 @@ public sealed partial class MapPageViewModel : ObservableObject
 
     /// <summary>Whether summit glyphs + elevation labels are drawn over the 3D terrain.</summary>
     [ObservableProperty] private bool showPeakNames = true;
+
+    /// <summary>Whether the Kasprowy Wierch cable-car overlay (cables + station masts) is drawn in 3D.</summary>
+    [ObservableProperty] private bool showCableCar = true;
 
     /// <summary>Whether the avalanche slope-steepness ("Mapa nachylenia") shading is active.</summary>
     [ObservableProperty] private bool slopeMapMode;
@@ -1988,7 +1992,11 @@ public sealed partial class MapPageViewModel : ObservableObject
         // watercourses (bake artefacts) that render as dark-walled trench "dashes". The LOD demo pipeline
         // already despikes; the auto-loaded MAIN map must too, or the same DEM shows holes here.
         DemRaster loadedRaster = raster;
-        raster = await Task.Run(() => DemRasterRepair.FillPits(loadedRaster, depthThresholdMeters: 20.0)).ConfigureAwait(true);
+        raster = await Task.Run(() => DemRasterRepair.FillPits(
+            DemRasterRepair.FillDropoutStrips(
+                DemRasterRepair.FillNarrowZeroStrips(loadedRaster, maxWidthCells: 24),
+                depthThresholdMeters: 50.0, minRunCells: 3),
+            depthThresholdMeters: 20.0)).ConfigureAwait(true);
 
         // CPU-Skia 3D path (mobile + non-Windows desktop) can't keep an interactive frame rate on
         // ~9 M-vertex LiDAR meshes — orbit/pinch stutter — so subsample the loaded DEM down to a
@@ -2353,7 +2361,12 @@ public sealed partial class MapPageViewModel : ObservableObject
                 // regular processing-grid positions (water/void bake artefacts) — on the rendered base each is a
                 // cell-wide dark-walled shaft (the black "dashes" along valleys). Before the stride subsample,
                 // or the stride could sample a pit cell whose true neighbours are then ~50 m away.
-                DemRaster r = DemRasterRepair.FillPits(loadedBase, depthThresholdMeters: 20.0);
+                // Checklist §A: bridge narrow flat-0 strips from neighbours FIRST, then fully fill corrupt single
+                // ROW/COLUMN dropouts (mosaic/stitch artefacts hundreds of m below their neighbours — FillPits only
+                // shaves them to ~20 m, leaving a residual narrow trench in the base), then despike one-cell pits.
+                DemRaster bridgedBase = DemRasterRepair.FillNarrowZeroStrips(loadedBase, maxWidthCells: 24);
+                DemRaster destriped = DemRasterRepair.FillDropoutStrips(bridgedBase, depthThresholdMeters: 50.0, minRunCells: 3);
+                DemRaster r = DemRasterRepair.FillPits(destriped, depthThresholdMeters: 20.0);
                 if (!ringBase)
                 {
                     // Legacy uniform base for the online fallback window only.
@@ -2606,6 +2619,8 @@ public sealed partial class MapPageViewModel : ObservableObject
     private const int PerTileGridN = 8;                                  // N×N crops over the loaded window (8 = ~500 m tiles, finer budget control)
     private static readonly int[] PerTileSubsampleSteps = { 1, 2, 4, 8 };// finest → coarsest stride per tile
     private const float PerTileSkirtDepthMeters = 25f;                   // vertical curtain hides inter-tile (and window→base) seams
+
+
     private const int PerTileMaxTileSide = 250;                          // skirt + 16-bit index limit
 #if WINDOWS
     private const long PerTileVertexBudget = 6_000_000;                 // desktop GPU: 4× the phone budget — 1 m holds across the whole (larger) window
@@ -2656,8 +2671,10 @@ public sealed partial class MapPageViewModel : ObservableObject
             return null;
         }
 
-        // Coverage guard: GUGiK returns flat ~0 outside its coverage (not a NoData sentinel) → a flat green
-        // plate below the terrain. Hole cells below the floor so the mesh drops them and the base shows.
+        // Checklist §A (same chain as the per-tile path): bridge narrow flat-0 strips from the 1 m neighbours
+        // + despike one-cell pits, THEN hole the flat-0 out-of-coverage plate.
+        detail = DemRasterRepair.FillNarrowZeroStrips(detail, maxWidthCells: 24);
+        detail = DemRasterRepair.FillPits(detail, depthThresholdMeters: 20.0);
         detail = DemRasterRepair.HoleBelow(detail, DetailCoverageFloorMeters);
 
         (double dMin, double dMax) = detail.GetElevationRange();

@@ -529,3 +529,5 @@ signing.env
 # Local diagnostic captures at the repo root (device screenshots / uiautomator dumps).
 /ui.xml
 /*.png
+.sk-clip-backup/
+tools/_demdump/
