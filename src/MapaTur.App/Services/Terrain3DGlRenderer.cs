@@ -524,12 +524,39 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "in vec2 vUv;\n" +
         "uniform sampler2D uScene;\n" +
         "uniform sampler2D uBloom;\n" +
-        "uniform float uIntensity;\n" +
+        "uniform sampler2D uGodray;\n" +
+        "uniform float uIntensity;\n" +        // bloom
+        "uniform float uGodrayIntensity;\n" +
         "out vec4 fragColor;\n" +
         "void main(){\n" +
         "  vec3 sc = texture(uScene, vUv).rgb;\n" +
         "  vec3 bl = texture(uBloom, vUv).rgb;\n" +
-        "  fragColor = vec4(sc + (bl * uIntensity), 1.0);\n" +
+        "  vec3 gr = texture(uGodray, vUv).rgb;\n" +
+        "  fragColor = vec4(sc + (bl * uIntensity) + (gr * uGodrayIntensity), 1.0);\n" +
+        "}\n";
+
+    // God rays (crepuscular rays): screen-space radial blur of the bright-pass mask toward the sun's
+    // on-screen position. Where dark terrain occludes the path to the sun the accumulation stops, so light
+    // streams out only through the gaps — the classic post-process light-shaft look. Reuses PostVertexShaderSource.
+    private const string GodrayFragmentShaderSource =
+        "#version 300 es\n" +
+        "precision highp float;\n" +
+        "in vec2 vUv;\n" +
+        "uniform sampler2D uTex;\n" +   // bright-pass mask (sun/sky bright, terrain black)
+        "uniform vec2 uSunUv;\n" +      // sun position in this texture's UV space
+        "out vec4 fragColor;\n" +
+        "void main(){\n" +
+        "  const int N = 24;\n" +
+        "  vec2 delta = (vUv - uSunUv) * (1.0 / float(N));\n" + // density 1.0; marches toward the sun
+        "  vec2 uv = vUv;\n" +
+        "  vec3 col = texture(uTex, uv).rgb;\n" +
+        "  float decay = 1.0;\n" +
+        "  for (int i = 0; i < N; i++) {\n" +
+        "    uv -= delta;\n" +
+        "    col += texture(uTex, uv).rgb * decay * 0.5;\n" + // weight 0.5
+        "    decay *= 0.93;\n" +
+        "  }\n" +
+        "  fragColor = vec4(col * 0.35, 1.0);\n" + // exposure
         "}\n";
 
     // Cloud-layer ("sea of clouds") program. A large horizontal quad at a fixed world altitude,
@@ -1085,14 +1112,19 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // Bloom: two half-resolution colour buffers (ping-pong) for the bright-pass + separable Gaussian blur,
     // composited additively over the full-res scene into postColorTex. Half-res keeps it cheap and gives the
     // soft spread for free on upsample. Falls back to the plain pass-through if these can't be created.
-    private uint bloomFboA, bloomTexA, bloomFboB, bloomTexB;
+    private uint bloomBrightFbo, bloomBrightTex;            // shared bright-pass output (bloom blur AND god rays read it)
+    private uint bloomFboA, bloomTexA, bloomFboB, bloomTexB; // bloom blur ping-pong; A holds the final bloom
+    private uint godrayFbo, godrayTex;                       // god-ray radial-blur output
     private int bloomWidth, bloomHeight; // half of the present size
     private bool bloomUnsupported;
-    private uint bloomBrightProgram, bloomBlurProgram, bloomCompositeProgram;
+    private uint bloomBrightProgram, bloomBlurProgram, bloomCompositeProgram, godrayProgram;
     private int bloomBrightTexLoc = -1, bloomBrightThresholdLoc = -1;
     private int bloomBlurTexLoc = -1, bloomBlurDirLoc = -1;
+    private int godrayTexLoc = -1, godraySunUvLoc = -1;
     private int bloomCompSceneLoc = -1, bloomCompBloomLoc = -1, bloomCompIntensityLoc = -1;
+    private int bloomCompGodrayLoc = -1, bloomCompGodrayIntensityLoc = -1;
     private bool bloomStageLogged;
+    private bool godrayStageLogged;
 
     private readonly Dictionary<TerrainMesh3D, TileBuffers> tileBuffers = new();
     private IReadOnlyList<TerrainMesh3D>? lastTiles;
@@ -1410,18 +1442,24 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             postProgram = 0;
             postTexLocation = -1;
             postStageLogged = false;
-            // Bloom ping-pong buffers + programs — same context-loss handling.
+            // Bloom + god-ray buffers/programs — same context-loss handling.
+            bloomBrightFbo = bloomBrightTex = 0;
             bloomFboA = bloomTexA = bloomFboB = bloomTexB = 0;
+            godrayFbo = godrayTex = 0;
             bloomWidth = 0;
             bloomHeight = 0;
             bloomUnsupported = false;
             bloomBrightProgram = 0;
             bloomBlurProgram = 0;
             bloomCompositeProgram = 0;
+            godrayProgram = 0;
             bloomBrightTexLoc = bloomBrightThresholdLoc = -1;
             bloomBlurTexLoc = bloomBlurDirLoc = -1;
+            godrayTexLoc = godraySunUvLoc = -1;
             bloomCompSceneLoc = bloomCompBloomLoc = bloomCompIntensityLoc = -1;
+            bloomCompGodrayLoc = bloomCompGodrayIntensityLoc = -1;
             bloomStageLogged = false;
+            godrayStageLogged = false;
             // The planar-reflection target belonged to the dead context — drop the handles so it's rebuilt fresh.
             reflectionFbo = 0;
             reflectionColorTex = 0;
@@ -2036,9 +2074,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         // Post-process stage (pass-through today; bloom / god rays build on it). Reads the resolved scene
         // and returns the texture the caller wraps for Skia — falls back to presentColorTex if unavailable.
+        // God rays: project the sun to screen space; draw only when it is in front / on-frame. Strength
+        // rides the same low-sun curve as the glow (peaks at golden hour, nil at noon/night).
+        (bool sunVisible, Vector2 sunUv) = atmosphere is not null
+            ? SunScreenProjection.Project(camera, atmosphere.SunDirection, vpWidth, vpHeight)
+            : (false, Vector2.Zero);
+        float godrayIntensity = (sunVisible && atmosphere is not null) ? atmosphere.SunGlowIntensity * 0.6f : 0f;
+
         uint finalTex = RunPostProcess(
             gl, presentColorTex, vpWidth, vpHeight,
-            atmosphere?.BloomThreshold ?? 1f, atmosphere?.BloomIntensity ?? 0f);
+            atmosphere?.BloomThreshold ?? 1f, atmosphere?.BloomIntensity ?? 0f,
+            sunUv.X, sunUv.Y, godrayIntensity);
 
         // Unbind everything before returning. The caller will re-establish whatever framebuffer Skia
         // expects (via GRContext.ResetContext) before sampling the texture we just produced.
@@ -2352,30 +2398,43 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             return false;
         }
         (int bw, int bh) = PostProcessBufferSizing.Downsample(fullWidth, fullHeight, 2);
-        if (bloomFboA != 0 && bloomWidth == bw && bloomHeight == bh)
+        if (bloomBrightFbo != 0 && bloomWidth == bw && bloomHeight == bh)
         {
             return true;
         }
 
+        g.DeleteFramebuffer(bloomBrightFbo);
+        g.DeleteTexture(bloomBrightTex);
         g.DeleteFramebuffer(bloomFboA);
         g.DeleteTexture(bloomTexA);
         g.DeleteFramebuffer(bloomFboB);
         g.DeleteTexture(bloomTexB);
+        g.DeleteFramebuffer(godrayFbo);
+        g.DeleteTexture(godrayTex);
 
+        bloomBrightTex = MakeColorTexture(g, bw, bh);
+        bloomBrightFbo = MakeColorFbo(g, bloomBrightTex, out GLEnum statusBright);
         bloomTexA = MakeColorTexture(g, bw, bh);
         bloomFboA = MakeColorFbo(g, bloomTexA, out GLEnum statusA);
         bloomTexB = MakeColorTexture(g, bw, bh);
         bloomFboB = MakeColorFbo(g, bloomTexB, out GLEnum statusB);
+        godrayTex = MakeColorTexture(g, bw, bh);
+        godrayFbo = MakeColorFbo(g, godrayTex, out GLEnum statusGod);
         g.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
 
-        if (statusA != GLEnum.FramebufferComplete || statusB != GLEnum.FramebufferComplete)
+        if (statusBright != GLEnum.FramebufferComplete || statusA != GLEnum.FramebufferComplete
+            || statusB != GLEnum.FramebufferComplete || statusGod != GLEnum.FramebufferComplete)
         {
-            Log.Information("[GL3D] bloom framebuffer incomplete (A={A}, B={B}) — bloom disabled this session", statusA, statusB);
+            Log.Information("[GL3D] post-effect framebuffer incomplete (bright={Br}, A={A}, B={B}, god={G}) — bloom/god-rays off this session", statusBright, statusA, statusB, statusGod);
+            g.DeleteFramebuffer(bloomBrightFbo);
+            g.DeleteTexture(bloomBrightTex);
             g.DeleteFramebuffer(bloomFboA);
             g.DeleteTexture(bloomTexA);
             g.DeleteFramebuffer(bloomFboB);
             g.DeleteTexture(bloomTexB);
-            bloomFboA = bloomTexA = bloomFboB = bloomTexB = 0;
+            g.DeleteFramebuffer(godrayFbo);
+            g.DeleteTexture(godrayTex);
+            bloomBrightFbo = bloomBrightTex = bloomFboA = bloomTexA = bloomFboB = bloomTexB = godrayFbo = godrayTex = 0;
             bloomUnsupported = true;
             return false;
         }
@@ -2391,7 +2450,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// otherwise (or if any buffer/program is unavailable) it pass-throughs the scene unchanged. Always
     /// returns a valid texture so the scene is never lost.
     /// </summary>
-    private uint RunPostProcess(GL g, uint sourceTex, int width, int height, float bloomThreshold, float bloomIntensity)
+    private uint RunPostProcess(
+        GL g, uint sourceTex, int width, int height,
+        float bloomThreshold, float bloomIntensity, float sunUvX, float sunUvY, float godrayIntensity)
     {
         if (!postProcessEnabled || postProgram == 0 || sourceTex == 0 || width <= 0 || height <= 0)
         {
@@ -2407,14 +2468,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.Disable(EnableCap.Blend);
         g.BindVertexArray(skyVao); // reuse the sky pass's fullscreen triangle for every post pass
 
-        bool doBloom = bloomIntensity > 0.001f
-            && bloomBrightProgram != 0 && bloomBlurProgram != 0 && bloomCompositeProgram != 0
-            && EnsureBloomBuffers(g, width, height);
+        bool buffersReady = bloomBrightProgram != 0 && bloomBlurProgram != 0 && godrayProgram != 0
+            && bloomCompositeProgram != 0 && EnsureBloomBuffers(g, width, height);
+        bool wantBloom = bloomIntensity > 0.001f;
+        bool wantGodray = godrayIntensity > 0.001f;
 
-        if (doBloom)
+        if (buffersReady && (wantBloom || wantGodray))
         {
-            // 1) Bright-pass: full-res scene → half-res bloomTexA.
-            g.BindFramebuffer(FramebufferTarget.Framebuffer, bloomFboA);
+            // Bright-pass (shared by bloom + god rays): full-res scene → half-res bloomBrightTex.
+            g.BindFramebuffer(FramebufferTarget.Framebuffer, bloomBrightFbo);
             g.Viewport(0, 0, (uint)bloomWidth, (uint)bloomHeight);
             g.UseProgram(bloomBrightProgram);
             g.ActiveTexture(TextureUnit.Texture0);
@@ -2423,21 +2485,35 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             g.Uniform1(bloomBrightThresholdLoc, bloomThreshold);
             g.DrawArrays(PrimitiveType.Triangles, 0, 3);
 
-            // 2) Horizontal blur: bloomTexA → bloomTexB.
-            g.BindFramebuffer(FramebufferTarget.Framebuffer, bloomFboB);
-            g.UseProgram(bloomBlurProgram);
-            g.BindTexture(TextureTarget.Texture2D, bloomTexA);
-            g.Uniform1(bloomBlurTexLoc, 0);
-            g.Uniform2(bloomBlurDirLoc, 1f / bloomWidth, 0f);
-            g.DrawArrays(PrimitiveType.Triangles, 0, 3);
+            if (wantBloom)
+            {
+                // Separable blur: bright → B (horizontal) → A (vertical). A holds the final bloom.
+                g.BindFramebuffer(FramebufferTarget.Framebuffer, bloomFboB);
+                g.UseProgram(bloomBlurProgram);
+                g.BindTexture(TextureTarget.Texture2D, bloomBrightTex);
+                g.Uniform1(bloomBlurTexLoc, 0);
+                g.Uniform2(bloomBlurDirLoc, 1f / bloomWidth, 0f);
+                g.DrawArrays(PrimitiveType.Triangles, 0, 3);
 
-            // 3) Vertical blur: bloomTexB → bloomTexA.
-            g.BindFramebuffer(FramebufferTarget.Framebuffer, bloomFboA);
-            g.BindTexture(TextureTarget.Texture2D, bloomTexB);
-            g.Uniform2(bloomBlurDirLoc, 0f, 1f / bloomHeight);
-            g.DrawArrays(PrimitiveType.Triangles, 0, 3);
+                g.BindFramebuffer(FramebufferTarget.Framebuffer, bloomFboA);
+                g.BindTexture(TextureTarget.Texture2D, bloomTexB);
+                g.Uniform2(bloomBlurDirLoc, 0f, 1f / bloomHeight);
+                g.DrawArrays(PrimitiveType.Triangles, 0, 3);
+            }
 
-            // 4) Composite: full-res scene + upsampled bloomTexA * intensity → postColorTex.
+            if (wantGodray)
+            {
+                // Radial blur of the bright mask toward the sun's screen position → godrayTex.
+                g.BindFramebuffer(FramebufferTarget.Framebuffer, godrayFbo);
+                g.UseProgram(godrayProgram);
+                g.BindTexture(TextureTarget.Texture2D, bloomBrightTex);
+                g.Uniform1(godrayTexLoc, 0);
+                g.Uniform2(godraySunUvLoc, sunUvX, sunUvY);
+                g.DrawArrays(PrimitiveType.Triangles, 0, 3);
+            }
+
+            // Composite: scene + bloom*intensity + godray*intensity → postColorTex. Inactive terms get a
+            // zero intensity so their (possibly stale) buffer contributes nothing.
             g.BindFramebuffer(FramebufferTarget.Framebuffer, postFbo);
             g.Viewport(0, 0, (uint)width, (uint)height);
             g.UseProgram(bloomCompositeProgram);
@@ -2447,21 +2523,32 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             g.ActiveTexture(TextureUnit.Texture1);
             g.BindTexture(TextureTarget.Texture2D, bloomTexA);
             g.Uniform1(bloomCompBloomLoc, 1);
-            g.Uniform1(bloomCompIntensityLoc, bloomIntensity);
+            g.ActiveTexture(TextureUnit.Texture2);
+            g.BindTexture(TextureTarget.Texture2D, godrayTex);
+            g.Uniform1(bloomCompGodrayLoc, 2);
+            g.Uniform1(bloomCompIntensityLoc, wantBloom ? bloomIntensity : 0f);
+            g.Uniform1(bloomCompGodrayIntensityLoc, wantGodray ? godrayIntensity : 0f);
             g.DrawArrays(PrimitiveType.Triangles, 0, 3);
+            g.BindTexture(TextureTarget.Texture2D, 0);
+            g.ActiveTexture(TextureUnit.Texture1);
             g.BindTexture(TextureTarget.Texture2D, 0);
             g.ActiveTexture(TextureUnit.Texture0);
             g.BindTexture(TextureTarget.Texture2D, 0);
 
-            if (!bloomStageLogged)
+            if (wantBloom && !bloomStageLogged)
             {
                 Log.Information("[GL3D] post-process: bloom active {W}x{H} (half {BW}x{BH})", width, height, bloomWidth, bloomHeight);
                 bloomStageLogged = true;
             }
+            if (wantGodray && !godrayStageLogged)
+            {
+                Log.Information("[GL3D] post-process: god rays active {W}x{H} sunUv={U},{V}", width, height, sunUvX, sunUvY);
+                godrayStageLogged = true;
+            }
         }
         else
         {
-            // Pass-through (bloom off / unavailable): scene → postColorTex unchanged.
+            // Pass-through (effects off / unavailable): scene → postColorTex unchanged.
             g.BindFramebuffer(FramebufferTarget.Framebuffer, postFbo);
             g.Viewport(0, 0, (uint)width, (uint)height);
             g.UseProgram(postProgram);
@@ -3110,6 +3197,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         bloomCompSceneLoc = g.GetUniformLocation(bloomCompositeProgram, "uScene");
         bloomCompBloomLoc = g.GetUniformLocation(bloomCompositeProgram, "uBloom");
         bloomCompIntensityLoc = g.GetUniformLocation(bloomCompositeProgram, "uIntensity");
+        bloomCompGodrayLoc = g.GetUniformLocation(bloomCompositeProgram, "uGodray");
+        bloomCompGodrayIntensityLoc = g.GetUniformLocation(bloomCompositeProgram, "uGodrayIntensity");
+        godrayProgram = BuildPostProgram(g, GodrayFragmentShaderSource, "God rays");
+        godrayTexLoc = g.GetUniformLocation(godrayProgram, "uTex");
+        godraySunUvLoc = g.GetUniformLocation(godrayProgram, "uSunUv");
 
         // Cloud-layer program — horizontal quad at altitude, fBm-alpha "sea of clouds".
         uint cvs = CompileShader(g, ShaderType.VertexShader, CloudLayerVertexShaderSource);
@@ -4511,11 +4603,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.DeleteTexture(postColorTex);
         postFbo = 0;
         postColorTex = 0;
+        gl.DeleteFramebuffer(bloomBrightFbo);
+        gl.DeleteTexture(bloomBrightTex);
         gl.DeleteFramebuffer(bloomFboA);
         gl.DeleteTexture(bloomTexA);
         gl.DeleteFramebuffer(bloomFboB);
         gl.DeleteTexture(bloomTexB);
-        bloomFboA = bloomTexA = bloomFboB = bloomTexB = 0;
+        gl.DeleteFramebuffer(godrayFbo);
+        gl.DeleteTexture(godrayTex);
+        bloomBrightFbo = bloomBrightTex = bloomFboA = bloomTexA = bloomFboB = bloomTexB = godrayFbo = godrayTex = 0;
         gl.DeleteFramebuffer(reflectionFbo);
         gl.DeleteTexture(reflectionColorTex);
         gl.DeleteRenderbuffer(reflectionDepthRb);
@@ -4550,6 +4646,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.DeleteProgram(bloomBrightProgram);
             gl.DeleteProgram(bloomBlurProgram);
             gl.DeleteProgram(bloomCompositeProgram);
+            gl.DeleteProgram(godrayProgram);
             gl.DeleteVertexArray(skyVao);
             gl.DeleteBuffer(skyVbo);
             gl.DeleteProgram(cloudProgram);
@@ -4566,6 +4663,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             bloomBrightProgram = 0;
             bloomBlurProgram = 0;
             bloomCompositeProgram = 0;
+            godrayProgram = 0;
             skyVao = 0;
             skyVbo = 0;
             cloudProgram = 0;
