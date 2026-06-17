@@ -55,8 +55,11 @@ nie przenosimy 1:1 na GLES. Kroki 1–5 odtwarzają *postrzegany* rezultat o zł
   etap post-process `RunPostProcess`/`EnsurePostBuffers` w rendererze (`6b28d84`, pass-through za
   kill-switchem, graceful fallback). Desktop-log-verified: `[GL3D] post-process stage active`,
   FBO kompletny. Reszta etapu (bloom/godrays) buduje na `RunPostProcess`.
-- ⏭️ **Następne: Krok 3 (bloom)** — bright-pass → blur (mip-chain z helpera, half-res) → additive
-  composite, w `RunPostProcess`. Próg/intensywność z `Atmosphere` (TDD).
+- ✅ **Krok 3 (bloom)** — `Atmosphere.BloomIntensity/Threshold` (TDD) + bright-pass → separable blur
+  (half-res ping-pong) → additive composite w `RunPostProcess` (`544203f`). Desktop-log-verified
+  („bloom active 1424x713 half 712x356"), na S25 v104, user: „wygląda ok".
+- ⏭️ **Następne: Krok 4 (smugi światła / god rays)** — maska okluzji → radial blur ku słońcu (screen-space)
+  → additive, w `RunPostProcess` (reużywa fundamentu). Rzut słońca do screen-space (TDD).
 
 ### Recepta deployu / weryfikacji (potwierdzona w tej sesji)
 - APK: `dotnet build src/MapaTur.App -f net10.0-android -c Release -p:EmbedAssembliesIntoApk=true
