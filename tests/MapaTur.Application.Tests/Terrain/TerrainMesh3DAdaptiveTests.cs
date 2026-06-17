@@ -69,6 +69,26 @@ public sealed class TerrainMesh3DAdaptiveTests
     }
 
     [Fact]
+    public void BuildAdaptiveTiles_SpanningTwoOrthoCells_CutsAtTheCellBoundary()
+    {
+        // A plan tile that spans a 2×1 ortho cell boundary must be CUT at the boundary, so no block straddles
+        // it. A straddling block picks ONE cell by its centre and clamps the far-side vertices' UV → that
+        // cell's edge texels stretch into relief-independent "strata" stripes (the BuildTiles fix 197cde6
+        // already cut at cell boundaries; BuildAdaptiveTiles — used by the LOD base — did not). With the cut,
+        // blocks land in BOTH cells; without it, only the centre's cell appears.
+        var coverage = new OrthoCoverage(Bounds, GridCols: 2, GridRows: 1);
+        DemRaster full = Ramp(9); // bounds == coverage bounds → vertical cell boundary at the middle column
+        var plan = new List<PerTileLodDecision> { new(0, 0, 9, 9, 1) };
+
+        IReadOnlyList<TerrainMesh3D> meshes = TerrainMesh3D.BuildAdaptiveTiles(
+            full, plan, new TerrainMeshOptions { VerticalExaggeration = 1f }, orthoCoverage: coverage);
+
+        List<int> cells = meshes.Select(m => m.OrthoTileIndex).Distinct().OrderBy(i => i).ToList();
+        cells.Should().HaveCount(2, "the tile must be split at the cell boundary so each block stays inside one cell");
+        cells.Should().Contain(0).And.Contain(1);
+    }
+
+    [Fact]
     public void BuildAdaptiveTiles_WithEdgeHeightSource_PinsTheWindowPerimeterToTheBase()
     {
         // The streamed per-tile patch must MELT into the coarse base at the WINDOW edge (the initial single

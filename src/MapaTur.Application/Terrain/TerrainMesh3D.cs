@@ -520,6 +520,38 @@ public sealed class TerrainMesh3D
         MeshFrame frame = ComputeFrame(raster, anchor.Latitude);
 
         const int maxTileSide = 250; // ≤ 250 sampled verts/side keeps each block under the 16-bit index limit
+
+        // Ortho cell boundaries (absolute raster cols/rows). A block that STRADDLES a cell boundary picks one
+        // cell by its centre and clamps the far-side UV → that cell's edge texels stretch into relief-independent
+        // "strata" stripes. BuildTiles' orthoCoverage path already cuts at these boundaries (197cde6); the LOD
+        // base goes through BuildAdaptiveTiles, which did NOT — so it needs the same cut to kill the stripes.
+        var cellCols = new SortedSet<int>();
+        var cellRows = new SortedSet<int>();
+        if (orthoCoverage is { } cov)
+        {
+            double cw = cov.Bounds.SouthWest.Longitude, ce = cov.Bounds.NorthEast.Longitude;
+            double cs = cov.Bounds.SouthWest.Latitude, cn = cov.Bounds.NorthEast.Latitude;
+            for (int i = 1; i < cov.GridCols; i++)
+            {
+                double lon = cw + (i * (ce - cw) / cov.GridCols);
+                int col = (int)Math.Round((lon - raster.West) / (raster.East - raster.West) * (raster.Columns - 1));
+                if (col > 0 && col < raster.Columns - 1)
+                {
+                    cellCols.Add(col);
+                }
+            }
+
+            for (int i = 1; i < cov.GridRows; i++)
+            {
+                double lat = cn - (i * (cn - cs) / cov.GridRows);
+                int row = (int)Math.Round((raster.North - lat) / (raster.North - raster.South) * (raster.Rows - 1));
+                if (row > 0 && row < raster.Rows - 1)
+                {
+                    cellRows.Add(row);
+                }
+            }
+        }
+
         var tiles = new List<TerrainMesh3D>(plan.Count);
         foreach (PerTileLodDecision d in plan)
         {
@@ -539,8 +571,8 @@ public sealed class TerrainMesh3D
             // shared, so internal sub-seams sample identical absolute cells (coincide, no crack); only blocks on
             // the plan tile's true edge carry the neighbour weld ratio.
             int seg = maxTileSide * step;
-            int[] colCuts = StepAlignedCuts(colStartT, colEndT, seg);
-            int[] rowCuts = StepAlignedCuts(rowStartT, rowEndT, seg);
+            int[] colCuts = CutsWithCellBoundaries(colStartT, colEndT, seg, cellCols);
+            int[] rowCuts = CutsWithCellBoundaries(rowStartT, rowEndT, seg, cellRows);
             for (int ri = 0; ri < rowCuts.Length - 1; ri++)
             {
                 int sr0 = rowCuts[ri];
@@ -564,21 +596,38 @@ public sealed class TerrainMesh3D
     }
 
     /// <summary>
-    /// Inclusive cut points over [start, end] no more than <paramref name="seg"/> cells apart, each interior cut
-    /// at start + k·seg so it lands on the step grid (seg = maxTileSide·step) — adjacent sub-blocks then share a
-    /// step-aligned boundary and their sampled vertices coincide. Consecutive entries are a sub-block's range.
+    /// Inclusive cut points over [start, end] that (a) include every ortho cell <paramref name="boundaries"/>
+    /// strictly inside the range, so no sub-block straddles a cell (which would clamp its far-side UV into
+    /// stretched edge texels = "strata" stripes), and (b) split each gap between anchors into EQUAL parts no
+    /// more than <paramref name="seg"/> cells apart (equal parts avoid a 1–2-column sliver next to a boundary —
+    /// the dashed dark line along a cell edge). Consecutive entries are a sub-block's shared range. With no
+    /// boundaries it degrades to plain ≤seg even cuts of the whole range.
     /// </summary>
-    private static int[] StepAlignedCuts(int start, int end, int seg)
+    private static int[] CutsWithCellBoundaries(int start, int end, int seg, SortedSet<int> boundaries)
     {
-        var cuts = new List<int> { start };
-        int cur = start;
-        while (end - cur > seg)
+        var anchors = new SortedSet<int> { start, end };
+        foreach (int b in boundaries)
         {
-            cur += seg;
-            cuts.Add(cur);
+            if (b > start && b < end)
+            {
+                anchors.Add(b);
+            }
         }
 
-        cuts.Add(end);
+        var cuts = new SortedSet<int>();
+        var sorted = new List<int>(anchors);
+        for (int i = 0; i < sorted.Count - 1; i++)
+        {
+            int a = sorted[i];
+            int b = sorted[i + 1];
+            int span = b - a;
+            int parts = Math.Max(1, (int)Math.Ceiling((double)span / seg));
+            for (int k = 0; k <= parts; k++)
+            {
+                cuts.Add(a + (int)Math.Round((double)span * k / parts));
+            }
+        }
+
         return cuts.ToArray();
     }
 
