@@ -379,6 +379,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform float uCloudCoverage;\n" + // 0 = clear, 1 = overcast
         "uniform vec2 uCloudDrift;\n" +     // wind drift velocity (scaled by the wind setting)
         "uniform float uCloudDark;\n" +     // storm darkening, 1 = bright, <1 = darker
+        "uniform float uSunGlowIntensity;\n" + // forward-scatter glow strength (swells near horizon, 0 at noon/night)
+        "uniform float uSunGlowWidth;\n" +     // angular spread of the glow halo (wider near horizon)
         "out vec4 fragColor;\n" +
         // 2D value-noise + fractal Brownian motion. Hash-based, no texture lookups — costs ~5
         // sin() + ~40 lerps per cloud pixel. Adreno 830 chews through this without breaking a
@@ -450,7 +452,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // wider Mie halo (pow 80 → 55, 0.55 → 0.72) so the sun reads as a real, radiant sun rather than a dot.
         "  float sunCore = smoothstep(0.9976, 0.9991, sunDot);\n" +
         "  float sunHalo = pow(max(sunDot, 0.0), 55.0) * 0.72;\n" +
-        "  vec3 sun = uSunColor * (sunCore * 1.3 + sunHalo);\n" +
+        // Forward-scatter glow ("poświata pod słońcem"): a broad warm bloom around the sun that swells as
+        // it nears the horizon. uSunGlowWidth lowers the exponent (broader spread); the bloom pools BELOW
+        // the sun (forward scatter sinks toward the horizon) and is scaled by uSunGlowIntensity — which the
+        // Atmosphere model drives strong at golden hour and to nil at noon / night.
+        "  float glowExp = mix(40.0, 4.0, clamp(uSunGlowWidth, 0.0, 1.0));\n" +
+        "  float belowSun = clamp((uSunDir.z - viewDir.z) * 2.0 + 0.5, 0.0, 1.0);\n" +
+        "  float glow = pow(max(sunDot, 0.0), glowExp) * uSunGlowIntensity * (0.7 + 0.6 * belowSun);\n" +
+        "  vec3 sun = uSunColor * (sunCore * 1.3 + sunHalo + glow);\n" +
         "  fragColor = vec4(sky + sun, 1.0);\n" +
         "}\n";
 
@@ -871,6 +880,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int skyCloudCoverageLocation = -1;
     private int skyCloudDriftLocation = -1;
     private int skyCloudDarkLocation = -1;
+    private int skySunGlowIntensityLocation = -1;
+    private int skySunGlowWidthLocation = -1;
     private uint skyVao;
     private uint skyVbo;
 
@@ -1202,6 +1213,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             skyCloudCoverageLocation = -1;
             skyCloudDriftLocation = -1;
             skyCloudDarkLocation = -1;
+            skySunGlowIntensityLocation = -1;
+            skySunGlowWidthLocation = -1;
             skyVao = 0;
             skyVbo = 0;
             cloudProgram = 0;
@@ -1472,6 +1485,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.Uniform1(skyCloudCoverageLocation, effectiveCoverage);
             gl.Uniform2(skyCloudDriftLocation, windVec.X, windVec.Y);
             gl.Uniform1(skyCloudDarkLocation, stormDarken);
+            gl.Uniform1(skySunGlowIntensityLocation, atmosphere.SunGlowIntensity);
+            gl.Uniform1(skySunGlowWidthLocation, atmosphere.SunGlowWidth);
             gl.BindVertexArray(skyVao);
             gl.DrawArrays(PrimitiveType.Triangles, 0, 3);
             gl.BindVertexArray(0);
@@ -2680,6 +2695,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         skyCloudCoverageLocation = g.GetUniformLocation(skyProgram, "uCloudCoverage");
         skyCloudDriftLocation = g.GetUniformLocation(skyProgram, "uCloudDrift");
         skyCloudDarkLocation = g.GetUniformLocation(skyProgram, "uCloudDark");
+        skySunGlowIntensityLocation = g.GetUniformLocation(skyProgram, "uSunGlowIntensity");
+        skySunGlowWidthLocation = g.GetUniformLocation(skyProgram, "uSunGlowWidth");
 
         // Fullscreen triangle: 3 vertices, each xy in clip space, covering NDC [-1,1]^2 with one extra
         // vertex outside the rect so the rasteriser fills the full screen without re-clipping a quad.

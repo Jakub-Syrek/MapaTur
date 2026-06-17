@@ -62,6 +62,15 @@ public sealed class Atmosphere
     /// <summary>Exponential fog density per metre of view depth. Higher = murkier distance.</summary>
     public float FogDensity { get; }
 
+    /// <summary>Strength [0,1] of the forward-scatter glow ("poświata") around and under the sun. Swells as
+    /// the sun nears the horizon (longer atmospheric path scatters more forward light); zero when the sun
+    /// is below the horizon. Drives the sky shader's sun-glow term.</summary>
+    public float SunGlowIntensity { get; }
+
+    /// <summary>Angular spread [0,1] of the sun-glow halo. A tight disc near noon, widening across the sky
+    /// as the sun sinks; zero at night.</summary>
+    public float SunGlowWidth { get; }
+
     /// <summary>
     /// Builds the model from a time-of-day in hours (wrapped into [0,24)) and an optional cloud
     /// coverage in [0,1]. Default coverage = 0.35 (scattered cirrus, the look that fits a
@@ -139,6 +148,17 @@ public sealed class Atmosphere
         const float fogMax = 0.000015f;
         FogDensity = fogMin + ((fogMax - fogMin) * warmth);
         FogColor = SkyHorizonColor;
+
+        // Forward-scatter glow ("poświata pod słońcem"): the warm bloom that swells around and under the
+        // sun as its rays graze a longer atmospheric path near the horizon. Active only while the sun is
+        // above the horizon; fades in over the last ~34° of descent. Width grows alongside it but keeps a
+        // small floor so a tight halo is always present while the sun is up.
+        const float glowMaxElevationRadians = 0.6f; // ≈ 34°
+        float horizonProximity = sunElevation > 0f
+            ? Math.Clamp(1f - (sunElevation / glowMaxElevationRadians), 0f, 1f)
+            : 0f;
+        SunGlowIntensity = horizonProximity;
+        SunGlowWidth = sunElevation > 0f ? 0.15f + (0.85f * horizonProximity) : 0f;
     }
 
     private static float WrapToDay(float hours)

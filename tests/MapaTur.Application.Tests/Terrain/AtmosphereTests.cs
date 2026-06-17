@@ -158,4 +158,57 @@ public sealed class AtmosphereTests
 
         twentyFive.SunDirection.Z.Should().BeApproximately(one.SunDirection.Z, Tolerance);
     }
+
+    [Fact]
+    public void SunGlowIntensity_NearHorizon_IsStrongerThanAtNoon()
+    {
+        // Forward-scatter glow ("poświata pod słońcem") swells as the sun's rays graze a longer
+        // atmospheric path near the horizon. At a low afternoon sun it must clearly exceed the
+        // near-nil glow of a steep midday sun.
+        var lowSun = new Atmosphere(timeOfDayHours: 17f);
+        var noon = new Atmosphere(timeOfDayHours: 12f);
+
+        lowSun.SunGlowIntensity.Should().BeGreaterThan(noon.SunGlowIntensity);
+    }
+
+    [Fact]
+    public void SunGlowIntensity_BelowHorizon_IsZero()
+    {
+        // No sun above the horizon => no forward-scatter glow at all (night is dark).
+        new Atmosphere(timeOfDayHours: 0f).SunGlowIntensity.Should().Be(0f);
+    }
+
+    [Fact]
+    public void SunGlowIntensity_IncreasesAsSunApproachesHorizon()
+    {
+        // Monotonic swell through the golden hour: each step closer to the horizon glows more.
+        var early = new Atmosphere(timeOfDayHours: 16.5f);
+        var mid = new Atmosphere(timeOfDayHours: 17f);
+        var late = new Atmosphere(timeOfDayHours: 17.5f);
+
+        mid.SunGlowIntensity.Should().BeGreaterThan(early.SunGlowIntensity);
+        late.SunGlowIntensity.Should().BeGreaterThan(mid.SunGlowIntensity);
+    }
+
+    [Fact]
+    public void SunGlowIntensity_IsInUnitRange()
+    {
+        new Atmosphere(timeOfDayHours: 17.8f).SunGlowIntensity.Should().BeInRange(0f, 1f);
+    }
+
+    [Fact]
+    public void SunGlowWidth_NearHorizon_IsWiderThanAtNoon()
+    {
+        // The glow halo spreads wider across the sky as the sun sinks; at noon it is a tight disc.
+        var lowSun = new Atmosphere(timeOfDayHours: 17f);
+        var noon = new Atmosphere(timeOfDayHours: 12f);
+
+        lowSun.SunGlowWidth.Should().BeGreaterThan(noon.SunGlowWidth);
+    }
+
+    [Fact]
+    public void SunGlowWidth_BelowHorizon_IsZero()
+    {
+        new Atmosphere(timeOfDayHours: 0f).SunGlowWidth.Should().Be(0f);
+    }
 }
