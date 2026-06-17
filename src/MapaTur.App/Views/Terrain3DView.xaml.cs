@@ -177,6 +177,17 @@ public partial class Terrain3DView : ContentView
         set => SetValue(PeakLabelRadiusMetersProperty, value);
     }
 
+    /// <summary>Whether the Kasprowy Wierch cable-car overlay (sagging cables + station masts) is drawn.</summary>
+    public static readonly BindableProperty ShowCableCarProperty = BindableProperty.Create(
+        nameof(ShowCableCar), typeof(bool), typeof(Terrain3DView), true,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
+
+    public bool ShowCableCar
+    {
+        get => (bool)GetValue(ShowCableCarProperty);
+        set => SetValue(ShowCableCarProperty, value);
+    }
+
     /// <summary>Whether the on-screen camera control pads (altitude + pan/tilt) are shown. Set false in the
     /// immersive landscape mode so a phone screenshot of the scene is free of UI chrome.</summary>
     public static readonly BindableProperty ControlsVisibleProperty = BindableProperty.Create(
@@ -2316,6 +2327,8 @@ public partial class Terrain3DView : ContentView
             // base wider than the ortho doesn't stretch clamped edge texels into "strata" bands. Null → no cull.
             glRenderer.SetOrthoCoverageGeoBounds(LodOrthoCoverageBounds, 300f);
             glRenderer.LakeFineBounds = LodDetailBounds; // lakes inside the 1 m detail keep legacy seating
+            glRenderer.ShowCableCar = ShowCableCar; // "🚠 Kolejka" layer toggle
+            glRenderer.CableCar = MapaTur.Application.Terrain.CableCarData.Kasprowy; // Kasprowy Wierch aerialway
 
             // Push a changed ortho image to the GL renderer once (it uploads on the GL thread next Render).
             if (orthoPathDirty)

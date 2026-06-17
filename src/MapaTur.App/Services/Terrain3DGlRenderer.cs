@@ -1007,6 +1007,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private TerrainMesh3D? lastRoadMesh;
     private DetailElevationField? lastRoadDetail;
 
+    private LineBuffers? cableLines;
+    private CableCarLine? lastCableCarBuilt;
+    private TerrainMesh3D? lastCableMesh;
+    private float lastCableExaggeration = -1f;
+
+    /// <summary>Aerialway line to overlay (sagging cables + station masts), or null for none. Drawn only
+    /// when <see cref="ShowCableCar"/> is set; reuses the absolute-frame line ribbon pipeline.</summary>
+    public CableCarLine? CableCar { get; set; }
+
+    /// <summary>Whether the cable-car overlay is drawn this frame.</summary>
+    public bool ShowCableCar { get; set; }
+
     /// <summary>
     /// Sets (or clears, when <paramref name="rgba"/> is null) the ortho-photo texture draped over the terrain.
     /// <paramref name="rgba"/> is tightly-packed top-row-first RGBA8 (row 0 = north, matching the mesh UVs).
@@ -1135,6 +1147,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             lastRoadRaster = null;
             lastRoadMesh = null;
             lastRoadDetail = null;
+            cableLines = null;
+            lastCableCarBuilt = null;
+            lastCableMesh = null;
+            lastCableExaggeration = -1f;
             cumulusProgram = 0;
             cumulusInstanceCount = 0;
             cumulusUnsupported = false;
@@ -1802,6 +1818,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         DrawRoadLines(gl, roads, raster, frame, detail);
         DrawTrailLines(gl, trails, raster, frame, detail);
         DrawRouteLine(gl, route, raster, frame, detail);
+        DrawCableCar(gl, frame);
 
         gl.BindVertexArray(0);
 
@@ -2982,6 +2999,60 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         DrawLine(g, routeLines, RouteHalfWidthPx);
+    }
+
+    private const float CableHalfWidthPx = 2.2f;     // drawn cable ribbon half-width
+    private const float CableMastHeightM = 30f;      // station mast height the cable attaches to
+    private const float CableSagFraction = 0.03f;    // mid-span droop as a fraction of the span's horizontal length
+    private const int CableSegments = 28;            // catenary samples per span
+    private const byte CableR = 0x20, CableG = 0x20, CableB = 0x24;       // near-black cable
+    private const byte StationR = 0xD0, StationG = 0x40, StationB = 0x30; // red station mast
+
+    // Aerialway overlay (e.g. Kasprowy Wierch): sagging cables between station masts, drawn with the same
+    // absolute-frame ribbon pipeline as the trails (the line MVP is already restored to absolute above).
+    private void DrawCableCar(GL g, TerrainMesh3D mesh)
+    {
+        if (!ShowCableCar || CableCar is null || CableCar.Stations.Count < 2)
+        {
+            return;
+        }
+
+        float exaggeration = mesh.VerticalExaggeration;
+        if (cableLines is null
+            || !ReferenceEquals(lastCableCarBuilt, CableCar)
+            || !ReferenceEquals(lastCableMesh, mesh)
+            || lastCableExaggeration != exaggeration)
+        {
+            DeleteLine(g, ref cableLines);
+            var ribbon = new RibbonBuilder();
+            IReadOnlyList<CableCarStation> st = CableCar.Stations;
+
+            // Cable: each consecutive station pair is a span; the cable hangs from one mast top to the next
+            // with a sag proportional to the span's horizontal length, so it droops over the valley.
+            for (int i = 0; i + 1 < st.Count; i++)
+            {
+                Vector3 lower = mesh.GeoToWorld(st[i].Location, (float)st[i].ElevationMeters + CableMastHeightM);
+                Vector3 upper = mesh.GeoToWorld(st[i + 1].Location, (float)st[i + 1].ElevationMeters + CableMastHeightM);
+                float horiz = new Vector2(upper.X - lower.X, upper.Y - lower.Y).Length();
+                float sagWorld = horiz * CableSagFraction * exaggeration;
+                ribbon.Append(CableCarGeometry.SampleCable(lower, upper, sagWorld, CableSegments), CableR, CableG, CableB);
+            }
+
+            // Station masts: a short vertical post from the terrain up to the cable attachment height.
+            foreach (CableCarStation s in st)
+            {
+                Vector3 baseW = mesh.GeoToWorld(s.Location, (float)s.ElevationMeters);
+                Vector3 topW = mesh.GeoToWorld(s.Location, (float)s.ElevationMeters + CableMastHeightM);
+                ribbon.Append(new[] { baseW, topW }, StationR, StationG, StationB);
+            }
+
+            cableLines = UploadLine(g, ribbon);
+            lastCableCarBuilt = CableCar;
+            lastCableMesh = mesh;
+            lastCableExaggeration = exaggeration;
+        }
+
+        DrawLine(g, cableLines, CableHalfWidthPx);
     }
 
     // Builds screen-space ribbon geometry: each polyline segment becomes a 4-vertex quad (2 triangles).
