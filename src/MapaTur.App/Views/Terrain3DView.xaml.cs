@@ -1650,6 +1650,19 @@ public partial class Terrain3DView : ContentView
             anchor.Latitude, anchor.Longitude, viewProjection, width, height);
         renderer.DrawConstellationLines(canvas, ConstellationLines.ResolveScreenSegments(labels));
         renderer.DrawStarLabels(canvas, labels);
+
+        // Moon name + phase label (helps locate the thin crescent), projected the same way as the stars and
+        // lifted clear of the disc.
+        MoonSky moon = NightSky.MoonForLocalDate(
+            now.Year, now.Month, now.Day, atmo.TimeOfDayHours, anchor.Latitude, anchor.Longitude);
+        IReadOnlyList<StarLabel> moonHit = StarLabelProjector.Project(
+            new[] { (moon.MoonDirection, 0f, $"Księżyc {moon.IlluminatedFraction * 100f:F0}%") },
+            viewProjection, width, height);
+        if (moonHit.Count > 0)
+        {
+            StarLabel m = moonHit[0];
+            renderer.DrawStarLabels(canvas, new[] { new StarLabel(m.Name, m.ScreenX, m.ScreenY - 26f, m.Magnitude) });
+        }
     }
 
     private IReadOnlyList<ProjectedPeak> HideOccludedPeaks(IReadOnlyList<ProjectedPeak> peaks, TerrainMesh3D frame)

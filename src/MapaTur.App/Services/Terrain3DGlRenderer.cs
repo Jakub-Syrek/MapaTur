@@ -543,6 +543,42 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  fragColor = vec4(vec3(1.0, 0.96, 0.90), alpha);\n" + // faintly warm white; additive blend adds col*alpha
         "}\n";
 
+    // Night-sky Moon pass: ONE point sprite at the lunar world direction (driven by the uMoonDir uniform, so
+    // no vertex buffer — any bound VAO works). Same w=0 + z=w far-plane pin as the stars. The fragment paints
+    // a phased disc: a terminator ellipse whose lit side faces the Sun (uTermDir = bright-limb screen dir,
+    // uIlluminated = lit fraction), with faint earthshine on the dark side.
+    private const string MoonVertexShaderSource =
+        "#version 300 es\n" +
+        "uniform mat4 uViewProj;\n" +
+        "uniform vec3 uMoonDir;\n" +  // unit world direction to the Moon (X east, Y north, Z up)
+        "uniform float uSizePx;\n" +
+        "void main(){\n" +
+        "  vec4 clip = uViewProj * vec4(uMoonDir, 0.0);\n" +
+        "  gl_Position = vec4(clip.xy, clip.w, clip.w);\n" + // pin to far plane (same fix as the stars)
+        "  gl_PointSize = uSizePx;\n" +
+        "}\n";
+
+    private const string MoonFragmentShaderSource =
+        "#version 300 es\n" +
+        "precision highp float;\n" +
+        "uniform vec2 uTermDir;\n" +      // unit screen-space direction toward the bright limb
+        "uniform float uIlluminated;\n" + // lit fraction 0..1 (0=new, 1=full)
+        "uniform float uNightFactor;\n" +
+        "out vec4 fragColor;\n" +
+        "void main(){\n" +
+        "  vec2 pc = gl_PointCoord * 2.0 - 1.0;\n" +
+        "  pc.y = -pc.y;\n" +                                  // gl_PointCoord is top-left origin; flip to screen-up
+        "  float r = length(pc);\n" +
+        "  if (r > 1.0) discard;\n" +                          // round disc
+        "  float along = dot(pc, uTermDir);\n" +               // toward bright limb (+1) .. dark limb (-1)
+        "  float across = length(pc - (along * uTermDir));\n" +
+        "  float boundary = (1.0 - 2.0 * uIlluminated) * sqrt(max(0.0, 1.0 - across * across));\n" + // terminator ellipse
+        "  float lit = smoothstep(boundary - 0.06, boundary + 0.06, along);\n" +
+        "  float bright = mix(0.05, 1.0, lit);\n" +            // faint earthshine on the dark side
+        "  float edge = smoothstep(1.0, 0.90, r);\n" +         // soft limb
+        "  fragColor = vec4(vec3(0.97, 0.96, 0.90) * bright, edge * uNightFactor);\n" +
+        "}\n";
+
     // Post-process pass: a fullscreen triangle (reusing the sky VAO's location-0 vec2 clip attribute) that
     // samples the resolved scene texture and writes it to the post FBO. The vertex stage turns clip-space
     // [-1,1] into [0,1] UVs; the fragment stage is currently a pass-through (bloom / god rays will extend it).
@@ -1091,6 +1127,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private double lastStarLon = double.NaN;
     private float[]? starScratch;
 
+    // Night-sky Moon program: one phased disc point sprite (no VBO — position comes from the uMoonDir uniform).
+    private uint moonProgram;
+    private int moonViewProjLocation = -1;
+    private int moonDirLocation = -1;
+    private int moonSizeLocation = -1;
+    private int moonTermDirLocation = -1;
+    private int moonIlluminatedLocation = -1;
+    private int moonNightFactorLocation = -1;
+
     // Cloud-layer ("sea of clouds") program + unit-quad geometry.
     private uint cloudProgram;
     private int cloudMvpLocation = -1;
@@ -1490,6 +1535,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             starVbo = 0;
             starCount = 0;
             starBufferReady = false;
+            moonProgram = 0;
+            moonViewProjLocation = -1;
+            moonDirLocation = -1;
+            moonSizeLocation = -1;
+            moonTermDirLocation = -1;
+            moonIlluminatedLocation = -1;
+            moonNightFactorLocation = -1;
             cloudProgram = 0;
             cloudMvpLocation = -1;
             cloudCenterLocation = -1;
@@ -1835,6 +1887,46 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     gl.Uniform1(starStarsOnLocation, 1f);
                     gl.BindVertexArray(starVao);
                     gl.DrawArrays(PrimitiveType.Points, 0, (uint)starCount);
+                    gl.BindVertexArray(0);
+                    gl.Disable(EnableCap.Blend);
+                }
+            }
+
+            // Moon: one phased disc at the lunar direction, drawn after the stars (sits on top) and gated to
+            // night the same way. The Sun direction orients the lit limb; the disc is culled below the horizon.
+            if (localDate is { } moonDate && tiles.Count > 0 && starNightFactor > 0.001f)
+            {
+                GeoPoint moonAnchor = tiles[0].ProjectionAnchor;
+                MoonSky moon = NightSky.MoonForLocalDate(
+                    moonDate.Year, moonDate.Month, moonDate.Day, atmosphere.TimeOfDayHours,
+                    moonAnchor.Latitude, moonAnchor.Longitude);
+                if (moon.MoonDirection.Z > 0f)
+                {
+                    // Bright-limb screen direction: project the Moon dir and a point nudged toward the Sun.
+                    Vector2 moonNdc = ProjectDirectionNdc(moon.MoonDirection, mvp);
+                    Vector3 towardSun = Vector3.Normalize(moon.SunDirection - moon.MoonDirection);
+                    Vector2 sunNdc = ProjectDirectionNdc(Vector3.Normalize(moon.MoonDirection + (towardSun * 0.05f)), mvp);
+                    Vector2 termDir = sunNdc - moonNdc;
+                    termDir = termDir.LengthSquared() > 1e-9f ? Vector2.Normalize(termDir) : new Vector2(1f, 0f);
+
+                    Span<float> moonVp = stackalloc float[16]
+                    {
+                        mvp.M11, mvp.M12, mvp.M13, mvp.M14,
+                        mvp.M21, mvp.M22, mvp.M23, mvp.M24,
+                        mvp.M31, mvp.M32, mvp.M33, mvp.M34,
+                        mvp.M41, mvp.M42, mvp.M43, mvp.M44,
+                    };
+                    gl.Enable(EnableCap.Blend);
+                    gl.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.One); // additive: the lit disc adds light
+                    gl.UseProgram(moonProgram);
+                    gl.UniformMatrix4(moonViewProjLocation, 1, false, moonVp);
+                    gl.Uniform3(moonDirLocation, moon.MoonDirection.X, moon.MoonDirection.Y, moon.MoonDirection.Z);
+                    gl.Uniform1(moonSizeLocation, 44f);
+                    gl.Uniform2(moonTermDirLocation, termDir.X, termDir.Y);
+                    gl.Uniform1(moonIlluminatedLocation, moon.IlluminatedFraction);
+                    gl.Uniform1(moonNightFactorLocation, starNightFactor);
+                    gl.BindVertexArray(skyVao); // any bound VAO; the vertex shader uses uMoonDir, not attributes
+                    gl.DrawArrays(PrimitiveType.Points, 0, 1);
                     gl.BindVertexArray(0);
                     gl.Disable(EnableCap.Blend);
                 }
@@ -3434,6 +3526,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         return !(hasNeg && hasPos);
     }
 
+    // Projects a world DIRECTION (point at infinity) to normalized device coords (x,y in [-1,1]), matching the
+    // star/Moon vertex shaders' w=0 transform. Used to derive the Moon's bright-limb screen direction.
+    private static Vector2 ProjectDirectionNdc(Vector3 direction, Matrix4x4 viewProjection)
+    {
+        Vector4 clip = Vector4.Transform(new Vector4(direction, 0f), viewProjection);
+        float w = MathF.Abs(clip.W) < 1e-6f ? 1e-6f : clip.W;
+        return new Vector2(clip.X / w, clip.Y / w);
+    }
+
     // Rebuilds + uploads the star VBO when the Julian-Date inputs change (slider hour, date, or observer
     // location); otherwise leaves the cached buffer untouched. Packs only above-horizon stars (4 floats each:
     // dir.xyz + magnitude). Cheap — the bundled catalog is ~30 stars — but the cache keeps it off the hot path.
@@ -3642,6 +3743,31 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.BindVertexArray(0);
         starCount = 0;
         starBufferReady = false;
+
+        // Moon program — a single phased-disc point sprite (no VAO/VBO of its own; the draw binds skyVao and the
+        // vertex shader positions the point from the uMoonDir uniform).
+        uint mvs = CompileShader(g, ShaderType.VertexShader, MoonVertexShaderSource);
+        uint mfs = CompileShader(g, ShaderType.FragmentShader, MoonFragmentShaderSource);
+        moonProgram = g.CreateProgram();
+        g.AttachShader(moonProgram, mvs);
+        g.AttachShader(moonProgram, mfs);
+        g.LinkProgram(moonProgram);
+        g.GetProgram(moonProgram, ProgramPropertyARB.LinkStatus, out int moonLinked);
+        if (moonLinked == 0)
+        {
+            string log = g.GetProgramInfoLog(moonProgram);
+            throw new InvalidOperationException("Moon shader link failed: " + log);
+        }
+        g.DetachShader(moonProgram, mvs);
+        g.DetachShader(moonProgram, mfs);
+        g.DeleteShader(mvs);
+        g.DeleteShader(mfs);
+        moonViewProjLocation = g.GetUniformLocation(moonProgram, "uViewProj");
+        moonDirLocation = g.GetUniformLocation(moonProgram, "uMoonDir");
+        moonSizeLocation = g.GetUniformLocation(moonProgram, "uSizePx");
+        moonTermDirLocation = g.GetUniformLocation(moonProgram, "uTermDir");
+        moonIlluminatedLocation = g.GetUniformLocation(moonProgram, "uIlluminated");
+        moonNightFactorLocation = g.GetUniformLocation(moonProgram, "uNightFactor");
 
         // Post-process program — fullscreen pass-through (foundation for bloom / god rays). Reuses the
         // fullscreen triangle above (skyVao) for its draw.
@@ -5157,6 +5283,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.DeleteProgram(starProgram);
             gl.DeleteVertexArray(starVao);
             gl.DeleteBuffer(starVbo);
+            gl.DeleteProgram(moonProgram);
             gl.DeleteProgram(cloudProgram);
             gl.DeleteVertexArray(cloudVao);
             gl.DeleteBuffer(cloudVbo);
@@ -5180,6 +5307,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             starVbo = 0;
             starCount = 0;
             starBufferReady = false;
+            moonProgram = 0;
             cloudProgram = 0;
             cloudVao = 0;
             cloudVbo = 0;

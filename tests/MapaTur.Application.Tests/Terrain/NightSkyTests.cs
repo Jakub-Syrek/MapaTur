@@ -89,4 +89,24 @@ public sealed class NightSkyTests
 
         act.Should().Throw<ArgumentNullException>();
     }
+
+    [Fact]
+    public void MoonForLocalDate_KnownNight_GivesUnitDirectionsAltitudeAndPhase()
+    {
+        // 2026-06-18 20:18 CEST (UTC+2) over Tatra: the Moon sits ~32° up as an 18% crescent.
+        MoonSky moon = NightSky.MoonForLocalDate(2026, 6, 18, 20.3, Lat, Lon);
+
+        moon.MoonDirection.Length().Should().BeApproximately(1f, 1e-4f);
+        moon.SunDirection.Length().Should().BeApproximately(1f, 1e-4f);
+        moon.MoonDirection.Z.Should().BeApproximately(0.524f, 0.02f);     // sin(altitude) ≈ 32°
+        moon.IlluminatedFraction.Should().BeApproximately(0.18f, 0.03f);  // thin crescent
+    }
+
+    [Fact]
+    public void MoonForLocalDate_IlluminatedFraction_AlwaysInUnitRange()
+    {
+        MoonSky moon = NightSky.MoonForLocalDate(2026, 1, 15, 22.0, Lat, Lon);
+
+        moon.IlluminatedFraction.Should().BeInRange(0f, 1f);
+    }
 }

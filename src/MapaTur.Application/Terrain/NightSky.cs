@@ -2,6 +2,9 @@ using System.Numerics;
 
 namespace MapaTur.Application.Terrain;
 
+/// <summary>The Moon + Sun world directions and the lunar illuminated fraction for a moment, for the night-sky pass.</summary>
+public readonly record struct MoonSky(Vector3 MoonDirection, Vector3 SunDirection, float IlluminatedFraction);
+
 /// <summary>
 /// Integration bridge between the astronomy core and the renderer: turns a star catalog + Julian Date +
 /// observer location into world-space directions (X east, Y north, Z up) the night-sky pass can upload and
@@ -52,5 +55,27 @@ public static class NightSky
         double hourUtc = localHour - CentralEuropeanTime.UtcOffsetHours(year, month, day);
         double julianDate = AstronomicalTime.JulianDate(year, month, day, hourUtc);
         return StarDirections(stars, julianDate, latitudeDegrees, longitudeDegrees);
+    }
+
+    /// <summary>
+    /// The Moon's world direction (X east, Y north, Z up), the Sun's world direction (used to orient the
+    /// lit limb / terminator), and the illuminated fraction [0,1], for a local wall-clock date/hour in the
+    /// app's region (Central European Time, DST-aware). Direction Z &gt; 0 means above the horizon. Composes
+    /// <see cref="LunarPosition"/> / <see cref="SolarPosition"/> with the same sidereal transform as the stars.
+    /// </summary>
+    public static MoonSky MoonForLocalDate(
+        int year, int month, int day, double localHour, double latitudeDegrees, double longitudeDegrees)
+    {
+        double hourUtc = localHour - CentralEuropeanTime.UtcOffsetHours(year, month, day);
+        double julianDate = AstronomicalTime.JulianDate(year, month, day, hourUtc);
+        double lst = AstronomicalTime.LocalSiderealTimeHours(julianDate, longitudeDegrees);
+
+        (double moonRa, double moonDec) = LunarPosition.Equatorial(julianDate);
+        (double sunRa, double sunDec) = SolarPosition.Equatorial(julianDate);
+        Vector3 moonDir = CelestialCoordinates.EquatorialToWorld(moonRa, moonDec, lst, latitudeDegrees);
+        Vector3 sunDir = CelestialCoordinates.EquatorialToWorld(sunRa, sunDec, lst, latitudeDegrees);
+        float illuminated = (float)LunarPosition.IlluminatedFraction(julianDate);
+
+        return new MoonSky(moonDir, sunDir, illuminated);
     }
 }
