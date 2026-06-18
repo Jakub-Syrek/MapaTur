@@ -1426,6 +1426,7 @@ public partial class Terrain3DView : ContentView
             // POI text labels only when the camera is close — a far view of 1000+ POIs is a wall of text.
             bool poiLabelsVisible = Camera.Distance < Services.Terrain3DCanvasRenderer.PoiLabelMaxDistanceWorld;
             renderer.DrawOverlays(canvas, null, null, projectedClimbing, projectedPois, projectedPeaks, projectedUserLocation, poiLabelsVisible);
+            DrawStarLabelsOverScene(canvas, frame, e.Info.Width, e.Info.Height);
             DrawNightLights(canvas, projectedPois);
             // Recording capture for this path happens inside TryRenderTerrainGl (GL FBO readback), not here.
             return;
@@ -1619,6 +1620,26 @@ public partial class Terrain3DView : ContentView
     // Drops peak markers whose summit is hidden behind a ridge from the camera. The GL terrain is
     // depth-buffered but these Skia labels are drawn on top with no depth test, so without this a peak
     // label "punches through" the ridge in front of it. Off-screen markers are skipped (won't draw).
+    // Projects tonight's bundled named stars and draws their names over the GL scene — only at night (so the
+    // labels track the GL star pass, which is gated the same way) and only for the few stars above the horizon
+    // and in frame. Uses the shared world frame (tile 0) anchor + the time-of-day slider hour, exactly like the
+    // GL star buffer, so each name sits on its dot.
+    private void DrawStarLabelsOverScene(SKCanvas canvas, TerrainMesh3D frame, int width, int height)
+    {
+        if (EffectiveAtmosphere is not { } atmo || atmo.SunDirection.Z >= 0f)
+        {
+            return; // daytime — the GL stars (and so their labels) are invisible
+        }
+
+        var anchor = frame.ProjectionAnchor;
+        DateTime now = DateTime.Now;
+        var viewProjection = Camera.BuildViewProjection((float)width / Math.Max(1, height));
+        IReadOnlyList<StarLabel> labels = StarLabelProjector.ProjectForLocalDate(
+            StarCatalogData.Bundled, now.Year, now.Month, now.Day, atmo.TimeOfDayHours,
+            anchor.Latitude, anchor.Longitude, viewProjection, width, height);
+        renderer.DrawStarLabels(canvas, labels);
+    }
+
     private IReadOnlyList<ProjectedPeak> HideOccludedPeaks(IReadOnlyList<ProjectedPeak> peaks, TerrainMesh3D frame)
     {
         if (Raster is not { } raster)

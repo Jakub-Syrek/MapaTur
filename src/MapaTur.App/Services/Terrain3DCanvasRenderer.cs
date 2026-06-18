@@ -50,6 +50,9 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
     private const float PeakLabelSizePx = 12.5f;
     // Named summits get their name on a line above the elevation, in a slightly larger bold face.
     private const float PeakNameSizePx = 14f;
+
+    /// <summary>Font size (px) for night-sky star-name labels — a touch smaller than peak names.</summary>
+    private const float StarLabelSizePx = 13f;
     // Minimum on-screen spacing between peak markers; closer ones are dropped so labels don't overlap.
     private const float MinPeakSeparationPx = 52f;
     private readonly List<SKPoint> drawnPeakAnchors = new();
@@ -102,6 +105,8 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
     private SKPaint? peakLabelHaloPaint;
     private SKFont? peakFont;
     private SKFont? peakNameFont;
+    private SKFont? starLabelFont;
+    private SKPaint? starLabelFillPaint;
     private SKPath? peakPath;
     private SKPaint? skyPaint;
     private SKShader? skyShader;
@@ -629,6 +634,36 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         }
     }
 
+    // Night-sky star-name labels: small warm-pale text just above each in-frame star's GL point sprite. The
+    // positions come from StarLabelProjector, which mirrors the star shader's projection, so the name tracks
+    // its dot. Drawn over the composited scene like the peak labels; the dark halo keeps it legible against
+    // the sky gradient. The host only calls this at night with the handful of stars actually in frame.
+    public void DrawStarLabels(SKCanvas canvas, IReadOnlyList<StarLabel> labels)
+    {
+        ArgumentNullException.ThrowIfNull(canvas);
+        if (labels is null || labels.Count == 0)
+        {
+            return;
+        }
+
+        starLabelFillPaint ??= new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill, Color = new SKColor(0xE8, 0xE2, 0xD4) };
+        peakLabelHaloPaint ??= new SKPaint
+        {
+            IsAntialias = true,
+            Style = SKPaintStyle.Stroke,
+            StrokeWidth = 3f,
+            Color = PeakLabelHaloColor,
+        };
+        starLabelFont ??= new SKFont { Size = StarLabelSizePx };
+
+        foreach (StarLabel label in labels)
+        {
+            float labelY = label.ScreenY - 7f; // sit the name just above the star sprite
+            canvas.DrawText(label.Name, label.ScreenX, labelY, SKTextAlign.Center, starLabelFont, peakLabelHaloPaint);
+            canvas.DrawText(label.Name, label.ScreenX, labelY, SKTextAlign.Center, starLabelFont, starLabelFillPaint);
+        }
+    }
+
     // Draws a small observation-tower glyph (splayed legs + rung, a cabin and a peaked roof) with its base
     // on the projected point. Uses the already-coloured poiFillPaint + poiOutlinePaint. Returns the glyph's
     // top Y so the caller can place the label above it.
@@ -863,6 +898,8 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         peakLabelHaloPaint?.Dispose();
         peakFont?.Dispose();
         peakNameFont?.Dispose();
+        starLabelFont?.Dispose();
+        starLabelFillPaint?.Dispose();
         peakPath?.Dispose();
         skyPaint?.Dispose();
         skyShader?.Dispose();
