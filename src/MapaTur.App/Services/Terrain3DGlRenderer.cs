@@ -450,7 +450,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  float sunDot = dot(viewDir, uSunDir);\n" +
         // Bigger, brighter disc (~4° → ~2.5° soft edge, was ~2° → ~1°) with an over-bright core, plus a
         // wider Mie halo (pow 80 → 55, 0.55 → 0.72) so the sun reads as a real, radiant sun rather than a dot.
-        "  float sunCore = smoothstep(0.9976, 0.9991, sunDot);\n" +
+        "  float sunCore = smoothstep(0.9992, 0.9996, sunDot);\n" +
         "  float sunHalo = pow(max(sunDot, 0.0), 55.0) * 0.72;\n" +
         // Forward-scatter glow ("poświata pod słońcem"): a broad warm bloom around the sun that swells as
         // it nears the horizon. uSunGlowWidth lowers the exponent (broader spread); the bloom pools BELOW
@@ -556,7 +556,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    col += texture(uTex, uv).rgb * decay * 0.5;\n" + // weight 0.5
         "    decay *= 0.93;\n" +
         "  }\n" +
-        "  fragColor = vec4(col * 0.35, 1.0);\n" + // exposure
+        "  fragColor = vec4(col * 0.5, 1.0);\n" + // exposure
         "}\n";
 
     // Cloud-layer ("sea of clouds") program. A large horizontal quad at a fixed world altitude,
@@ -2079,7 +2079,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         (bool sunVisible, Vector2 sunUv) = atmosphere is not null
             ? SunScreenProjection.Project(camera, atmosphere.SunDirection, vpWidth, vpHeight)
             : (false, Vector2.Zero);
-        float godrayIntensity = (sunVisible && atmosphere is not null) ? atmosphere.SunGlowIntensity * 0.6f : 0f;
+        float godrayIntensity = (sunVisible && atmosphere is not null) ? atmosphere.SunGlowIntensity * 1.3f : 0f;
 
         uint finalTex = RunPostProcess(
             gl, presentColorTex, vpWidth, vpHeight,
