@@ -1193,7 +1193,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private readonly float[] cascadeSplitFar = new float[ShadowCascadeCount];
     private bool shadowMapsAllocated;
     private bool shadowUnsupported;
-    private readonly bool shadowsEnabled = true; // compile-time kill-switch (part 4 makes it runtime-settable)
+    private readonly bool shadowsEnabled = false; // TEMP off: CSM breaks terrain render on Adreno (device) — debugging; desktop was fine
     private uint shadowDepthProgram;
     private int shadowLightVpLoc = -1;
     private bool shadowPassLogged;
@@ -1983,6 +1983,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // (sun above horizon, geometry ready), so night / fallback degrades to no shadows cleanly.
         if (shadowStrengthLoc >= 0)
         {
+            // ALWAYS pin the shadow samplers to units 2/3/4. Left at their default (unit 0) the
+            // sampler2DShadow uniforms collide with uOrtho (sampler2D, unit 0): two sampler types on one
+            // texture image unit makes the program invalid to USE, and Adreno rejects the WHOLE terrain draw
+            // (GL_INVALID_OPERATION) → terrain vanishes. Desktop GL tolerated it; the device did not. Must be
+            // set even when shadows are off (csmShadow early-returns before sampling, so empty units are fine).
+            gl.Uniform1(shadowMap0Loc, 2);
+            gl.Uniform1(shadowMap1Loc, 3);
+            gl.Uniform1(shadowMap2Loc, 4);
             if (shadowsActiveThisFrame)
             {
                 gl.ActiveTexture(TextureUnit.Texture2);
@@ -1992,9 +2000,6 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 gl.ActiveTexture(TextureUnit.Texture4);
                 gl.BindTexture(TextureTarget.Texture2D, shadowDepthTex[2]);
                 gl.ActiveTexture(TextureUnit.Texture0);
-                gl.Uniform1(shadowMap0Loc, 2);
-                gl.Uniform1(shadowMap1Loc, 3);
-                gl.Uniform1(shadowMap2Loc, 4);
                 UploadMatrix(gl, cascadeVp0Loc, cascadeLightVp[0]);
                 UploadMatrix(gl, cascadeVp1Loc, cascadeLightVp[1]);
                 UploadMatrix(gl, cascadeVp2Loc, cascadeLightVp[2]);
