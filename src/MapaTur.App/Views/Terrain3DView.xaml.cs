@@ -165,6 +165,17 @@ public partial class Terrain3DView : ContentView
         set => SetValue(ShowPeakNamesProperty, value);
     }
 
+    /// <summary>Whether the night-sky pass (stars + name labels + constellation lines) is drawn after dusk.</summary>
+    public static readonly BindableProperty ShowNightSkyProperty = BindableProperty.Create(
+        nameof(ShowNightSky), typeof(bool), typeof(Terrain3DView), true,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
+
+    public bool ShowNightSky
+    {
+        get => (bool)GetValue(ShowNightSkyProperty);
+        set => SetValue(ShowNightSkyProperty, value);
+    }
+
     /// <summary>Maximum camera distance (metres) at which summit name labels are shown — peaks farther than
     /// this are culled, so the user can trim distant label clutter via a slider. Default 15 km.</summary>
     public static readonly BindableProperty PeakLabelRadiusMetersProperty = BindableProperty.Create(
@@ -1626,9 +1637,9 @@ public partial class Terrain3DView : ContentView
     // GL star buffer, so each name sits on its dot.
     private void DrawStarLabelsOverScene(SKCanvas canvas, TerrainMesh3D frame, int width, int height)
     {
-        if (EffectiveAtmosphere is not { } atmo || atmo.SunDirection.Z >= 0f)
+        if (!ShowNightSky || EffectiveAtmosphere is not { } atmo || atmo.SunDirection.Z >= 0f)
         {
-            return; // daytime — the GL stars (and so their labels) are invisible
+            return; // night sky off, or daytime — the GL stars (and so their labels) are invisible
         }
 
         var anchor = frame.ProjectionAnchor;
@@ -2377,7 +2388,7 @@ public partial class Terrain3DView : ContentView
             // Today's local date drives the night-sky star pass (with the time-of-day slider as the local
             // hour); the stars fade in only once the slider puts the sun below the horizon.
             IReadOnlyList<TreeInstance>? forest = EnsureForest(tiles);
-            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere, forest, DetailElevation, DateOnly.FromDateTime(DateTime.Now));
+            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere, forest, DetailElevation, ShowNightSky ? DateOnly.FromDateTime(DateTime.Now) : null);
             if (terrainTextureId == 0)
             {
                 return false;

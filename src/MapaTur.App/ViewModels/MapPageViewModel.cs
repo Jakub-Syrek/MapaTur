@@ -334,6 +334,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             case "PoiPasses": ShowPasses = !ShowPasses; break;
             case "Trails": ShowTrails = !ShowTrails; break;
             case "PeakNames": ShowPeakNames = !ShowPeakNames; break;
+            case "NightSky": ShowNightSky = !ShowNightSky; break;
             case "CableCar": ShowCableCar = !ShowCableCar; break;
         }
     }
@@ -733,6 +734,9 @@ public sealed partial class MapPageViewModel : ObservableObject
 
     /// <summary>Whether summit glyphs + elevation labels are drawn over the 3D terrain.</summary>
     [ObservableProperty] private bool showPeakNames = true;
+
+    /// <summary>Whether the night-sky pass (stars + name labels + constellation lines) is drawn after dusk.</summary>
+    [ObservableProperty] private bool showNightSky = true;
 
     /// <summary>Whether the Kasprowy Wierch cable-car overlay (cables + station masts) is drawn in 3D.</summary>
     [ObservableProperty] private bool showCableCar = true;

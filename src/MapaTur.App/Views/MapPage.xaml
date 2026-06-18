@@ -42,6 +42,7 @@
                              LodOrthoCoverageBounds="{Binding LodOrthoCoverageBounds}"
                              LodDetailBounds="{Binding LodDetailBounds}"
                              ShowPeakNames="{Binding ShowPeakNames}"
+                             ShowNightSky="{Binding ShowNightSky}"
                              PeakLabelRadiusMeters="{Binding PeakLabelRadiusMeters}"
                              ControlsVisible="{Binding ChromeVisible}"
                              SlopeMapEnabled="{Binding SlopeMapMode}"
@@ -446,6 +447,12 @@
                             <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                             <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="PeakNames" /></Border.GestureRecognizers>
                             <Label Text="🗻 Nazwy szczytów" Style="{StaticResource GlassLabel}" FontSize="12" />
+                        </Border>
+                        <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
+                                Background="{Binding ShowNightSky, Converter={StaticResource BoolToBrush}, ConverterParameter='#5536E2FF|#14FFFFFF'}">
+                            <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
+                            <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="NightSky" /></Border.GestureRecognizers>
+                            <Label Text="✨ Niebo nocne" Style="{StaticResource GlassLabel}" FontSize="12" />
                         </Border>
                     </FlexLayout>
 
