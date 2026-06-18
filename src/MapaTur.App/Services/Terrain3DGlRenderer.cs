@@ -146,7 +146,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // cascade by camera-space view distance, project the ABSOLUTE world position into its light space, and
         // compare with a slope-scaled bias. Returns 1 = fully lit, →0 = shadowed (scaled by uShadowStrength).
         "float pcfShadow(highp sampler2DShadow sm, vec2 uv, float depthRef){\n" +
-        "  float t = 1.0 / 2048.0;\n" +
+        "  float t = 1.0 / 1024.0;\n" +
         "  float s = 0.0;\n" +
         "  for (int x = -1; x <= 1; x++) {\n" +
         "    for (int y = -1; y <= 1; y++) {\n" +
@@ -1184,7 +1184,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // each fit by an orthographic light matrix (CascadeLightMatrix). aPos is absolute world, so the depth
     // pass transforms it straight by the cascade light matrix — no model/stable offset needed.
     private const int ShadowCascadeCount = 3;
-    private const int ShadowMapSize = 2048;
+    private const int ShadowMapSize = 1024; // mobile-friendly (was 2048); raise later if quality needs it
     private const float ShadowMaxDistance = 15000f; // cap cascade far so texels stay dense over visible terrain
     private const float ShadowSplitLambda = 0.85f;
     private readonly uint[] shadowFbos = new uint[ShadowCascadeCount];
@@ -1193,7 +1193,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private readonly float[] cascadeSplitFar = new float[ShadowCascadeCount];
     private bool shadowMapsAllocated;
     private bool shadowUnsupported;
-    private readonly bool shadowsEnabled = false; // TEMP off: CSM breaks terrain render on Adreno (device) — debugging; desktop was fine
+    private readonly bool shadowsEnabled = true; // re-enabled after the unit-0 sampler-collision fix; device perf test
     private uint shadowDepthProgram;
     private int shadowLightVpLoc = -1;
     private bool shadowPassLogged;
