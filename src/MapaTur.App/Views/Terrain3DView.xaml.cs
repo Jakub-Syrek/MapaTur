@@ -2352,8 +2352,10 @@ public partial class Terrain3DView : ContentView
             // into a colour texture it owns and returns the texture handle. A 0 handle means the present
             // FBO couldn't be allocated this frame; fall back to Skia. The optional Atmosphere drives the
             // sky pass and the terrain fragment shader's aerial-perspective blend; passing null skips both.
+            // Today's local date drives the night-sky star pass (with the time-of-day slider as the local
+            // hour); the stars fade in only once the slider puts the sun below the horizon.
             IReadOnlyList<TreeInstance>? forest = EnsureForest(tiles);
-            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere, forest, DetailElevation);
+            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere, forest, DetailElevation, DateOnly.FromDateTime(DateTime.Now));
             if (terrainTextureId == 0)
             {
                 return false;

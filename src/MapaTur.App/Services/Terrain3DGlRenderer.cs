@@ -503,6 +503,46 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  fragColor = vec4(sky + sun, 1.0);\n" +
         "}\n";
 
+    // Night-sky star pass: each catalog star is one point sprite placed by its world-space direction
+    // (X east, Y north, Z up). gl_Position uses w=0 so the projection pins it to the sky at infinity —
+    // immune to camera translation AND to the terrain's camera-relative model frame. Drawn after the sky
+    // gradient, before the depth-tested terrain pass occludes whatever sits behind a ridge. Brightness +
+    // point size come from apparent magnitude; the whole pass fades in with uNightFactor so it only shows
+    // once the sun is down.
+    private const string StarVertexShaderSource =
+        "#version 300 es\n" +
+        "layout(location=0) in vec3 aDir;\n" +   // unit world direction to the star
+        "layout(location=1) in float aMag;\n" +  // apparent magnitude (smaller = brighter)
+        "uniform mat4 uViewProj;\n" +            // forward view-projection (same matrix as the terrain pass)
+        "out float vMag;\n" +
+        "out float vUp;\n" +                     // world-up component -> discard below the horizon
+        "void main(){\n" +
+        "  vMag = aMag;\n" +
+        "  vUp = aDir.z;\n" +
+        "  vec4 clip = uViewProj * vec4(aDir, 0.0);\n" +    // direction at infinity: immune to camera translation + the camera-relative terrain frame
+        "  gl_Position = vec4(clip.xy, clip.w, clip.w);\n" + // pin depth to the far plane (z=w -> NDC.z=1); a raw w=0 lands NDC.z>1 and the whole sky gets far-clipped
+        "  gl_PointSize = mix(3.0, 9.0, clamp((6.0 - aMag) / 7.5, 0.0, 1.0));\n" + // brighter stars draw larger
+        "}\n";
+
+    private const string StarFragmentShaderSource =
+        "#version 300 es\n" +
+        "precision highp float;\n" +
+        "in float vMag;\n" +
+        "in float vUp;\n" +
+        "uniform float uNightFactor;\n" + // 0 by day .. 1 deep night (same curve as the sky shader)
+        "uniform float uStarsOn;\n" +     // 1 = stars enabled, 0 = panel toggle off (reserved for step F)
+        "out vec4 fragColor;\n" +
+        "void main(){\n" +
+        "  if (vUp <= 0.0) discard;\n" +                     // below the horizon — never visible
+        "  vec2 pc = gl_PointCoord * 2.0 - 1.0;\n" +
+        "  float r2 = dot(pc, pc);\n" +
+        "  if (r2 > 1.0) discard;\n" +                        // round dot, not a square
+        "  float soft = 1.0 - smoothstep(0.1, 1.0, r2);\n" +  // soft falloff to the sprite edge
+        "  float bright = clamp((6.5 - vMag) / 5.5, 0.4, 1.0);\n" + // lift the floor so fainter catalog stars still read
+        "  float alpha = bright * soft * uNightFactor * uStarsOn;\n" +
+        "  fragColor = vec4(vec3(1.0, 0.96, 0.90), alpha);\n" + // faintly warm white; additive blend adds col*alpha
+        "}\n";
+
     // Post-process pass: a fullscreen triangle (reusing the sky VAO's location-0 vec2 clip attribute) that
     // samples the resolved scene texture and writes it to the post FBO. The vertex stage turns clip-space
     // [-1,1] into [0,1] UVs; the fragment stage is currently a pass-through (bloom / god rays will extend it).
@@ -1034,6 +1074,23 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private uint skyVao;
     private uint skyVbo;
 
+    // Night-sky star program: catalog stars drawn as point sprites in the sky pass (after the gradient).
+    // The VBO holds (dir.xyz, magnitude) per above-horizon star and is re-uploaded only when the Julian-Date
+    // inputs change (slider hour / date / observer location), not every frame.
+    private uint starProgram;
+    private int starViewProjLocation = -1;
+    private int starNightFactorLocation = -1;
+    private int starStarsOnLocation = -1;
+    private uint starVao;
+    private uint starVbo;
+    private int starCount;
+    private bool starBufferReady;
+    private int lastStarDateKey;
+    private double lastStarLocalHour = double.NaN;
+    private double lastStarLat = double.NaN;
+    private double lastStarLon = double.NaN;
+    private float[]? starScratch;
+
     // Cloud-layer ("sea of clouds") program + unit-quad geometry.
     private uint cloudProgram;
     private int cloudMvpLocation = -1;
@@ -1338,7 +1395,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         IReadOnlyList<Trail>? roads = null,
         Atmosphere? atmosphere = null,
         IReadOnlyList<TreeInstance>? forest = null,
-        DetailElevationField? detail = null)
+        DetailElevationField? detail = null,
+        DateOnly? localDate = null)
     {
         gl ??= PlatformGl.Get();
 
@@ -1424,6 +1482,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             skySunGlowWidthLocation = -1;
             skyVao = 0;
             skyVbo = 0;
+            starProgram = 0;
+            starViewProjLocation = -1;
+            starNightFactorLocation = -1;
+            starStarsOnLocation = -1;
+            starVao = 0;
+            starVbo = 0;
+            starCount = 0;
+            starBufferReady = false;
             cloudProgram = 0;
             cloudMvpLocation = -1;
             cloudCenterLocation = -1;
@@ -1743,6 +1809,36 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.BindVertexArray(skyVao);
             gl.DrawArrays(PrimitiveType.Triangles, 0, 3);
             gl.BindVertexArray(0);
+
+            // Stars on top of the gradient (depth-write/-test still off): catalog point sprites pinned to the
+            // sky, gated to night so they fade in only after sunset. The forward view-projection + w=0 keeps
+            // them fixed to the celestial sphere as the camera orbits, and the depth-tested terrain pass that
+            // follows paints over any that sit behind a ridge.
+            float starNightFactor = Math.Clamp(-atmosphere.SunDirection.Z * 3f, 0f, 1f);
+            if (localDate is { } starDate && tiles.Count > 0 && starNightFactor > 0.001f)
+            {
+                EnsureStarBuffer(gl, starDate, atmosphere.TimeOfDayHours, tiles[0].ProjectionAnchor);
+                if (starCount > 0)
+                {
+                    Span<float> starVp = stackalloc float[16]
+                    {
+                        mvp.M11, mvp.M12, mvp.M13, mvp.M14,
+                        mvp.M21, mvp.M22, mvp.M23, mvp.M24,
+                        mvp.M31, mvp.M32, mvp.M33, mvp.M34,
+                        mvp.M41, mvp.M42, mvp.M43, mvp.M44,
+                    };
+                    gl.Enable(EnableCap.Blend);
+                    gl.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.One); // additive: stars add light to the sky
+                    gl.UseProgram(starProgram);
+                    gl.UniformMatrix4(starViewProjLocation, 1, false, starVp);
+                    gl.Uniform1(starNightFactorLocation, starNightFactor);
+                    gl.Uniform1(starStarsOnLocation, 1f);
+                    gl.BindVertexArray(starVao);
+                    gl.DrawArrays(PrimitiveType.Points, 0, (uint)starCount);
+                    gl.BindVertexArray(0);
+                    gl.Disable(EnableCap.Blend);
+                }
+            }
             // Restore depth state for the terrain pass.
             gl.Enable(EnableCap.DepthTest);
             gl.DepthMask(true);
@@ -3338,6 +3434,60 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         return !(hasNeg && hasPos);
     }
 
+    // Rebuilds + uploads the star VBO when the Julian-Date inputs change (slider hour, date, or observer
+    // location); otherwise leaves the cached buffer untouched. Packs only above-horizon stars (4 floats each:
+    // dir.xyz + magnitude). Cheap — the bundled catalog is ~30 stars — but the cache keeps it off the hot path.
+    private void EnsureStarBuffer(GL g, DateOnly localDate, double localHour, GeoPoint anchor)
+    {
+        int dateKey = (localDate.Year * 10000) + (localDate.Month * 100) + localDate.Day;
+        if (starBufferReady
+            && dateKey == lastStarDateKey
+            && Math.Abs(localHour - lastStarLocalHour) < 1e-4
+            && anchor.Latitude == lastStarLat
+            && anchor.Longitude == lastStarLon)
+        {
+            return;
+        }
+
+        IReadOnlyList<(Vector3 Direction, float Magnitude)> dirs = NightSky.StarDirectionsForLocalDate(
+            StarCatalogData.Bundled, localDate.Year, localDate.Month, localDate.Day, localHour,
+            anchor.Latitude, anchor.Longitude);
+
+        if (starScratch is null || starScratch.Length < dirs.Count * 4)
+        {
+            starScratch = new float[dirs.Count * 4];
+        }
+
+        int n = 0;
+        for (int i = 0; i < dirs.Count; i++)
+        {
+            (Vector3 dir, float mag) = dirs[i];
+            if (dir.Z <= 0f)
+            {
+                continue; // below the horizon — never drawn
+            }
+
+            starScratch[(n * 4) + 0] = dir.X;
+            starScratch[(n * 4) + 1] = dir.Y;
+            starScratch[(n * 4) + 2] = dir.Z;
+            starScratch[(n * 4) + 3] = mag;
+            n++;
+        }
+        starCount = n;
+        Log.Information("[Stars] build hour={Hour:F2} anchor=({Lat:F3},{Lon:F3}) catalog={Cat} aboveHorizon={N}", localHour, anchor.Latitude, anchor.Longitude, dirs.Count, n);
+
+        g.BindVertexArray(starVao);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, starVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(n * 4 * sizeof(float)), starScratch.AsSpan(0, n * 4), BufferUsageARB.DynamicDraw);
+        g.BindVertexArray(0);
+
+        lastStarDateKey = dateKey;
+        lastStarLocalHour = localHour;
+        lastStarLat = anchor.Latitude;
+        lastStarLon = anchor.Longitude;
+        starBufferReady = true;
+    }
+
     private void EnsureProgram(GL g)
     {
         if (programReady)
@@ -3458,6 +3608,40 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.EnableVertexAttribArray(0);
         g.VertexAttribPointer(0, 2, VertexAttribPointerType.Float, false, 2 * sizeof(float), (void*)0);
         g.BindVertexArray(0);
+
+        // Star program — catalog point sprites for the night sky. Own VAO/VBO; the VBO is filled lazily by
+        // EnsureStarBuffer (one (dir.xyz, mag) record per above-horizon star). The attribute layout is set up
+        // now against starVbo so later re-uploads only need a BufferData, not a re-bind of the pointers.
+        uint stv = CompileShader(g, ShaderType.VertexShader, StarVertexShaderSource);
+        uint stf = CompileShader(g, ShaderType.FragmentShader, StarFragmentShaderSource);
+        starProgram = g.CreateProgram();
+        g.AttachShader(starProgram, stv);
+        g.AttachShader(starProgram, stf);
+        g.LinkProgram(starProgram);
+        g.GetProgram(starProgram, ProgramPropertyARB.LinkStatus, out int starLinked);
+        if (starLinked == 0)
+        {
+            string log = g.GetProgramInfoLog(starProgram);
+            throw new InvalidOperationException("Star shader link failed: " + log);
+        }
+        g.DetachShader(starProgram, stv);
+        g.DetachShader(starProgram, stf);
+        g.DeleteShader(stv);
+        g.DeleteShader(stf);
+        starViewProjLocation = g.GetUniformLocation(starProgram, "uViewProj");
+        starNightFactorLocation = g.GetUniformLocation(starProgram, "uNightFactor");
+        starStarsOnLocation = g.GetUniformLocation(starProgram, "uStarsOn");
+        starVao = g.GenVertexArray();
+        g.BindVertexArray(starVao);
+        starVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, starVbo);
+        g.EnableVertexAttribArray(0);
+        g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 4 * sizeof(float), (void*)0);
+        g.EnableVertexAttribArray(1);
+        g.VertexAttribPointer(1, 1, VertexAttribPointerType.Float, false, 4 * sizeof(float), (void*)(3 * sizeof(float)));
+        g.BindVertexArray(0);
+        starCount = 0;
+        starBufferReady = false;
 
         // Post-process program — fullscreen pass-through (foundation for bloom / god rays). Reuses the
         // fullscreen triangle above (skyVao) for its draw.
@@ -4970,6 +5154,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.DeleteProgram(shadowDepthProgram);
             gl.DeleteVertexArray(skyVao);
             gl.DeleteBuffer(skyVbo);
+            gl.DeleteProgram(starProgram);
+            gl.DeleteVertexArray(starVao);
+            gl.DeleteBuffer(starVbo);
             gl.DeleteProgram(cloudProgram);
             gl.DeleteVertexArray(cloudVao);
             gl.DeleteBuffer(cloudVbo);
@@ -4988,6 +5175,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             shadowDepthProgram = 0;
             skyVao = 0;
             skyVbo = 0;
+            starProgram = 0;
+            starVao = 0;
+            starVbo = 0;
+            starCount = 0;
+            starBufferReady = false;
             cloudProgram = 0;
             cloudVao = 0;
             cloudVbo = 0;
