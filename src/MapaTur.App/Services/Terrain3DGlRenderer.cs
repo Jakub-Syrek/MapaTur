@@ -559,6 +559,19 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  fragColor = vec4(col * 0.5, 1.0);\n" + // exposure
         "}\n";
 
+    // Shadow depth pass: transform the terrain vertex (absolute world aPos) by a cascade's light
+    // view-projection and write depth only. No colour output — the FBO has just a depth texture.
+    private const string ShadowDepthVertexShaderSource =
+        "#version 300 es\n" +
+        "layout(location=0) in vec3 aPos;\n" +
+        "uniform mat4 uLightVp;\n" +
+        "void main(){ gl_Position = uLightVp * vec4(aPos, 1.0); }\n";
+
+    private const string ShadowDepthFragmentShaderSource =
+        "#version 300 es\n" +
+        "precision highp float;\n" +
+        "void main(){}\n";
+
     // Cloud-layer ("sea of clouds") program. A large horizontal quad at a fixed world altitude,
     // drawn AFTER the terrain with the depth test on (so peaks above the layer occlude it and the
     // valleys below are veiled) but depth-write off and alpha blending on. The fragment shader
@@ -1126,6 +1139,25 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private bool bloomStageLogged;
     private bool godrayStageLogged;
 
+    // Cascaded Shadow Maps (Krok 5): per-cascade depth textures rendered from the sun's POV, sampled in the
+    // terrain shader (part 4). Cascades cover near→far slices of the camera frustum (CascadeShadowSplits),
+    // each fit by an orthographic light matrix (CascadeLightMatrix). aPos is absolute world, so the depth
+    // pass transforms it straight by the cascade light matrix — no model/stable offset needed.
+    private const int ShadowCascadeCount = 3;
+    private const int ShadowMapSize = 2048;
+    private const float ShadowMaxDistance = 15000f; // cap cascade far so texels stay dense over visible terrain
+    private const float ShadowSplitLambda = 0.85f;
+    private readonly uint[] shadowFbos = new uint[ShadowCascadeCount];
+    private readonly uint[] shadowDepthTex = new uint[ShadowCascadeCount];
+    private readonly Matrix4x4[] cascadeLightVp = new Matrix4x4[ShadowCascadeCount];
+    private readonly float[] cascadeSplitFar = new float[ShadowCascadeCount];
+    private bool shadowMapsAllocated;
+    private bool shadowUnsupported;
+    private readonly bool shadowsEnabled = true; // compile-time kill-switch (part 4 makes it runtime-settable)
+    private uint shadowDepthProgram;
+    private int shadowLightVpLoc = -1;
+    private bool shadowPassLogged;
+
     private readonly Dictionary<TerrainMesh3D, TileBuffers> tileBuffers = new();
     private IReadOnlyList<TerrainMesh3D>? lastTiles;
 
@@ -1460,6 +1492,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             bloomCompGodrayLoc = bloomCompGodrayIntensityLoc = -1;
             bloomStageLogged = false;
             godrayStageLogged = false;
+            // Shadow cascades + depth program — same context-loss handling.
+            for (int i = 0; i < ShadowCascadeCount; i++)
+            {
+                shadowFbos[i] = 0;
+                shadowDepthTex[i] = 0;
+            }
+            shadowMapsAllocated = false;
+            shadowUnsupported = false;
+            shadowDepthProgram = 0;
+            shadowLightVpLoc = -1;
+            shadowPassLogged = false;
             // The planar-reflection target belonged to the dead context — drop the handles so it's rebuilt fresh.
             reflectionFbo = 0;
             reflectionColorTex = 0;
@@ -1526,6 +1569,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // least-recently-rendered ones past the VRAM budget. mvp is the world→clip matrix the frustum
         // test expects (same as Camera3D.ProjectToScreen). Must run before the terrain pass binds cells.
         StreamOrthoTextures(gl, mvp, tiles);
+
+        // Cascaded Shadow Maps depth pass (Krok 5): render terrain depth from the sun's POV into the cascade
+        // shadow maps before the sky/terrain passes. Self-contained — restores the bound FBO + viewport.
+        RenderShadowMaps(gl, camera, atmosphere?.SunDirection ?? Vector3.Zero, (float)width / Math.Max(1, height), vpWidth, vpHeight);
 
         // ── Live weather ────────────────────────────────────────────────────────────────────────
         // Clouds are not a static dial: the coverage wanders over minutes (sometimes near-clear,
@@ -2570,6 +2617,140 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     }
 
     /// <summary>
+    /// Allocates the cascade depth textures + depth-only FBOs once. Each is a DEPTH_COMPONENT24 texture set
+    /// up for hardware comparison (sampler2DShadow) so part 4 can PCF-filter it. Latches
+    /// <see cref="shadowUnsupported"/> on incompleteness so the caller skips the shadow pass for the session.
+    /// </summary>
+    private bool EnsureShadowMaps(GL g)
+    {
+        if (shadowUnsupported)
+        {
+            return false;
+        }
+        if (shadowMapsAllocated)
+        {
+            return true;
+        }
+
+        for (int i = 0; i < ShadowCascadeCount; i++)
+        {
+            uint tex = g.GenTexture();
+            g.BindTexture(TextureTarget.Texture2D, tex);
+            g.TexImage2D(
+                TextureTarget.Texture2D, 0, (int)InternalFormat.DepthComponent24,
+                ShadowMapSize, ShadowMapSize, 0, PixelFormat.DepthComponent, PixelType.UnsignedInt, null);
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureCompareMode, (int)GLEnum.CompareRefToTexture);
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureCompareFunc, (int)GLEnum.Lequal);
+            g.BindTexture(TextureTarget.Texture2D, 0);
+
+            uint fbo = g.GenFramebuffer();
+            g.BindFramebuffer(FramebufferTarget.Framebuffer, fbo);
+            g.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.DepthAttachment, TextureTarget.Texture2D, tex, 0);
+            GLEnum status = g.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
+            g.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+            if (status != GLEnum.FramebufferComplete)
+            {
+                Log.Information("[GL3D] shadow framebuffer incomplete ({Status}) cascade {C} — shadows off this session", status, i);
+                g.DeleteTexture(tex);
+                g.DeleteFramebuffer(fbo);
+                for (int j = 0; j < i; j++)
+                {
+                    g.DeleteFramebuffer(shadowFbos[j]);
+                    g.DeleteTexture(shadowDepthTex[j]);
+                    shadowFbos[j] = 0;
+                    shadowDepthTex[j] = 0;
+                }
+                shadowUnsupported = true;
+                return false;
+            }
+            shadowFbos[i] = fbo;
+            shadowDepthTex[i] = tex;
+        }
+        shadowMapsAllocated = true;
+        return true;
+    }
+
+    /// <summary>
+    /// Renders the terrain depth from the sun's POV into each cascade's shadow map and stores the cascade
+    /// light matrices + split far-distances for the terrain shader (part 4). Self-contained: saves and
+    /// restores the bound framebuffer + viewport, so it can run before the sky/terrain passes without
+    /// disturbing them. Skips at night (sun at/below horizon) and before geometry is uploaded. The terrain
+    /// vertex (absolute world aPos) is transformed straight by the cascade light matrix.
+    /// </summary>
+    private void RenderShadowMaps(GL g, Camera3D camera, Vector3 sunDirection, float aspectRatio, int vpWidth, int vpHeight)
+    {
+        if (!shadowsEnabled || shadowDepthProgram == 0 || tileBuffers.Count == 0)
+        {
+            return;
+        }
+        Vector3 sun = sunDirection.LengthSquared() > 1e-8f ? Vector3.Normalize(sunDirection) : Vector3.Zero;
+        if (sun.Z <= 0.02f) // sun at/below the horizon → no shadows (night)
+        {
+            return;
+        }
+        if (!EnsureShadowMaps(g))
+        {
+            return;
+        }
+
+        Span<int> prevFbo = stackalloc int[1];
+        g.GetInteger(GLEnum.FramebufferBinding, prevFbo);
+
+        float near = camera.NearPlane;
+        float far = MathF.Min(camera.FarPlane, ShadowMaxDistance);
+        IReadOnlyList<float> splits = CascadeShadowSplits.FarDistances(near, far, ShadowCascadeCount, ShadowSplitLambda);
+
+        g.Enable(EnableCap.DepthTest);
+        g.DepthMask(true);
+        g.Disable(EnableCap.Blend);
+        g.UseProgram(shadowDepthProgram);
+
+        Span<float> lm = stackalloc float[16];
+        float sliceNear = near;
+        for (int c = 0; c < ShadowCascadeCount; c++)
+        {
+            float sliceFar = splits[c];
+            Matrix4x4 lightVp = CascadeLightMatrix.Build(camera, aspectRatio, sliceNear, sliceFar, sun, depthPadding: 2000f);
+            cascadeLightVp[c] = lightVp;
+            cascadeSplitFar[c] = sliceFar;
+
+            g.BindFramebuffer(FramebufferTarget.Framebuffer, shadowFbos[c]);
+            g.Viewport(0, 0, ShadowMapSize, ShadowMapSize);
+            g.Clear((uint)ClearBufferMask.DepthBufferBit);
+
+            // Same row-major upload as uMvp (transpose=false): GL reads it column-major, so GLSL's
+            // uLightVp * v matches Vector4.Transform(v, lightVp) that the matrix tests pin.
+            lm[0] = lightVp.M11; lm[1] = lightVp.M12; lm[2] = lightVp.M13; lm[3] = lightVp.M14;
+            lm[4] = lightVp.M21; lm[5] = lightVp.M22; lm[6] = lightVp.M23; lm[7] = lightVp.M24;
+            lm[8] = lightVp.M31; lm[9] = lightVp.M32; lm[10] = lightVp.M33; lm[11] = lightVp.M34;
+            lm[12] = lightVp.M41; lm[13] = lightVp.M42; lm[14] = lightVp.M43; lm[15] = lightVp.M44;
+            g.UniformMatrix4(shadowLightVpLoc, 1, false, lm);
+
+            foreach (KeyValuePair<TerrainMesh3D, TileBuffers> entry in tileBuffers)
+            {
+                g.BindVertexArray(entry.Value.Vao);
+                g.DrawElements(PrimitiveType.Triangles, (uint)entry.Value.IndexCount, DrawElementsType.UnsignedShort, (void*)0);
+            }
+            sliceNear = sliceFar;
+        }
+
+        g.BindVertexArray(0);
+        g.BindFramebuffer(FramebufferTarget.Framebuffer, (uint)prevFbo[0]);
+        g.Viewport(0, 0, (uint)vpWidth, (uint)vpHeight);
+
+        if (!shadowPassLogged)
+        {
+            Log.Information("[GL3D] shadow pass: {Cascades} cascades {Size}px, far {FarM}m, splits {S0}/{S1}/{S2}",
+                ShadowCascadeCount, ShadowMapSize, far, cascadeSplitFar[0], cascadeSplitFar[1], cascadeSplitFar[2]);
+            shadowPassLogged = true;
+        }
+    }
+
+    /// <summary>
     /// Creates / resizes the off-screen multisampled colour+depth FBO. Returns false (and leaves nothing
     /// bound to change) when MSAA isn't usable, so the caller renders directly into Skia's FBO instead.
     /// </summary>
@@ -3202,6 +3383,25 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         godrayProgram = BuildPostProgram(g, GodrayFragmentShaderSource, "God rays");
         godrayTexLoc = g.GetUniformLocation(godrayProgram, "uTex");
         godraySunUvLoc = g.GetUniformLocation(godrayProgram, "uSunUv");
+
+        // Shadow depth program — depth-only pass for Cascaded Shadow Maps (own vertex/fragment shaders).
+        uint shvs = CompileShader(g, ShaderType.VertexShader, ShadowDepthVertexShaderSource);
+        uint shfs = CompileShader(g, ShaderType.FragmentShader, ShadowDepthFragmentShaderSource);
+        shadowDepthProgram = g.CreateProgram();
+        g.AttachShader(shadowDepthProgram, shvs);
+        g.AttachShader(shadowDepthProgram, shfs);
+        g.LinkProgram(shadowDepthProgram);
+        g.GetProgram(shadowDepthProgram, ProgramPropertyARB.LinkStatus, out int shadowLinked);
+        if (shadowLinked == 0)
+        {
+            string log = g.GetProgramInfoLog(shadowDepthProgram);
+            throw new InvalidOperationException("Shadow depth shader link failed: " + log);
+        }
+        g.DetachShader(shadowDepthProgram, shvs);
+        g.DetachShader(shadowDepthProgram, shfs);
+        g.DeleteShader(shvs);
+        g.DeleteShader(shfs);
+        shadowLightVpLoc = g.GetUniformLocation(shadowDepthProgram, "uLightVp");
 
         // Cloud-layer program — horizontal quad at altitude, fBm-alpha "sea of clouds".
         uint cvs = CompileShader(g, ShaderType.VertexShader, CloudLayerVertexShaderSource);
@@ -4612,6 +4812,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.DeleteFramebuffer(godrayFbo);
         gl.DeleteTexture(godrayTex);
         bloomBrightFbo = bloomBrightTex = bloomFboA = bloomTexA = bloomFboB = bloomTexB = godrayFbo = godrayTex = 0;
+        for (int i = 0; i < ShadowCascadeCount; i++)
+        {
+            gl.DeleteFramebuffer(shadowFbos[i]);
+            gl.DeleteTexture(shadowDepthTex[i]);
+            shadowFbos[i] = 0;
+            shadowDepthTex[i] = 0;
+        }
+        shadowMapsAllocated = false;
         gl.DeleteFramebuffer(reflectionFbo);
         gl.DeleteTexture(reflectionColorTex);
         gl.DeleteRenderbuffer(reflectionDepthRb);
@@ -4647,6 +4855,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.DeleteProgram(bloomBlurProgram);
             gl.DeleteProgram(bloomCompositeProgram);
             gl.DeleteProgram(godrayProgram);
+            gl.DeleteProgram(shadowDepthProgram);
             gl.DeleteVertexArray(skyVao);
             gl.DeleteBuffer(skyVbo);
             gl.DeleteProgram(cloudProgram);
@@ -4664,6 +4873,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             bloomBlurProgram = 0;
             bloomCompositeProgram = 0;
             godrayProgram = 0;
+            shadowDepthProgram = 0;
             skyVao = 0;
             skyVbo = 0;
             cloudProgram = 0;
