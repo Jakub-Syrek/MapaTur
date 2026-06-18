@@ -1637,6 +1637,7 @@ public partial class Terrain3DView : ContentView
         IReadOnlyList<StarLabel> labels = StarLabelProjector.ProjectForLocalDate(
             StarCatalogData.Bundled, now.Year, now.Month, now.Day, atmo.TimeOfDayHours,
             anchor.Latitude, anchor.Longitude, viewProjection, width, height);
+        renderer.DrawConstellationLines(canvas, ConstellationLines.ResolveScreenSegments(labels));
         renderer.DrawStarLabels(canvas, labels);
     }
 

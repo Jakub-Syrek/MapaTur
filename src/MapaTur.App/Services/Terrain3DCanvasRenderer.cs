@@ -107,6 +107,7 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
     private SKFont? peakNameFont;
     private SKFont? starLabelFont;
     private SKPaint? starLabelFillPaint;
+    private SKPaint? starLinePaint;
     private SKPath? peakPath;
     private SKPaint? skyPaint;
     private SKShader? skyShader;
@@ -634,6 +635,31 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         }
     }
 
+    // Faint constellation lines connecting the in-frame stars of an asterism (e.g. the Big Dipper), drawn
+    // under the star-name labels so the names stay legible. Endpoints come from ConstellationLines, which only
+    // emits a segment when both its stars are on screen.
+    public void DrawConstellationLines(SKCanvas canvas, IReadOnlyList<StarSegment> segments)
+    {
+        ArgumentNullException.ThrowIfNull(canvas);
+        if (segments is null || segments.Count == 0)
+        {
+            return;
+        }
+
+        starLinePaint ??= new SKPaint
+        {
+            IsAntialias = true,
+            Style = SKPaintStyle.Stroke,
+            StrokeWidth = 1.2f,
+            Color = new SKColor(0x9A, 0xA8, 0xC4, 0x70), // faint cool-pale, semi-transparent
+        };
+
+        foreach (StarSegment seg in segments)
+        {
+            canvas.DrawLine(seg.X1, seg.Y1, seg.X2, seg.Y2, starLinePaint);
+        }
+    }
+
     // Night-sky star-name labels: small warm-pale text just above each in-frame star's GL point sprite. The
     // positions come from StarLabelProjector, which mirrors the star shader's projection, so the name tracks
     // its dot. Drawn over the composited scene like the peak labels; the dark halo keeps it legible against
@@ -900,6 +926,7 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         peakNameFont?.Dispose();
         starLabelFont?.Dispose();
         starLabelFillPaint?.Dispose();
+        starLinePaint?.Dispose();
         peakPath?.Dispose();
         skyPaint?.Dispose();
         skyShader?.Dispose();
