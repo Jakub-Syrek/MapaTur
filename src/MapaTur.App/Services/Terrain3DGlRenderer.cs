@@ -84,6 +84,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform vec3 uFogColor;\n" +
         "uniform float uFogDensity;\n" + // per-metre exponential; 0 = no aerial perspective
         "uniform vec3 uCameraPos;\n" +
+        // Cascaded Shadow Maps (Krok 5 part 4): 3 cascade depth maps + their light view-projections + the
+        // cascade split far-distances. uShadowStrength 0 = off (night / disabled), 1 = full.
+        "uniform highp sampler2DShadow uShadowMap0;\n" +
+        "uniform highp sampler2DShadow uShadowMap1;\n" +
+        "uniform highp sampler2DShadow uShadowMap2;\n" +
+        "uniform mat4 uCascadeVp0;\n" +
+        "uniform mat4 uCascadeVp1;\n" +
+        "uniform mat4 uCascadeVp2;\n" +
+        "uniform vec3 uCascadeSplit;\n" +
+        "uniform float uShadowStrength;\n" +
         // Cloud-shadow inputs: the SAME field the sea-of-clouds layer draws, so the shadows on the
         // ground line up with the clouds overhead. The terrain fragment projects up along the sun
         // ray to the cloud plane and samples the field there — moving dappled light at any sun angle.
@@ -132,6 +142,33 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "             mix(hashT(i + vec2(0.0,1.0)), hashT(i + vec2(1.0,1.0)), f.x), f.y);\n" +
         "}\n" +
         "float fbmT(vec2 p){ float v=0.0,a=0.5; for(int i=0;i<5;i++){ v+=a*noiseT(p); p*=2.0; a*=0.5;} return v; }\n" +
+        // Cascaded Shadow Maps (Krok 5 part 4): 3x3 PCF of one cascade (hardware depth compare), then pick the
+        // cascade by camera-space view distance, project the ABSOLUTE world position into its light space, and
+        // compare with a slope-scaled bias. Returns 1 = fully lit, →0 = shadowed (scaled by uShadowStrength).
+        "float pcfShadow(highp sampler2DShadow sm, vec2 uv, float depthRef){\n" +
+        "  float t = 1.0 / 2048.0;\n" +
+        "  float s = 0.0;\n" +
+        "  for (int x = -1; x <= 1; x++) {\n" +
+        "    for (int y = -1; y <= 1; y++) {\n" +
+        "      s += texture(sm, vec3(uv + (vec2(float(x), float(y)) * t), depthRef));\n" +
+        "    }\n" +
+        "  }\n" +
+        "  return s / 9.0;\n" +
+        "}\n" +
+        "float csmShadow(float viewDist, vec3 worldPos, float ndotl){\n" +
+        "  if (uShadowStrength < 0.001) return 1.0;\n" +
+        "  int ci = (viewDist < uCascadeSplit.x) ? 0 : ((viewDist < uCascadeSplit.y) ? 1 : 2);\n" +
+        "  mat4 vp = (ci == 0) ? uCascadeVp0 : ((ci == 1) ? uCascadeVp1 : uCascadeVp2);\n" +
+        "  vec4 lc = vp * vec4(worldPos, 1.0);\n" +
+        "  vec3 p = lc.xyz / lc.w;\n" +
+        "  p = (p * 0.5) + 0.5;\n" +
+        "  if (p.z >= 1.0 || p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0) return 1.0;\n" +
+        "  float bias = max(0.0025 * (1.0 - ndotl), 0.0007);\n" +
+        "  float d = p.z - bias;\n" +
+        "  float lit = (ci == 0) ? pcfShadow(uShadowMap0, p.xy, d)\n" +
+        "            : ((ci == 1) ? pcfShadow(uShadowMap1, p.xy, d) : pcfShadow(uShadowMap2, p.xy, d));\n" +
+        "  return mix(1.0, lit, uShadowStrength);\n" +
+        "}\n" +
         "void main(){\n" +
         // Reflection pre-pass: we're rendering the terrain MIRRORED about the lake plane into the reflection
         // texture. Discard anything below the waterline so only the above-water peaks end up in the reflection.
@@ -217,6 +254,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  }\n" +
         "  float lambert = max(0.0, dot(shN, uLightDir));\n" +
         "  float sunlit = lambert * (1.0 - uAmbient) * (1.0 - (sunShadow * uCloudShadow));\n" +
+        // CSM: attenuate the direct-sun term where the terrain is in its own shadow (cascade chosen by view
+        // distance in the render frame; lookup uses the absolute world pos against the absolute light matrix).
+        "  sunlit *= csmShadow(length(vWorldPos - uCameraPos), vStableWorldPos, lambert);\n" +
         "  vec3 lightSum = (uSkyAmbient * uAmbient) + (uSunColor * sunlit);\n" +
         // Ambient FLOOR: steep faces turned from the sun (lambert=0) otherwise collapse to lightSum≈0 → near-BLACK
         // (the "czarne dziury/kropki" — proven: an unlit render has 0 black px). max() lifts ONLY the deepest
@@ -1157,6 +1197,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private uint shadowDepthProgram;
     private int shadowLightVpLoc = -1;
     private bool shadowPassLogged;
+    // Shadow-sampling uniforms on the terrain program (part 4) + per-frame active flag + tuning strength.
+    private int shadowMap0Loc = -1, shadowMap1Loc = -1, shadowMap2Loc = -1;
+    private int cascadeVp0Loc = -1, cascadeVp1Loc = -1, cascadeVp2Loc = -1;
+    private int cascadeSplitLoc = -1, shadowStrengthLoc = -1;
+    private bool shadowsActiveThisFrame;
+    private const float ShadowStrength = 0.7f;
 
     private readonly Dictionary<TerrainMesh3D, TileBuffers> tileBuffers = new();
     private IReadOnlyList<TerrainMesh3D>? lastTiles;
@@ -1503,6 +1549,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             shadowDepthProgram = 0;
             shadowLightVpLoc = -1;
             shadowPassLogged = false;
+            shadowMap0Loc = shadowMap1Loc = shadowMap2Loc = -1;
+            cascadeVp0Loc = cascadeVp1Loc = cascadeVp2Loc = -1;
+            cascadeSplitLoc = shadowStrengthLoc = -1;
+            shadowsActiveThisFrame = false;
             // The planar-reflection target belonged to the dead context — drop the handles so it's rebuilt fresh.
             reflectionFbo = 0;
             reflectionColorTex = 0;
@@ -1926,6 +1976,35 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.UniformMatrix4(mvpLocation, 1, false, m);
             gl.Uniform3(modelOffsetLocation, -r.X, -r.Y, -r.Z);
             gl.Uniform3(terrainCameraPosLocation, cameraWorldPos.X - r.X, cameraWorldPos.Y - r.Y, cameraWorldPos.Z - r.Z);
+        }
+
+        // CSM shadow sampling (part 4): bind the 3 cascade depth maps (units 2/3/4) + upload their light
+        // matrices + split distances. Strength is 0 unless RenderShadowMaps actually rendered this frame
+        // (sun above horizon, geometry ready), so night / fallback degrades to no shadows cleanly.
+        if (shadowStrengthLoc >= 0)
+        {
+            if (shadowsActiveThisFrame)
+            {
+                gl.ActiveTexture(TextureUnit.Texture2);
+                gl.BindTexture(TextureTarget.Texture2D, shadowDepthTex[0]);
+                gl.ActiveTexture(TextureUnit.Texture3);
+                gl.BindTexture(TextureTarget.Texture2D, shadowDepthTex[1]);
+                gl.ActiveTexture(TextureUnit.Texture4);
+                gl.BindTexture(TextureTarget.Texture2D, shadowDepthTex[2]);
+                gl.ActiveTexture(TextureUnit.Texture0);
+                gl.Uniform1(shadowMap0Loc, 2);
+                gl.Uniform1(shadowMap1Loc, 3);
+                gl.Uniform1(shadowMap2Loc, 4);
+                UploadMatrix(gl, cascadeVp0Loc, cascadeLightVp[0]);
+                UploadMatrix(gl, cascadeVp1Loc, cascadeLightVp[1]);
+                UploadMatrix(gl, cascadeVp2Loc, cascadeLightVp[2]);
+                gl.Uniform3(cascadeSplitLoc, cascadeSplitFar[0], cascadeSplitFar[1], cascadeSplitFar[2]);
+                gl.Uniform1(shadowStrengthLoc, ShadowStrength);
+            }
+            else
+            {
+                gl.Uniform1(shadowStrengthLoc, 0f);
+            }
         }
 
         // Drape the ortho: bind each mesh tile's own cell texture (OrthoTileIndex) so a multi-cell ortho
@@ -2385,6 +2464,24 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         return true;
     }
 
+    /// <summary>Uploads a System.Numerics matrix to a uniform with the same row-major (transpose=false)
+    /// convention as uMvp, so GLSL's M*v matches Vector4.Transform(v, M).</summary>
+    private static void UploadMatrix(GL g, int location, Matrix4x4 m)
+    {
+        if (location < 0)
+        {
+            return;
+        }
+        Span<float> a = stackalloc float[16]
+        {
+            m.M11, m.M12, m.M13, m.M14,
+            m.M21, m.M22, m.M23, m.M24,
+            m.M31, m.M32, m.M33, m.M34,
+            m.M41, m.M42, m.M43, m.M44,
+        };
+        g.UniformMatrix4(location, 1, false, a);
+    }
+
     /// <summary>Creates a clamped, linear-filtered RGBA8 colour texture of the given size.</summary>
     private static uint MakeColorTexture(GL g, int w, int h)
     {
@@ -2683,6 +2780,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// </summary>
     private void RenderShadowMaps(GL g, Camera3D camera, Vector3 sunDirection, float aspectRatio, int vpWidth, int vpHeight)
     {
+        shadowsActiveThisFrame = false;
         if (!shadowsEnabled || shadowDepthProgram == 0 || tileBuffers.Count == 0)
         {
             return;
@@ -2741,6 +2839,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.BindVertexArray(0);
         g.BindFramebuffer(FramebufferTarget.Framebuffer, (uint)prevFbo[0]);
         g.Viewport(0, 0, (uint)vpWidth, (uint)vpHeight);
+        shadowsActiveThisFrame = true;
 
         if (!shadowPassLogged)
         {
@@ -3304,6 +3403,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         terrainSnowSlopeCosBareLocation = g.GetUniformLocation(program, "uSnowSlopeCosBare");
         terrainSnowSlopeCosFullLocation = g.GetUniformLocation(program, "uSnowSlopeCosFull");
         terrainNoonSnowLiftLocation = g.GetUniformLocation(program, "uNoonSnowLift");
+        shadowMap0Loc = g.GetUniformLocation(program, "uShadowMap0");
+        shadowMap1Loc = g.GetUniformLocation(program, "uShadowMap1");
+        shadowMap2Loc = g.GetUniformLocation(program, "uShadowMap2");
+        cascadeVp0Loc = g.GetUniformLocation(program, "uCascadeVp0");
+        cascadeVp1Loc = g.GetUniformLocation(program, "uCascadeVp1");
+        cascadeVp2Loc = g.GetUniformLocation(program, "uCascadeVp2");
+        cascadeSplitLoc = g.GetUniformLocation(program, "uCascadeSplit");
+        shadowStrengthLoc = g.GetUniformLocation(program, "uShadowStrength");
 
         // Sky program — single triangle covering the screen, fragment-shader-only atmospheric model.
         uint sks = CompileShader(g, ShaderType.VertexShader, SkyVertexShaderSource);
