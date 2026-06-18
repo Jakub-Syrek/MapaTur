@@ -15,23 +15,18 @@ Faza A (rdzeń astronomiczny, `src/MapaTur.Application/Terrain/`):
 - `StarCatalog.Parse(csv)` + `StarCatalogData.Bundled` (29 jasnych nazwanych, baked w C# — device-safe, jak lakes) + `scripts/generate-star-catalog.py` (pełne pole HYG, mag≤6, uruchamiane offline) + `data/stars.csv`.
 - B1 `NightSky.StarDirections(stars, jd, latDeg, lonDeg)` → lista (Vector3 Direction, float Magnitude). Test e2e: Polaris→due-north@alt=lat.
 
+## ✅ B3 + podpisy + linie — ZROBIONE i NA MAIN (tip `e51e1e8`, CI), device-confirmed (Wielki Wóz)
+- **B3.1 czas** (`ea97e56`, TDD): `CentralEuropeanTime.UtcOffsetHours` (CET/CEST wg reguły EU DST — ostatnia niedziela III/X, liczone per-rok) + `NightSky.StarDirectionsForLocalDate(stars, y,m,d, localHour, lat, lon)` (localHour→UTC→jd→`StarDirections`; ciągły wzór JD sam roluje dzień przy ujemnej godzinie). UtcNow zostaje w App.
+- **B3.2 pas GL** (`95e0cf1`): point-sprite'y w sky-pass `Terrain3DGlRenderer` (po gradiencie, depth off, additive blend), `EnsureStarBuffer` (cache po jd-inputach, cull Z≤0, re-upload tylko gdy zmiana), bramka `nightFactor`. `Render(..., DateOnly? localDate)`; widok podaje `DateTime.Now`; lat/lon = `tiles[0].ProjectionAnchor`.
+  - ⚠️ **GOTCHA far-plane** (kosztowała długi debug): trik w=0 `uViewProj*vec4(dir,0)` daje `NDC.z=(f+n)/(f-n) > 1` → **całe niebo ucinane przez far-clip** (clipping działa MIMO wyłączonego depth-testu; mechanizm/blend/point-size działały, gwiazdy znikały). FIX = przypnij głębię do far-plane: `gl_Position = vec4(clip.xy, clip.w, clip.w)`. Reużyj to dla Księżyca/planet.
+- **B3.3 podpisy (E częściowo)** (`dc0d6ef`, TDD): `StarLabelProjector` (kierunek→ekran IDENTYCZNIE jak `Camera3D.ProjectToScreen`, ale wejście w=0 i bez testu `ndcZ`; cull pod-horyzont/za-kamerą/poza-ekran) + `Terrain3DCanvasRenderer.DrawStarLabels` (overlay Skia, halo+fill, jak etykiety szczytów). Podpisy trafiają w punkty GL (te same `clip.xy/clip.w`).
+- **B3.4 linie gwiazdozbiorów (E częściowo)** (`e51e1e8`, TDD): `ConstellationLines` (topologia Wozu po nazwach + resolver na segmenty ekranowe; segment tylko gdy OBA końce na ekranie) + `DrawConstellationLines` (Skia, pod podpisami).
+
 ## ⬜ ZOSTAŁO
-
-### B3 — render GL gwiazd (NASTĘPNY, device-zależny)
-1. **Plumbing jd**: w `Terrain3DView` policz jd = `AstronomicalTime.JulianDate(DateTime.UtcNow.Year/Month/Day, slider-hour-przeliczona-na-UTC)` i przekaż do renderera (nowy param/property w `Render(...)`). Slider to czas LOKALNY → odejmij offset strefy (Polska UTC+1/+2). Model deterministyczny — niedeterminizm (UtcNow) tylko w App.
-2. **lat/lon** = centrum sceny (DEM centre 49.25,19.95; w logach „LOD base centre …"; wyprowadź z tiles/anchor).
-3. **Pas GL** w `Terrain3DGlRenderer` (w sky-pass, PO gradiencie nieba, depth-WRITE off, PRZED terenem → teren zasłania to co pod horyzontem):
-   - VBO: dla każdej gwiazdy `NightSky.StarDirections` → (dir.xyz, mag); re-upload TYLKO gdy jd się zmieni (suwak), nie co klatkę.
-   - vertex: `gl_Position = uSkyViewProj * vec4(dir, 0.0)` — **kierunek w nieskończoności (w=0) → OMIJA gotcha camera-relative** (brak translacji, gwiazdy „przyklejone" do nieba). `gl_PointSize = mix(1.0, 4.0, (6.0-mag)/7.5)` (jaśniejsze=większe).
-   - fragment: kolor biały/lekko ciepły, alpha = jasność z magnitudo × `uNightFactor` × `uStarsOn`. Miękka kropka (odległość od centra point-coorda).
-   - bramka: `uStarsOn` (toggle) + nightFactor (już jest w sky shaderze: `clamp(-uSunDir.z*3,0,1)`).
-4. **Weryfikacja**: build podpisany (keystore!), deploy, ustaw **noc** na suwaku, sprawdź gwiazdy + rozpoznaj Wielki Wóz/Polaris. `adb screencap` do podglądu.
-
-### C–F
-- C **Księżyc**: dysk w kierunku `LunarPosition`→world (jak słońce), z fazą (terminator wg kąta do Słońca / `IlluminatedFraction`) + chłodna poświata. Opcjonalnie planety jako jasne „gwiazdy" w innym kolorze.
+- C **Księżyc**: dysk-billboard w kierunku `LunarPosition`→world (jak słońce), faza (terminator wg kąta do Słońca / `IlluminatedFraction`) + chłodna poświata. **Reużyj fix far-plane (w=0 + z=w).** ⚠️ **device-verify: Księżyc bywa pod horyzontem / nów dla danej daty — sprawdź `LunarPosition` ZANIM oczekujesz widoczności** (gwiazdy są zawsze, Księżyc nie). Planety jako jasne „gwiazdy" w innym kolorze (`PlanetaryPosition` gotowe).
 - D **Światło księżyca**: słaby, chłodno-niebieski term kierunkowy w shaderze terenu (Lambert od Moon × faza × wysokość), gdy `uSunDir.z<0`.
-- E **Podpisy**: rzut nazwanych gwiazd/gwiazdozbiorów(centroid)/planet/Księżyca na ekran — **reużyj `Marker3DOverlayProjector`** (szczyty już tak działają) + occlusion. Osobny toggle „Podpisy".
-- F **Toggle panelu**: „Niebo nocne" (+ „Podpisy") w panelu Pogoda/Widok (wzorem suwaków/chipów). Potem **upgrade Słońca** na realny model (zastąp uproszczony łuk w `Atmosphere`) + **re-tune złotej godziny**.
+- E **reszta podpisów**: planety + Księżyc; więcej gwiazdozbiorów (katalog ma pełny kształt tylko dla Ursa Major — dorzuć gwiazdy do `StarCatalogData.Bundled` lub gęste pole ze `scripts/generate-star-catalog.py`).
+- F **Toggle panelu**: „Niebo nocne" (+ „Podpisy") w panelu Pogoda/Widok (wzorem suwaków/chipów; teraz gwiazdy+podpisy+linie są ZAWSZE on nocą). Potem **upgrade Słońca** na realny model (zastąp uproszczony łuk w `Atmosphere` — UWAGA: bramka nocy gwiazd używa jego `SunDirection.Z`) + **re-tune złotej godziny**.
 
 ## ⚠️ Gotchas (twarde lekcje tej sesji)
 - **GLES/Adreno ≠ desktop**: desktop-log NIE wystarcza; ZAWSZE wgraj na telefon przed „done". Sampler różnych typów na jednej jednostce = Adreno odrzuca draw (patrz fix `c264e01`). Star pass jest prostszy (bez FBO/samplerów) — ryzyko mniejsze, ale i tak device-verify.
