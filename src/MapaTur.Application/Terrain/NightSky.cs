@@ -31,4 +31,26 @@ public static class NightSky
 
         return result;
     }
+
+    /// <summary>
+    /// Convenience overload for the renderer: world direction + magnitude for each star at a <em>local</em>
+    /// wall-clock date and hour in the app's region (Central European Time, DST-aware). The renderer supplies
+    /// today's calendar date and the time-slider hour as local time, plus the scene-centre latitude /
+    /// longitude (e.g. the mesh's <c>ProjectionAnchor</c>). Converts the local hour to UTC via
+    /// <see cref="CentralEuropeanTime"/>, builds the Julian Date, then defers to <see cref="StarDirections"/>.
+    /// </summary>
+    /// <remarks>
+    /// The Julian Date formula is continuous in the UT hour, so a local hour near midnight that subtracts the
+    /// offset below zero shifts smoothly into the previous calendar day — no manual date rollover needed.
+    /// </remarks>
+    public static IReadOnlyList<(Vector3 Direction, float Magnitude)> StarDirectionsForLocalDate(
+        IReadOnlyList<Star> stars, int year, int month, int day, double localHour,
+        double latitudeDegrees, double longitudeDegrees)
+    {
+        ArgumentNullException.ThrowIfNull(stars);
+
+        double hourUtc = localHour - CentralEuropeanTime.UtcOffsetHours(year, month, day);
+        double julianDate = AstronomicalTime.JulianDate(year, month, day, hourUtc);
+        return StarDirections(stars, julianDate, latitudeDegrees, longitudeDegrees);
+    }
 }

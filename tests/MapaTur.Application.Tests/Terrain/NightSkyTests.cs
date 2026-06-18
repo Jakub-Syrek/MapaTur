@@ -57,4 +57,36 @@ public sealed class NightSkyTests
 
         Vector3.Distance(a, b).Should().BeGreaterThan(0.2f);
     }
+
+    [Fact]
+    public void StarDirectionsForLocalDate_SummerEvening_UsesUtcPlusTwoOffset()
+    {
+        // CEST (summer time) is UTC+2, so 23:00 local resolves to 21:00 UTC the same calendar day.
+        double utcJd = AstronomicalTime.JulianDate(2026, 7, 15, 21.0);
+        Vector3 expected = NightSky.StarDirections(new[] { Equatorial }, utcJd, Lat, Lon)[0].Direction;
+
+        Vector3 actual = NightSky.StarDirectionsForLocalDate(new[] { Equatorial }, 2026, 7, 15, 23.0, Lat, Lon)[0].Direction;
+
+        Vector3.Distance(actual, expected).Should().BeLessThan(1e-5f);
+    }
+
+    [Fact]
+    public void StarDirectionsForLocalDate_WinterEvening_UsesUtcPlusOneOffset()
+    {
+        // CET (standard time) is UTC+1, so 23:00 local resolves to 22:00 UTC the same calendar day.
+        double utcJd = AstronomicalTime.JulianDate(2026, 1, 15, 22.0);
+        Vector3 expected = NightSky.StarDirections(new[] { Equatorial }, utcJd, Lat, Lon)[0].Direction;
+
+        Vector3 actual = NightSky.StarDirectionsForLocalDate(new[] { Equatorial }, 2026, 1, 15, 23.0, Lat, Lon)[0].Direction;
+
+        Vector3.Distance(actual, expected).Should().BeLessThan(1e-5f);
+    }
+
+    [Fact]
+    public void StarDirectionsForLocalDate_NullStars_Throws()
+    {
+        Action act = () => NightSky.StarDirectionsForLocalDate(null!, 2026, 7, 15, 23.0, Lat, Lon);
+
+        act.Should().Throw<ArgumentNullException>();
+    }
 }
