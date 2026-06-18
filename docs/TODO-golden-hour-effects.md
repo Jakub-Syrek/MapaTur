@@ -77,10 +77,16 @@ nie przenosimy 1:1 na GLES. Kroki 1–5 odtwarzają *postrzegany* rezultat o zł
 - ✅ **Krok 4 (smugi światła — screen-space)** — `SunScreenProjection` (TDD) + radial blur jasnej maski ku
   słońcu, additive w `RunPostProcess` (`fb64db0`, helper `e1f0a04`). Współdzielony bright-pass z bloomem.
   Desktop-log-verified (buffers/program OK), na S25 v105.
-- 🔜 **Krok 5 (CSM) — W TOKU, priorytet** — user wybrał „od razu" celować w **wolumetryczne** god rays,
-  a te WYMAGAJĄ shadow map. CSM = 2-3 kaskady, depth z POV słońca, `sampler2DShadow`+PCF+bias w shaderze
-  terenu. TDD: podziały kaskad + macierze światła (ortho-fit slice'a frustuma). Daje też „lepsze cienie".
-- ⏭️ **Krok 6 (wolumetryczne god rays)** — ray-march + sampling cienia (po CSM). Zastąpi screen-space.
+- ✅ **Krok 5 (CSM) — UKOŃCZONY** — 3 kaskady, depth z POV słońca → `sampler2DShadow`+3×3 PCF+slope-bias
+  w shaderze terenu. TDD: `CascadeShadowSplits` (12), `FrustumSliceCorners` (5), `CascadeLightMatrix` (9).
+  GL: depth-pass (`a9343ed`) + próbkowanie (`f460a61`). **Gotcha camera-relative**: wybór kaskady w render-frame
+  (`vWorldPos−uCameraPos`), lookup w ABSOLUTNYM `vStableWorldPos` vs absolutna macierz kaskady. `ShadowStrength`
+  0.7, bias 0.0025/0.0007, far 15 km. User-accepted na desktopie (16:39 + 07:16, cienie kierunkowo OK).
+- ⏭️ **Krok 6 (wolumetryczne god rays)** — ray-march + sampling shadow-mapy (CSM teraz odblokował). Zastąpi
+  screen-space god rays. Zadanie #6.
+
+## ✅ Epic „golden hour" KOMPLETNY (poświata + FBO + bloom + smugi + cienie CSM)
+Wszystko zacommitowane lokalnie, gate zielony (1203 testy). Pozostało: strojenie do smaku, push, Krok 6.
 
 ### Recepta deployu / weryfikacji (potwierdzona w tej sesji)
 - APK: `dotnet build src/MapaTur.App -f net10.0-android -c Release -p:EmbedAssembliesIntoApk=true
