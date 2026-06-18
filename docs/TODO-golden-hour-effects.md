@@ -44,6 +44,22 @@ sun dir/kolory/ambient/fog). Realna luka: fizyczna poświata, smugi światła i 
 - [ ] 2–3 kaskady, depth z POV słońca, `sampler2DShadow` + PCF + bias; splity/macierze (TDD).
 - [ ] Strojenie bias/filtr na urządzeniu. Odblokowuje wolumetryczne smugi.
 
+## Backlog (odległy — pomysły na potem)
+
+### Gwiezdne niebo nad Tatrami z księżycem 🌙
+Nocna scena (analog złotej godziny dla `sunElevation < 0`). Szkic:
+- **Gwiazdy** — proceduralne pole gwiazd w `SkyFragmentShaderSource`: hash-noise punktów na kierunku
+  patrzenia (stała względem świata, jak chmury), miganie w czasie; jasność bramkowana `nightFactor`
+  (już istnieje w shaderze nieba) i tłumiona przez zachmurzenie/księżycową poświatę.
+- **Księżyc** — dysk + miękkie halo (jak słońce, ale chłodny, mniejszy), własny kierunek `uMoonDir`
+  (dodać do `Atmosphere`: pozycja księżyca + ewentualnie faza). Opcjonalnie krater-tekstura/normalka.
+- **Światło księżyca** — słaby, chłodno-niebieski ambient + delikatny Lambert od `uMoonDir`, gdy słońce
+  pod horyzontem; śnieg/jeziora łapią zimny odblask.
+- **Droga Mleczna** (opcja) — pas fBm wzdłuż łuku, bardzo subtelny.
+- Sterowanie z `Atmosphere` (rozszerzyć o księżyc/noc); zero nowej infrastruktury renderu — sam shader
+  nieba + ewentualnie 1 płaszczyzna odbicia księżyca na jeziorach (reużyć ścieżki wody).
+- Pułapka: nie przesadzić z jasnością gwiazd między chmurami; spójność z `nightFactor`.
+
 ## Czego NIE robimy (i nie trzeba)
 Prawdziwy Lumen (dynamiczne GI z ray-tracingiem) i prawdziwe Virtual Shadow Maps — to systemy silnikowe,
 nie przenosimy 1:1 na GLES. Kroki 1–5 odtwarzają *postrzegany* rezultat o złotej godzinie na urządzeniu.
