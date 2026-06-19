@@ -7,7 +7,7 @@
 [![MAUI](https://img.shields.io/badge/.NET%20MAUI-Android%20%7C%20iOS%20%7C%20Windows%20%7C%20macOS-512BD4?logo=dotnet&logoColor=white)](https://learn.microsoft.com/dotnet/maui/)
 [![3D engine](https://img.shields.io/badge/3D-OpenGL%20ES%203.0%20%C2%B7%20ANGLE%20%2F%20D3D11-CC3333)](docs/3d-terrain.md)
 [![Mapsui](https://img.shields.io/badge/maps-Mapsui%20%2B%20SkiaSharp-2E7D32)](https://mapsui.com/)
-[![Tests](https://img.shields.io/badge/tests-1092%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1291%20passing-brightgreen)](#testing)
 [![Architecture](https://img.shields.io/badge/architecture-Clean-success)](#architecture)
 [![Top language](https://img.shields.io/github/languages/top/Jakub-Syrek/MapaTur)](#)
 [![Code size](https://img.shields.io/github/languages/code-size/Jakub-Syrek/MapaTur)](#)
@@ -67,8 +67,10 @@ hiking trails, roads and the planned route are draped and depth-occluded by the 
 | **Mountain lake water (171 tarns)** | ✅ Verified | OSM-generated gazetteer (PL + SK, named + unnamed); each tarn ear-clipped at its own waterline with depth-tinted bottom, wind ripples and a planar terrain reflection; seated against the loaded terrain so coarse-LOD basins never leak |
 | Depth-occluded 3D trail & route overlays | ✅ Verified | Screen-space ribbon lines, hidden behind ridges, clipped to the DEM edge |
 | Named summit overlay | ✅ Verified | DEM peak detection + WGS84 gazetteer (incl. Orla Perć), published elevations, label de-collision |
+| **Named lakes & mountain passes** | ✅ Verified | Tarn + pass labels drawn over the 3D scene; lake names obey the label-range slider and are DEM-occluded (hidden behind ridges) like summit names; pass names stay pinned as wayfinding anchors |
 | Mountain POIs (huts / shelters / chalets / viewpoints) | ✅ Verified | Overpass download; colour-coded markers + labels on 2D map and 3D view (viewpoints as a lookout-tower glyph); per-kind show/hide filter |
 | Orthophoto terrain drape | ✅ Verified | Aerial imagery sampled per-pixel over the DEM — GUGiK Ortofotomapa (PL) + ÚGKK ZBGIS Ortofotomozaika (SK) composited along the border ridge (colour-matched, feathered, clipped to the national footprints); Esri World Imagery fallback; mipmaps + anisotropic filtering |
+| **Shader contour lines (warstwice)** | ✅ Verified | Iso-elevation lines evaluated per fragment in the terrain shader — thin minor lines every 5 m + a red index line every 100 m — `fwidth`-antialiased and distance-faded so they hug the live 1 m relief instead of poking through it; "Warstwice" toggle |
 | Road overlay (OSM highways) | ✅ Verified | Viewport Overpass download; grey depth-tested ribbons in 3D + 2D layer, independent show/hide |
 | Hillshade base layer | ✅ Verified | Multi-layer MBTiles loader + Copernicus hillshade pipeline |
 | **Time-of-day atmosphere** | ✅ Verified | Procedural world-space sky dome, sun disc + Mie halo, aerial-perspective fog; a "Czas" slider drives a deterministic Tatra-latitude solar arc (sunrise → noon → golden hour → night), persisted |
@@ -76,7 +78,10 @@ hiking trails, roads and the planned route are draped and depth-occluded by the 
 | **Night refuge lights** | ✅ Verified | Warm window glows switch on in huts / shelters / chalets after sunset, fading in through dusk |
 | **POI offline cache** | ✅ Verified | Downloaded POIs persist to SQLite and re-hydrate within the DEM footprint at startup — refuges + their lights survive a restart with no re-download |
 | **Camera state persistence** | ✅ Verified | Camera framing (target / distance / azimuth / pitch) saved per DEM and restored on reload |
-| **Cinematic fly-through** | ✅ Verified | Scripted camera flight along the Orla Perć ridge (Zawrat → Krzyżne) on a Catmull-Rom spline, slalom over the peaks; the time-of-day sweeps into golden hour mid-flight; on-screen chrome auto-hides for a clean shot |
+| **Planned-route persistence** | ✅ Verified | The multi-stop route's ordered stops are saved (`RouteStopsSerializer` → preferences) and re-planned on startup, so a trip survives an app restart |
+| **Cinematic fly-through** | ✅ Verified | One-tap Orla Perć round trip (Kasprowy → ridge → Kasprowy) on a Catmull-Rom spline, real-clock paced (~89 s); a non-linear day-arc sweeps a long red dawn → day → evening → a brief night where the camera tilts up to reveal the Big Dipper + Moon; 1 m detail streams to the flight path and on-screen chrome auto-hides |
+| **Route film (fly-through of your route)** | ✅ Verified | "Film z trasy" runs the same cinematic camera along the *planned* multi-stop route and records it to an MP4 on Android (desktop preview is a no-op) |
+| **Place teleport (search → fly to)** | ✅ Verified | "Lecę" jumps the 3D camera straight to a gazetteer place by name, framed at a fixed view distance + pitch |
 | GPS dot / live location | ✅ Verified | MAUI Geolocation; blue dot + accuracy halo on 2D & 3D, "Track me" toggle, PL/EN |
 | Elevation-aware routing (SRTM) | ⏳ Planned | Currently routes are flat (Overpass geometry lacks `ele`) |
 | Off-trail edges in graph | ⏳ Planned | Cost penalty exists; UI tagging gesture pending |
@@ -98,7 +103,8 @@ The 3D view is a **custom real-time renderer**, not an off-the-shelf 3D engine:
 - **Trails, roads & route as depth-tested screen-space ribbons** (occluded by ridges, clipped to the DEM); **named summits and mountain POIs** with de-cluttered labels (2D overlay drawn by Skia over the GL terrain).
 - **Procedural atmosphere** driven by a single `Atmosphere(timeOfDay, cloudiness, wind)` model: a world-space sky dome (gradient + sun disc + Mie halo), aerial-perspective distance fog, coloured sun/shadow lighting on the terrain, cirrus + a "sea of clouds" inversion layer, live weather (drifting/morphing coverage, wind speed + storm-darkening), sun-tracking cloud altitude, moving cloud shadows, and warm night lights in refuges after dusk. Time / cloud / wind sliders, all persisted.
 - Camera: in-place look-around (tilt) / pan / zoom / altitude via on-screen hold-to-repeat pads that fade out at rest and materialise on hover/press (plus mouse + keyboard on desktop); framing **persists per DEM**; **auto-falls-back to a Skia software renderer** on any GL failure, so the view never breaks.
-- **Cinematic fly-through**: a one-tap scripted flight along the Orla Perć ridge — a Catmull-Rom spline through DEM-sampled waypoints, weaving slalom over the summits at constant speed, with the time-of-day sweeping into golden hour and all on-screen chrome auto-hiding for a clean cinematic shot.
+- **Cinematic fly-through**: a one-tap Orla Perć round trip (Kasprowy → ridge → Kasprowy) — a Catmull-Rom spline through DEM-sampled waypoints, real-clock paced so the duration is honoured regardless of frame rate, with a non-linear day-arc (long red dawn → day → evening → a brief night where the camera tilts up to reveal the Big Dipper + Moon), 1 m detail streamed to the flight path, and chrome auto-hidden for a clean shot. The same camera drives a **route film** along the planned multi-stop route, recorded to MP4 on Android.
+- **Shader contour lines (warstwice)**: iso-elevation lines evaluated per fragment in the terrain shader — thin minor lines every 5 m plus a red index line every 100 m — antialiased with `fwidth` and faded with distance/density, so they hug the live 1 m relief instead of being baked geometry that the detail could poke through; one toggle. (A standalone marching-squares `ContourGenerator` exists + is tested for non-shader uses.)
 
 Full write-up: [`docs/3d-terrain.md`](docs/3d-terrain.md).
 
@@ -113,7 +119,7 @@ src/
 ├── MapaTur.Infrastructure  SQLite, HTTP (Overpass), TCX parser, GPX writer, DEM reader
 ├── MapaTur.Routing         TrailGraph, AStarRouter, Tobler hiking function
 └── MapaTur.App             MAUI: MapPage + view model, OpenGL ES terrain renderer, DI bootstrap
-tests/                      880+ unit + integration tests (xUnit + FluentAssertions + FsCheck)
+tests/                      1290+ unit + integration tests (xUnit + FluentAssertions + FsCheck)
 testdata/                   sample-tatry.tcx, overpass-tatry-sample.json, demo MBTiles, DEM generators
 tools/                      stand-alone dev/ops utilities (NOT shipped in the app) — see tools/README.md
 ├── PackageBaker            CLI: bake baked data → versioned packages + manifest.json
@@ -200,10 +206,10 @@ dotnet test
 | Suite | Tests | Focus |
 |---|---|---|
 | `MapaTur.Domain.Tests` | 139 | Value objects, aggregates (Route), elevation math, DEM (+ crop), POI tags + colours |
-| `MapaTur.Application.Tests` | 833 | Overpass queries (trails/POI/roads), 3D terrain math + camera + atmosphere, screen-space LOD + per-tile roughness planner + ring-base planner + vertex budget + normal smoothing, DEM repair (pit despike / hole fill), lake seating + OSM lake-gazetteer invariants, multi-stop route planner + use cases, **route summary + fit-to-route framing, overlay polyline densification + 1 m detail-elevation seating** |
-| `MapaTur.Infrastructure.Tests` | 98 | TCX/Overpass/POI/road parsers, MBTiles + DEM readers, GUGiK WCS tile source + cache, SQLite (trails/climbing/POI), GPX |
+| `MapaTur.Application.Tests` | 1015 | Overpass queries (trails/POI/roads), 3D terrain math + camera + atmosphere, screen-space LOD + per-tile roughness planner + ring-base planner + vertex budget + normal smoothing, DEM repair (pit despike / hole fill), lake seating + OSM lake-gazetteer invariants, multi-stop route planner + use cases, route summary + fit-to-route framing, overlay polyline densification + 1 m detail-elevation seating, **marching-squares contour extraction + route-stops persistence serializer** |
+| `MapaTur.Infrastructure.Tests` | 115 | TCX/Overpass/POI/road parsers, MBTiles + DEM readers, GUGiK WCS tile source + cache, SQLite (trails/climbing/POI), GPX |
 | `MapaTur.Routing.Tests` | 22 | Tobler function, distance/time cost functions, graph snapping, A\* correctness |
-| **Total** | **1092** | xUnit + FluentAssertions + NSubstitute + FsCheck |
+| **Total** | **1291** | xUnit + FluentAssertions + NSubstitute + FsCheck |
 
 ## Roadmap
 
