@@ -163,6 +163,14 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private bool is3DFlying;
 
+    /// <summary>True from launch until the initial terrain scene is ready — drives the full-screen loading overlay.</summary>
+    [ObservableProperty]
+    private bool isInitialLoading = true;
+
+    /// <summary>Initial-load progress in [0,1] for the loading overlay's progress bar; advances across the load stages.</summary>
+    [ObservableProperty]
+    private double loadProgress;
+
     /// <summary>Whether to show the 3D on-screen chrome (sliders): only in 3D mode and not mid-flight.</summary>
     public bool Show3DChrome => Is3DMode && !Is3DFlying;
 
@@ -336,6 +344,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             case "PeakNames": ShowPeakNames = !ShowPeakNames; break;
             case "NightSky": ShowNightSky = !ShowNightSky; break;
             case "CableCar": ShowCableCar = !ShowCableCar; break;
+            case "Contours": ShowContours = !ShowContours; break;
         }
     }
 
@@ -739,7 +748,10 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty] private bool showNightSky = true;
 
     /// <summary>Whether the Kasprowy Wierch cable-car overlay (cables + station masts) is drawn in 3D.</summary>
-    [ObservableProperty] private bool showCableCar = true;
+    [ObservableProperty] private bool showCableCar; // off by default — keeps the peak clean (toggle via the "🚠 Kolejka" chip)
+
+    /// <summary>Whether the contour-line (warstwice) overlay is draped on the 3D relief.</summary>
+    [ObservableProperty] private bool showContours = true;
 
     /// <summary>Whether the avalanche slope-steepness ("Mapa nachylenia") shading is active.</summary>
     [ObservableProperty] private bool slopeMapMode;
@@ -754,7 +766,16 @@ public sealed partial class MapPageViewModel : ObservableObject
     // to trails and each POI category from the Dane panel.
     [ObservableProperty] private bool showTrails;
 
-    partial void OnShowTrailsChanged(bool value) => OnTrailFilterChanged();
+    partial void OnShowTrailsChanged(bool value)
+    {
+        OnTrailFilterChanged();
+        if (value && rawTrails is null)
+        {
+            // Never loaded this session (no bundled file / not yet downloaded) → fetch them from Overpass for the
+            // current footprint (the Tatra core in 3D), so turning "Szlaki" on pulls trails in, not shows nothing.
+            _ = DownloadTrailsForViewportAsync();
+        }
+    }
 
     // PTTK colour toggles for the trail filter. All true by default — the
     // partial OnXxxChanged hooks below rebuild Trails3DOverlay + 2D layer.
@@ -854,6 +875,13 @@ public sealed partial class MapPageViewModel : ObservableObject
             trailRenderer.RenderTrails(Map, filteredTrails);
         }
         Trails3DOverlay = rawTrails3D.Where(filter.IsVisible).ToList();
+
+        // A restored route (stops loaded but no line yet, because trails weren't available) can now be planned
+        // over the freshly loaded trail graph.
+        if (RouteStops.Count >= 2 && !HasPlannedRoute)
+        {
+            await ReplanRouteAsync().ConfigureAwait(true);
+        }
     }
 
     /// <summary>Builds the current <see cref="TrailFilter"/> snapshot from the toggle state.</summary>
@@ -909,6 +937,21 @@ public sealed partial class MapPageViewModel : ObservableObject
         logger.LogInformation(
             "Place search '{Query}': gazetteer={Total}, results={Results}",
             PlaceQuery, placeGazetteer.All.Count, PlaceResults.Count);
+    }
+
+    /// <summary>Raised when the user picks a place to fly the 3D camera over — the page moves the camera there.</summary>
+    public event EventHandler<Domain.Routing.RouteWaypoint>? TeleportRequested;
+
+    [RelayCommand]
+    private void TeleportToPlace(Domain.Routing.RouteWaypoint? place)
+    {
+        if (place is null)
+        {
+            return;
+        }
+
+        ActiveSection = 0; // close the panel so the flown-to place is unobstructed
+        TeleportRequested?.Invoke(this, place);
     }
 
     // Rebuilds the searchable place picker from the current named-place sets. Cheap; called after the
@@ -1779,6 +1822,22 @@ public sealed partial class MapPageViewModel : ObservableObject
         await ReplanRouteAsync().ConfigureAwait(true);
     }
 
+    /// <summary>Raised when the user asks to film the planned route — the page starts the route fly-through.</summary>
+    public event EventHandler? RouteFilmRequested;
+
+    /// <summary>Films the planned tourist route: a cinematic fly-through ALONG it, recorded to MP4.</summary>
+    [RelayCommand]
+    private void MakeRouteFilm()
+    {
+        if (!HasPlannedRoute)
+        {
+            return;
+        }
+
+        ActiveSection = 0; // clear the panel for a clean cinematic shot
+        RouteFilmRequested?.Invoke(this, EventArgs.Empty);
+    }
+
     /// <summary>Removes a stop from the chain and re-plans the shorter route.</summary>
     [RelayCommand]
     private async Task RemoveStopAsync(Domain.Routing.RouteWaypoint waypoint)
@@ -1791,10 +1850,64 @@ public sealed partial class MapPageViewModel : ObservableObject
         await ReplanRouteAsync().ConfigureAwait(true);
     }
 
+    // Route persistence: the planned stops are saved as JSON in the settings store after every change and
+    // restored at startup, so the tourist route survives an app restart (the chain "Biela voda" etc. comes back).
+    private void PersistRouteStops()
+    {
+        settingsStore.RouteStopsJson = RouteStops.Count == 0
+            ? null
+            : System.Text.Json.JsonSerializer.Serialize(
+                RouteStops.Select(s => new RouteStopDto(s.Name, s.Location.Latitude, s.Location.Longitude, (int)s.Kind, s.ElevationMeters)));
+    }
+
+    /// <summary>
+    /// Re-loads the saved route stops (if any) and renders the chain. Best-effort: the route LINE only draws
+    /// once the trail graph is available, but the stops + markers come back immediately. No-op if already populated.
+    /// </summary>
+    public async Task RestoreRouteStopsAsync()
+    {
+        if (RouteStops.Count > 0)
+        {
+            return;
+        }
+
+        string? json = settingsStore.RouteStopsJson;
+        if (string.IsNullOrEmpty(json))
+        {
+            return;
+        }
+
+        List<RouteStopDto>? dtos;
+        try
+        {
+            dtos = System.Text.Json.JsonSerializer.Deserialize<List<RouteStopDto>>(json);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return; // corrupt preference — ignore rather than crash startup
+        }
+
+        if (dtos is null || dtos.Count == 0)
+        {
+            return;
+        }
+
+        foreach (RouteStopDto d in dtos)
+        {
+            RouteStops.Add(new Domain.Routing.RouteWaypoint(
+                d.Name, new GeoPoint(d.Lat, d.Lon), (Domain.Routing.WaypointKind)d.Kind, d.Elev));
+        }
+
+        await ReplanRouteAsync().ConfigureAwait(true);
+    }
+
+    private sealed record RouteStopDto(string Name, double Lat, double Lon, int Kind, double? Elev);
+
     // Renders the current stop markers, then (with ≥2 stops) plans the chained route over the trail
     // graph and renders it. A leg with no path names the gap so the user knows where the chain broke.
     private async Task ReplanRouteAsync()
     {
+        PersistRouteStops();
         routeRenderer.RenderWaypoints(Map, RouteStops.Select(s => s.Location).ToList());
 
         if (RouteStops.Count < 2)
@@ -2325,6 +2438,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             IsBusy = true;
             StatusMessage = "LOD demo: baza 30 m…";
+            LoadProgress = 0.3;
 
             var center = new GeoPoint(
                 (TatraDemRegion.Bounds.NorthEast.Latitude + TatraDemRegion.Bounds.SouthWest.Latitude) / 2.0,
@@ -2390,6 +2504,7 @@ public sealed partial class MapPageViewModel : ObservableObject
                 baseRaster.Columns, baseRaster.Rows, baseCentre.Latitude, baseCentre.Longitude, bMin, bMax);
 
             StatusMessage = "LOD demo: kafel 1 m…";
+            LoadProgress = 0.7;
             var options = new MapaTur.Application.Terrain.TerrainMeshOptions
             {
                 VerticalExaggeration = (float)Math.Clamp(VerticalExaggeration, 1.0, 5.0),
@@ -2488,6 +2603,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             // Base is framed + static; turn on detail streaming so the 1 m ring follows the camera focus
             // (Etap 3) — the view stops reframing on detail swaps so the camera roams the base freely.
             IsLodStreaming = true;
+            LoadProgress = 1.0;
             logger.LogInformation("LOD built: {BaseTiles} base + {Total} total tiles; detail streaming ON", baseTiles.Count, combined.Count);
             StatusMessage = "LOD: baza + 1 m podąża za kamerą (Etap 3)";
         }
@@ -3247,6 +3363,11 @@ public sealed partial class MapPageViewModel : ObservableObject
                 loaded.Add(Path.GetFileName(trailsPath));
                 logger.LogInformation("Auto-loaded {Count} pre-bundled trails from {Path}", trails.Count, trailsPath);
             }
+
+            // Restore the user's saved tourist route (stops persist across restarts). Best-effort: the stop
+            // markers come back now; the route LINE draws once trails are available (bundled above, or after a
+            // "Szlaki" download — ApplyTrailsAsync re-plans then).
+            await RestoreRouteStopsAsync().ConfigureAwait(true);
 
             if (discovery.OrthoTexturePath is { } orthoPath)
             {

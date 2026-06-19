@@ -59,4 +59,10 @@ public interface I3DSettingsStore
     /// regions falls back to auto-framing.
     /// </summary>
     string? CameraState { get; set; }
+
+    /// <summary>
+    /// Serialized planned-route stops (a JSON list of name + lat/lon + kind + elevation) so the tourist
+    /// route the user built persists across app restarts. Null until they add a stop.
+    /// </summary>
+    string? RouteStopsJson { get; set; }
 }

@@ -190,13 +190,24 @@ public partial class Terrain3DView : ContentView
 
     /// <summary>Whether the Kasprowy Wierch cable-car overlay (sagging cables + station masts) is drawn.</summary>
     public static readonly BindableProperty ShowCableCarProperty = BindableProperty.Create(
-        nameof(ShowCableCar), typeof(bool), typeof(Terrain3DView), true,
+        nameof(ShowCableCar), typeof(bool), typeof(Terrain3DView), false,
         propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
 
     public bool ShowCableCar
     {
         get => (bool)GetValue(ShowCableCarProperty);
         set => SetValue(ShowCableCarProperty, value);
+    }
+
+    /// <summary>Whether the contour-line (warstwice) overlay is draped on the 3D relief.</summary>
+    public static readonly BindableProperty ShowContoursProperty = BindableProperty.Create(
+        nameof(ShowContours), typeof(bool), typeof(Terrain3DView), true,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
+
+    public bool ShowContours
+    {
+        get => (bool)GetValue(ShowContoursProperty);
+        set => SetValue(ShowContoursProperty, value);
     }
 
     /// <summary>Whether the on-screen camera control pads (altitude + pan/tilt) are shown. Set false in the
@@ -922,34 +933,22 @@ public partial class Terrain3DView : ContentView
     }
 
     // ── Cinematic fly-through: Orla Perć ────────────────────────────────────────────────────────
-    // A scripted camera flight along the Orla Perć ridge (Zawrat → Krzyżne, W→E), weaving from side
-    // to side ("slalom") over the peaks. Geo waypoints are sampled against the live DEM so the path
-    // hugs the real terrain at whatever vertical exaggeration is set; a Catmull-Rom spline smooths
-    // the ridge line and an ease-in/out keeps the start/stop gentle. Drives the camera directly
-    // (free-fly via Target + derived orbit angles), bypassing the orbit controller + its clamps.
-    // Leg 1 (slow, slalom): the classic Orla Perć ridge. Leg 2 (the long hops read as a fast
-    // transfer): drop over Dolina Białej Wody, over Rysy, across the border to Gerlach, then along
-    // the Velická-valley rim to the Łomnica finale — the Slovak side now carries 1 m DMR 5.0 detail,
-    // so the grand finale flies over real LiDAR walls. Equal TIME per spline segment makes the short
-    // Orla Perć hops majestic and the multi-kilometre valley hops cinematic-fast, by construction.
+    // A scripted Orla Perć round trip — Kasprowy Wierch → the Orla Perć ridge (Zawrat → Krzyżne) → back to
+    // Kasprowy — with the time-of-day racing a FULL 24 h cycle in the ~10 s flight, so the day turns to night
+    // (stars + Moon flash by at the Krzyżne turnaround) and back again. Geo waypoints are sampled against the
+    // live DEM; a Catmull-Rom spline + the camera low-pass smooth the path.
     private static readonly (double Lat, double Lon)[] OrlaPercWaypoints =
     {
-        (49.2193, 20.0179), // Zawrat (pass — flight start)
-        (49.2205, 20.0233), // Mały Kozi Wierch
-        (49.2222, 20.0294), // Kozi Wierch (2291 m)
-        (49.2235, 20.0337), // Kozie Czuby
-        (49.2249, 20.0389), // Zadni Granat
-        (49.2258, 20.0436), // Skrajny Granat
+        (49.2317, 19.9817), // Kasprowy Wierch (start)
+        (49.2290, 20.0050), // Świnica (2301 m)
+        (49.2193, 20.0179), // Zawrat (pass — onto the Orla Perć)
+        (49.2235, 20.0337), // Kozie Czuby (mid Orla Perć)
         (49.2270, 20.0506), // Buczynowe Turnie
-        (49.2283, 20.0586), // Krzyżne (end of the Orla Perć leg)
-        (49.2120, 20.0750), // over Dolina Białej Wody (the transfer begins)
-        (49.1900, 20.0850), // Żabia Grań
-        (49.1795, 20.0881), // Rysy
-        (49.1700, 20.1100), // Vysoká / Ciężka dolina (across the border)
-        (49.1641, 20.1343), // Gerlach (2655 m)
-        (49.1750, 20.1650), // rim of Dolina Wielicka (Polski Grzebień side)
-        (49.1830, 20.1900), // Sławkowski Szczyt
-        (49.1956, 20.2117), // Łomnica (2634 m — flight end)
+        (49.2283, 20.0586), // Krzyżne (turnaround — the ridge's east end)
+        (49.2249, 20.0389), // Zadni Granat (heading back west)
+        (49.2205, 20.0233), // Mały Kozi Wierch
+        (49.2290, 20.0050), // Świnica
+        (49.2317, 19.9817), // Kasprowy Wierch (return — flight end)
     };
 
     // Real-metre clearance the LOCAL camera floor keeps the eye above the terrain directly beneath it: the
@@ -962,22 +961,77 @@ public partial class Terrain3DView : ContentView
     // above this (raise / zoom-out is capped), keeping the view over the terrain rather than in space.
     private const double CameraCeilingMeters = 8_000.0;
 
-    private const double FlightDurationSeconds = 50.0; // ~3.3 s per spline segment, matching the old Orla Perć pace over the extended route
+    private const double FlightDurationSeconds = 89.0; // Orla Perć round trip — a full 24 h day↔night cycle plays out slowly over this window
+    private const double FlightStartPauseSeconds = 14.0; // hold at the start (gaze tilted down, camera close) so the 1 m detail fully streams in before the camera moves
     private const float FlightSlalomAmplitude = 950f;  // world-metres of side-to-side weave (large so it reads at the stand-off distance)
-    private const float FlightSlalomWeaves = 3.0f;     // number of left-right swings along the ridge
-    private const float FlightCameraHeight = 2600f;    // world-Z above the ridge — far enough above the (2.6×-exaggerated) spiky crest to never dive into a face
-    private const float FlightCameraBack = 2600f;      // big stand-off so the whole ridge frames up sharply instead of one magnified, pixelated face
+    private const float FlightSlalomWeaves = 2.0f;     // fewer left-right swings — calmer rotation (was 3, read as too jerky)
+    private const float FlightCameraHeight = 700f;     // world-Z above the ridge — low + immersive (was 2600, framed too much terrain → stutter); still clears the peaks at the closer stand-off
+    private const float FlightCameraBack = 1600f;      // closer stand-off (was 2600) so peaks read bigger, while still framing the ridge ahead
+
+    // Narrower field of view while flying (≈34° vs the default 45°): a gentle telephoto so the peaks fill
+    // more of the frame ("zbyt szeroko, bliżej"). Restored to whatever the camera had when the flight ends.
+    private const float FlightFieldOfViewYRadians = 0.60f;
+
+    // Drop the look-at point this many world-metres below the ridge so the camera's gaze tilts DOWN onto the
+    // near terrain. The 1 m detail streams toward whatever the gaze hits, so a too-high gaze leaves the
+    // foreground un-detailed ("detale nie wskakują bo za wysoko patrzy kamera").
+    private const float FlightLookDownMeters = 350f;
+
+    // Night finale: how high (world-metres) to lift the look-at in the last stretch so the camera tilts UP off
+    // the ridge into the night sky — the brief night exists just to sweep across the Big Dipper + Moon.
+    private const float FlightSkyRevealMeters = 4500f;
+
+    // Tighter depth range JUST for the flight. The default 10 m → 1 000 000 m (ratio 1:100 000) wrecks Z-buffer
+    // precision, so distant lake-water planes and depth-tested cloud billboards z-fight and SHIMMER as the
+    // camera moves. The flight camera sits ~700 m above the ridge (nothing is closer), so a 150 m near + 100 km
+    // far won't clip anything and lifts depth precision ~150× — kills the flicker. Restored on stop.
+    private const float FlightNearPlane = 150f;
+    private const float FlightFarPlane = 100_000f;
     private const double FlightCancelDragPx = 30.0;    // cumulative drag (px) before a touch cancels the fly-through
 
-    private const float FlightSunDrop = 5.5f; // hours the time-of-day advances over the flight (12.5h → 18h: midday into golden hour)
+    // Time-of-day arc (flight progress → hour): a VERY long red morning, the largest stretch in full day, a
+    // sizable golden evening, then only a BRIEF night at the very end — just enough to whip the camera up to
+    // the Big Dipper + Moon for the finale.
+    private static readonly (float P, float Hour)[] FlightTimeKeys =
+    {
+        (0.00f, 5.0f),   // dawn — start in the pre-sunrise red
+        (0.28f, 8.5f),   // … a VERY long morning lingered in sunrise / red light (~28 % of the flight)
+        (0.68f, 16.0f),  // … the largest stretch in full day (~40 %)
+        (0.90f, 19.0f),  // … a sizable golden evening (~22 %)
+        (1.00f, 21.8f),  // … a brief night (~10 %) for the sky reveal — stars, Big Dipper, Moon
+    };
+
+    // Piecewise-linear interpolation of FlightTimeKeys at flight progress p∈[0,1].
+    private static float FlightTimeOfDay(float p)
+    {
+        for (int i = 1; i < FlightTimeKeys.Length; i++)
+        {
+            if (p <= FlightTimeKeys[i].P)
+            {
+                (float p0, float h0) = FlightTimeKeys[i - 1];
+                (float p1, float h1) = FlightTimeKeys[i];
+                float t = (p - p0) / MathF.Max(1e-4f, p1 - p0);
+                return h0 + ((h1 - h0) * t);
+            }
+        }
+        return FlightTimeKeys[^1].Hour;
+    }
 
     private IDispatcherTimer? flightTimer;
     private Vector3[]? flightPath;
     private double flightElapsedSeconds;
+    private readonly System.Diagnostics.Stopwatch flightClock = new(); // real-time clock so the flight honours FlightDurationSeconds regardless of how fast the dispatcher timer actually ticks
+    private int flightDetailTick; // drives 1 m detail streaming directly during the flight (incl. the static start pause, which the camera-save timer skips)
     private bool flightActive;
+    // Frame-to-frame low-pass of the fly-through camera so abrupt heading changes ease out (see OnFlightTick).
+    private Vector3 flightSmoothPos;
+    private Vector3 flightSmoothLook;
+    private bool flightSmoothInit;
+    private float flightSavedFov; // camera FOV before the flight narrowed it (restored on stop)
+    private float flightSavedNear; // camera near/far before the flight tightened them for depth precision (restored on stop)
+    private float flightSavedFar;
     // Atmosphere snapshot at flight start + the live, time-swept atmosphere used while flying so the
     // sun visibly lowers into golden hour over the course of the flight.
-    private float flightStartTime;
     private float flightBaseCloud;
     private float flightBaseWind;
     private Atmosphere? flightAtmosphere;
@@ -1018,18 +1072,63 @@ public partial class Terrain3DView : ContentView
             pts[i] = frame.GeoToWorld(new GeoPoint(lat, lon), (float)elev);
         }
 
+        BeginFlight(pts);
+    }
+
+    /// <summary>Starts a cinematic fly-through ALONG the planned tourist route — and records it to MP4 — so the
+    /// user can film their route. No-op until a DEM + raster + a planned route exist.</summary>
+    public void StartRouteFlight()
+    {
+        if (WorldFrame is not { } frame || Raster is null || Route is null)
+        {
+            return;
+        }
+
+        IReadOnlyList<GeoPoint> poly = Route.ToPolyline();
+        if (poly.Count < 2)
+        {
+            return;
+        }
+
+        var pts = new Vector3[poly.Count];
+        for (int i = 0; i < poly.Count; i++)
+        {
+            double elev = Raster.SampleBilinear(poly[i].Longitude, poly[i].Latitude);
+            if (double.IsNaN(elev) || elev < 200 || elev > 4000)
+            {
+                elev = 2000;
+            }
+
+            pts[i] = frame.GeoToWorld(poly[i], (float)elev);
+        }
+
+        BeginFlight(pts);
+    }
+
+    // Shared cinematic-flight start (Orla Perć demo OR the planned route): adopt the world path, reset the
+    // flight clocks + camera (telephoto FOV, tightened depth), sweep the day arc, hide the chrome + request the
+    // MP4 capture, then run the ~30 Hz tick.
+    private void BeginFlight(Vector3[] pts)
+    {
         flightPath = pts;
         flightElapsedSeconds = 0;
+        flightClock.Restart();
+        flightDetailTick = 0;
         flightActive = true;
+        flightSmoothInit = false; // snap the low-pass to the first frame
+        flightSavedFov = Camera.FieldOfViewYRadians;
+        Camera.FieldOfViewYRadians = FlightFieldOfViewYRadians; // gentle telephoto for the flight
+        flightSavedNear = Camera.NearPlane;
+        flightSavedFar = Camera.FarPlane;
+        Camera.NearPlane = FlightNearPlane; // tighten the depth range so distant water/clouds stop z-fighting
+        Camera.FarPlane = FlightFarPlane;
         IsFlying = true;
-        // Cinematic time arc independent of the slider: the flight always sweeps from midday into
-        // golden hour (12.5h → 18h) so the sun visibly lowers and the light warms over the flight,
-        // never tipping into night. Cloud + wind come from the user's settings.
+        // Cinematic time arc independent of the slider (the non-linear FlightTimeKeys day arc); cloud + wind
+        // come from the user's settings.
         Atmosphere? a = Atmosphere;
-        flightStartTime = 12.5f;
         flightBaseCloud = a?.CloudCoverage ?? 0.35f;
         flightBaseWind = a?.Wind ?? 0.3f;
-        flightAtmosphere = new Atmosphere(flightStartTime, flightBaseCloud, flightBaseWind);
+        flightAtmosphere = new Atmosphere(FlightTimeOfDay(0f), flightBaseCloud, flightBaseWind);
         SetChromeVisible(false); // clear the screen for a clean cinematic shot
         // Request an MP4 capture of the flight; it starts on the next paint once the surface size is known.
         recordingRequested = videoRecorder?.IsSupported ?? false;
@@ -1040,6 +1139,7 @@ public partial class Terrain3DView : ContentView
             flightTimer.Interval = TimeSpan.FromMilliseconds(33); // ~30 fps
             flightTimer.Tick += OnFlightTick;
         }
+
         flightTimer.Start();
     }
 
@@ -1064,6 +1164,9 @@ public partial class Terrain3DView : ContentView
         {
             IsFlying = false;
             SetChromeVisible(true);
+            Camera.FieldOfViewYRadians = flightSavedFov; // restore the pre-flight FOV
+            Camera.NearPlane = flightSavedNear;
+            Camera.FarPlane = flightSavedFar;
         }
     }
 
@@ -1083,8 +1186,10 @@ public partial class Terrain3DView : ContentView
             return;
         }
 
-        flightElapsedSeconds += 0.033;
-        double raw = flightElapsedSeconds / FlightDurationSeconds;
+        flightElapsedSeconds = flightClock.Elapsed.TotalSeconds; // real wall-clock time so the flight lasts exactly FlightDurationSeconds
+        // Hold at the start for FlightStartPauseSeconds so the 1 m detail streams in, then advance the path.
+        double moving = flightElapsedSeconds - FlightStartPauseSeconds;
+        double raw = moving <= 0.0 ? 0.0 : moving / FlightDurationSeconds;
         bool finished = raw >= 1.0;
         if (finished)
         {
@@ -1095,8 +1200,8 @@ public partial class Terrain3DView : ContentView
         // near-halt over the last third — which read as "the flight stopped in the middle". Constant
         // speed keeps it obviously moving the whole way.
         float p = (float)raw;
-        // Sweep the time-of-day forward so the sun lowers into golden hour as the flight progresses.
-        flightAtmosphere = new Atmosphere(flightStartTime + (FlightSunDrop * p), flightBaseCloud, flightBaseWind);
+        // Time-of-day follows the day arc (long red morning → day → evening → brief night) over the flight.
+        flightAtmosphere = new Atmosphere(FlightTimeOfDay(p), flightBaseCloud, flightBaseWind);
         Vector3 here = SampleFlightPath(p);
         Vector3 ahead = SampleFlightPath(MathF.Min(1f, p + 0.025f));
 
@@ -1112,7 +1217,49 @@ public partial class Terrain3DView : ContentView
 
         // Look a little further along the ridge so the camera always faces the direction of travel.
         Vector3 lookAt = SampleFlightPath(MathF.Min(1f, p + 0.06f));
-        ApplyFreeCamera(cameraPos, lookAt);
+        lookAt.Z -= FlightLookDownMeters; // tilt the gaze down so the 1 m detail streams onto the near terrain, not the far sky
+
+        // Night finale: in the last ~10 % the gaze pitches UP into the sky so the Big Dipper + Moon fill the
+        // frame (the day arc puts the brief night here).
+        float skyReveal = Math.Clamp((p - 0.90f) / 0.10f, 0f, 1f);
+        lookAt.Z += skyReveal * FlightSkyRevealMeters;
+
+        // Low-pass the camera position + look-at frame-to-frame so the sharp path turns (the long E↔W
+        // transfers and the slalom) EASE into the rotation instead of whipping the heading around faster
+        // than the GPU can stream terrain ("obroty zbyt gwałtowne, fps nie nadąża"). First frame snaps.
+        if (!flightSmoothInit)
+        {
+            flightSmoothPos = cameraPos;
+            flightSmoothLook = lookAt;
+            flightSmoothInit = true;
+        }
+        else
+        {
+            const float follow = 0.10f; // ~0.33 s ease at the 30 Hz tick — gentle, no whip
+            flightSmoothPos = Vector3.Lerp(flightSmoothPos, cameraPos, follow);
+            flightSmoothLook = Vector3.Lerp(flightSmoothLook, lookAt, follow);
+        }
+
+        ApplyFreeCamera(flightSmoothPos, flightSmoothLook);
+
+        // Drive the 1 m detail streaming directly. The camera-save timer only raises CameraFocusMoved when the
+        // camera CHANGES, so the STATIC start-pause would stream nothing and the flight would set off over
+        // un-detailed terrain. Fire ~1×/s ourselves (tick 0 fires immediately, during the pause): the VM gates
+        // on look-at drift + cooldown, so a held camera loads exactly one 2 km patch and a moving one keeps the
+        // detail patch on the gaze.
+        if (DetailStreamingEnabled && flightDetailTick++ % 30 == 0)
+        {
+            CameraFocusMoved?.Invoke(this, new Camera3D
+            {
+                Target = Camera.Target,
+                Distance = Camera.Distance,
+                AzimuthRadians = Camera.AzimuthRadians,
+                PitchRadians = Camera.PitchRadians,
+                FieldOfViewYRadians = Camera.FieldOfViewYRadians,
+                NearPlane = Camera.NearPlane,
+                FarPlane = Camera.FarPlane,
+            });
+        }
         Canvas.InvalidateSurface();
 
         // On reaching the end: cleanly stop AND restore the UI (the old code only flipped
@@ -1160,6 +1307,35 @@ public partial class Terrain3DView : ContentView
             + ((-p0 + p2) * f)
             + (((2f * p0) - (5f * p1) + (4f * p2) - p3) * t2)
             + ((-p0 + (3f * p1) - (3f * p2) + p3) * t3));
+    }
+
+    private const float TeleportViewDistanceMeters = 3200f; // how far back the camera sits after a name-search teleport
+    private const float TeleportViewPitchRadians = 0.52f;   // ~30° above the place, looking down at it
+
+    /// <summary>
+    /// Jumps the camera to sit over a named place (from the search picker): centres the orbit target on the
+    /// place's ground point and pulls back to a fixed over-the-place vantage, keeping the current heading.
+    /// </summary>
+    public void TeleportTo(Domain.Routing.RouteWaypoint place)
+    {
+        ArgumentNullException.ThrowIfNull(place);
+        if (WorldFrame is not { } frame)
+        {
+            return;
+        }
+
+        double elevM = place.ElevationMeters
+            ?? Raster?.SampleBilinear(place.Location.Longitude, place.Location.Latitude)
+            ?? 1500.0;
+        if (double.IsNaN(elevM) || elevM < 0.0)
+        {
+            elevM = 1500.0;
+        }
+
+        Camera.Target = frame.GeoToWorld(place.Location, (float)elevM);
+        Camera.Distance = TeleportViewDistanceMeters;
+        Camera.PitchRadians = TeleportViewPitchRadians;
+        Canvas.InvalidateSurface();
     }
 
     /// <summary>
@@ -1437,6 +1613,7 @@ public partial class Terrain3DView : ContentView
             // POI text labels only when the camera is close — a far view of 1000+ POIs is a wall of text.
             bool poiLabelsVisible = Camera.Distance < Services.Terrain3DCanvasRenderer.PoiLabelMaxDistanceWorld;
             renderer.DrawOverlays(canvas, null, null, projectedClimbing, projectedPois, projectedPeaks, projectedUserLocation, poiLabelsVisible);
+            DrawLakeLabelsOverScene(canvas, frame, e.Info.Width, e.Info.Height);
             DrawStarLabelsOverScene(canvas, frame, e.Info.Width, e.Info.Height);
             DrawNightLights(canvas, projectedPois);
             // Recording capture for this path happens inside TryRenderTerrainGl (GL FBO readback), not here.
@@ -1662,6 +1839,63 @@ public partial class Terrain3DView : ContentView
         {
             StarLabel m = moonHit[0];
             renderer.DrawStarLabels(canvas, new[] { new StarLabel(m.Name, m.ScreenX, m.ScreenY - 26f, m.Magnitude) });
+        }
+    }
+
+    // Lake-name labels: project each NAMED tarn's outline centroid (lifted just above the water) and reuse the
+    // star-label text pass so the name sits over the lake. Shares the peak-names ("Nazwy") toggle, the range
+    // slider, AND the DEM occlusion raycast — so a lake name behind a ridge hides exactly like a peak / POI name.
+    private void DrawLakeLabelsOverScene(SKCanvas canvas, TerrainMesh3D frame, int width, int height)
+    {
+        if (!ShowPeakNames)
+        {
+            return;
+        }
+
+        const float lift = 6f;
+        var viewProjection = Camera.BuildViewProjection((float)width / Math.Max(1, height));
+        Vector3 cameraPos = Camera.Position;
+        var occlusionRaster = Raster;
+        float radiusSquared = (float)PeakLabelRadiusMeters * (float)PeakLabelRadiusMeters; // obey the "zasięg" slider, same as peak labels
+        var labels = new List<StarLabel>();
+        foreach (var lake in MapaTur.Application.Terrain.MountainLakeData.WithinBounds(frame.Bounds))
+        {
+            int n = lake.Outline.Count;
+            if (n == 0 || string.IsNullOrEmpty(lake.Name))
+            {
+                continue;
+            }
+
+            double cLat = 0, cLon = 0;
+            for (int i = 0; i < n; i++)
+            {
+                cLat += lake.Outline[i].Latitude;
+                cLon += lake.Outline[i].Longitude;
+            }
+
+            var centroid = new MapaTur.Domain.Geography.GeoPoint(cLat / n, cLon / n);
+            Vector3 world = frame.GeoToWorld(centroid, (float)lake.ElevationMeters + lift);
+            if (Vector3.DistanceSquared(cameraPos, world) > radiusSquared)
+            {
+                continue; // beyond the range slider — drop it, exactly like peak labels
+            }
+
+            if (occlusionRaster is not null
+                && !MapaTur.Application.Terrain.TerrainOcclusion.IsVisible(cameraPos, world, occlusionRaster, frame.ProjectionAnchor, frame.VerticalExaggeration))
+            {
+                continue; // behind a ridge / rock — hidden like the peak + POI labels
+            }
+
+            Vector3? screen = Camera.ProjectToScreen(world, viewProjection, width, height);
+            if (screen is { } s && s.X >= 0f && s.X <= width && s.Y >= 0f && s.Y <= height)
+            {
+                labels.Add(new StarLabel(lake.Name, s.X, s.Y, 0f));
+            }
+        }
+
+        if (labels.Count > 0)
+        {
+            renderer.DrawStarLabels(canvas, labels);
         }
     }
 
@@ -2258,8 +2492,8 @@ public partial class Terrain3DView : ContentView
                 controller.ApplyVertical(-KeyPanPixelStep);
                 break;
 
-            // F9 starts the cinematic fly-through (Orla Perć → Gerlach → Łomnica) — same entry point
-            // as the Widok panel's 🎬 button, handy for demos and for driving the app programmatically.
+            // F9 starts the cinematic grand-tour fly-through (Orla Perć ridge → Western Tatras → Gerlach
+            // finale, time-swept midday→night) — same entry point as the Widok panel's 🎬 button, for demos.
             case Windows.System.VirtualKey.F9:
                 StartOrlaPercFlight();
                 break;
@@ -2375,6 +2609,7 @@ public partial class Terrain3DView : ContentView
             glRenderer.LakeFineBounds = LodDetailBounds; // lakes inside the 1 m detail keep legacy seating
             glRenderer.ShowCableCar = ShowCableCar; // "🚠 Kolejka" layer toggle
             glRenderer.CableCar = MapaTur.Application.Terrain.CableCarData.Kasprowy; // Kasprowy Wierch aerialway
+            glRenderer.ShowContours = ShowContours; // "Warstwice" layer toggle — thin iso-elevation lines on the relief
 
             // Push a changed ortho image to the GL renderer once (it uploads on the GL thread next Render).
             if (orthoPathDirty)

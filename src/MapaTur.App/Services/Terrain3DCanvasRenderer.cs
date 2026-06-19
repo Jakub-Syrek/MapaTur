@@ -623,7 +623,8 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
 
             // Label only when the camera is close (showLabels) — a far/high view of a wide POI set would
             // otherwise be an unreadable wall of overlapping text. The coloured dot / tower always shows.
-            if (showLabels)
+            // EXCEPTION: passes are key navigation landmarks (like peaks), so their name shows at any distance.
+            if (showLabels || marker.Source.Kind == MapaTur.Domain.Pois.PoiKind.Pass)
             {
                 string label = !string.IsNullOrEmpty(marker.Source.Name)
                     ? marker.Source.Name

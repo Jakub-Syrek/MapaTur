@@ -133,6 +133,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform sampler2D uReflectionTex;\n" +  // the mirrored-terrain reflection texture (sampled by the lake mesh)
         "uniform float uReflectionEnabled;\n" +  // 1 = sample the real reflection; 0 = use the cheap sky-gradient fallback
         "uniform vec2 uViewportPx;\n" +          // main viewport size in pixels (for the screen-space reflection UV)
+        "uniform float uContourSpacingZ;\n" +    // world-Z between contour lines (= interval m × Pion); >0 when on
+        "uniform vec3 uContourColor;\n" +        // warstwice line tint
+        "uniform float uContourStrength;\n" +    // 0 disables the contour overlay
+        "uniform float uContourWidthPx;\n" +     // contour half-width in pixels (fwidth-based AA, constant on screen)
+        "uniform float uContourMajorSpacingZ;\n" + // world-Z between RED index (major) lines (= 100 m × Pion)
+        "uniform vec3 uContourMajorColor;\n" +     // index (major) line tint — red
         "out vec4 fragColor;\n" +
         "float hashT(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n" +
         "float noiseT(vec2 p){\n" +
@@ -186,7 +192,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    float wx = noiseT(wp + vec2(we, 0.0)) - noiseT(wp - vec2(we, 0.0));\n" +
         "    float wy = noiseT(wp + vec2(0.0, we)) - noiseT(wp - vec2(0.0, we));\n" +
         "    float rippleFade = mix(0.4, 1.0, 1.0 - smoothstep(600.0, 2600.0, length(uCameraPos - vWorldPos)));\n" +
-        "    vec3 wn = normalize(vec3(vec2(wx, wy) * 0.075 * rippleFade, 1.0));\n" + // more surface tilt → reads as a wind-rippled lake, not smooth resin
+        "    vec3 wn = normalize(vec3(vec2(wx, wy) * 0.085 * rippleFade, 1.0));\n" + // more surface tilt → reads as a wind-rippled lake, not smooth resin
         "    vec3 bottomCol = mix(vec3(0.18, 0.38, 0.40), vec3(0.03, 0.08, 0.16), depthF);\n" + // darker own-colour (less blue paint), keep turquoise rim hue
         "    vec3 reflFlat = reflect(-viewW, vec3(0.0, 0.0, 1.0));\n" +
         "    float skyAmt = smoothstep(-0.05, 0.50, reflFlat.z);\n" +
@@ -196,11 +202,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    if (uReflectionEnabled > 0.5) {\n" +
         "      vec2 rUv = (gl_FragCoord.xy / uViewportPx) + (vec2(wx, wy) * 0.020 * rippleFade);\n" + // stronger ripple wobble breaks the mesh/LOD traces in the reflection
         "      vec3 mtn = texture(uReflectionTex, clamp(rUv, 0.001, 0.999)).rgb;\n" +
-        "      reflCol = mix(mtn, vec3(0.12, 0.28, 0.38), 0.10);\n" + // lighter blue wash → punchier, less milky reflection
+        "      reflCol = mix(mtn, vec3(0.12, 0.28, 0.38), 0.06);\n" + // less blue wash → punchier, sharper (glossier) mirror
         "    }\n" +
-        "    float fresW = clamp(pow(1.0 - max(dot(wn, viewW), 0.0), 4.0), 0.22, 0.97);\n" + // sharper Fresnel + lower floor → clear/dark water face-on, strong mirror at grazing edges (contrast)
+        "    float fresW = clamp(pow(1.0 - max(dot(wn, viewW), 0.0), 5.0), 0.20, 0.99);\n" + // sharper Fresnel: clearer water face-on, stronger mirror at grazing → glossier contrast
         "    vec3 wcol = mix(bottomCol, reflCol, fresW);\n" +
-        "    wcol = clamp(wcol, 0.0, 1.0);\n" + // sun-glint still OFF (re-add as an isolated next step; it twice caused a bright streak/confetti)
+        // Sun glint: a TIGHT specular where the RIPPLED surface (wn, not the flat plane) reflects the sun to the
+        // eye → concentrated sparkles along the sun path, NOT one hard streak (that was the old bug). Sun-up gate
+        // kills it at night; high power keeps each sparkle small; modest intensity avoids a blown-out blob.
+        "    vec3 sd = normalize(uLightDir);\n" +
+        "    float sunUp = smoothstep(0.0, 0.12, sd.z);\n" +
+        "    float glint = pow(max(dot(wn, normalize(viewW + sd)), 0.0), 160.0);\n" +
+        "    wcol += vec3(1.0, 0.96, 0.86) * (glint * 0.40 * sunUp);\n" +
+        "    wcol = clamp(wcol, 0.0, 1.0);\n" +
         "    float waterAlpha = mix(0.15, 0.60, smoothstep(0.0, 0.5, depthF));\n" + // shore kept glassy (0.15, unchanged); deep ~27% less opaque
 
         "    fragColor = vec4(wcol, waterAlpha);\n" +
@@ -379,6 +392,24 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // into the horizon haze like the real range, instead of staying a hard white cut-out. Only a mild
         // reduction (was a near-full block), so close snow is still sharp while far snow reads as luminous distance.
         "  fogAmount *= (1.0 - 0.35 * snowMix);\n" +
+        // Contour lines (warstwice): tint the surface near each iso-elevation level, computed from THIS
+        // fragment's elevation so the line lies exactly on whatever LOD is drawn (coarse base OR 1 m detail) —
+        // no float, no rock poke-through. fwidth keeps it a constant pixel width; applied pre-fog so it fades.
+        "  if (uContourStrength > 0.001 && uReflectionPass < 0.5) {\n" +
+        // Minor lines. fwidth(cz) = contour levels spanned by one pixel; fade the lines out once they crowd
+        // below a few px so dense 5 m contours in the distance don't smear into a solid tint.
+        "    float cz = vStableWorldPos.z / uContourSpacingZ;\n" +
+        "    float wC = max(fwidth(cz), 1e-5);\n" +
+        "    float dC = min(fract(cz), 1.0 - fract(cz));\n" +
+        "    float minorL = (1.0 - smoothstep(0.0, wC * uContourWidthPx, dC)) * (1.0 - smoothstep(0.3, 0.6, wC));\n" +
+        "    lit = mix(lit, uContourColor, minorL * uContourStrength);\n" +
+        // Major (index) lines every 100 m — red, a touch bolder, drawn over the minor so they win at 100 m.
+        "    float mz = vStableWorldPos.z / uContourMajorSpacingZ;\n" +
+        "    float wM = max(fwidth(mz), 1e-5);\n" +
+        "    float dM = min(fract(mz), 1.0 - fract(mz));\n" +
+        "    float majorL = (1.0 - smoothstep(0.0, wM * uContourWidthPx * 1.6, dM)) * (1.0 - smoothstep(0.3, 0.6, wM));\n" +
+        "    lit = mix(lit, uContourMajorColor, majorL * uContourStrength);\n" +
+        "  }\n" +
         "  fragColor = vec4(mix(lit, uFogColor, fogAmount), 1.0);\n" +
         // DIAGNOSTIC overlay: render the raw ortho UV as colour (R=U, G=V). A clean smooth gradient per cell = UV
         // is fine → flat bands are texture sampling (mip/aniso/content). A striped/sawtooth pattern = UV is broken.
@@ -466,10 +497,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  float cloudDensity = 0.0;\n" +
         "  if (h > 0.015) {\n" +
         "    vec2 cloudUv = viewDir.xy / h;\n" +
-        "    cloudUv = vec2(cloudUv.x * 0.5, cloudUv.y * 1.6) + (uCloudDrift * uTime);\n" +
-        "    float clouds = noise2(cloudUv) * 0.6 + noise2(cloudUv * 2.3) * 0.4;\n" +
-        "    float threshold = 0.68 - (uCloudCoverage * 0.28);\n" + // sparser cirrus
-        "    cloudDensity = smoothstep(threshold, threshold + 0.16, clouds) * 0.7;\n" +
+        "    cloudUv = vec2(cloudUv.x * 0.42, cloudUv.y * 2.0) + (uCloudDrift * uTime);\n" +
+        "    float clouds = fbm(cloudUv * 1.25);\n" + // 5-octave fBm: soft WISPY cirrus, no value-noise grid (kills the angular/pixelated bands)
+        "    float threshold = 0.56 - (uCloudCoverage * 0.26);\n" +
+        "    cloudDensity = smoothstep(threshold, threshold + 0.30, clouds) * 0.6;\n" + // wide band = feathered (pierzaste) edges, not hard angular ones
         // Fade clouds out near the horizon (h -> 0) where the overhead-plane projection
         // stretches to infinity and would smear into a hard band.
         "    cloudDensity *= smoothstep(0.015, 0.18, h);\n" +
@@ -490,16 +521,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  float sunDot = dot(viewDir, uSunDir);\n" +
         // Bigger, brighter disc (~4° → ~2.5° soft edge, was ~2° → ~1°) with an over-bright core, plus a
         // wider Mie halo (pow 80 → 55, 0.55 → 0.72) so the sun reads as a real, radiant sun rather than a dot.
-        "  float sunCore = smoothstep(0.9992, 0.9996, sunDot);\n" +
-        "  float sunHalo = pow(max(sunDot, 0.0), 55.0) * 0.72;\n" +
+        "  float sunCore = smoothstep(0.99993, 0.99997, sunDot);\n" + // small, natural disc (~0.7° — was a huge 0.9992 blob)
+        "  float sunHalo = pow(max(sunDot, 0.0), 400.0) * 0.72;\n" + // much tighter halo (was 55) so it doesn't saturate a big blob; brightness unchanged
         // Forward-scatter glow ("poświata pod słońcem"): a broad warm bloom around the sun that swells as
         // it nears the horizon. uSunGlowWidth lowers the exponent (broader spread); the bloom pools BELOW
         // the sun (forward scatter sinks toward the horizon) and is scaled by uSunGlowIntensity — which the
         // Atmosphere model drives strong at golden hour and to nil at noon / night.
-        "  float glowExp = mix(40.0, 4.0, clamp(uSunGlowWidth, 0.0, 1.0));\n" +
+        "  float glowExp = mix(170.0, 100.0, clamp(uSunGlowWidth, 0.0, 1.0));\n" + // very tight forward-scatter glow so the Sun reads natural-sized
         "  float belowSun = clamp((uSunDir.z - viewDir.z) * 2.0 + 0.5, 0.0, 1.0);\n" +
         "  float glow = pow(max(sunDot, 0.0), glowExp) * uSunGlowIntensity * (0.7 + 0.6 * belowSun);\n" +
-        "  vec3 sun = uSunColor * (sunCore * 1.3 + sunHalo + glow);\n" +
+        "  vec3 sun = uSunColor * (sunCore * 1.2 + sunHalo * 0.6 + glow * 0.5);\n" + // halo+glow weighted down so the saturated white blob stays small (Sun reads natural)
         "  fragColor = vec4(sky + sun, 1.0);\n" +
         "}\n";
 
@@ -833,6 +864,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  float field = (1.0 - r) + ((lump - 0.5) * 0.95);\n" +
         "  float baseFlat = smoothstep(-1.0, -0.32, c.y);\n" + // soft flat bottom (condensation level)
         "  float density = smoothstep(0.16, 0.60, field) * baseFlat;\n" +
+        "  density *= smoothstep(1.0, 0.78, max(abs(c.x), abs(c.y)));\n" + // fade out at the quad rim so the cauliflower never reaches a hard rectangular edge
         "  if (density < 0.02) { discard; }\n" +
         // Lit top → shaded base (the puff's own vertical axis stands in for the sun-from-above term).
         "  float topLit = smoothstep(-0.45, 0.9, c.y + (lump - 0.5) * 0.7);\n" +
@@ -900,6 +932,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  vec2 offNdc = (nrm * uHalfPx * aSide) / (uViewport * 0.5);\n" +
         "  gl_Position = clipA;\n" +
         "  gl_Position.xy += offNdc * clipA.w;\n" +
+        // Small depth bias toward the camera so the line WINS the depth test against the 1 m detail surface it
+        // lies on (the fine relief no longer overdraws/occludes trails + route) — yet small enough that a real
+        // ridge clearly in front still occludes the line behind it.
+        "  gl_Position.z -= 0.0010 * gl_Position.w;\n" +
         "}\n";
 
     private const float TrailHalfWidthPx = 1.6f;
@@ -921,6 +957,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private const float TrailLiftMeters = 6f;
     private const float RouteLiftMeters = 9f;
     private const float RoadLiftMeters = 4f;
+
+    // Contour lines (warstwice): drawn IN the terrain shader from each fragment's elevation, so they lie on
+    // whatever LOD is rendered (coarse base OR 1 m detail) — no float, no rock poke-through, crisp at any zoom.
+    private const double ContourIntervalMeters = 5.0;        // minor contour spacing (m)
+    private const double ContourMajorIntervalMeters = 100.0; // red index (major) contour spacing (m)
+    private const float ContourStrengthOn = 0.4f;      // line tint strength when the layer is on (0 = off) — subtle so the 1 m detail/ortho stays dominant
+    private const float ContourWidthPx = 0.7f;         // line half-width in pixels (fwidth-based AA)
+    private const byte ContourR = 158, ContourG = 104, ContourB = 60;                // minor line — warm topo brown
+    private const byte ContourMajorR = 206, ContourMajorG = 52, ContourMajorB = 40;  // major index line — red
 
     private sealed class TileBuffers
     {
@@ -1086,6 +1131,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int terrainCloudShadowLocation = -1;
     private int terrainSnowStrengthLocation = -1;
     private int terrainSnowLineZLocation = -1;
+    private int terrainContourSpacingZLocation = -1;
+    private int terrainContourColorLocation = -1;
+    private int terrainContourMajorSpacingZLocation = -1;
+    private int terrainContourMajorColorLocation = -1;
+    private int terrainContourStrengthLocation = -1;
+    private int terrainContourWidthPxLocation = -1;
     private int terrainSnowBandZLocation = -1;
     private int terrainSnowSlopeCosBareLocation = -1;
     private int terrainSnowSlopeCosFullLocation = -1;
@@ -1340,6 +1391,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// <summary>Whether the cable-car overlay is drawn this frame.</summary>
     public bool ShowCableCar { get; set; }
 
+    /// <summary>Whether the contour-line (warstwice) overlay is drawn this frame.</summary>
+    public bool ShowContours { get; set; }
+
     /// <summary>
     /// Sets (or clears, when <paramref name="rgba"/> is null) the ortho-photo texture draped over the terrain.
     /// <paramref name="rgba"/> is tightly-packed top-row-first RGBA8 (row 0 = north, matching the mesh UVs).
@@ -1507,6 +1561,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             terrainCloudShadowLocation = -1;
             terrainSnowStrengthLocation = -1;
             terrainSnowLineZLocation = -1;
+            terrainContourSpacingZLocation = -1;
+            terrainContourColorLocation = -1;
+            terrainContourMajorSpacingZLocation = -1;
+            terrainContourMajorColorLocation = -1;
+            terrainContourStrengthLocation = -1;
+            terrainContourWidthPxLocation = -1;
             terrainSnowBandZLocation = -1;
             terrainSnowSlopeCosBareLocation = -1;
             terrainSnowSlopeCosFullLocation = -1;
@@ -2022,6 +2082,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         SnowShadingParameters snow = SnowModel.Compute(snowAmount, snowMinZ, snowMaxZ);
         gl.Uniform1(terrainSnowStrengthLocation, snowAmount);
         gl.Uniform1(terrainSnowLineZLocation, snow.LineZ);
+
+        // Contour lines (warstwice) — shader overlay; spacing in world-Z (interval m × the mesh's Pion) so it
+        // tracks exaggeration. Strength 0 when the layer is toggled off.
+        float contourExag = lightFrame.VerticalExaggeration > 0f ? lightFrame.VerticalExaggeration : 1f;
+        gl.Uniform1(terrainContourSpacingZLocation, (float)ContourIntervalMeters * contourExag);
+        gl.Uniform3(terrainContourColorLocation, ContourR / 255f, ContourG / 255f, ContourB / 255f);
+        gl.Uniform1(terrainContourMajorSpacingZLocation, (float)ContourMajorIntervalMeters * contourExag);
+        gl.Uniform3(terrainContourMajorColorLocation, ContourMajorR / 255f, ContourMajorG / 255f, ContourMajorB / 255f);
+        gl.Uniform1(terrainContourStrengthLocation, ShowContours ? ContourStrengthOn : 0f);
+        gl.Uniform1(terrainContourWidthPxLocation, ContourWidthPx);
+
         gl.Uniform1(terrainSnowBandZLocation, snow.BandZ);
         gl.Uniform1(terrainSnowSlopeCosBareLocation, snow.SlopeCosBare);
         gl.Uniform1(terrainSnowSlopeCosFullLocation, snow.SlopeCosFull);
@@ -3655,6 +3726,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         terrainCloudShadowLocation = g.GetUniformLocation(program, "uCloudShadow");
         terrainSnowStrengthLocation = g.GetUniformLocation(program, "uSnowStrength");
         terrainSnowLineZLocation = g.GetUniformLocation(program, "uSnowLineZ");
+        terrainContourSpacingZLocation = g.GetUniformLocation(program, "uContourSpacingZ");
+        terrainContourColorLocation = g.GetUniformLocation(program, "uContourColor");
+        terrainContourMajorSpacingZLocation = g.GetUniformLocation(program, "uContourMajorSpacingZ");
+        terrainContourMajorColorLocation = g.GetUniformLocation(program, "uContourMajorColor");
+        terrainContourStrengthLocation = g.GetUniformLocation(program, "uContourStrength");
+        terrainContourWidthPxLocation = g.GetUniformLocation(program, "uContourWidthPx");
         terrainSnowBandZLocation = g.GetUniformLocation(program, "uSnowBandZ");
         terrainSnowSlopeCosBareLocation = g.GetUniformLocation(program, "uSnowSlopeCosBare");
         terrainSnowSlopeCosFullLocation = g.GetUniformLocation(program, "uSnowSlopeCosFull");
@@ -4148,6 +4225,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private const byte CabinR = 0xF5, CabinG = 0xC8, CabinB = 0x20;       // bright yellow gondola
 
     // Aerialway overlay (e.g. Kasprowy Wierch): sagging cables between station masts, drawn with the same
+    // Thin iso-elevation contour lines (warstwice) draped on the relief, seated + lifted like trails and
+    // drawn through the same absolute-frame ribbon pipeline. Built by marching squares from the base raster
+    // (sub-sampled if large, so generation stays cheap and the curves stay clean), cached until it changes.
     // absolute-frame ribbon pipeline as the trails (the line MVP is already restored to absolute above).
     private void DrawCableCar(GL g, TerrainMesh3D mesh, DemRaster? raster, DetailElevationField? detail)
     {
@@ -4902,9 +4982,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private static float[] BuildCumulusField()
     {
         var rng = new Random(20260613);
-        const int clusters = 26;
+        const int clusters = 52;          // 2× the cumulus count
         const float fieldRadius = 16000f; // m around the scene centre
-        const float deckSpread = 1400f;   // vertical spread of the cumulus deck
+        const float deckSpread = 2800f;   // taller vertical spread so cumulus sit at clearly DIFFERENT heights
         var data = new List<float>(clusters * 6 * 5);
         for (int ci = 0; ci < clusters; ci++)
         {

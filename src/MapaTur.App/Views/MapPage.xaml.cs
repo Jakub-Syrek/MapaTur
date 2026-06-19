@@ -50,6 +50,8 @@ public partial class MapPage : ContentPage
         TerrainView.CameraFocusMoved += OnCameraFocusMoved;
         viewModel.PropertyChanged += OnViewModelPropertyChanged;
         viewModel.TerrainReframeRequested += OnTerrainReframeRequested;
+        viewModel.TeleportRequested += OnTeleportRequested;
+        viewModel.RouteFilmRequested += OnRouteFilmRequested;
     }
 
     // Keeps the 3D camera and the 2D map framed on the same place + zoom as the user
@@ -289,6 +291,19 @@ public partial class MapPage : ContentPage
     {
         viewModel.ActiveSection = 0;
         Dispatcher.Dispatch(() => TerrainView.FrameMesh());
+    }
+
+    // Name-search "teleport": fly the 3D camera over the picked place. Dispatched so any pending binding
+    // (the panel closing) has propagated before the camera jumps.
+    private void OnTeleportRequested(object? sender, Domain.Routing.RouteWaypoint place)
+    {
+        Dispatcher.Dispatch(() => TerrainView.TeleportTo(place));
+    }
+
+    // "Film z trasy": start the cinematic fly-through along the planned route (records to MP4).
+    private void OnRouteFilmRequested(object? sender, EventArgs e)
+    {
+        Dispatcher.Dispatch(() => TerrainView.StartRouteFlight());
     }
 
     // LOD Krok 4: the 3D view reports a snapshot of the camera pose as it roams the static base; forward it

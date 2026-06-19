@@ -43,6 +43,7 @@
                              LodDetailBounds="{Binding LodDetailBounds}"
                              ShowPeakNames="{Binding ShowPeakNames}"
                              ShowNightSky="{Binding ShowNightSky}"
+                             ShowContours="{Binding ShowContours}"
                              PeakLabelRadiusMeters="{Binding PeakLabelRadiusMeters}"
                              ControlsVisible="{Binding ChromeVisible}"
                              SlopeMapEnabled="{Binding SlopeMapMode}"
@@ -375,7 +376,7 @@
                                         SelectionMode="None">
                             <CollectionView.ItemTemplate>
                                 <DataTemplate x:DataType="routing:RouteWaypoint">
-                                    <Grid Padding="8,7" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                    <Grid Padding="8,7" ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
                                         <Grid.GestureRecognizers>
                                             <TapGestureRecognizer
                                                 Command="{Binding Source={x:Reference PageRoot}, Path=BindingContext.AddStopCommand}"
@@ -385,6 +386,11 @@
                                                FontSize="13" LineBreakMode="TailTruncation" VerticalOptions="Center" />
                                         <Label Grid.Column="1" Text="{Binding ElevationMeters, StringFormat='{0:F0} m'}"
                                                Style="{StaticResource GlassCaption}" FontSize="11" VerticalOptions="Center" />
+                                        <Button Grid.Column="2" Text="🎯 Lecę" FontSize="12" Padding="8,2" Margin="0"
+                                                BackgroundColor="#3336E2FF" TextColor="White" CornerRadius="10"
+                                                VerticalOptions="Center"
+                                                Command="{Binding Source={x:Reference PageRoot}, Path=BindingContext.TeleportToPlaceCommand}"
+                                                CommandParameter="{Binding .}" />
                                     </Grid>
                                 </DataTemplate>
                             </CollectionView.ItemTemplate>
@@ -424,6 +430,8 @@
                             </Border>
                             <Button Style="{StaticResource GlassButtonAccent}" Text="🧭  Pokaż trasę"
                                     Command="{Binding ShowRouteCommand}" />
+                            <Button Style="{StaticResource GlassButton}" Text="🎬  Film z trasy"
+                                    Command="{Binding MakeRouteFilmCommand}" />
                         </VerticalStackLayout>
 
                         <Grid ColumnDefinitions="*,*" ColumnSpacing="8">
@@ -453,6 +461,12 @@
                             <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                             <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="NightSky" /></Border.GestureRecognizers>
                             <Label Text="✨ Niebo nocne" Style="{StaticResource GlassLabel}" FontSize="12" />
+                        </Border>
+                        <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
+                                Background="{Binding ShowContours, Converter={StaticResource BoolToBrush}, ConverterParameter='#5536E2FF|#14FFFFFF'}">
+                            <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
+                            <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="Contours" /></Border.GestureRecognizers>
+                            <Label Text="〰️ Warstwice" Style="{StaticResource GlassLabel}" FontSize="12" />
                         </Border>
                     </FlexLayout>
 
