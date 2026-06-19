@@ -1852,13 +1852,10 @@ public sealed partial class MapPageViewModel : ObservableObject
 
     // Route persistence: the planned stops are saved as JSON in the settings store after every change and
     // restored at startup, so the tourist route survives an app restart (the chain "Biela voda" etc. comes back).
-    private void PersistRouteStops()
-    {
+    private void PersistRouteStops() =>
         settingsStore.RouteStopsJson = RouteStops.Count == 0
             ? null
-            : System.Text.Json.JsonSerializer.Serialize(
-                RouteStops.Select(s => new RouteStopDto(s.Name, s.Location.Latitude, s.Location.Longitude, (int)s.Kind, s.ElevationMeters)));
-    }
+            : Application.Routing.RouteStopsSerializer.Serialize(RouteStops);
 
     /// <summary>
     /// Re-loads the saved route stops (if any) and renders the chain. Best-effort: the route LINE only draws
@@ -1871,37 +1868,20 @@ public sealed partial class MapPageViewModel : ObservableObject
             return;
         }
 
-        string? json = settingsStore.RouteStopsJson;
-        if (string.IsNullOrEmpty(json))
+        IReadOnlyList<Domain.Routing.RouteWaypoint> saved =
+            Application.Routing.RouteStopsSerializer.Deserialize(settingsStore.RouteStopsJson);
+        if (saved.Count == 0)
         {
             return;
         }
 
-        List<RouteStopDto>? dtos;
-        try
+        foreach (Domain.Routing.RouteWaypoint w in saved)
         {
-            dtos = System.Text.Json.JsonSerializer.Deserialize<List<RouteStopDto>>(json);
-        }
-        catch (System.Text.Json.JsonException)
-        {
-            return; // corrupt preference — ignore rather than crash startup
-        }
-
-        if (dtos is null || dtos.Count == 0)
-        {
-            return;
-        }
-
-        foreach (RouteStopDto d in dtos)
-        {
-            RouteStops.Add(new Domain.Routing.RouteWaypoint(
-                d.Name, new GeoPoint(d.Lat, d.Lon), (Domain.Routing.WaypointKind)d.Kind, d.Elev));
+            RouteStops.Add(w);
         }
 
         await ReplanRouteAsync().ConfigureAwait(true);
     }
-
-    private sealed record RouteStopDto(string Name, double Lat, double Lon, int Kind, double? Elev);
 
     // Renders the current stop markers, then (with ≥2 stops) plans the chained route over the trail
     // graph and renders it. A leg with no path names the gap so the user knows where the chain broke.
