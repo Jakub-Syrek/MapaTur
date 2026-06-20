@@ -613,9 +613,19 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// Mirror every GPS fix onto the 2D Mapsui layer. The 3D view binds <c>UserLocation</c>
     /// directly so it picks the change up through its own bindable handler.
     /// </summary>
+    // "Centre on me" sets this so the NEXT fix recentres the 3D camera, even though the fix arrives a moment
+    // after the button is tapped (when tracking had to be started first).
+    private bool centerOnNextFix;
+
     partial void OnUserLocationChanged(UserLocation? value)
     {
         userLocationRenderer?.RenderUserLocation(Map, value);
+
+        if (centerOnNextFix && value is { } fix)
+        {
+            centerOnNextFix = false;
+            RaiseCenterOnLocation(fix);
+        }
     }
 
     /// <summary>
@@ -644,6 +654,42 @@ public sealed partial class MapPageViewModel : ObservableObject
             IsLocationTracking = true;
             StatusMessage = Localization.AppStrings.StatusLocationTrackingStarted;
         }
+    }
+
+    /// <summary>
+    /// "Centre on me": brings the 3D camera to the live GPS position — the field-test gap "nie ma opcji
+    /// wycentruj na mnie". If a fix is already in hand it centres at once; otherwise it starts tracking and
+    /// centres on the first fix that arrives. Reuses the place-teleport path (TeleportRequested -> TeleportTo).
+    /// </summary>
+    [RelayCommand]
+    public async Task CenterOnMeAsync()
+    {
+        if (UserLocation is { } fix)
+        {
+            RaiseCenterOnLocation(fix);
+            return;
+        }
+
+        // No fix yet — make sure the GPS loop is running, then centre on the first one that comes in.
+        centerOnNextFix = true;
+        if (userLocationService is { IsTracking: false })
+        {
+            bool started = await userLocationService.StartAsync().ConfigureAwait(true);
+            IsLocationTracking = started;
+            if (started)
+            {
+                StatusMessage = Localization.AppStrings.StatusLocationTrackingStarted;
+            }
+        }
+    }
+
+    private void RaiseCenterOnLocation(UserLocation fix)
+    {
+        // Name is unused by the camera move (TeleportTo reads only Location + elevation); elevation is left
+        // null so TeleportTo samples the DEM under the fix, exactly like a place teleport.
+        var here = new Domain.Routing.RouteWaypoint(
+            "GPS", fix.Position, Domain.Routing.WaypointKind.TrailPoint, null);
+        TeleportRequested?.Invoke(this, here);
     }
 
     partial void OnVerticalExaggerationChanged(double value)
