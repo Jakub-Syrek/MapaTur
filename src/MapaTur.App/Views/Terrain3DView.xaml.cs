@@ -1249,12 +1249,24 @@ public partial class Terrain3DView : ContentView
         // detail patch on the gaze.
         if (DetailStreamingEnabled && flightDetailTick++ % 30 == 0)
         {
+            // Stream the 1 m detail to the terrain we're flying TOWARD — the ridge/summit ahead — NOT the
+            // cinematic gaze. The display gaze tilts FlightLookDownMeters below the ridge so the foreground
+            // streams in, but the streamer raycasts the screen centre and only ever probes LOWER in the frame
+            // (LookAtLowerFrameFallbacks), so that down-tilt made the focus land on the slope BELOW an
+            // approaching peak: climbing "pod górę" left the summit on the 30 m base ("brakuje detali na
+            // szczycie", detail only appeared once the camera rose ABOVE and looked down). Re-aim a
+            // streaming-only camera at the ridge point ahead (full elevation) so the patch lands ON the summit
+            // before we arrive; its width (∝ camera→focus distance) still reaches back across the foreground.
+            Vector3 streamEye = flightSmoothPos;
+            Vector3 streamFocus = SampleFlightPath(MathF.Min(1f, p + 0.06f));
+            Vector3 streamOffset = streamEye - streamFocus;
+            float streamDist = MathF.Max(1f, streamOffset.Length());
             CameraFocusMoved?.Invoke(this, new Camera3D
             {
-                Target = Camera.Target,
-                Distance = Camera.Distance,
-                AzimuthRadians = Camera.AzimuthRadians,
-                PitchRadians = Camera.PitchRadians,
+                Target = streamFocus,
+                Distance = streamDist,
+                AzimuthRadians = MathF.Atan2(streamOffset.Y, streamOffset.X),
+                PitchRadians = MathF.Asin(Math.Clamp(streamOffset.Z / streamDist, -1f, 1f)),
                 FieldOfViewYRadians = Camera.FieldOfViewYRadians,
                 NearPlane = Camera.NearPlane,
                 FarPlane = Camera.FarPlane,
@@ -1545,6 +1557,15 @@ public partial class Terrain3DView : ContentView
         double occlusionMs = 0;
         int occlusionMarkers = 0;
 
+        // Occlusion cache gate: the per-marker DEM raycast (in HideOccluded*) is the dominant per-frame CPU
+        // cost, yet a still camera under the 15 fps repaint timer re-ran it every frame for nothing. Decide
+        // ONCE per paint whether to recompute — only when the eye moves past the threshold or the LOD frame
+        // changes; otherwise both passes reuse the cached visibility (zero raycasts).
+        System.Numerics.Vector3 occlusionCam = Camera.Position;
+        bool occlusionRecompute = !hasOcclusionCache
+            || !ReferenceEquals(lastOcclusionFrame, frame)
+            || System.Numerics.Vector3.DistanceSquared(occlusionCam, lastOcclusionCamPos) > OcclusionCacheMoveThresholdSq;
+
         IReadOnlyList<ProjectedClimbingArea>? projectedClimbing = null;
         if (ClimbingAreas is { Count: > 0 } areas && Raster is not null)
         {
@@ -1559,7 +1580,7 @@ public partial class Terrain3DView : ContentView
                 pois, Raster, frame, Camera, e.Info.Width, e.Info.Height, PoiMarkerLiftMeters);
             occlusionMarkers += projectedPois.Count;
             var sw = DebugEnabled ? System.Diagnostics.Stopwatch.StartNew() : null;
-            projectedPois = HideOccludedPois(projectedPois, frame);
+            projectedPois = HideOccludedPois(projectedPois, frame, occlusionRecompute);
             if (sw is not null) { occlusionMs += sw.Elapsed.TotalMilliseconds; }
         }
 
@@ -1572,8 +1593,15 @@ public partial class Terrain3DView : ContentView
                 maxDistanceMeters: (float)PeakLabelRadiusMeters);
             occlusionMarkers += projectedPeaks.Count;
             var sw = DebugEnabled ? System.Diagnostics.Stopwatch.StartNew() : null;
-            projectedPeaks = HideOccludedPeaks(projectedPeaks, frame);
+            projectedPeaks = HideOccludedPeaks(projectedPeaks, frame, occlusionRecompute);
             if (sw is not null) { occlusionMs += sw.Elapsed.TotalMilliseconds; }
+        }
+
+        if (occlusionRecompute)
+        {
+            lastOcclusionCamPos = occlusionCam;
+            lastOcclusionFrame = frame;
+            hasOcclusionCache = true;
         }
 
         if (DebugEnabled)
@@ -1899,39 +1927,65 @@ public partial class Terrain3DView : ContentView
         }
     }
 
-    private IReadOnlyList<ProjectedPeak> HideOccludedPeaks(IReadOnlyList<ProjectedPeak> peaks, TerrainMesh3D frame)
+    // Occlusion cache (perf). The per-marker DEM raycast is a pure function of the eye position + terrain
+    // frame, but the ~15 fps repaint timer used to re-run it EVERY frame even for a perfectly still camera —
+    // the cost that dominated a POI-heavy Tatra view. Now we recompute only when the eye moves past a small
+    // threshold or the LOD frame changes (decided once per paint in OnPaintSurface); a static view reuses the
+    // cached visibility and does ZERO raycasts while the clouds keep drifting. We cache the VISIBLE marker
+    // locations (stable per marker across frames) and re-filter the freshly-projected list each frame.
+    private const float OcclusionCacheMoveThresholdSq = 15f * 15f;
+    private System.Numerics.Vector3 lastOcclusionCamPos;
+    private TerrainMesh3D? lastOcclusionFrame;
+    private bool hasOcclusionCache;
+    private readonly HashSet<MapaTur.Domain.Geography.GeoPoint> visiblePeakLocations = new();
+    private readonly HashSet<MapaTur.Domain.Geography.GeoPoint> visiblePoiLocations = new();
+
+    private IReadOnlyList<ProjectedPeak> HideOccludedPeaks(IReadOnlyList<ProjectedPeak> peaks, TerrainMesh3D frame, bool recompute)
     {
         if (Raster is not { } raster)
         {
             return peaks;
         }
 
-        System.Numerics.Vector3 cam = Camera.Position;
-        int n = peaks.Count;
+        if (recompute)
+        {
+            System.Numerics.Vector3 cam = Camera.Position;
+            int n = peaks.Count;
 
-        // Each marker's occlusion is an independent, read-only DEM raycast, so fan the march out across
-        // cores for large marker sets — this is the per-frame cost that dominated a POI-heavy Tatra view.
-        // keep[] preserves list order (declutter / draw order unchanged); small sets stay sequential to
-        // avoid thread-pool overhead.
-        var keep = new bool[n];
-        if (n >= OcclusionParallelThreshold)
-        {
-            System.Threading.Tasks.Parallel.For(0, n, i => keep[i] = IsPeakVisible(peaks[i], cam, raster, frame));
-        }
-        else
-        {
+            // Each marker's occlusion is an independent, read-only DEM raycast, so fan the march out across
+            // cores for large marker sets. keep[] preserves list order; small sets stay sequential.
+            var keep = new bool[n];
+            if (n >= OcclusionParallelThreshold)
+            {
+                System.Threading.Tasks.Parallel.For(0, n, i => keep[i] = IsPeakVisible(peaks[i], cam, raster, frame));
+            }
+            else
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    keep[i] = IsPeakVisible(peaks[i], cam, raster, frame);
+                }
+            }
+
+            visiblePeakLocations.Clear();
             for (int i = 0; i < n; i++)
             {
-                keep[i] = IsPeakVisible(peaks[i], cam, raster, frame);
+                if (keep[i])
+                {
+                    visiblePeakLocations.Add(peaks[i].Source.Location);
+                }
             }
         }
 
-        var visible = new List<ProjectedPeak>(n);
-        for (int i = 0; i < n; i++)
+        // Re-filter the freshly-projected list (current screen positions) by the cached visibility. A marker
+        // that just entered the frame defaults to hidden until the next recompute (errs on the safe side —
+        // never flashes a name through a ridge), which the small move-threshold resolves within a step or two.
+        var visible = new List<ProjectedPeak>(peaks.Count);
+        foreach (ProjectedPeak p in peaks)
         {
-            if (keep[i])
+            if (p.ScreenPosition is not null && visiblePeakLocations.Contains(p.Source.Location))
             {
-                visible.Add(peaks[i]);
+                visible.Add(p);
             }
         }
 
@@ -1951,38 +2005,49 @@ public partial class Terrain3DView : ContentView
     }
 
     // As HideOccludedPeaks, for POIs — a hut / parking / viewpoint behind a ridge hides its marker too.
-    private IReadOnlyList<ProjectedPoi> HideOccludedPois(IReadOnlyList<ProjectedPoi> pois, TerrainMesh3D frame)
+    private IReadOnlyList<ProjectedPoi> HideOccludedPois(IReadOnlyList<ProjectedPoi> pois, TerrainMesh3D frame, bool recompute)
     {
         if (Raster is not { } raster)
         {
             return pois;
         }
 
-        System.Numerics.Vector3 cam = Camera.Position;
-        float poiLift = PoiMarkerLiftMeters;
-        int n = pois.Count;
+        if (recompute)
+        {
+            System.Numerics.Vector3 cam = Camera.Position;
+            float poiLift = PoiMarkerLiftMeters;
+            int n = pois.Count;
 
-        // As HideOccludedPeaks: independent read-only raycasts, fanned out across cores for large sets,
-        // list order preserved.
-        var keep = new bool[n];
-        if (n >= OcclusionParallelThreshold)
-        {
-            System.Threading.Tasks.Parallel.For(0, n, i => keep[i] = IsPoiVisible(pois[i], cam, raster, frame, poiLift));
-        }
-        else
-        {
+            // As HideOccludedPeaks: independent read-only raycasts, fanned out across cores for large sets.
+            var keep = new bool[n];
+            if (n >= OcclusionParallelThreshold)
+            {
+                System.Threading.Tasks.Parallel.For(0, n, i => keep[i] = IsPoiVisible(pois[i], cam, raster, frame, poiLift));
+            }
+            else
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    keep[i] = IsPoiVisible(pois[i], cam, raster, frame, poiLift);
+                }
+            }
+
+            visiblePoiLocations.Clear();
             for (int i = 0; i < n; i++)
             {
-                keep[i] = IsPoiVisible(pois[i], cam, raster, frame, poiLift);
+                if (keep[i])
+                {
+                    visiblePoiLocations.Add(pois[i].Source.Position);
+                }
             }
         }
 
-        var visible = new List<ProjectedPoi>(n);
-        for (int i = 0; i < n; i++)
+        var visible = new List<ProjectedPoi>(pois.Count);
+        foreach (ProjectedPoi p in pois)
         {
-            if (keep[i])
+            if (p.ScreenPosition is not null && visiblePoiLocations.Contains(p.Source.Position))
             {
-                visible.Add(pois[i]);
+                visible.Add(p);
             }
         }
 

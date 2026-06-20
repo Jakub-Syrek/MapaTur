@@ -1744,8 +1744,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         if (!ReferenceEquals(lastTiles, tiles))
         {
-            ReleaseTiles(gl);
-            UploadTiles(gl, tiles);
+            // Incremental: keep the reused base tiles' VBOs, swap only the look-at detail patch (see SyncTiles).
+            // A detail reload no longer re-pushes the whole base — kills the per-reload upload hitch on move.
+            SyncTiles(gl, tiles);
             lastTiles = tiles;
         }
 
@@ -4021,96 +4022,137 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         return shader;
     }
 
-    private void UploadTiles(GL g, IReadOnlyList<TerrainMesh3D> tiles)
+    private void UploadTile(GL g, TerrainMesh3D tile)
     {
-        foreach (TerrainMesh3D tile in tiles)
+        int vertexCount = tile.Vertices.Length;
+
+        // Positions: tightly packed x,y,z floats.
+        var positions = new float[vertexCount * 3];
+        for (int i = 0; i < vertexCount; i++)
         {
-            int vertexCount = tile.Vertices.Length;
-
-            // Positions: tightly packed x,y,z floats.
-            var positions = new float[vertexCount * 3];
-            for (int i = 0; i < vertexCount; i++)
-            {
-                Vector3 v = tile.Vertices[i];
-                positions[(i * 3) + 0] = v.X;
-                positions[(i * 3) + 1] = v.Y;
-                positions[(i * 3) + 2] = v.Z;
-            }
-
-            // Colours: the UNSHADED base tint as explicit R,G,B,A bytes (the mesh stores 0xAARRGGBB; avoid
-            // endianness surprises). The fragment shader applies Lambert shading per pixel from the normal.
-            var colors = new byte[vertexCount * 4];
-            for (int i = 0; i < vertexCount; i++)
-            {
-                uint argb = tile.BaseColors[i];
-                colors[(i * 4) + 0] = (byte)((argb >> 16) & 0xFF);
-                colors[(i * 4) + 1] = (byte)((argb >> 8) & 0xFF);
-                colors[(i * 4) + 2] = (byte)(argb & 0xFF);
-                colors[(i * 4) + 3] = (byte)((argb >> 24) & 0xFF);
-            }
-
-            // Normals: tightly packed x,y,z floats in the mesh's world frame (X east, Y north, Z up).
-            var normals = new float[vertexCount * 3];
-            for (int i = 0; i < vertexCount; i++)
-            {
-                Vector3 n = tile.Normals[i];
-                normals[(i * 3) + 0] = n.X;
-                normals[(i * 3) + 1] = n.Y;
-                normals[(i * 3) + 2] = n.Z;
-            }
-
-            ushort[] indices = tile.Indices;
-
-            var buffers = new TileBuffers { IndexCount = indices.Length };
-            buffers.Vao = g.GenVertexArray();
-            g.BindVertexArray(buffers.Vao);
-
-            buffers.PositionVbo = g.GenBuffer();
-            g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.PositionVbo);
-            g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(positions.Length * sizeof(float)), positions, BufferUsageARB.StaticDraw);
-            g.EnableVertexAttribArray(0);
-            g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
-
-            buffers.ColorVbo = g.GenBuffer();
-            g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.ColorVbo);
-            g.BufferData<byte>(BufferTargetARB.ArrayBuffer, (nuint)colors.Length, colors, BufferUsageARB.StaticDraw);
-            g.EnableVertexAttribArray(1);
-            g.VertexAttribPointer(1, 4, VertexAttribPointerType.UnsignedByte, true, 4, (void*)0);
-
-            buffers.NormalVbo = g.GenBuffer();
-            g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.NormalVbo);
-            g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(normals.Length * sizeof(float)), normals, BufferUsageARB.StaticDraw);
-            g.EnableVertexAttribArray(2);
-            g.VertexAttribPointer(2, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
-
-            float[] texCoords = tile.TexCoords;
-            buffers.TexVbo = g.GenBuffer();
-            g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.TexVbo);
-            g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(texCoords.Length * sizeof(float)), texCoords, BufferUsageARB.StaticDraw);
-            g.EnableVertexAttribArray(3);
-            g.VertexAttribPointer(3, 2, VertexAttribPointerType.Float, false, 2 * sizeof(float), (void*)0);
-
-            buffers.Ebo = g.GenBuffer();
-            g.BindBuffer(BufferTargetARB.ElementArrayBuffer, buffers.Ebo);
-            g.BufferData<ushort>(BufferTargetARB.ElementArrayBuffer, (nuint)(indices.Length * sizeof(ushort)), indices, BufferUsageARB.StaticDraw);
-
-            g.BindVertexArray(0);
-            tileBuffers[tile] = buffers;
+            Vector3 v = tile.Vertices[i];
+            positions[(i * 3) + 0] = v.X;
+            positions[(i * 3) + 1] = v.Y;
+            positions[(i * 3) + 2] = v.Z;
         }
+
+        // Colours: the UNSHADED base tint as explicit R,G,B,A bytes (the mesh stores 0xAARRGGBB; avoid
+        // endianness surprises). The fragment shader applies Lambert shading per pixel from the normal.
+        var colors = new byte[vertexCount * 4];
+        for (int i = 0; i < vertexCount; i++)
+        {
+            uint argb = tile.BaseColors[i];
+            colors[(i * 4) + 0] = (byte)((argb >> 16) & 0xFF);
+            colors[(i * 4) + 1] = (byte)((argb >> 8) & 0xFF);
+            colors[(i * 4) + 2] = (byte)(argb & 0xFF);
+            colors[(i * 4) + 3] = (byte)((argb >> 24) & 0xFF);
+        }
+
+        // Normals: tightly packed x,y,z floats in the mesh's world frame (X east, Y north, Z up).
+        var normals = new float[vertexCount * 3];
+        for (int i = 0; i < vertexCount; i++)
+        {
+            Vector3 n = tile.Normals[i];
+            normals[(i * 3) + 0] = n.X;
+            normals[(i * 3) + 1] = n.Y;
+            normals[(i * 3) + 2] = n.Z;
+        }
+
+        ushort[] indices = tile.Indices;
+
+        var buffers = new TileBuffers { IndexCount = indices.Length };
+        buffers.Vao = g.GenVertexArray();
+        g.BindVertexArray(buffers.Vao);
+
+        buffers.PositionVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.PositionVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(positions.Length * sizeof(float)), positions, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(0);
+        g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
+
+        buffers.ColorVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.ColorVbo);
+        g.BufferData<byte>(BufferTargetARB.ArrayBuffer, (nuint)colors.Length, colors, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(1);
+        g.VertexAttribPointer(1, 4, VertexAttribPointerType.UnsignedByte, true, 4, (void*)0);
+
+        buffers.NormalVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.NormalVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(normals.Length * sizeof(float)), normals, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(2);
+        g.VertexAttribPointer(2, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
+
+        float[] texCoords = tile.TexCoords;
+        buffers.TexVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.TexVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(texCoords.Length * sizeof(float)), texCoords, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(3);
+        g.VertexAttribPointer(3, 2, VertexAttribPointerType.Float, false, 2 * sizeof(float), (void*)0);
+
+        buffers.Ebo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ElementArrayBuffer, buffers.Ebo);
+        g.BufferData<ushort>(BufferTargetARB.ElementArrayBuffer, (nuint)(indices.Length * sizeof(ushort)), indices, BufferUsageARB.StaticDraw);
+
+        g.BindVertexArray(0);
+        tileBuffers[tile] = buffers;
     }
 
     private void ReleaseTiles(GL g)
     {
         foreach (TileBuffers b in tileBuffers.Values)
         {
-            g.DeleteBuffer(b.PositionVbo);
-            g.DeleteBuffer(b.ColorVbo);
-            g.DeleteBuffer(b.NormalVbo);
-            g.DeleteBuffer(b.TexVbo);
-            g.DeleteBuffer(b.Ebo);
-            g.DeleteVertexArray(b.Vao);
+            ReleaseTileBuffers(g, b);
         }
         tileBuffers.Clear();
+    }
+
+    private static void ReleaseTileBuffers(GL g, TileBuffers b)
+    {
+        g.DeleteBuffer(b.PositionVbo);
+        g.DeleteBuffer(b.ColorVbo);
+        g.DeleteBuffer(b.NormalVbo);
+        g.DeleteBuffer(b.TexVbo);
+        g.DeleteBuffer(b.Ebo);
+        g.DeleteVertexArray(b.Vao);
+    }
+
+    // Incremental tile residency. The base tiles are REUSED across detail reloads (same TerrainMesh3D refs;
+    // only the look-at detail patch is rebuilt — see MapPageViewModel: `new List(lodBaseTiles); AddRange(...)`).
+    // The old guard released + re-uploaded EVERY tile whenever the list reference changed, re-pushing the whole
+    // base VBO set on each reload — the visible "detal doładowuje się ~2 s przy ruchu" hitch. Now keep the VBOs
+    // for tiles still present (the whole base), release only the gone (previous detail) tiles, upload only new.
+    private void SyncTiles(GL g, IReadOnlyList<TerrainMesh3D> tiles)
+    {
+        var wanted = new HashSet<TerrainMesh3D>(tiles); // TerrainMesh3D is a sealed class → reference identity
+
+        if (tileBuffers.Count > 0)
+        {
+            List<TerrainMesh3D>? gone = null;
+            foreach (TerrainMesh3D existing in tileBuffers.Keys)
+            {
+                if (!wanted.Contains(existing))
+                {
+                    (gone ??= new List<TerrainMesh3D>()).Add(existing);
+                }
+            }
+
+            if (gone is not null)
+            {
+                foreach (TerrainMesh3D t in gone)
+                {
+                    ReleaseTileBuffers(g, tileBuffers[t]); // t came from tileBuffers.Keys → always present
+                    tileBuffers.Remove(t);
+                }
+            }
+        }
+
+        foreach (TerrainMesh3D t in tiles)
+        {
+            if (!tileBuffers.ContainsKey(t))
+            {
+                UploadTile(g, t);
+            }
+        }
     }
 
     private void DrawTrailLines(GL g, IReadOnlyList<Trail>? trails, DemRaster? raster, TerrainMesh3D mesh, DetailElevationField? detail)
