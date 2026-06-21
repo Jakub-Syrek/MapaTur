@@ -634,7 +634,7 @@
                 HorizontalOptions="Start" VerticalOptions="End" Margin="12,0,0,96"
                 InputTransparent="True"
                 IsVisible="{Binding IsLodStreaming}">
-            <Label Text="LOD 1 m" Style="{StaticResource GlassCaption}" />
+            <Label Text="{Binding LodBadgeText}" Style="{StaticResource GlassCaption}" />
         </Border>
 
         <!-- Marker details card: styled popup shown when a POI / climbing marker is tapped. -->

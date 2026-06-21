@@ -76,9 +76,35 @@ public sealed partial class MapPageViewModel : ObservableObject
     // flying, so detail streaming never triggers a WCS download. Null when no GUGiK source is wired.
     private readonly Func<DemTileKey, bool>? detailTileCached;
 
+    // Detail tile gate for the LOD streamer — platform-split so the DESKTOP stays exactly as it works today.
+    private Func<DemTileKey, bool>? DetailTileGate
+    {
+        get
+        {
+#if WINDOWS
+            // Desktop is left UNTOUCHED ("nie zjeb desktopowej wersji"): its z16 cache is already populated, so
+            // the existing cache-only render shows 1 m everywhere. Same gate as before — zero behaviour change.
+            return detailTileCached;
+#else
+            // Phone: live WCS fetch on every camera move (when online) hammered z16 downloads + huge raster/mesh
+            // rebuilds → memory pressure / ANR ("dławienie", system even LMK-killed other apps). DISABLED pending
+            // diagnosis: cache-only, same as desktop — deterministic, no per-move network/alloc storm. This is also
+            // the clean baseline for reading the LOD badge (a cache miss now shows as "z16 ON 0/N", not a stall).
+            return detailTileCached;
+#endif
+        }
+    }
+
 
     [ObservableProperty]
     private string statusMessage = string.Empty;
+
+    // Text of the always-on "LOD 1 m" badge. Default = the old static label so DESKTOP is unchanged; on mobile
+    // OnDetailFocusAsync overwrites it with the live LOD detail decision (LodDetailDiagnostics) — the badge is the
+    // only LOD element that is permanently visible (IsLodStreaming), so it is where the on-device ground truth must
+    // go (the status pill auto-hides). This also stops the badge from lying that 1 m is on when detail is null.
+    [ObservableProperty]
+    private string lodBadgeText = "LOD 1 m";
 
     [ObservableProperty]
     private bool isBusy;
@@ -2115,6 +2141,10 @@ public sealed partial class MapPageViewModel : ObservableObject
 #if WINDOWS
     private const int MaxMeshVerticesForPlatform = int.MaxValue;
 #elif ANDROID
+    // 5 M keeps the base mesh cheap so the phone holds FPS. Raising it to 12 M to render the full 15 m base
+    // natively TANKED FPS to ~3 (too many verts) and did NOT fix quality — sharpness comes from the 1 m DETAIL,
+    // not from rendering more of the coarse base (which is blocky up close at 15 m anyway). Keep the base cheap;
+    // the fix is getting the 1 m detail to actually stream, not inflating the base.
     private const int MaxMeshVerticesForPlatform = 5_000_000;
 #else
     private const int MaxMeshVerticesForPlatform = 2_000_000;
@@ -2741,6 +2771,14 @@ public sealed partial class MapPageViewModel : ObservableObject
     private GeoPoint lodDetailCentre;
     private bool lodDetailLoading;
     private DateTime lastLodDetailReloadUtc = DateTime.MinValue;
+    // Last per-tile z16 plan/cache counts + realised mesh coarseness, captured for the on-screen LOD diagnostic
+    // readout (see LodDetailDiagnostics). avgStep/finestStep reveal whether the z16 mesh is actually fine (≈1) or
+    // demoted coarse by the vertex budget (≥2) — the real "plasticine" signal even when z16 is selected & cached.
+    private int lastPerTileRequested;
+    private int lastPerTileCached;
+    private double lastPerTileAvgStep;
+    private int lastPerTileFinestStep;
+    private string lastPerTileNote = string.Empty; // why the per-tile detail did/didn't render: "ok" | "no-raster" | "no-terrain"
     private const double LodDetailReloadThresholdMeters = 700;            // re-centre after ~700 m drift (the 2 km patch has headroom)
     private static readonly TimeSpan LodDetailReloadCooldown = TimeSpan.FromMilliseconds(1200);
 
@@ -2773,6 +2811,8 @@ public sealed partial class MapPageViewModel : ObservableObject
     private const double LodRingNearRadiusMeters = 1_000_000.0;
     private const double LodRingMidRadiusMeters = 2_000_000.0;
 #else
+    // Reverted to 6 km / 14 km — widening the native ring (to 20-100 km) blew the vertex count and crashed FPS
+    // on the phone for no quality win (the base is coarse regardless; the fix is the 1 m detail, not the base).
     private const double LodRingNearRadiusMeters = 6000.0;
     private const double LodRingMidRadiusMeters = 14000.0;
 #endif
@@ -2802,7 +2842,7 @@ public sealed partial class MapPageViewModel : ObservableObject
 #if WINDOWS
     private const long PerTileVertexBudget = 6_000_000;                 // desktop GPU: 4× the phone budget — 1 m holds across the whole (larger) window
 #else
-    private const long PerTileVertexBudget = 1_500_000;                  // hard cap on total detail verts (FPS safety)
+    private const long PerTileVertexBudget = 6_000_000;                  // raised 3 M→6 M: a 2200 m z16 window is ~7.95 M cells @1 m, so 3 M forced ConstrainToBudget to demote most tiles to step 2/4 (~3-6 m = the "plasticine" mesh even with z16 ON). 6 M holds near-step-1. FPS/mem to verify on device.
 #endif
     private const int PerTileRoughnessStride = 4;                        // sample every 4th cell for roughness (cost ÷16, metric scale kept)
     private const int PerTileRoughnessNeighborDistance = 8;              // measure curvature over ±8 cells (~10 m) so ridge roughness registers (±1 reads ~0)
@@ -2810,7 +2850,7 @@ public sealed partial class MapPageViewModel : ObservableObject
 #if WINDOWS
     private const double PerTileWindowRadiusMeters = 3500.0;            // desktop: ~2.3× the phone window — "1 m everywhere you look", budget scaled to match
 #else
-    private const double PerTileWindowRadiusMeters = 1500.0;             // detail window radius (smaller than 2000 = same budget on less area = sharper foreground)
+    private const double PerTileWindowRadiusMeters = 2200.0;             // raised from 1500: the 1 m ring was too small, so the deforming 15 m base showed on the very peaks you look at
 #endif
     private const double PerTileCameraBubbleRadiusMeters = 250.0;        // near-camera tiles forced fine regardless of look-at (no blocky foreground under a low camera)
     private const int PerTileCameraBubbleStep = 2;                       // coarsest step allowed inside the camera bubble
@@ -2841,7 +2881,7 @@ public sealed partial class MapPageViewModel : ObservableObject
 
         // fillNoData: false — keep NoData so the NoData-aware mesh holes gaps/uncovered cells through to the
         // base (Krok 4c), instead of rendering flat geometry over them (the yellow blinds).
-        DemRaster? detail = await regionDemLoader.LoadRegionAsync(window, zoom, tileAvailable: detailTileCached, fillNoData: false).ConfigureAwait(true);
+        DemRaster? detail = await regionDemLoader.LoadRegionAsync(window, zoom, tileAvailable: DetailTileGate, fillNoData: false).ConfigureAwait(true);
         if (detail is null)
         {
             logger.LogWarning("LOD detail: no cached z{Zoom} raster at {Lat:F4},{Lon:F4}", zoom, focus.Latitude, focus.Longitude);
@@ -2918,13 +2958,16 @@ public sealed partial class MapPageViewModel : ObservableObject
         MapBounds window = LodTerrainWindow.Around(focus, PerTileWindowRadiusMeters);
         IReadOnlyList<DemTileKey> planned = DemTilePlanner.TilesForBounds(window, NearDetailZoom);
         int cachedCount = detailTileCached is null ? planned.Count : planned.Count(detailTileCached);
+        lastPerTileRequested = planned.Count;   // surfaced in the on-screen LOD diagnostic (LodDetailDiagnostics)
+        lastPerTileCached = cachedCount;
         logger.LogInformation(
             "LOD per-tile cache-only z{Zoom}: requested={Requested}, cached={Cached}, skipped={Skipped}",
             NearDetailZoom, planned.Count, cachedCount, planned.Count - cachedCount);
 
-        DemRaster? full = await regionDemLoader.LoadRegionAsync(window, NearDetailZoom, tileAvailable: detailTileCached, fillNoData: false).ConfigureAwait(true);
+        DemRaster? full = await regionDemLoader.LoadRegionAsync(window, NearDetailZoom, tileAvailable: DetailTileGate, fillNoData: false).ConfigureAwait(true);
         if (full is null)
         {
+            lastPerTileNote = "no-raster";
             logger.LogWarning("LOD per-tile: no cached z{Zoom} raster at {Lat:F4},{Lon:F4}", NearDetailZoom, focus.Latitude, focus.Longitude);
             return null;
         }
@@ -2932,6 +2975,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         // All the heavy CPU — HoleBelow, the roughness/SSE/budget plan, and the per-tile meshing — runs OFF the
         // UI thread so flying never freezes (the roughness scan over the ~8 M-cell z16 window was the stall).
         DemRaster loaded = full;
+        double loadedMax = full.GetElevationRange().Max; // raw z16 cache content max — distinguishes empty tiles vs repair zeroing
         float exaggeration = (float)Math.Clamp(VerticalExaggeration, 1.0, 5.0);
         RoughnessLodPreset preset = RoughnessLodPreset.Balanced;
         var detailOptions = new MapaTur.Application.Terrain.TerrainMeshOptions
@@ -2963,7 +3007,14 @@ public sealed partial class MapPageViewModel : ObservableObject
             DemRaster holed = DemRasterRepair.HoleBelow(despiked, DetailCoverageFloorMeters);
             if (!DemRasterCoverage.HasTerrain(holed, minTopMeters: 100))
             {
-                logger.LogInformation("LOD per-tile @ {Lat:F4},{Lon:F4}: no 1 m coverage — keeping base", focus.Latitude, focus.Longitude);
+                double holedMax = holed.GetElevationRange().Max;
+                // raw = max of the loaded z16 cache; holed = after FillNarrowZeroStrips→FillPits→HoleBelow.
+                // raw≈0 ⇒ cache tiles are empty/NoData (data problem); raw≈2000 but holed<100 ⇒ the repair chain
+                // zeroed real terrain (code bug, e.g. HoleBelow over-holing).
+                lastPerTileNote = $"no-terrain raw{loadedMax:F0} holed{holedMax:F0}";
+                logger.LogInformation(
+                    "LOD per-tile @ {Lat:F4},{Lon:F4}: no 1 m coverage — keeping base (rawMax={Raw:F0} holedMax={Holed:F0})",
+                    focus.Latitude, focus.Longitude, loadedMax, holedMax);
                 return null;
             }
 
@@ -2994,6 +3045,8 @@ public sealed partial class MapPageViewModel : ObservableObject
 
             int finestStep = plan.Count == 0 ? 0 : plan.Min(d => d.SubsampleStep);
             double avgStep = plan.Count == 0 ? 0 : plan.Average(d => d.SubsampleStep);
+            lastPerTileAvgStep = avgStep;       // surfaced on the LOD badge (LodDetailDiagnostics) to see real mesh coarseness
+            lastPerTileFinestStep = finestStep; // (worker thread write; the await in OnDetailFocusAsync is the memory barrier)
             int s1 = plan.Count(d => d.SubsampleStep == 1);
             int s2 = plan.Count(d => d.SubsampleStep == 2);
             int s4 = plan.Count(d => d.SubsampleStep == 4);
@@ -3036,6 +3089,7 @@ public sealed partial class MapPageViewModel : ObservableObject
                 nearStep1, farStep1,
                 planResult.RoughnessMs, planResult.PlanningMs, meshTimer.ElapsedMilliseconds, totalTimer.ElapsedMilliseconds, PerTileRoughnessStride);
 
+            lastPerTileNote = "ok";
             return (IReadOnlyList<TerrainMesh3D>?)meshes;
         }).ConfigureAwait(true);
 
@@ -3055,7 +3109,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// Swaps ONLY the detail layer; the base (and camera framing) stays put. Debounced + cooldown so a fast
     /// pan doesn't thrash rebuilds.
     /// </summary>
-    public async Task OnDetailFocusAsync(MapaTur.Application.Terrain.Camera3D camera)
+    public async Task OnDetailFocusAsync(MapaTur.Application.Terrain.Camera3D camera, int viewportHeightPixels = 0)
     {
         ArgumentNullException.ThrowIfNull(camera);
         if (!IsLodStreaming || lodDetailLoading || lodBaseTiles is null || regionDemLoader is null)
@@ -3119,7 +3173,15 @@ public sealed partial class MapPageViewModel : ObservableObject
             ? System.Numerics.Vector3.Distance(camera.Position, w2)
             : camera.Distance;
         double viewportHeight = 1000.0;
-        if (TryGetMapFocus(out _, out _, out double vh) && vh > 0)
+        // Mobile: use the real 3D backbuffer height. TryGetMapFocus reads the 2D Mapsui viewport, which is never
+        // laid out when Is3DMode=true, so it returns false → vh stays 1000 → screen-space error under-estimated
+        // (~2-3×) → the per-tile planner asks for coarser detail than the screen needs. Desktop is left on its
+        // existing path (unchanged) so its SSE/visual does not move.
+        if (!OperatingSystem.IsWindows() && viewportHeightPixels > 0)
+        {
+            viewportHeight = viewportHeightPixels;
+        }
+        else if (TryGetMapFocus(out _, out _, out double vh) && vh > 0)
         {
             viewportHeight = vh;
         }
@@ -3155,6 +3217,11 @@ public sealed partial class MapPageViewModel : ObservableObject
             // (Overlapping multi-res layers caused vertical curtains; proper multi-res stitching is 4c.)
             // At/below the base zoom the patch adds nothing — keep the base alone.
             IReadOnlyList<TerrainMesh3D>? detailTiles;
+            int? diagRequested = null;
+            int? diagCached = null;
+            double? diagAvgStep = null;
+            int? diagFinestStep = null;
+            string? diagNote = null;
             if (detailZoom <= BaseDetailZoomFloor)
             {
                 detailTiles = null; // at/below the base zoom the patch adds nothing — keep the base alone.
@@ -3164,11 +3231,36 @@ public sealed partial class MapPageViewModel : ObservableObject
                 // Model 1: per-tile roughness LOD over the look-at window (1 m on sharp, coarser on smooth).
                 detailTiles = await BuildPerTileDetailAsync(
                     focus, lodAnchor, camera.Position, camera.FieldOfViewYRadians, viewportHeight).ConfigureAwait(true);
+                diagRequested = lastPerTileRequested;
+                diagCached = lastPerTileCached;
+                diagNote = lastPerTileNote; // "ok" | "no-raster" | "no-terrain" — why detail did/didn't render
+                // Only meaningful if a real mesh came back; if detailTiles is null we are on base, leave step unset.
+                if (detailTiles is not null)
+                {
+                    diagAvgStep = lastPerTileAvgStep;
+                    diagFinestStep = lastPerTileFinestStep;
+                }
             }
             else
             {
                 // Fallback: the proven single stitched patch at the look-at's adaptive zoom.
                 detailTiles = await BuildDetailTilesAsync(focus, lodAnchor, detailZoom).ConfigureAwait(true);
+            }
+            // On-screen LOD ground truth — logcat/Serilog comes back empty on the phone, so surface the detail
+            // decision on the always-visible LOD badge (the status pill auto-hides): was the 1 m patch nulled by the
+            // zoom floor (the "plasticine" cause), and how much z16 is actually cached. Runtime-guarded to mobile so
+            // the desktop badge stays "LOD 1 m" (a runtime check, not #if, keeps the diag vars "used" so the desktop
+            // build stays warning-clean).
+            if (!OperatingSystem.IsWindows())
+            {
+                // OnDetailFocusAsync is raised from the renderer's camera-moved event (a GL/render thread, NOT the
+                // UI thread). LodBadgeText is bound to a Label, and touching a view off the UI thread crashes Android
+                // ("Only the original thread that created a view hierarchy can touch its views"). Marshal the set —
+                // same pattern the VM uses for other view-bound updates (e.g. UserLocation).
+                string badge = LodDetailDiagnostics.Format(
+                    focusSource, cameraToLookAt, viewportHeight, detailZoom, BaseDetailZoomFloor,
+                    diagRequested, diagCached, diagAvgStep, diagFinestStep, diagNote);
+                MainThread.BeginInvokeOnMainThread(() => LodBadgeText = badge);
             }
             if (detailTiles is null)
             {

@@ -311,7 +311,7 @@ public partial class MapPage : ContentPage
     // on drift + cooldown). The base and camera framing don't change, so this never yanks the camera.
     private async void OnCameraFocusMoved(object? sender, Camera3D camera)
     {
-        await viewModel.OnDetailFocusAsync(camera);
+        await viewModel.OnDetailFocusAsync(camera, TerrainView.SurfacePixelHeight);
     }
 
     // "Download whole Tatras offline": a big one-time pull meant for WiFi (no signal in the field). The

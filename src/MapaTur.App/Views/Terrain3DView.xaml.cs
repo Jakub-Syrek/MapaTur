@@ -598,6 +598,11 @@ public partial class Terrain3DView : ContentView
     private int lastSurfacePixelWidth;
     private int lastSurfacePixelHeight;
 
+    /// <summary>Real backbuffer height (px) of the last 3D paint — the true viewport height for screen-space LOD.
+    /// The 2D Mapsui viewport is never laid out in 3D mode, so this is the only valid height source on mobile.
+    /// 0 until the first frame is drawn.</summary>
+    public int SurfacePixelHeight => lastSurfacePixelHeight;
+
     // Touch target radius in device-independent units; scaled to surface pixels at hit-test time so a
     // finger tap near a small marker glyph still selects it.
     private const float MarkerTapRadiusDiu = 26f;
