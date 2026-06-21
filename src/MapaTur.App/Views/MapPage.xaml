@@ -94,7 +94,7 @@
                         </Border>
                         <VerticalStackLayout Spacing="1" Padding="0,4" HorizontalOptions="Center" InputTransparent="True">
                             <Label Text="🧭" FontSize="19" HorizontalOptions="Center" />
-                            <Label Text="Trasa" Style="{StaticResource GlassCaption}" FontSize="10" HorizontalOptions="Center" />
+                            <Label Text="{x:Static loc:AppStrings.TabRoute}" Style="{StaticResource GlassCaption}" FontSize="10" HorizontalOptions="Center" />
                         </VerticalStackLayout>
                     </Grid>
 
@@ -109,7 +109,7 @@
                         </Border>
                         <VerticalStackLayout Spacing="1" Padding="0,4" HorizontalOptions="Center" InputTransparent="True">
                             <Label Text="🎚️" FontSize="19" HorizontalOptions="Center" />
-                            <Label Text="Tryby" Style="{StaticResource GlassCaption}" FontSize="10" HorizontalOptions="Center" />
+                            <Label Text="{x:Static loc:AppStrings.TabModes}" Style="{StaticResource GlassCaption}" FontSize="10" HorizontalOptions="Center" />
                         </VerticalStackLayout>
                     </Grid>
 
@@ -124,7 +124,7 @@
                         </Border>
                         <VerticalStackLayout Spacing="1" Padding="0,4" HorizontalOptions="Center" InputTransparent="True">
                             <Label Text="🎥" FontSize="19" HorizontalOptions="Center" />
-                            <Label Text="Widok" Style="{StaticResource GlassCaption}" FontSize="10" HorizontalOptions="Center" />
+                            <Label Text="{x:Static loc:AppStrings.TabView}" Style="{StaticResource GlassCaption}" FontSize="10" HorizontalOptions="Center" />
                         </VerticalStackLayout>
                     </Grid>
 
@@ -139,7 +139,7 @@
                         </Border>
                         <VerticalStackLayout Spacing="1" Padding="0,4" HorizontalOptions="Center" InputTransparent="True">
                             <Label Text="🗺️" FontSize="19" HorizontalOptions="Center" />
-                            <Label Text="Mapa" Style="{StaticResource GlassCaption}" FontSize="10" HorizontalOptions="Center" />
+                            <Label Text="{x:Static loc:AppStrings.TabMap}" Style="{StaticResource GlassCaption}" FontSize="10" HorizontalOptions="Center" />
                         </VerticalStackLayout>
                     </Grid>
 
@@ -154,7 +154,7 @@
                         </Border>
                         <VerticalStackLayout Spacing="1" Padding="0,4" HorizontalOptions="Center" InputTransparent="True">
                             <Label Text="🌦️" FontSize="19" HorizontalOptions="Center" />
-                            <Label Text="Pogoda" Style="{StaticResource GlassCaption}" FontSize="10" HorizontalOptions="Center" />
+                            <Label Text="{x:Static loc:AppStrings.TabWeather}" Style="{StaticResource GlassCaption}" FontSize="10" HorizontalOptions="Center" />
                         </VerticalStackLayout>
                     </Grid>
 
@@ -169,7 +169,7 @@
                         </Border>
                         <VerticalStackLayout Spacing="1" Padding="0,4" HorizontalOptions="Center" InputTransparent="True">
                             <Label Text="⚙️" FontSize="19" HorizontalOptions="Center" />
-                            <Label Text="Ustawienia" Style="{StaticResource GlassCaption}" FontSize="9" HorizontalOptions="Center" />
+                            <Label Text="{x:Static loc:AppStrings.TabSettings}" Style="{StaticResource GlassCaption}" FontSize="9" HorizontalOptions="Center" />
                         </VerticalStackLayout>
                     </Grid>
                 </Grid>
@@ -182,7 +182,7 @@
                 <VerticalStackLayout Spacing="10">
                     <!-- Tap the header to collapse / expand this search + location bar. -->
                     <Grid ColumnDefinitions="*,Auto">
-                        <Label Grid.Column="0" Text="🔍  Lokalizacja i szukanie" Style="{StaticResource GlassCaption}" VerticalOptions="Center" />
+                        <Label Grid.Column="0" Text="{x:Static loc:AppStrings.LocateBarHeader}" Style="{StaticResource GlassCaption}" VerticalOptions="Center" />
                         <Label Grid.Column="1" Text="▾" Style="{StaticResource GlassLabel}" FontSize="14" VerticalOptions="Center"
                                IsVisible="{Binding IsLocateBarExpanded}" />
                         <Label Grid.Column="1" Text="▸" Style="{StaticResource GlassLabel}" FontSize="14" VerticalOptions="Center"
@@ -195,14 +195,14 @@
                     <VerticalStackLayout Spacing="10" IsVisible="{Binding IsLocateBarExpanded}">
                     <Grid ColumnDefinitions="*,*" ColumnSpacing="8">
                         <Button Grid.Column="0" Style="{StaticResource GlassButtonAccent}"
-                                Text="🎯  Na mnie"
+                                Text="{x:Static loc:AppStrings.LocateCenterOnMe}"
                                 Command="{Binding CenterOnMeCommand}" />
                         <Button Grid.Column="1" Style="{StaticResource GlassButtonAccent}"
                                 Text="{Binding IsLocationTracking, Converter={StaticResource LocationTrackingLabel}}"
                                 Command="{Binding ToggleLocationTrackingCommand}" />
                     </Grid>
                     <Border Style="{StaticResource GlassBar}" Padding="10,2">
-                        <Entry Placeholder="Teleportuj: szczyt, schronisko, jezioro…" Text="{Binding PlaceQuery, Mode=TwoWay}"
+                        <Entry Placeholder="{x:Static loc:AppStrings.TeleportPlaceholder}" Text="{Binding PlaceQuery, Mode=TwoWay}"
                                TextColor="White" PlaceholderColor="#88FFFFFF" BackgroundColor="Transparent" />
                     </Border>
                     <CollectionView ItemsSource="{Binding PlaceResults}" HeightRequest="150" SelectionMode="None">
@@ -213,7 +213,7 @@
                                            FontSize="13" LineBreakMode="TailTruncation" VerticalOptions="Center" />
                                     <Label Grid.Column="1" Text="{Binding ElevationMeters, StringFormat='{0:F0} m'}"
                                            Style="{StaticResource GlassCaption}" FontSize="11" VerticalOptions="Center" />
-                                    <Button Grid.Column="2" Text="🎯 Lecę" FontSize="12" Padding="8,2" Margin="0"
+                                    <Button Grid.Column="2" Text="{x:Static loc:AppStrings.TeleportFly}" FontSize="12" Padding="8,2" Margin="0"
                                             BackgroundColor="#3336E2FF" TextColor="White" CornerRadius="10"
                                             VerticalOptions="Center"
                                             Command="{Binding Source={x:Reference PageRoot}, Path=BindingContext.TeleportToPlaceCommand}"
@@ -233,10 +233,10 @@
                     IsVisible="{Binding ActiveSection, Converter={StaticResource IntEquals}, ConverterParameter=1}">
                 <ScrollView MaximumHeightRequest="600">
                 <VerticalStackLayout Spacing="12">
-                    <Label Text="🧭  Trasa" Style="{StaticResource GlassTitle}" />
+                    <Label Text="{x:Static loc:AppStrings.SectionRouteTitle}" Style="{StaticResource GlassTitle}" />
 
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                        <Label Grid.Column="0" Text="Planowanie trasy" Style="{StaticResource GlassLabel}" />
+                        <Label Grid.Column="0" Text="{x:Static loc:AppStrings.RoutePlanningLabel}" Style="{StaticResource GlassLabel}" />
                         <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding IsRoutePlanningMode, Mode=TwoWay}" />
                     </Grid>
 
@@ -244,9 +244,9 @@
                          the map); they form an ordered chain routed leg-by-leg over the trails. Visible only
                          while planning is on. -->
                     <VerticalStackLayout Spacing="8" IsVisible="{Binding IsRoutePlanningMode}">
-                        <Label Text="DODAJ PRZYSTANEK" Style="{StaticResource GlassCaption}" />
+                        <Label Text="{x:Static loc:AppStrings.AddStopHeader}" Style="{StaticResource GlassCaption}" />
                         <Border Style="{StaticResource GlassBar}" Padding="10,2">
-                            <Entry Placeholder="Szukaj: szczyt, schronisko, jezioro…" Text="{Binding PlaceQuery, Mode=TwoWay}"
+                            <Entry Placeholder="{x:Static loc:AppStrings.SearchPlaceholder}" Text="{Binding PlaceQuery, Mode=TwoWay}"
                                    TextColor="White" PlaceholderColor="#88FFFFFF" BackgroundColor="Transparent" />
                         </Border>
 
@@ -264,7 +264,7 @@
                                                FontSize="13" LineBreakMode="TailTruncation" VerticalOptions="Center" />
                                         <Label Grid.Column="1" Text="{Binding ElevationMeters, StringFormat='{0:F0} m'}"
                                                Style="{StaticResource GlassCaption}" FontSize="11" VerticalOptions="Center" />
-                                        <Button Grid.Column="2" Text="🎯 Lecę" FontSize="12" Padding="8,2" Margin="0"
+                                        <Button Grid.Column="2" Text="{x:Static loc:AppStrings.TeleportFly}" FontSize="12" Padding="8,2" Margin="0"
                                                 BackgroundColor="#3336E2FF" TextColor="White" CornerRadius="10"
                                                 VerticalOptions="Center"
                                                 Command="{Binding Source={x:Reference PageRoot}, Path=BindingContext.TeleportToPlaceCommand}"
@@ -274,13 +274,13 @@
                             </CollectionView.ItemTemplate>
                         </CollectionView>
 
-                        <Label Text="TRASA (KOLEJNE PRZYSTANKI)" Style="{StaticResource GlassCaption}" />
+                        <Label Text="{x:Static loc:AppStrings.RouteStopsHeader}" Style="{StaticResource GlassCaption}" />
                         <!-- Drag ⠿ to reorder the stops (designs the route order); ReorderCompleted re-plans.
                              Each stop is a card with the name, elevation and a delete chip. -->
                         <CollectionView ItemsSource="{Binding RouteStops}" HeightRequest="200" SelectionMode="None"
                                         CanReorderItems="True" ReorderCompleted="OnRouteStopsReorderCompleted">
                             <CollectionView.EmptyView>
-                                <Label Text="Wybierz przystanki z listy lub tapnij na mapie — potem przeciągnij ⠿, by zmienić kolejność."
+                                <Label Text="{x:Static loc:AppStrings.RouteStopsEmpty}"
                                        Style="{StaticResource GlassCaption}" FontSize="11" Padding="4,6" />
                             </CollectionView.EmptyView>
                             <CollectionView.ItemTemplate>
@@ -292,13 +292,13 @@
                                             <VerticalStackLayout Grid.Column="1" Spacing="0" VerticalOptions="Center">
                                                 <Label Text="{Binding Name}" Style="{StaticResource GlassLabel}"
                                                        FontSize="14" LineBreakMode="TailTruncation" />
-                                                <Label Text="{Binding ElevationMeters, StringFormat='{0:F0} m n.p.m.'}"
+                                                <Label Text="{Binding ElevationMeters, StringFormat='{0:F0} m'}"
                                                        Style="{StaticResource GlassCaption}" FontSize="10" />
                                             </VerticalStackLayout>
                                             <Border Grid.Column="2" Padding="9,4" StrokeThickness="1" Stroke="#33FF6B7A"
                                                     Background="#22FF6B7A" VerticalOptions="Center">
                                                 <Border.StrokeShape><RoundRectangle CornerRadius="10" /></Border.StrokeShape>
-                                                <Label Text="✕  Usuń" FontSize="12" TextColor="#FFC0C8" />
+                                                <Label Text="{x:Static loc:AppStrings.StopRemove}" FontSize="12" TextColor="#FFC0C8" />
                                                 <Border.GestureRecognizers>
                                                     <TapGestureRecognizer
                                                         Command="{Binding Source={x:Reference PageRoot}, Path=BindingContext.RemoveStopCommand}"
@@ -319,16 +319,16 @@
                                 <Label Text="{Binding RouteSummary}" Style="{StaticResource GlassLabel}"
                                        FontSize="14" HorizontalOptions="Center" />
                             </Border>
-                            <Button Style="{StaticResource GlassButtonAccent}" Text="🧭  Pokaż trasę"
+                            <Button Style="{StaticResource GlassButtonAccent}" Text="{x:Static loc:AppStrings.RouteShow}"
                                     Command="{Binding ShowRouteCommand}" />
-                            <Button Style="{StaticResource GlassButton}" Text="🎬  Film z trasy"
+                            <Button Style="{StaticResource GlassButton}" Text="{x:Static loc:AppStrings.RouteFilm}"
                                     Command="{Binding MakeRouteFilmCommand}" />
                         </VerticalStackLayout>
 
                         <Grid ColumnDefinitions="*,*" ColumnSpacing="8">
-                            <Button Grid.Column="0" Style="{StaticResource GlassButton}" Text="🗑  Wyczyść"
+                            <Button Grid.Column="0" Style="{StaticResource GlassButton}" Text="{x:Static loc:AppStrings.RouteClearShort}"
                                     Command="{Binding ClearRouteCommand}" />
-                            <Button Grid.Column="1" Style="{StaticResource GlassButton}" Text="⬇  GPX"
+                            <Button Grid.Column="1" Style="{StaticResource GlassButton}" Text="{x:Static loc:AppStrings.RouteGpxShort}"
                                     Command="{Binding ExportRouteCommand}" IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
                         </Grid>
                     </VerticalStackLayout>
@@ -341,156 +341,156 @@
                     IsVisible="{Binding ActiveSection, Converter={StaticResource IntEquals}, ConverterParameter=2}">
                 <ScrollView MaximumHeightRequest="600">
                 <VerticalStackLayout Spacing="12">
-                    <Label Text="🎚️  Tryby" Style="{StaticResource GlassTitle}" />
+                    <Label Text="{x:Static loc:AppStrings.SectionModesTitle}" Style="{StaticResource GlassTitle}" />
 
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                        <Label Grid.Column="0" Text="Ortofotomapa" Style="{StaticResource GlassLabel}" />
+                        <Label Grid.Column="0" Text="{x:Static loc:AppStrings.ToggleOrtho}" Style="{StaticResource GlassLabel}" />
                         <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowOrtho}" />
                     </Grid>
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                         <VerticalStackLayout Grid.Column="0" Spacing="0">
-                            <Label Text="Skały" Style="{StaticResource GlassLabel}" />
-                            <Label Text="materiał skały na stromiznach (zamiast rozmytego ortho)" Style="{StaticResource GlassCaption}" FontSize="10" />
+                            <Label Text="{x:Static loc:AppStrings.ToggleRock}" Style="{StaticResource GlassLabel}" />
+                            <Label Text="{x:Static loc:AppStrings.ToggleRockHint}" Style="{StaticResource GlassCaption}" FontSize="10" />
                         </VerticalStackLayout>
                         <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding RockMaterialOn}" />
                     </Grid>
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                         <VerticalStackLayout Grid.Column="0" Spacing="0">
-                            <Label Text="Biomy" Style="{StaticResource GlassLabel}" />
-                            <Label Text="strefy wysokościowe: hale / piargi / skała / śnieg / lód" Style="{StaticResource GlassCaption}" FontSize="10" />
+                            <Label Text="{x:Static loc:AppStrings.ToggleBiomes}" Style="{StaticResource GlassLabel}" />
+                            <Label Text="{x:Static loc:AppStrings.ToggleBiomesHint}" Style="{StaticResource GlassCaption}" FontSize="10" />
                         </VerticalStackLayout>
                         <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding BiomeMaterialOn}" />
                     </Grid>
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                         <VerticalStackLayout Grid.Column="0" Spacing="0">
-                            <Label Text="Mapa nachylenia" Style="{StaticResource GlassLabel}" />
-                            <Label Text="kolor wg stromości stoku (lawinowa)" Style="{StaticResource GlassCaption}" FontSize="10" />
+                            <Label Text="{x:Static loc:AppStrings.ToggleSlopeMap}" Style="{StaticResource GlassLabel}" />
+                            <Label Text="{x:Static loc:AppStrings.ToggleSlopeMapHint}" Style="{StaticResource GlassCaption}" FontSize="10" />
                         </VerticalStackLayout>
                         <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding SlopeMapMode}" />
                     </Grid>
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                        <Label Grid.Column="0" Text="Szlaki turystyczne" Style="{StaticResource GlassLabel}" />
+                        <Label Grid.Column="0" Text="{x:Static loc:AppStrings.ToggleTrails}" Style="{StaticResource GlassLabel}" />
                         <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowTrails}" />
                     </Grid>
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                        <Label Grid.Column="0" Text="Drogi" Style="{StaticResource GlassLabel}" />
+                        <Label Grid.Column="0" Text="{x:Static loc:AppStrings.ToggleRoads}" Style="{StaticResource GlassLabel}" />
                         <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowRoads}" />
                     </Grid>
 
-                    <Label Text="KOLORY SZLAKÓW" Style="{StaticResource GlassCaption}" Margin="0,2,0,0" />
+                    <Label Text="{x:Static loc:AppStrings.TrailColoursHeader}" Style="{StaticResource GlassCaption}" Margin="0,2,0,0" />
                     <FlexLayout Wrap="Wrap" JustifyContent="Start" AlignItems="Center">
                         <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
                                 Background="{Binding TrailColourRedEnabled, Converter={StaticResource BoolToBrush}, ConverterParameter='#CCDC2626|#14FFFFFF'}">
                             <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                             <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="TrailRed" /></Border.GestureRecognizers>
-                            <Label Text="Czerwony" Style="{StaticResource GlassLabel}" FontSize="12" />
+                            <Label Text="{x:Static loc:AppStrings.ColourRed}" Style="{StaticResource GlassLabel}" FontSize="12" />
                         </Border>
                         <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
                                 Background="{Binding TrailColourBlueEnabled, Converter={StaticResource BoolToBrush}, ConverterParameter='#CC2563EB|#14FFFFFF'}">
                             <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                             <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="TrailBlue" /></Border.GestureRecognizers>
-                            <Label Text="Niebieski" Style="{StaticResource GlassLabel}" FontSize="12" />
+                            <Label Text="{x:Static loc:AppStrings.ColourBlue}" Style="{StaticResource GlassLabel}" FontSize="12" />
                         </Border>
                         <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
                                 Background="{Binding TrailColourGreenEnabled, Converter={StaticResource BoolToBrush}, ConverterParameter='#CC16A34A|#14FFFFFF'}">
                             <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                             <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="TrailGreen" /></Border.GestureRecognizers>
-                            <Label Text="Zielony" Style="{StaticResource GlassLabel}" FontSize="12" />
+                            <Label Text="{x:Static loc:AppStrings.ColourGreen}" Style="{StaticResource GlassLabel}" FontSize="12" />
                         </Border>
                         <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
                                 Background="{Binding TrailColourYellowEnabled, Converter={StaticResource BoolToBrush}, ConverterParameter='#CCEAB308|#14FFFFFF'}">
                             <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                             <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="TrailYellow" /></Border.GestureRecognizers>
-                            <Label Text="Żółty" Style="{StaticResource GlassLabel}" FontSize="12" />
+                            <Label Text="{x:Static loc:AppStrings.ColourYellow}" Style="{StaticResource GlassLabel}" FontSize="12" />
                         </Border>
                         <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
                                 Background="{Binding TrailColourBlackEnabled, Converter={StaticResource BoolToBrush}, ConverterParameter='#CC111111|#14FFFFFF'}">
                             <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                             <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="TrailBlack" /></Border.GestureRecognizers>
-                            <Label Text="Czarny" Style="{StaticResource GlassLabel}" FontSize="12" />
+                            <Label Text="{x:Static loc:AppStrings.ColourBlack}" Style="{StaticResource GlassLabel}" FontSize="12" />
                         </Border>
                     </FlexLayout>
 
-                    <Label Text="WARSTWY" Style="{StaticResource GlassCaption}" />
+                    <Label Text="{x:Static loc:AppStrings.LayersHeader}" Style="{StaticResource GlassCaption}" />
                     <FlexLayout Wrap="Wrap" JustifyContent="Start" AlignItems="Center">
                         <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
                                 Background="{Binding ShowTrails, Converter={StaticResource BoolToBrush}, ConverterParameter='#5536E2FF|#14FFFFFF'}">
                             <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                             <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="Trails" /></Border.GestureRecognizers>
-                            <Label Text="〰 Szlaki" Style="{StaticResource GlassLabel}" FontSize="12" />
+                            <Label Text="{x:Static loc:AppStrings.LayerTrails}" Style="{StaticResource GlassLabel}" FontSize="12" />
                         </Border>
                         <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
                                 Background="{Binding ShowPeakNames, Converter={StaticResource BoolToBrush}, ConverterParameter='#5536E2FF|#14FFFFFF'}">
                             <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                             <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="PeakNames" /></Border.GestureRecognizers>
-                            <Label Text="🗻 Nazwy szczytów" Style="{StaticResource GlassLabel}" FontSize="12" />
+                            <Label Text="{x:Static loc:AppStrings.LayerPeakNames}" Style="{StaticResource GlassLabel}" FontSize="12" />
                         </Border>
                         <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
                                 Background="{Binding ShowNightSky, Converter={StaticResource BoolToBrush}, ConverterParameter='#5536E2FF|#14FFFFFF'}">
                             <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                             <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="NightSky" /></Border.GestureRecognizers>
-                            <Label Text="✨ Niebo nocne" Style="{StaticResource GlassLabel}" FontSize="12" />
+                            <Label Text="{x:Static loc:AppStrings.LayerNightSky}" Style="{StaticResource GlassLabel}" FontSize="12" />
                         </Border>
                         <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
                                 Background="{Binding ShowContours, Converter={StaticResource BoolToBrush}, ConverterParameter='#5536E2FF|#14FFFFFF'}">
                             <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                             <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="Contours" /></Border.GestureRecognizers>
-                            <Label Text="〰️ Warstwice" Style="{StaticResource GlassLabel}" FontSize="12" />
+                            <Label Text="{x:Static loc:AppStrings.LayerContours}" Style="{StaticResource GlassLabel}" FontSize="12" />
                         </Border>
                     </FlexLayout>
 
                     <!-- Peak-name label radius: only summits within this camera distance show a name. Sits right
                          under the "Nazwy szczytów" toggle and appears only while that layer is on. -->
                     <Grid ColumnDefinitions="64,*,52" ColumnSpacing="10" IsVisible="{Binding ShowPeakNames}">
-                        <Label Grid.Column="0" Text="Zasięg" Style="{StaticResource GlassLabel}" />
+                        <Label Grid.Column="0" Text="{x:Static loc:AppStrings.PeakRangeLabel}" Style="{StaticResource GlassLabel}" />
                         <Slider Grid.Column="1" Style="{StaticResource GlassSlider}" Minimum="1000" Maximum="80000"
-                                Value="{Binding PeakLabelRadiusMeters, Mode=TwoWay}" SemanticProperties.Hint="Zasięg nazw szczytów od kamery" />
+                                Value="{Binding PeakLabelRadiusMeters, Mode=TwoWay}" SemanticProperties.Hint="{x:Static loc:AppStrings.PeakRangeHint}" />
                         <Label Grid.Column="2" Text="{Binding PeakLabelRadiusText}" Style="{StaticResource GlassValue}" />
                     </Grid>
 
-                    <Label Text="PUNKTY (POI)" Style="{StaticResource GlassCaption}" />
+                    <Label Text="{x:Static loc:AppStrings.PoiHeader}" Style="{StaticResource GlassCaption}" />
                     <FlexLayout Wrap="Wrap" JustifyContent="Start" AlignItems="Center">
                         <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
                                 Background="{Binding ShowHuts, Converter={StaticResource BoolToBrush}, ConverterParameter='#5536E2FF|#14FFFFFF'}">
                             <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                             <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="PoiHuts" /></Border.GestureRecognizers>
-                            <Label Text="Schroniska" Style="{StaticResource GlassLabel}" FontSize="12" />
+                            <Label Text="{x:Static loc:AppStrings.PoiHuts}" Style="{StaticResource GlassLabel}" FontSize="12" />
                         </Border>
                         <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
                                 Background="{Binding ShowWildernessHuts, Converter={StaticResource BoolToBrush}, ConverterParameter='#5536E2FF|#14FFFFFF'}">
                             <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                             <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="PoiWilderness" /></Border.GestureRecognizers>
-                            <Label Text="Bacówki" Style="{StaticResource GlassLabel}" FontSize="12" />
+                            <Label Text="{x:Static loc:AppStrings.PoiWilderness}" Style="{StaticResource GlassLabel}" FontSize="12" />
                         </Border>
                         <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
                                 Background="{Binding ShowChalets, Converter={StaticResource BoolToBrush}, ConverterParameter='#5536E2FF|#14FFFFFF'}">
                             <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                             <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="PoiChalets" /></Border.GestureRecognizers>
-                            <Label Text="Chaty" Style="{StaticResource GlassLabel}" FontSize="12" />
+                            <Label Text="{x:Static loc:AppStrings.PoiChalets}" Style="{StaticResource GlassLabel}" FontSize="12" />
                         </Border>
                         <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
                                 Background="{Binding ShowShelters, Converter={StaticResource BoolToBrush}, ConverterParameter='#5536E2FF|#14FFFFFF'}">
                             <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                             <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="PoiShelters" /></Border.GestureRecognizers>
-                            <Label Text="Wiaty" Style="{StaticResource GlassLabel}" FontSize="12" />
+                            <Label Text="{x:Static loc:AppStrings.PoiShelters}" Style="{StaticResource GlassLabel}" FontSize="12" />
                         </Border>
                         <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
                                 Background="{Binding ShowViewpoints, Converter={StaticResource BoolToBrush}, ConverterParameter='#5536E2FF|#14FFFFFF'}">
                             <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                             <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="PoiViewpoints" /></Border.GestureRecognizers>
-                            <Label Text="Widoki" Style="{StaticResource GlassLabel}" FontSize="12" />
+                            <Label Text="{x:Static loc:AppStrings.PoiViewpoints}" Style="{StaticResource GlassLabel}" FontSize="12" />
                         </Border>
                         <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
                                 Background="{Binding ShowParking, Converter={StaticResource BoolToBrush}, ConverterParameter='#5536E2FF|#14FFFFFF'}">
                             <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                             <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="PoiParking" /></Border.GestureRecognizers>
-                            <Label Text="🅿 Parkingi" Style="{StaticResource GlassLabel}" FontSize="12" />
+                            <Label Text="{x:Static loc:AppStrings.PoiParking}" Style="{StaticResource GlassLabel}" FontSize="12" />
                         </Border>
                         <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
                                 Background="{Binding ShowPasses, Converter={StaticResource BoolToBrush}, ConverterParameter='#5536E2FF|#14FFFFFF'}">
                             <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                             <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="PoiPasses" /></Border.GestureRecognizers>
-                            <Label Text="⛰ Przełęcze" Style="{StaticResource GlassLabel}" FontSize="12" />
+                            <Label Text="{x:Static loc:AppStrings.PoiPasses}" Style="{StaticResource GlassLabel}" FontSize="12" />
                         </Border>
                     </FlexLayout>
                 </VerticalStackLayout>
@@ -501,29 +501,29 @@
             <Border x:Name="PanelPogoda" Style="{StaticResource GlassSurface}" Padding="16,14"
                     IsVisible="{Binding ActiveSection, Converter={StaticResource IntEquals}, ConverterParameter=5}">
                 <VerticalStackLayout Spacing="14">
-                    <Label Text="🌦️  Pogoda" Style="{StaticResource GlassTitle}" />
+                    <Label Text="{x:Static loc:AppStrings.SectionWeatherTitle}" Style="{StaticResource GlassTitle}" />
                     <Grid ColumnDefinitions="64,*,52" ColumnSpacing="10">
-                        <Label Grid.Column="0" Text="Czas" Style="{StaticResource GlassLabel}" />
+                        <Label Grid.Column="0" Text="{x:Static loc:AppStrings.WeatherTime}" Style="{StaticResource GlassLabel}" />
                         <Slider Grid.Column="1" Style="{StaticResource GlassSlider}" Minimum="0" Maximum="24"
-                                Value="{Binding TimeOfDayHours, Mode=TwoWay}" SemanticProperties.Hint="Pora dnia" />
+                                Value="{Binding TimeOfDayHours, Mode=TwoWay}" SemanticProperties.Hint="{x:Static loc:AppStrings.WeatherTimeHint}" />
                         <Label Grid.Column="2" Text="{Binding TimeOfDayHours, Converter={StaticResource HoursToClock}}" Style="{StaticResource GlassValue}" />
                     </Grid>
                     <Grid ColumnDefinitions="64,*,52" ColumnSpacing="10">
-                        <Label Grid.Column="0" Text="Chmury" Style="{StaticResource GlassLabel}" />
+                        <Label Grid.Column="0" Text="{x:Static loc:AppStrings.WeatherClouds}" Style="{StaticResource GlassLabel}" />
                         <Slider Grid.Column="1" Style="{StaticResource GlassSlider}" Minimum="0" Maximum="1"
-                                Value="{Binding Cloudiness, Mode=TwoWay}" SemanticProperties.Hint="Zachmurzenie" />
+                                Value="{Binding Cloudiness, Mode=TwoWay}" SemanticProperties.Hint="{x:Static loc:AppStrings.WeatherCloudsHint}" />
                         <Label Grid.Column="2" Text="{Binding Cloudiness, StringFormat='{0:P0}'}" Style="{StaticResource GlassValue}" />
                     </Grid>
                     <Grid ColumnDefinitions="64,*,52" ColumnSpacing="10">
-                        <Label Grid.Column="0" Text="Wiatr" Style="{StaticResource GlassLabel}" />
+                        <Label Grid.Column="0" Text="{x:Static loc:AppStrings.WeatherWind}" Style="{StaticResource GlassLabel}" />
                         <Slider Grid.Column="1" Style="{StaticResource GlassSlider}" Minimum="0" Maximum="1"
-                                Value="{Binding Wind, Mode=TwoWay}" SemanticProperties.Hint="Siła wiatru" />
+                                Value="{Binding Wind, Mode=TwoWay}" SemanticProperties.Hint="{x:Static loc:AppStrings.WeatherWindHint}" />
                         <Label Grid.Column="2" Text="{Binding Wind, StringFormat='{0:P0}'}" Style="{StaticResource GlassValue}" />
                     </Grid>
                     <Grid ColumnDefinitions="64,*,52" ColumnSpacing="10">
-                        <Label Grid.Column="0" Text="Śnieg" Style="{StaticResource GlassLabel}" />
+                        <Label Grid.Column="0" Text="{x:Static loc:AppStrings.WeatherSnow}" Style="{StaticResource GlassLabel}" />
                         <Slider Grid.Column="1" Style="{StaticResource GlassSlider}" Minimum="0" Maximum="1"
-                                Value="{Binding Snow, Mode=TwoWay}" SemanticProperties.Hint="Pokrywa śnieżna" />
+                                Value="{Binding Snow, Mode=TwoWay}" SemanticProperties.Hint="{x:Static loc:AppStrings.WeatherSnowHint}" />
                         <Label Grid.Column="2" Text="{Binding Snow, StringFormat='{0:P0}'}" Style="{StaticResource GlassValue}" />
                     </Grid>
                 </VerticalStackLayout>
@@ -533,16 +533,16 @@
             <Border x:Name="PanelWidok" Style="{StaticResource GlassSurface}" Padding="16,14"
                     IsVisible="{Binding ActiveSection, Converter={StaticResource IntEquals}, ConverterParameter=3}">
                 <VerticalStackLayout Spacing="14">
-                    <Label Text="🎥  Widok" Style="{StaticResource GlassTitle}" />
+                    <Label Text="{x:Static loc:AppStrings.SectionViewTitle}" Style="{StaticResource GlassTitle}" />
                     <Grid ColumnDefinitions="64,*,52" ColumnSpacing="10">
-                        <Label Grid.Column="0" Text="Pion" Style="{StaticResource GlassLabel}" />
+                        <Label Grid.Column="0" Text="{x:Static loc:AppStrings.ViewVertical}" Style="{StaticResource GlassLabel}" />
                         <Slider Grid.Column="1" Style="{StaticResource GlassSlider}" Minimum="1" Maximum="5"
                                 Value="{Binding VerticalExaggeration, Mode=TwoWay}" SemanticProperties.Hint="{x:Static loc:AppStrings.LabelVerticalExaggeration}" />
                         <Label Grid.Column="2" Text="{Binding VerticalExaggeration, StringFormat='{0:F1}×'}" Style="{StaticResource GlassValue}" />
                     </Grid>
                     <Grid ColumnDefinitions="*,*" ColumnSpacing="10">
-                        <Button Grid.Column="0" Style="{StaticResource GlassButton}" Text="⟲  Reset kamery" Clicked="OnResetCameraClicked" />
-                        <Button Grid.Column="1" Style="{StaticResource GlassButtonAccent}" Text="🎬  Fly-through" Clicked="OnFlyThroughClicked" />
+                        <Button Grid.Column="0" Style="{StaticResource GlassButton}" Text="{x:Static loc:AppStrings.ViewResetCamera}" Clicked="OnResetCameraClicked" />
+                        <Button Grid.Column="1" Style="{StaticResource GlassButtonAccent}" Text="{x:Static loc:AppStrings.ViewFlythrough}" Clicked="OnFlyThroughClicked" />
                     </Grid>
                 </VerticalStackLayout>
             </Border>
@@ -554,36 +554,36 @@
                      download-for-view group, so cap its height and let it scroll. -->
                 <ScrollView MaximumHeightRequest="600">
                 <VerticalStackLayout Spacing="12">
-                    <Label Text="🗺️  Mapa" Style="{StaticResource GlassTitle}" />
+                    <Label Text="{x:Static loc:AppStrings.SectionMapTitle}" Style="{StaticResource GlassTitle}" />
 
                     <!-- The old "LOD demo" button is gone: the full LOD pipeline (ring base + 1 m
                          streaming) auto-starts with the map — see AutoStartLodPipeline in the VM. -->
 
-                    <Label Text="REGIONY" Style="{StaticResource GlassCaption}" />
+                    <Label Text="{x:Static loc:AppStrings.MapRegionsHeader}" Style="{StaticResource GlassCaption}" />
                     <FlexLayout Wrap="Wrap" JustifyContent="Start" AlignItems="Center">
                         <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
                                 Background="{Binding RegionTatryEnabled, Converter={StaticResource BoolToBrush}, ConverterParameter='#5536E2FF|#14FFFFFF'}">
                             <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                             <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="RegionTatry" /></Border.GestureRecognizers>
-                            <Label Text="Tatry" Style="{StaticResource GlassLabel}" FontSize="12" />
+                            <Label Text="{x:Static loc:AppStrings.RegionTatry}" Style="{StaticResource GlassLabel}" FontSize="12" />
                         </Border>
                         <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
                                 Background="{Binding RegionBeskidyEnabled, Converter={StaticResource BoolToBrush}, ConverterParameter='#5536E2FF|#14FFFFFF'}">
                             <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                             <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="RegionBeskidy" /></Border.GestureRecognizers>
-                            <Label Text="Beskidy" Style="{StaticResource GlassLabel}" FontSize="12" />
+                            <Label Text="{x:Static loc:AppStrings.RegionBeskidy}" Style="{StaticResource GlassLabel}" FontSize="12" />
                         </Border>
                         <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
                                 Background="{Binding RegionPieninyEnabled, Converter={StaticResource BoolToBrush}, ConverterParameter='#5536E2FF|#14FFFFFF'}">
                             <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                             <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="RegionPieniny" /></Border.GestureRecognizers>
-                            <Label Text="Pieniny" Style="{StaticResource GlassLabel}" FontSize="12" />
+                            <Label Text="{x:Static loc:AppStrings.RegionPieniny}" Style="{StaticResource GlassLabel}" FontSize="12" />
                         </Border>
                         <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
                                 Background="{Binding RegionBieszczadyEnabled, Converter={StaticResource BoolToBrush}, ConverterParameter='#5536E2FF|#14FFFFFF'}">
                             <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                             <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="RegionBieszczady" /></Border.GestureRecognizers>
-                            <Label Text="Bieszczady" Style="{StaticResource GlassLabel}" FontSize="12" />
+                            <Label Text="{x:Static loc:AppStrings.RegionBieszczady}" Style="{StaticResource GlassLabel}" FontSize="12" />
                         </Border>
                     </FlexLayout>
 
@@ -591,7 +591,7 @@
                             Background="#2236E2FF">
                         <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                         <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding LoadTatraRegionCommand}" /></Border.GestureRecognizers>
-                        <Label Text="⛰️  Wczytaj teren 1 m (Tatry · GUGiK)" Style="{StaticResource GlassLabel}"
+                        <Label Text="{x:Static loc:AppStrings.MapLoadTerrain}" Style="{StaticResource GlassLabel}"
                                FontSize="13" HorizontalOptions="Center" />
                     </Border>
 
@@ -599,7 +599,7 @@
                             Background="#223CE27A">
                         <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                         <Border.GestureRecognizers><TapGestureRecognizer Tapped="OnDownloadTatraOfflineTapped" /></Border.GestureRecognizers>
-                        <Label Text="⬇️  Pobierz całe Tatry offline (WiFi)" Style="{StaticResource GlassLabel}"
+                        <Label Text="{x:Static loc:AppStrings.MapDownloadOffline}" Style="{StaticResource GlassLabel}"
                                FontSize="13" HorizontalOptions="Center" />
                     </Border>
 
@@ -607,11 +607,11 @@
                             Background="#22B69CFF">
                         <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
                         <Border.GestureRecognizers><TapGestureRecognizer Tapped="OnDownloadDataPackagesTapped" /></Border.GestureRecognizers>
-                        <Label Text="📦  Pobierz paczki danych (serwer)" Style="{StaticResource GlassLabel}"
+                        <Label Text="{x:Static loc:AppStrings.MapDownloadPackages}" Style="{StaticResource GlassLabel}"
                                FontSize="13" HorizontalOptions="Center" />
                     </Border>
 
-                    <Label Text="POBIERZ DLA WIDOKU" Style="{StaticResource GlassCaption}" />
+                    <Label Text="{x:Static loc:AppStrings.MapDownloadForViewHeader}" Style="{StaticResource GlassCaption}" />
                     <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto" ColumnSpacing="8" RowSpacing="8">
                         <Button Grid.Row="0" Grid.Column="0" Style="{StaticResource GlassButton}" Text="{x:Static loc:AppStrings.DownloadTrails}"
                                 Command="{Binding DownloadTrailsForViewportCommand}" IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
@@ -623,7 +623,7 @@
                                 Command="{Binding DownloadPoisForViewportCommand}" IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
                     </Grid>
 
-                    <Label Text="TRASA" Style="{StaticResource GlassCaption}" />
+                    <Label Text="{x:Static loc:AppStrings.MapRouteHeader}" Style="{StaticResource GlassCaption}" />
                     <Grid ColumnDefinitions="*,*" ColumnSpacing="8">
                         <Button Grid.Column="0" Style="{StaticResource GlassButton}" Text="{x:Static loc:AppStrings.ClearRoute}"
                                 Command="{Binding ClearRouteCommand}" IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
@@ -638,9 +638,36 @@
             <Border x:Name="PanelUstawienia" Style="{StaticResource GlassSurface}" Padding="16,14"
                     IsVisible="{Binding ActiveSection, Converter={StaticResource IntEquals}, ConverterParameter=6}">
                 <VerticalStackLayout Spacing="12">
-                    <Label Text="⚙️  Ustawienia" Style="{StaticResource GlassTitle}" />
+                    <Label Text="{x:Static loc:AppStrings.SectionSettingsTitle}" Style="{StaticResource GlassTitle}" />
 
-                    <Label Text="JAKOŚĆ RENDERINGU" Style="{StaticResource GlassCaption}" />
+                    <Label Text="{x:Static loc:AppStrings.SettingsLanguageHeader}" Style="{StaticResource GlassCaption}" />
+                    <!-- Language selector: Polski / English. Switching persists the choice and soft-restarts
+                         the UI (SelectLanguageCommand → LanguageIndex → App.SwitchLanguage). -->
+                    <Border Padding="4" BackgroundColor="#14FFFFFF" StrokeThickness="1" Stroke="#22FFFFFF">
+                        <Border.StrokeShape><RoundRectangle CornerRadius="15" /></Border.StrokeShape>
+                        <Grid ColumnDefinitions="*,*" ColumnSpacing="4">
+                            <Grid Grid.Column="0" Padding="0,8">
+                                <Grid.GestureRecognizers><TapGestureRecognizer Command="{Binding SelectLanguageCommand}" CommandParameter="0" /></Grid.GestureRecognizers>
+                                <Border Background="{StaticResource GlassAccentFill}" Stroke="{StaticResource GlassAccentBrush}" StrokeThickness="1"
+                                        IsVisible="{Binding LanguageIndex, Converter={StaticResource IntEquals}, ConverterParameter=0}">
+                                    <Border.StrokeShape><RoundRectangle CornerRadius="12" /></Border.StrokeShape>
+                                </Border>
+                                <Label Text="Polski" Style="{StaticResource GlassLabel}" FontSize="13" HorizontalOptions="Center" InputTransparent="True" />
+                            </Grid>
+                            <Grid Grid.Column="1" Padding="0,8">
+                                <Grid.GestureRecognizers><TapGestureRecognizer Command="{Binding SelectLanguageCommand}" CommandParameter="1" /></Grid.GestureRecognizers>
+                                <Border Background="{StaticResource GlassAccentFill}" Stroke="{StaticResource GlassAccentBrush}" StrokeThickness="1"
+                                        IsVisible="{Binding LanguageIndex, Converter={StaticResource IntEquals}, ConverterParameter=1}">
+                                    <Border.StrokeShape><RoundRectangle CornerRadius="12" /></Border.StrokeShape>
+                                </Border>
+                                <Label Text="English" Style="{StaticResource GlassLabel}" FontSize="13" HorizontalOptions="Center" InputTransparent="True" />
+                            </Grid>
+                        </Grid>
+                    </Border>
+
+                    <BoxView HeightRequest="1" Color="#1AFFFFFF" Margin="0,2" />
+
+                    <Label Text="{x:Static loc:AppStrings.SettingsQualityHeader}" Style="{StaticResource GlassCaption}" />
                     <Border Padding="4" BackgroundColor="#14FFFFFF" StrokeThickness="1" Stroke="#22FFFFFF">
                         <Border.StrokeShape><RoundRectangle CornerRadius="15" /></Border.StrokeShape>
                         <Grid ColumnDefinitions="*,*,*" ColumnSpacing="4">
@@ -650,7 +677,7 @@
                                         IsVisible="{Binding RenderQuality, Converter={StaticResource IntEquals}, ConverterParameter=0}">
                                     <Border.StrokeShape><RoundRectangle CornerRadius="12" /></Border.StrokeShape>
                                 </Border>
-                                <Label Text="Wydajność" Style="{StaticResource GlassLabel}" FontSize="12" HorizontalOptions="Center" InputTransparent="True" />
+                                <Label Text="{x:Static loc:AppStrings.QualityPerformance}" Style="{StaticResource GlassLabel}" FontSize="12" HorizontalOptions="Center" InputTransparent="True" />
                             </Grid>
                             <Grid Grid.Column="1" Padding="0,8">
                                 <Grid.GestureRecognizers><TapGestureRecognizer Command="{Binding SelectQualityCommand}" CommandParameter="1" /></Grid.GestureRecognizers>
@@ -658,7 +685,7 @@
                                         IsVisible="{Binding RenderQuality, Converter={StaticResource IntEquals}, ConverterParameter=1}">
                                     <Border.StrokeShape><RoundRectangle CornerRadius="12" /></Border.StrokeShape>
                                 </Border>
-                                <Label Text="Zbalansowana" Style="{StaticResource GlassLabel}" FontSize="12" HorizontalOptions="Center" InputTransparent="True" />
+                                <Label Text="{x:Static loc:AppStrings.QualityBalanced}" Style="{StaticResource GlassLabel}" FontSize="12" HorizontalOptions="Center" InputTransparent="True" />
                             </Grid>
                             <Grid Grid.Column="2" Padding="0,8">
                                 <Grid.GestureRecognizers><TapGestureRecognizer Command="{Binding SelectQualityCommand}" CommandParameter="2" /></Grid.GestureRecognizers>
@@ -666,29 +693,29 @@
                                         IsVisible="{Binding RenderQuality, Converter={StaticResource IntEquals}, ConverterParameter=2}">
                                     <Border.StrokeShape><RoundRectangle CornerRadius="12" /></Border.StrokeShape>
                                 </Border>
-                                <Label Text="Wysoka" Style="{StaticResource GlassLabel}" FontSize="12" HorizontalOptions="Center" InputTransparent="True" />
+                                <Label Text="{x:Static loc:AppStrings.QualityHigh}" Style="{StaticResource GlassLabel}" FontSize="12" HorizontalOptions="Center" InputTransparent="True" />
                             </Grid>
                         </Grid>
                     </Border>
-                    <Label Text="Wydajność wyłącza antyaliasing i przerzedza las dla większej płynności; Wysoka renderuje pełnię."
+                    <Label Text="{x:Static loc:AppStrings.QualityHint}"
                            Style="{StaticResource GlassCaption}" />
 
                     <BoxView HeightRequest="1" Color="#1AFFFFFF" Margin="0,2" />
 
-                    <Label Text="PAMIĘĆ PODRĘCZNA" Style="{StaticResource GlassCaption}" />
+                    <Label Text="{x:Static loc:AppStrings.SettingsCacheHeader}" Style="{StaticResource GlassCaption}" />
                     <Label Text="{Binding CacheSummary}" Style="{StaticResource GlassLabel}" FontSize="12" />
-                    <Button Style="{StaticResource GlassButton}" Text="🗑  Wyczyść pobrane dane"
+                    <Button Style="{StaticResource GlassButton}" Text="{x:Static loc:AppStrings.SettingsClearCache}"
                             Command="{Binding ClearCacheCommand}" IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
 
                     <BoxView HeightRequest="1" Color="#1AFFFFFF" Margin="0,2" />
 
-                    <Label Text="DEBUG" Style="{StaticResource GlassCaption}" />
+                    <Label Text="{x:Static loc:AppStrings.SettingsDebugHeader}" Style="{StaticResource GlassCaption}" />
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                        <Label Grid.Column="0" Text="Nakładka FPS / statystyki" Style="{StaticResource GlassLabel}" />
+                        <Label Grid.Column="0" Text="{x:Static loc:AppStrings.SettingsFpsOverlay}" Style="{StaticResource GlassLabel}" />
                         <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowDebugOverlay}" />
                     </Grid>
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                        <Label Grid.Column="0" Text="Szczegółowe logi" Style="{StaticResource GlassLabel}" />
+                        <Label Grid.Column="0" Text="{x:Static loc:AppStrings.SettingsVerboseLogs}" Style="{StaticResource GlassLabel}" />
                         <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding VerboseLogging}" />
                     </Grid>
                 </VerticalStackLayout>

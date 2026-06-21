@@ -65,4 +65,10 @@ public interface I3DSettingsStore
     /// route the user built persists across app restarts. Null until they add a stop.
     /// </summary>
     string? RouteStopsJson { get; set; }
+
+    /// <summary>
+    /// Preferred UI language as a bare code ("pl" / "en"); see <c>MapaTur.Application.Localization.AppLanguage</c>.
+    /// Null until the user picks one, in which case the app starts in Polish (the default).
+    /// </summary>
+    string? Language { get; set; }
 }

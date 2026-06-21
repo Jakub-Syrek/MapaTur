@@ -3,6 +3,7 @@ using CommunityToolkit.Mvvm.Input;
 
 using MapaTur.App.Services;
 using MapaTur.Application.Climbing;
+using MapaTur.Application.Localization;
 using MapaTur.Application.Location;
 using MapaTur.Application.Maps;
 using MapaTur.Application.Markers;
@@ -558,6 +559,38 @@ public sealed partial class MapPageViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// Selected UI language: 0 = Polski, 1 = English. Mirrors the Ustawienia segmented control (highlighted
+    /// via IntEquals). The initial value is restored from <see cref="settingsStore"/> in the constructor by
+    /// setting the backing field directly, so launch does not trigger a restart.
+    /// </summary>
+    [ObservableProperty]
+    private int languageIndex;
+
+    partial void OnLanguageIndexChanged(int value)
+    {
+        string code = value == 1 ? AppLanguage.English : AppLanguage.Polish;
+        if (string.Equals(settingsStore.Language, code, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        // Persist the choice, then soft-restart the UI so every compile-time {x:Static} string
+        // re-resolves under the new culture (a live re-bind would need a markup extension).
+        settingsStore.Language = code;
+        App.SwitchLanguage(code);
+    }
+
+    /// <summary>Sets the UI language from the Ustawienia segmented control (index as string).</summary>
+    [RelayCommand]
+    private void SelectLanguage(string? index)
+    {
+        if (int.TryParse(index, out int i))
+        {
+            LanguageIndex = Math.Clamp(i, 0, 1);
+        }
+    }
+
     /// <summary>Human-readable summary of cached record counts, shown in the Ustawienia "Cache" block.</summary>
     [ObservableProperty]
     private string cacheSummary = "—";
@@ -578,7 +611,9 @@ public sealed partial class MapPageViewModel : ObservableObject
             int trails = await trailRepository.CountAsync().ConfigureAwait(true);
             int pois = await poiRepository.CountAsync().ConfigureAwait(true);
             int climbing = await climbingRepository.CountAsync().ConfigureAwait(true);
-            CacheSummary = $"Szlaki: {trails} · POI: {pois} · Wspinaczka: {climbing}";
+            CacheSummary = string.Format(
+                System.Globalization.CultureInfo.CurrentUICulture,
+                Localization.AppStrings.CacheSummaryFormat, trails, pois, climbing);
         }
         catch (Exception ex)
         {
@@ -597,12 +632,12 @@ public sealed partial class MapPageViewModel : ObservableObject
             await trailRepository.ClearAsync().ConfigureAwait(true);
             await poiRepository.ClearAsync().ConfigureAwait(true);
             await climbingRepository.ClearAsync().ConfigureAwait(true);
-            StatusMessage = "Wyczyszczono pobrane dane.";
+            StatusMessage = Localization.AppStrings.StatusCacheCleared;
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to clear cache");
-            StatusMessage = "Nie udało się wyczyścić cache.";
+            StatusMessage = Localization.AppStrings.StatusCacheClearFailed;
         }
         finally
         {
@@ -1448,6 +1483,9 @@ public sealed partial class MapPageViewModel : ObservableObject
             peakLabelRadiusMeters = Math.Clamp(savedPeakRadius, 1000.0, 80_000.0);
         }
         cameraState = settingsStore.CameraState;
+        // Restore the chosen UI language for the Ustawienia selector. Set the backing field directly so the
+        // OnLanguageIndexChanged hook does NOT fire a restart on launch (App already applied the culture).
+        languageIndex = AppLanguage.Normalize(settingsStore.Language) == AppLanguage.English ? 1 : 0;
         this.trackRenderer = trackRenderer;
         this.trailRenderer = trailRenderer;
         this.routeRenderer = routeRenderer;

@@ -240,5 +240,205 @@ public static class AppStrings
     /// <summary>Status shown when route-planning mode is turned off.</summary>
     public static string StatusRoutePlanningOff => Get(nameof(StatusRoutePlanningOff));
 
+    // ── Menu chrome: top tab chips ──
+    /// <summary>"Route" tab chip.</summary>
+    public static string TabRoute => Get(nameof(TabRoute));
+    /// <summary>"Modes" tab chip.</summary>
+    public static string TabModes => Get(nameof(TabModes));
+    /// <summary>"View" tab chip.</summary>
+    public static string TabView => Get(nameof(TabView));
+    /// <summary>"Map" tab chip.</summary>
+    public static string TabMap => Get(nameof(TabMap));
+    /// <summary>"Weather" tab chip.</summary>
+    public static string TabWeather => Get(nameof(TabWeather));
+    /// <summary>"Settings" tab chip.</summary>
+    public static string TabSettings => Get(nameof(TabSettings));
+
+    // ── Find-me / teleport bar ──
+    /// <summary>Header of the collapsible find-me / search bar.</summary>
+    public static string LocateBarHeader => Get(nameof(LocateBarHeader));
+    /// <summary>"Center on me" button.</summary>
+    public static string LocateCenterOnMe => Get(nameof(LocateCenterOnMe));
+    /// <summary>Placeholder for the teleport search entry.</summary>
+    public static string TeleportPlaceholder => Get(nameof(TeleportPlaceholder));
+    /// <summary>"Fly" button on a place result.</summary>
+    public static string TeleportFly => Get(nameof(TeleportFly));
+
+    // ── Section titles ──
+    /// <summary>Route panel title.</summary>
+    public static string SectionRouteTitle => Get(nameof(SectionRouteTitle));
+    /// <summary>Modes panel title.</summary>
+    public static string SectionModesTitle => Get(nameof(SectionModesTitle));
+    /// <summary>View panel title.</summary>
+    public static string SectionViewTitle => Get(nameof(SectionViewTitle));
+    /// <summary>Map panel title.</summary>
+    public static string SectionMapTitle => Get(nameof(SectionMapTitle));
+    /// <summary>Weather panel title.</summary>
+    public static string SectionWeatherTitle => Get(nameof(SectionWeatherTitle));
+    /// <summary>Settings panel title.</summary>
+    public static string SectionSettingsTitle => Get(nameof(SectionSettingsTitle));
+
+    // ── Route panel ──
+    /// <summary>"Route planning" toggle label.</summary>
+    public static string RoutePlanningLabel => Get(nameof(RoutePlanningLabel));
+    /// <summary>"ADD STOP" sub-header.</summary>
+    public static string AddStopHeader => Get(nameof(AddStopHeader));
+    /// <summary>Placeholder for the add-stop search entry.</summary>
+    public static string SearchPlaceholder => Get(nameof(SearchPlaceholder));
+    /// <summary>"ROUTE (STOPS IN ORDER)" sub-header.</summary>
+    public static string RouteStopsHeader => Get(nameof(RouteStopsHeader));
+    /// <summary>Empty-state hint for the stops list.</summary>
+    public static string RouteStopsEmpty => Get(nameof(RouteStopsEmpty));
+    /// <summary>"Remove" chip on a route stop.</summary>
+    public static string StopRemove => Get(nameof(StopRemove));
+    /// <summary>"Show route" button.</summary>
+    public static string RouteShow => Get(nameof(RouteShow));
+    /// <summary>"Route film" button.</summary>
+    public static string RouteFilm => Get(nameof(RouteFilm));
+    /// <summary>Short "Clear" route button.</summary>
+    public static string RouteClearShort => Get(nameof(RouteClearShort));
+    /// <summary>Short "GPX" export button.</summary>
+    public static string RouteGpxShort => Get(nameof(RouteGpxShort));
+
+    // ── Modes panel ──
+    /// <summary>"Orthophoto" toggle.</summary>
+    public static string ToggleOrtho => Get(nameof(ToggleOrtho));
+    /// <summary>"Rock" toggle.</summary>
+    public static string ToggleRock => Get(nameof(ToggleRock));
+    /// <summary>Caption under the "Rock" toggle.</summary>
+    public static string ToggleRockHint => Get(nameof(ToggleRockHint));
+    /// <summary>"Biomes" toggle.</summary>
+    public static string ToggleBiomes => Get(nameof(ToggleBiomes));
+    /// <summary>Caption under the "Biomes" toggle.</summary>
+    public static string ToggleBiomesHint => Get(nameof(ToggleBiomesHint));
+    /// <summary>"Slope map" toggle.</summary>
+    public static string ToggleSlopeMap => Get(nameof(ToggleSlopeMap));
+    /// <summary>Caption under the "Slope map" toggle.</summary>
+    public static string ToggleSlopeMapHint => Get(nameof(ToggleSlopeMapHint));
+    /// <summary>"Hiking trails" toggle.</summary>
+    public static string ToggleTrails => Get(nameof(ToggleTrails));
+    /// <summary>"Roads" toggle.</summary>
+    public static string ToggleRoads => Get(nameof(ToggleRoads));
+    /// <summary>"TRAIL COLOURS" sub-header.</summary>
+    public static string TrailColoursHeader => Get(nameof(TrailColoursHeader));
+    /// <summary>Trail colour "Red".</summary>
+    public static string ColourRed => Get(nameof(ColourRed));
+    /// <summary>Trail colour "Blue".</summary>
+    public static string ColourBlue => Get(nameof(ColourBlue));
+    /// <summary>Trail colour "Green".</summary>
+    public static string ColourGreen => Get(nameof(ColourGreen));
+    /// <summary>Trail colour "Yellow".</summary>
+    public static string ColourYellow => Get(nameof(ColourYellow));
+    /// <summary>Trail colour "Black".</summary>
+    public static string ColourBlack => Get(nameof(ColourBlack));
+    /// <summary>"LAYERS" sub-header.</summary>
+    public static string LayersHeader => Get(nameof(LayersHeader));
+    /// <summary>"Trails" layer chip.</summary>
+    public static string LayerTrails => Get(nameof(LayerTrails));
+    /// <summary>"Peak names" layer chip.</summary>
+    public static string LayerPeakNames => Get(nameof(LayerPeakNames));
+    /// <summary>"Night sky" layer chip.</summary>
+    public static string LayerNightSky => Get(nameof(LayerNightSky));
+    /// <summary>"Contours" layer chip.</summary>
+    public static string LayerContours => Get(nameof(LayerContours));
+    /// <summary>"Range" label for the peak-name radius slider.</summary>
+    public static string PeakRangeLabel => Get(nameof(PeakRangeLabel));
+    /// <summary>Accessibility hint for the peak-name radius slider.</summary>
+    public static string PeakRangeHint => Get(nameof(PeakRangeHint));
+    /// <summary>"POINTS (POI)" sub-header.</summary>
+    public static string PoiHeader => Get(nameof(PoiHeader));
+    /// <summary>POI chip "Mountain huts".</summary>
+    public static string PoiHuts => Get(nameof(PoiHuts));
+    /// <summary>POI chip "Wilderness huts".</summary>
+    public static string PoiWilderness => Get(nameof(PoiWilderness));
+    /// <summary>POI chip "Chalets".</summary>
+    public static string PoiChalets => Get(nameof(PoiChalets));
+    /// <summary>POI chip "Shelters".</summary>
+    public static string PoiShelters => Get(nameof(PoiShelters));
+    /// <summary>POI chip "Viewpoints".</summary>
+    public static string PoiViewpoints => Get(nameof(PoiViewpoints));
+    /// <summary>POI chip "Parking".</summary>
+    public static string PoiParking => Get(nameof(PoiParking));
+    /// <summary>POI chip "Passes".</summary>
+    public static string PoiPasses => Get(nameof(PoiPasses));
+
+    // ── Weather panel ──
+    /// <summary>"Time" slider label.</summary>
+    public static string WeatherTime => Get(nameof(WeatherTime));
+    /// <summary>Accessibility hint for the time slider.</summary>
+    public static string WeatherTimeHint => Get(nameof(WeatherTimeHint));
+    /// <summary>"Clouds" slider label.</summary>
+    public static string WeatherClouds => Get(nameof(WeatherClouds));
+    /// <summary>Accessibility hint for the clouds slider.</summary>
+    public static string WeatherCloudsHint => Get(nameof(WeatherCloudsHint));
+    /// <summary>"Wind" slider label.</summary>
+    public static string WeatherWind => Get(nameof(WeatherWind));
+    /// <summary>Accessibility hint for the wind slider.</summary>
+    public static string WeatherWindHint => Get(nameof(WeatherWindHint));
+    /// <summary>"Snow" slider label.</summary>
+    public static string WeatherSnow => Get(nameof(WeatherSnow));
+    /// <summary>Accessibility hint for the snow slider.</summary>
+    public static string WeatherSnowHint => Get(nameof(WeatherSnowHint));
+
+    // ── View panel ──
+    /// <summary>"Vertical" exaggeration slider label.</summary>
+    public static string ViewVertical => Get(nameof(ViewVertical));
+    /// <summary>"Reset camera" button.</summary>
+    public static string ViewResetCamera => Get(nameof(ViewResetCamera));
+    /// <summary>"Fly-through" button.</summary>
+    public static string ViewFlythrough => Get(nameof(ViewFlythrough));
+
+    // ── Map panel ──
+    /// <summary>"REGIONS" sub-header.</summary>
+    public static string MapRegionsHeader => Get(nameof(MapRegionsHeader));
+    /// <summary>Region chip "Tatras".</summary>
+    public static string RegionTatry => Get(nameof(RegionTatry));
+    /// <summary>Region chip "Beskids".</summary>
+    public static string RegionBeskidy => Get(nameof(RegionBeskidy));
+    /// <summary>Region chip "Pieniny".</summary>
+    public static string RegionPieniny => Get(nameof(RegionPieniny));
+    /// <summary>Region chip "Bieszczady".</summary>
+    public static string RegionBieszczady => Get(nameof(RegionBieszczady));
+    /// <summary>"Load 1 m terrain" button.</summary>
+    public static string MapLoadTerrain => Get(nameof(MapLoadTerrain));
+    /// <summary>"Download all Tatras offline" button.</summary>
+    public static string MapDownloadOffline => Get(nameof(MapDownloadOffline));
+    /// <summary>"Download data packages" button.</summary>
+    public static string MapDownloadPackages => Get(nameof(MapDownloadPackages));
+    /// <summary>"DOWNLOAD FOR VIEW" sub-header.</summary>
+    public static string MapDownloadForViewHeader => Get(nameof(MapDownloadForViewHeader));
+    /// <summary>"ROUTE" sub-header in the Map panel.</summary>
+    public static string MapRouteHeader => Get(nameof(MapRouteHeader));
+
+    // ── Settings panel ──
+    /// <summary>"RENDER QUALITY" sub-header.</summary>
+    public static string SettingsQualityHeader => Get(nameof(SettingsQualityHeader));
+    /// <summary>Quality option "Performance".</summary>
+    public static string QualityPerformance => Get(nameof(QualityPerformance));
+    /// <summary>Quality option "Balanced".</summary>
+    public static string QualityBalanced => Get(nameof(QualityBalanced));
+    /// <summary>Quality option "High".</summary>
+    public static string QualityHigh => Get(nameof(QualityHigh));
+    /// <summary>Explanatory caption under the quality selector.</summary>
+    public static string QualityHint => Get(nameof(QualityHint));
+    /// <summary>"CACHE" sub-header.</summary>
+    public static string SettingsCacheHeader => Get(nameof(SettingsCacheHeader));
+    /// <summary>"Clear downloaded data" button.</summary>
+    public static string SettingsClearCache => Get(nameof(SettingsClearCache));
+    /// <summary>"DEBUG" sub-header.</summary>
+    public static string SettingsDebugHeader => Get(nameof(SettingsDebugHeader));
+    /// <summary>"FPS / stats overlay" toggle.</summary>
+    public static string SettingsFpsOverlay => Get(nameof(SettingsFpsOverlay));
+    /// <summary>"Verbose logging" toggle.</summary>
+    public static string SettingsVerboseLogs => Get(nameof(SettingsVerboseLogs));
+    /// <summary>"LANGUAGE" sub-header.</summary>
+    public static string SettingsLanguageHeader => Get(nameof(SettingsLanguageHeader));
+    /// <summary>Format for the cache-summary line; {0}=trails, {1}=POI, {2}=climbing.</summary>
+    public static string CacheSummaryFormat => Get(nameof(CacheSummaryFormat));
+    /// <summary>Status shown after the local cache is cleared.</summary>
+    public static string StatusCacheCleared => Get(nameof(StatusCacheCleared));
+    /// <summary>Status shown when clearing the cache fails.</summary>
+    public static string StatusCacheClearFailed => Get(nameof(StatusCacheClearFailed));
+
     private static string Get(string key) => Manager.GetString(key) ?? key;
 }

@@ -239,4 +239,116 @@
   <data name="StatusRoutePlanningOff" xml:space="preserve">
     <value>Route planning off.</value>
   </data>
+
+  <!-- ════ Menu chrome: top tab chips ════ -->
+  <data name="TabRoute" xml:space="preserve"><value>Route</value></data>
+  <data name="TabModes" xml:space="preserve"><value>Modes</value></data>
+  <data name="TabView" xml:space="preserve"><value>View</value></data>
+  <data name="TabMap" xml:space="preserve"><value>Map</value></data>
+  <data name="TabWeather" xml:space="preserve"><value>Weather</value></data>
+  <data name="TabSettings" xml:space="preserve"><value>Settings</value></data>
+
+  <!-- ════ Find-me / teleport bar ════ -->
+  <data name="LocateBarHeader" xml:space="preserve"><value>🔍  Location &amp; search</value></data>
+  <data name="LocateCenterOnMe" xml:space="preserve"><value>🎯  Center on me</value></data>
+  <data name="TeleportPlaceholder" xml:space="preserve"><value>Teleport: peak, hut, lake…</value></data>
+  <data name="TeleportFly" xml:space="preserve"><value>🎯 Fly</value></data>
+
+  <!-- ════ Section titles ════ -->
+  <data name="SectionRouteTitle" xml:space="preserve"><value>🧭  Route</value></data>
+  <data name="SectionModesTitle" xml:space="preserve"><value>🎚️  Modes</value></data>
+  <data name="SectionViewTitle" xml:space="preserve"><value>🎥  View</value></data>
+  <data name="SectionMapTitle" xml:space="preserve"><value>🗺️  Map</value></data>
+  <data name="SectionWeatherTitle" xml:space="preserve"><value>🌦️  Weather</value></data>
+  <data name="SectionSettingsTitle" xml:space="preserve"><value>⚙️  Settings</value></data>
+
+  <!-- ════ Route panel ════ -->
+  <data name="RoutePlanningLabel" xml:space="preserve"><value>Route planning</value></data>
+  <data name="AddStopHeader" xml:space="preserve"><value>ADD STOP</value></data>
+  <data name="SearchPlaceholder" xml:space="preserve"><value>Search: peak, hut, lake…</value></data>
+  <data name="RouteStopsHeader" xml:space="preserve"><value>ROUTE (STOPS IN ORDER)</value></data>
+  <data name="RouteStopsEmpty" xml:space="preserve"><value>Pick stops from the list or tap them on the map — then drag ⠿ to reorder.</value></data>
+  <data name="StopRemove" xml:space="preserve"><value>✕  Remove</value></data>
+  <data name="RouteShow" xml:space="preserve"><value>🧭  Show route</value></data>
+  <data name="RouteFilm" xml:space="preserve"><value>🎬  Route film</value></data>
+  <data name="RouteClearShort" xml:space="preserve"><value>🗑  Clear</value></data>
+  <data name="RouteGpxShort" xml:space="preserve"><value>⬇  GPX</value></data>
+
+  <!-- ════ Modes panel ════ -->
+  <data name="ToggleOrtho" xml:space="preserve"><value>Orthophoto</value></data>
+  <data name="ToggleRock" xml:space="preserve"><value>Rock</value></data>
+  <data name="ToggleRockHint" xml:space="preserve"><value>rock material on steep slopes (instead of blurred ortho)</value></data>
+  <data name="ToggleBiomes" xml:space="preserve"><value>Biomes</value></data>
+  <data name="ToggleBiomesHint" xml:space="preserve"><value>elevation zones: meadows / scree / rock / snow / ice</value></data>
+  <data name="ToggleSlopeMap" xml:space="preserve"><value>Slope map</value></data>
+  <data name="ToggleSlopeMapHint" xml:space="preserve"><value>colour by slope steepness (avalanche)</value></data>
+  <data name="ToggleTrails" xml:space="preserve"><value>Hiking trails</value></data>
+  <data name="ToggleRoads" xml:space="preserve"><value>Roads</value></data>
+  <data name="TrailColoursHeader" xml:space="preserve"><value>TRAIL COLOURS</value></data>
+  <data name="ColourRed" xml:space="preserve"><value>Red</value></data>
+  <data name="ColourBlue" xml:space="preserve"><value>Blue</value></data>
+  <data name="ColourGreen" xml:space="preserve"><value>Green</value></data>
+  <data name="ColourYellow" xml:space="preserve"><value>Yellow</value></data>
+  <data name="ColourBlack" xml:space="preserve"><value>Black</value></data>
+  <data name="LayersHeader" xml:space="preserve"><value>LAYERS</value></data>
+  <data name="LayerTrails" xml:space="preserve"><value>〰 Trails</value></data>
+  <data name="LayerPeakNames" xml:space="preserve"><value>🗻 Peak names</value></data>
+  <data name="LayerNightSky" xml:space="preserve"><value>✨ Night sky</value></data>
+  <data name="LayerContours" xml:space="preserve"><value>〰️ Contours</value></data>
+  <data name="PeakRangeLabel" xml:space="preserve"><value>Range</value></data>
+  <data name="PeakRangeHint" xml:space="preserve"><value>Peak-name range from the camera</value></data>
+  <data name="PoiHeader" xml:space="preserve"><value>POINTS (POI)</value></data>
+  <data name="PoiHuts" xml:space="preserve"><value>Mountain huts</value></data>
+  <data name="PoiWilderness" xml:space="preserve"><value>Wilderness huts</value></data>
+  <data name="PoiChalets" xml:space="preserve"><value>Chalets</value></data>
+  <data name="PoiShelters" xml:space="preserve"><value>Shelters</value></data>
+  <data name="PoiViewpoints" xml:space="preserve"><value>Viewpoints</value></data>
+  <data name="PoiParking" xml:space="preserve"><value>🅿 Parking</value></data>
+  <data name="PoiPasses" xml:space="preserve"><value>⛰ Passes</value></data>
+
+  <!-- ════ Weather panel ════ -->
+  <data name="WeatherTime" xml:space="preserve"><value>Time</value></data>
+  <data name="WeatherTimeHint" xml:space="preserve"><value>Time of day</value></data>
+  <data name="WeatherClouds" xml:space="preserve"><value>Clouds</value></data>
+  <data name="WeatherCloudsHint" xml:space="preserve"><value>Cloudiness</value></data>
+  <data name="WeatherWind" xml:space="preserve"><value>Wind</value></data>
+  <data name="WeatherWindHint" xml:space="preserve"><value>Wind strength</value></data>
+  <data name="WeatherSnow" xml:space="preserve"><value>Snow</value></data>
+  <data name="WeatherSnowHint" xml:space="preserve"><value>Snow cover</value></data>
+
+  <!-- ════ View panel ════ -->
+  <data name="ViewVertical" xml:space="preserve"><value>Vertical</value></data>
+  <data name="ViewResetCamera" xml:space="preserve"><value>⟲  Reset camera</value></data>
+  <data name="ViewFlythrough" xml:space="preserve"><value>🎬  Fly-through</value></data>
+
+  <!-- ════ Map panel ════ -->
+  <data name="MapRegionsHeader" xml:space="preserve"><value>REGIONS</value></data>
+  <data name="RegionTatry" xml:space="preserve"><value>Tatras</value></data>
+  <data name="RegionBeskidy" xml:space="preserve"><value>Beskids</value></data>
+  <data name="RegionPieniny" xml:space="preserve"><value>Pieniny</value></data>
+  <data name="RegionBieszczady" xml:space="preserve"><value>Bieszczady</value></data>
+  <data name="MapLoadTerrain" xml:space="preserve"><value>⛰️  Load 1 m terrain (Tatras · GUGiK)</value></data>
+  <data name="MapDownloadOffline" xml:space="preserve"><value>⬇️  Download all Tatras offline (WiFi)</value></data>
+  <data name="MapDownloadPackages" xml:space="preserve"><value>📦  Download data packages (server)</value></data>
+  <data name="MapDownloadForViewHeader" xml:space="preserve"><value>DOWNLOAD FOR VIEW</value></data>
+  <data name="MapRouteHeader" xml:space="preserve"><value>ROUTE</value></data>
+
+  <!-- ════ Settings panel ════ -->
+  <data name="SettingsQualityHeader" xml:space="preserve"><value>RENDER QUALITY</value></data>
+  <data name="QualityPerformance" xml:space="preserve"><value>Performance</value></data>
+  <data name="QualityBalanced" xml:space="preserve"><value>Balanced</value></data>
+  <data name="QualityHigh" xml:space="preserve"><value>High</value></data>
+  <data name="QualityHint" xml:space="preserve"><value>Performance disables anti-aliasing and thins the forest for smoother framerate; High renders everything.</value></data>
+  <data name="SettingsCacheHeader" xml:space="preserve"><value>CACHE</value></data>
+  <data name="SettingsClearCache" xml:space="preserve"><value>🗑  Clear downloaded data</value></data>
+  <data name="SettingsDebugHeader" xml:space="preserve"><value>DEBUG</value></data>
+  <data name="SettingsFpsOverlay" xml:space="preserve"><value>FPS / stats overlay</value></data>
+  <data name="SettingsVerboseLogs" xml:space="preserve"><value>Verbose logging</value></data>
+  <data name="SettingsLanguageHeader" xml:space="preserve"><value>LANGUAGE</value></data>
+  <data name="CacheSummaryFormat" xml:space="preserve">
+    <value>Trails: {0} · POI: {1} · Climbing: {2}</value>
+    <comment>{0}=trail count, {1}=POI count, {2}=climbing count.</comment>
+  </data>
+  <data name="StatusCacheCleared" xml:space="preserve"><value>Downloaded data cleared.</value></data>
+  <data name="StatusCacheClearFailed" xml:space="preserve"><value>Failed to clear the cache.</value></data>
 </root>
