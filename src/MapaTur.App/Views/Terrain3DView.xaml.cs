@@ -2353,8 +2353,7 @@ public partial class Terrain3DView : ContentView
     private Windows.Foundation.Point lastPointerPosition;
 
     // Keyboard-step constants tuned to feel close to one drag-pixel of the gesture
-    // recognisers (controller.OrbitSensitivity = 0.005 rad/px, PanSensitivity = 0.001 m/px/m).
-    private const float KeyOrbitPixelStep = 16f;
+    // recognisers (controller.PanSensitivity = 0.001 m/px/m).
     private const float KeyPanPixelStep = 24f;
     private const float KeyZoomFactor = 1.1f;
     private const float KeyTiltPixelStep = 10f; // ~2.9° per repeat — view pitch (R/F, PgUp/PgDn)
@@ -2539,13 +2538,13 @@ public partial class Terrain3DView : ContentView
                 controller.ApplyPan(KeyPanPixelStep, 0f);
                 break;
 
-            // A / D orbit (swing azimuth); W / S move forward / backward on the ground plane (dolly through
-            // the scene), matching the FPS convention the user asked for.
+            // A / D strafe left / right (lateral pan, same as ← / →); W / S move forward / backward on the ground
+            // plane (dolly through the scene) — standard FPS movement (WASD moves, mouse drag orbits/rotates).
             case Windows.System.VirtualKey.A:
-                controller.ApplyOrbit(-KeyOrbitPixelStep, 0f);
+                controller.ApplyPan(-KeyPanPixelStep, 0f);
                 break;
             case Windows.System.VirtualKey.D:
-                controller.ApplyOrbit(KeyOrbitPixelStep, 0f);
+                controller.ApplyPan(KeyPanPixelStep, 0f);
                 break;
             case Windows.System.VirtualKey.W:
                 controller.ApplyPan(0f, KeyPanPixelStep);
