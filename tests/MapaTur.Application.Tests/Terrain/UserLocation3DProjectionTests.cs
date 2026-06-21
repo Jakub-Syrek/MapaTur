@@ -72,15 +72,21 @@ public sealed class UserLocation3DProjectionTests
     }
 
     [Fact]
-    public void ToWorld_FixOutsideDemAndWithoutAltitude_IsDropped()
+    public void ToWorld_FixOutsideDemAndWithoutAltitude_IsSeatedNotDropped()
     {
+        // Previously dropped → the field "raz punkt jest, raz nie". Now a fix just outside the mesh is
+        // CLAMPED to the raster and seated (flat 1500 m raster → sampled at the clamped edge), so it stays
+        // visible instead of vanishing.
+        const float lift = 20f;
         var positionOutside = new GeoPoint(50.50, 22.00); // way north-east of the Tatra bbox
         var fix = UserLocation.Create(positionOutside, accuracyMeters: 8.0, timestamp: T);
+        TerrainMesh3D mesh = BuildMesh();
 
         IReadOnlyList<MarkerWorldPoint<UserLocation>> world = UserLocation3DProjection.ToWorld(
-            new[] { fix }, FlatRaster(), BuildMesh());
+            new[] { fix }, FlatRaster(), mesh, markerLiftMeters: lift);
 
-        world.Should().BeEmpty();
+        world.Should().ContainSingle();
+        world[0].World.Z.Should().BeApproximately((1500f + lift) * mesh.VerticalExaggeration, precision: 0.5f);
     }
 
     [Fact]
@@ -98,14 +104,19 @@ public sealed class UserLocation3DProjectionTests
     }
 
     [Fact]
-    public void ToWorld_NoRasterAndNoAltitude_DropsFix()
+    public void ToWorld_NoRasterAndNoAltitude_IsSeatedOnFallback()
     {
+        // No DEM + no GNSS altitude: seat on the flat ~valley-floor fallback rather than dropping the
+        // marker, so the dot still shows while the terrain streams in (field "raz punkt jest, raz nie").
+        const float lift = 20f;
         var positionNoAlt = new GeoPoint(49.25, 19.95);
         var fix = UserLocation.Create(positionNoAlt, accuracyMeters: 8.0, timestamp: T);
+        TerrainMesh3D mesh = BuildMesh();
 
         IReadOnlyList<MarkerWorldPoint<UserLocation>> world = UserLocation3DProjection.ToWorld(
-            new[] { fix }, raster: null, BuildMesh());
+            new[] { fix }, raster: null, mesh, markerLiftMeters: lift);
 
-        world.Should().BeEmpty();
+        world.Should().ContainSingle();
+        world[0].World.Z.Should().BeApproximately((1000f + lift) * mesh.VerticalExaggeration, precision: 0.5f);
     }
 }
