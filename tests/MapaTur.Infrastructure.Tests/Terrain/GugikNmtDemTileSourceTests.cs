@@ -214,6 +214,23 @@ public sealed class GugikNmtDemTileSourceTests : IDisposable
     }
 
     [Fact]
+    public async Task GetTileAsync_AllZeroResponse_ReturnsNullAndCachesNothing()
+    {
+        // GUGiK returns a valid-structured but ALL-ZERO tile on no-coverage / flaky-overloaded responses.
+        // It must NOT be cached: a cached zero is pinned by File.Exists (IsCached) and never re-fetched, so a
+        // transient zero becomes PERMANENT "plasticine" poison (the detail path skips it via HasTerrain and the
+        // blunt base shows). Keeping it out of the cache lets a later fetch self-heal it.
+        var zeros = new[] { 0f, 0f, 0f, 0f };
+        var handler = new StubHandler(_ => Ok(BuildTiff(2, 2, zeros)));
+        var source = NewSource(handler);
+
+        DemRaster? raster = await source.GetTileAsync(InsidePoland);
+
+        raster.Should().BeNull();
+        File.Exists(ExpectedCachePath()).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task GetTileAsync_NonTiffPayload_ReturnsNull()
     {
         // A WCS ServiceException comes back as XML, not a TIFF — decode fails, treat as no data.

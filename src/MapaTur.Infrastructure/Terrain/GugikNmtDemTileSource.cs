@@ -38,6 +38,12 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
     private const float NoDataFloor = -10000f;
     private const float NoDataSentinel = -32768f;
 
+    // Empty-tile reject floor: GUGiK returns a valid-structured but ALL-ZERO raster on no-coverage or a
+    // flaky/overloaded response. Any real Polish terrain in a tile tops out far above this; an empty tile
+    // tops out at ~0. A tile whose highest valid elevation is below this is treated as "no tile" and NOT
+    // cached, so a transient zero self-heals on a later fetch instead of becoming permanent cache poison.
+    private const double EmptyTileFloorMeters = 1.0;
+
     // Anti-washboard: when a tile covers a lot of ground, requesting it at the plain tile grid makes the
     // WCS resample its 1 m source on a coarse grid (≈19 m/px at z13) across an EPSG:2180→3857 reprojection,
     // baking a diagonal ripple into the heights (whose derivative — the lighting normal — then stripes the
@@ -94,7 +100,15 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
         }
 
         int fetchPx = FetchPixelsFor(key);
-        byte[]? tiff = await ReadOrDownloadAsync(key, fetchPx, cancellationToken).ConfigureAwait(false);
+        string path = CachePath(key);
+        bool fromCache = File.Exists(path);
+
+        // Read from cache if present; otherwise download — but do NOT write to the cache yet. The tile is
+        // committed to disk only AFTER it decodes and passes the empty-tile guard below, so a GUGiK all-zero
+        // response is never cached.
+        byte[]? tiff = fromCache
+            ? await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false)
+            : await DownloadAsync(key, fetchPx, cancellationToken).ConfigureAwait(false);
         if (tiff is null)
         {
             return null;
@@ -107,7 +121,7 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
         }
         catch (FormatException)
         {
-            // Service returned an XML ServiceException or some unexpected payload — treat as no data.
+            // Service returned an XML ServiceException or some unexpected payload — treat as no data, cache nothing.
             return null;
         }
 
@@ -117,6 +131,7 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
         // If we over-requested (factor > 1), area-average the dense buffer back to tileSize — a proper
         // low-pass that removes the WCS coarse-grid washboard without adding mesh vertices. Only when the
         // server actually returned the dense grid we asked for; otherwise pass the decoded raster through.
+        DemRaster raster;
         int factor = fetchPx / this.tileSize;
         if (factor > 1 && grid.Width == fetchPx && grid.Height == fetchPx)
         {
@@ -126,10 +141,32 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
             // factor/fetchPx → same cache key, so this needs NO re-fetch of already-cached tiles.
             float[] averaged = MapaTur.Application.Terrain.DemTileSupersampler.LowPassDownsample(
                 samples, this.tileSize, factor, NoDataSentinel);
-            return new DemRaster(this.tileSize, this.tileSize, bounds, averaged, NoDataSentinel);
+            raster = new DemRaster(this.tileSize, this.tileSize, bounds, averaged, NoDataSentinel);
+        }
+        else
+        {
+            raster = new DemRaster(grid.Width, grid.Height, bounds, samples, NoDataSentinel);
         }
 
-        return new DemRaster(grid.Width, grid.Height, bounds, samples, NoDataSentinel);
+        // Empty-tile guard (the "plasticine" root cause): GUGiK returns a valid-structured but ALL-ZERO raster
+        // on no-coverage or a flaky/overloaded response. Reject it and DO NOT cache it — the cache is keyed on
+        // File.Exists, so a committed zero is pinned forever and never re-fetched, leaving the blunt base on
+        // screen. Keeping it uncached lets a later fetch self-heal a transient zero; a genuinely empty tile (no
+        // PL 1 m coverage) just re-resolves to the base on each load, exactly as the render path already does.
+        if (!DemRasterCoverage.HasTerrain(raster, EmptyTileFloorMeters))
+        {
+            return null;
+        }
+
+        // Valid tile: persist a freshly downloaded one. The cache stores the RAW WCS bytes; any area-average
+        // above is re-applied on read, so the cache key/content stays stable.
+        if (!fromCache)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            await File.WriteAllBytesAsync(path, tiff, cancellationToken).ConfigureAwait(false);
+        }
+
+        return raster;
     }
 
     private static bool IntersectsPoland(double west, double south, double east, double north)
@@ -146,25 +183,6 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
         }
 
         return samples;
-    }
-
-    private async Task<byte[]?> ReadOrDownloadAsync(DemTileKey key, int fetchPx, CancellationToken cancellationToken)
-    {
-        string path = CachePath(key);
-        if (File.Exists(path))
-        {
-            return await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
-        }
-
-        byte[]? tiff = await DownloadAsync(key, fetchPx, cancellationToken).ConfigureAwait(false);
-        if (tiff is null)
-        {
-            return null;
-        }
-
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        await File.WriteAllBytesAsync(path, tiff, cancellationToken).ConfigureAwait(false);
-        return tiff;
     }
 
     private async Task<byte[]?> DownloadAsync(DemTileKey key, int fetchPx, CancellationToken cancellationToken)
