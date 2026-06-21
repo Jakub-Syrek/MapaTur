@@ -31,6 +31,12 @@
 
 *Left: marked PTTK hiking trails, named summits and mountain POIs **densified and seated on the 1 m terrain** so each line hugs the relief instead of cutting across it — toggle layers (trails, summit names, POI categories) live from the data panel. Right: the bare relief with glacial tarns. Windows desktop (ANGLE → Direct3D 11).*
 
+<p align="center">
+  <img src="docs/screenshots/3d-tatry-desktop.jpg" alt="MapaTur 3D — Morskie Oko under the Mięguszowieckie ridge, marked PTTK trails on the 1 m terrain, on the Windows desktop" width="92%" />
+</p>
+
+*Morskie Oko beneath the Mięguszowieckie Szczyty, Cubryna and Mnich — red, green and yellow PTTK trails seated on the 1 m relief, named summits, and the tarn's water surface. Windows desktop (ANGLE → Direct3D 11).*
+
 ## About
 
 MapaTur is a hiking-trip companion for the Tatra mountains that **runs entirely offline**. Drop in any
