@@ -808,19 +808,50 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <summary>Premium menu "Biomy": paint the base albedo by elevation-zone biomes (hala/piargi/skała/śnieg/lód).</summary>
     [ObservableProperty] private bool biomeMaterialOn;
 
-    // Default OFF after a fresh install — only peak names (showPeakNames) start on; the user opts in
-    // to trails and each POI category from the Dane panel.
-    [ObservableProperty] private bool showTrails;
+    // Default ON — trails are core to a hiking map, so they show by default (field complaint: "szlaki się nie
+    // ładują... miała być na defaulcie dociąganie"). AutoLoad seats them OFFLINE-FIRST from the SQLite cache
+    // (a prior session's download) and only fetches from Overpass when nothing is cached and there's signal
+    // (LoadOrFetchTrailsOnStartupAsync). POI categories stay opt-in from the Dane panel.
+    [ObservableProperty] private bool showTrails = true;
 
     partial void OnShowTrailsChanged(bool value)
     {
         OnTrailFilterChanged();
         if (value && rawTrails is null)
         {
-            // Never loaded this session (no bundled file / not yet downloaded) → fetch them from Overpass for the
-            // current footprint (the Tatra core in 3D), so turning "Szlaki" on pulls trails in, not shows nothing.
-            _ = DownloadTrailsForViewportAsync();
+            // Toggled on with nothing loaded this session → pull them in (cache-first, then Overpass) instead
+            // of showing nothing. Same path AutoLoad uses, so an offline cache shows immediately.
+            _ = LoadOrFetchTrailsOnStartupAsync();
         }
+    }
+
+    /// <summary>
+    /// Seats the trail set on startup / first "Szlaki" use: OFFLINE-FIRST from the SQLite cache (a prior
+    /// session's download), falling back to a live Overpass fetch only when nothing is cached. An offline
+    /// fetch fails quietly. Best-effort — never blocks startup.
+    /// </summary>
+    private async Task LoadOrFetchTrailsOnStartupAsync()
+    {
+        if (!ShowTrails || rawTrails is not null || TerrainRaster is not { } raster)
+        {
+            return;
+        }
+
+        try
+        {
+            IReadOnlyList<Trail> cached = await trailRepository.FindIntersectingAsync(raster.Bounds).ConfigureAwait(true);
+            if (cached.Count > 0)
+            {
+                await ApplyTrailsAsync(cached).ConfigureAwait(true);
+                return;
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Startup cached-trail load failed");
+        }
+
+        await DownloadTrailsForViewportAsync().ConfigureAwait(true);
     }
 
     // PTTK colour toggles for the trail filter. All true by default — the
@@ -3389,6 +3420,10 @@ public sealed partial class MapPageViewModel : ObservableObject
                 loaded.Add(Path.GetFileName(trailsPath));
                 logger.LogInformation("Auto-loaded {Count} pre-bundled trails from {Path}", trails.Count, trailsPath);
             }
+
+            // Default-ON trails: if nothing was bundled, seat them offline-first from the SQLite cache (or
+            // fetch when online + uncached) so the map shows trails without a manual toggle.
+            await LoadOrFetchTrailsOnStartupAsync().ConfigureAwait(true);
 
             // Restore the user's saved tourist route (stops persist across restarts). Best-effort: the stop
             // markers come back now; the route LINE draws once trails are available (bundled above, or after a
