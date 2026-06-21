@@ -121,9 +121,15 @@ pobieraniu paczek + bundlowany trails JSON (loader już to wspiera `discovery.Tr
 - **Parytet:** cięższa baza/detal na mocnych urządzeniach (+ pozostałe wg planu).
 
 ## Postęp
-- [ ] Fala 1.3 Wydajność — bramkowanie repaintu, cache okluzji, inkrementalny UploadTiles
-- [ ] Fala 1.1 Nawigacja — „🎯 Na mnie" + stabilny punkt GPS
-- [ ] Fala 1.2 Szlaki — default ON + offline/pre-cache (część auto-sync)
-- [ ] Fala 2.4 Baza — gęstszy DEM (po ustaleniu źródła)
-- [ ] Fala 2.5 Detale — auto-sync paczek (DEM/szlaki/POI) na instalacji + okresowo
+- [~] Fala 1.3 Wydajność — ✅ cache okluzji + inkrementalny upload detalu (`a113dac`); ⏳ bramkowanie repaintu (15 fps zawsze), cache etykiet jezior
+- [x] Fala 1.1 Nawigacja — ✅ „🎯 Na mnie" recenter (`d9d7c62`) + ✅ stabilny punkt GPS (clamp do rastra + fallback, nie znika poza DEM / bez wysokości)
+- [x] Fala 1.2 Szlaki — ✅ default ON + offline-first (cache SQLite → fetch tylko gdy puste+online); okresowy refresh = Fala 2 auto-sync
+- [ ] Fala 2.4 Baza — gęstszy DEM ~10 m (po ustaleniu źródła: GUGiK NMT + ZBGIS)
+- [ ] Fala 2.5 Dane — auto-sync paczek (DEM z16 / szlaki / POI) na instalacji + okresowo przy zmianach
+- [ ] Fala 2.7 UX ładowania — komunikaty „pobieram / brak kafli" jako SPOKOJNE INFO (nie alarm — dane same się dociągają) + PASEK POSTĘPU do wszystkich oczekiwań (auto-load DEM, streaming detalu, pobieranie paczek, szlaki/POI)
 - [ ] Fala 3.6 Parytet — GL-recovery hook, cięższa baza na mocnych, demo/kamera gestami
+
+> Fala 2.7 — stan z audytu: dziś tylko `StatusMessage` (tekst) + `IsBusy` (blokuje przyciski),
+> brak paska postępu; stringi `StatusDownloading*` (AppStrings). „Brak kafli" = ścieżka
+> off-coverage / log `stream-probe`. Cel: zamienić alarmujące komunikaty na spokojne info i
+> dać JEDEN wspólny wskaźnik postępu (pasek/spinner) dla każdego oczekiwania.
