@@ -13,6 +13,56 @@ Pierwsze spisanie tego dokumentu: **2026-06-09** (sesja wody; LOD/streaming NIE 
 
 ---
 
+## SESJA 2026-06-21 — „góry z plasteliny" na mobile: baza 15 m DEFORMUJE morfologię, 1 m NIE wchodzi (🔵 NIEROZSTRZYGNIĘTE) + Fala 1 poprawek terenowych
+
+> **KONIEC SESJI: PROBLEM TERENU NIEROZWIĄZANY.** Telefon (vc **132**) dalej = „wyoblony pagórek zamiast kanciastej wieży" (Jastrzębia Turnia, zrzuty usera). Każda próba tej sesji albo zabiła FPS, albo nie tknęła jakości. **NASTĘPNY KROK (PRZERWANY przez usera dla tego handoffu): wystawić stan LOD NA EKRAN — bez tego zgaduję i kładę raz za razem (~6× ogłosiłem „fix", user odrzucił).**
+
+### A. Z CZYM WALCZYMY (diagnoza usera — 🟢 POTWIERDZONA wizualnie, NIErozwiązana)
+- 🟢 **To NIE utrata detalu z dystansem — to DEFORMACJA morfologii.** Baza `tatry.dem` = **4320×2200 = 15 m** (potwierdzone z nagłówka pliku) działa jak agresywny filtr dolnoprzepustowy: grań → szeroki obły wał, ściany → kopuły, żleby/załamania znikają. Najgorzej Jastrzębia Turnia / Czerwony Staw.
+- 🟢 **Oczekiwane:** daleko = mniej detalu, ale ten sam KSZTAŁT. **Obecne:** daleko = mniej detalu I inny kształt góry.
+- 🟢 **1 m się NIE doczytuje** — gdyby się doczytał, pierwszy plan byłby ostry; jest blocky WSZĘDZIE (foreground też). Badge „LOD 1 m" KŁAMIE (pokazuje się mimo że render to goła baza).
+- 🟢 **Desktop OK bo 1 m jedzie szeroko** (user: „na desktopie jedzie 1m wszędzie i zawsze"). Ten sam renderer (GLES, ANGLE/native), te same dane — różnica w POKRYCIU 1 m.
+
+### B. KLUCZOWE FAKTY (z kodu, 🟢 potwierdzone)
+- **Render detalu = CACHE-ONLY** (`MapPageViewModel.BuildPerTileDetailAsync` → `LoadRegionAsync(window, NearDetailZoom=16, tileAvailable: <gate>)`). `tileAvailable=null` → fetch live z WCS przez `source.GetTileAsync`; `=detailTileCached` → tylko cached. **To ŚWIADOMA decyzja §10 (2026-06-07): „zero WCS w locie".**
+- **Telefon MA mieć całe PL Tatry 1 m offline (~732 MB, §1/§65).** Cache `AppDataDirectory/dem-cache/gugik/{z}/{x}/{y}.tif`. Sprawdzenie z telefonu: katalogi `gugik/13,14,16` ISTNIEJĄ, ale **liczby kafli z16 NIE udało się wiarygodnie policzyć** (run-as filesystem flaky). **DO PILNEGO USTALENIA: czy z16 cache pełny (~4924 kafle, patrz SESJA 2026-06-10) czy rzadki/osierocony?** (Precedens: zmiana klucza cache `bbaf04e` raz osierociła z16 → goła baza wszędzie.)
+- **Aktywna ścieżka = `BuildPerTileDetailAsync`** (`UsePerTileDetail=true`). Ładuje z16 nad oknem `PerTileWindowRadiusMeters`, potem per-tile roughness LOD pod budżet `PerTileVertexBudget`.
+- **🟡 BRAMKA POMIJAJĄCA PATCH (najmocniejsza hipoteza):** w `OnDetailFocusAsync`, jeśli `detailZoom ≤ BaseDetailZoomFloor (=12)` → **patch w ogóle nie powstaje** (return null → goła baza). `detailZoom` z `ScreenSpaceLod.ZoomForCameraDistance(cameraToLookAt)`. Widok na szczyt o ~1-2 km → SSE może wybrać z14/z12 → patch SKIPPED → baza. **TO WERYFIKOWAĆ ON-SCREEN PIERWSZE.**
+
+### C. CO PRÓBOWAŁEM (wszystko UNCOMMITTED; każde albo zabiło FPS, albo nie tknęło jakości)
+1. 🔴 **Cap bazy 5 M → 12 M + ring 6 km → 100 km → 20 km** (renderować pełne 15 m bazy natywnie). **Efekt: 3 FPS, ZERO zysku jakości.** LEKCJA: renderowanie WIĘCEJ grubej bazy NIE naprawia morfologii — 15 m to za mało DANYCH; ostrość daje tylko 1 m detal. **COFNIĘTE** do 5 M / 6 km (gałęzie `#elif ANDROID` / `#else`; Windows nietknięty).
+2. 🔴 **Live-fetch v131** (`DetailTileGate`: online → `tileAvailable=null` → fetch z16 z WCS). **ŁAMIE decyzję cache-only §10.** `#if WINDOWS` = stary cache-only (desktop nietknięty), `#else` = online-aware (Connectivity). **Efekt: dalej blocky** → albo fetch nie działa, albo patch i tak SKIPPED (bramka B), albo cache był pełny a problem leży gdzie indziej.
+3. 🔴 **Okno detalu 1500 → 2200 m + budżet 1,5 M → 3 M** (v132). **Efekt: dalej blocky** → okno to nie problem; 1 m nie wchodzi W OGÓLE.
+4. (poboczne, NIE-teren) trail occlusion bias `0.001 → adaptacyjny 0.04` (`Terrain3DGlRenderer`) — user odrzucił jako dystrakcję.
+
+### D. LUKA DIAGNOSTYCZNA (czemu kładłem raz za razem)
+- **Nie umiem odczytać logu Serilog z telefonu.** Ścieżka = `AppContext.BaseDirectory/logs/mapatur-DATE.log` z fallbackiem `Path.GetTempPath()/MapaTur/logs`. `run-as` zwraca śmieci/„No such dir"; `logcat` ma TYLKO komendy adb (appowy ILogger→Serilog idzie do PLIKU, nie logcat). → zgadywałem zamiast czytać `cache-only z16: requested/cached/skipped` + `detail z{Zoom}`.
+- ➡️ **NASTĘPNY KROK (przerwany):** wpiąć do `BuildPerTileDetailAsync` ustawienie `StatusMessage` z: wybrany zoom + `cachedCount`/`planned.Count` + online(`Connectivity.Current.NetworkAccess`) + patch=NULL?. Pill jest już na ekranie → user czyta GROUND TRUTH → naprawiam DOKŁADNIE to. **ZACZNIJ OD TEGO.**
+
+### E. DECYZJE (user, 🟢 obowiązujące)
+- 🟢 **„Nie zjeb desktopowej wersji"** — desktop zostaje dokładnie jak działa. Detal-fetch `#if WINDOWS` = stary cache-only; capy bazy tylko w gałęziach Android/`#else`. (Uwaga: „desktop się nie buduje" usera = **blokada pliku** running `MapaTur.App.exe`, MSB3027, NIE błąd kodu — kompilacja przechodzi; [[maui_local_build_gotchas]].)
+- 🟢 **Fix to 1 m detal, NIE baza.** User: „mieliśmy podwyższyć bazę… a zajmujesz się gówno optycznymi sztuczkami" → „na desktopie jest ok bo 1m wszędzie".
+- 🟡 **Cache-only (§10) vs live-fetch:** nowa sesja MUSI zdecydować — trzymać cache-only + naprawić czemu (pełny?) cache nie ładuje (skip-bramka? osierocony cache?), ALBO świadomie złamać cache-only na mobile (v131) i potwierdzić że fetch DZIAŁA. **v131 łamie §10 bez dowodu że pomaga → domyślnie ROZWAŻ COFNIĘCIE i idź ścieżką „czemu cache nie ładuje".**
+
+### F. STAN GITA (koniec sesji)
+- **Branch `main`.** Pushnięte do `f04bac8`. **Fala 1 commity LOKALNE, NIEpushnięte:** `2829546`(plan), `a113dac`(perf), `d9d7c62`/`1bd3c7d`(nav), `0ed1294`/`8b65d64`(szlaki). Bramka (format+testy) zielona przed każdym.
+- **UNCOMMITTED (working tree):** `Terrain3DGlRenderer.cs` (trail bias adaptacyjny) + `MapPageViewModel.cs` (cap revert + ring revert + `DetailTileGate` live-fetch + okno/budżet bump). **Telefon = vc 132 z tymi zmianami.** Decyzja czy je commitować/cofać należy do nowej sesji (patrz E).
+
+### G. FALA 1 — poprawki po teście w Tatrach (OSOBNY wątek, w większości scommitowany)
+Plan + decyzje: **`docs/PLAN-tatry-field-fixes.md`**. Committed (lokalnie): 🟢 perf (cache okluzji + inkrementalny upload, `a113dac`), 🟢 nav („🎯 Na mnie" `d9d7c62` + stabilny punkt GPS `1bd3c7d`), 🟢 szlaki default-ON+offline (`0ed1294`). ZOSTAŁO: auto-sync paczek (DEM z16/szlaki/POI na instalacji + okresowo) — **to realny kierunek na pełny cache 1 m**; pasek postępu zamiast alarmów ładowania; parytet (GL-recovery hook Android).
+
+### H. DEPLOY (KRYTYCZNE — inaczej nie wgrasz bez wipe'u 732 MB cache)
+Telefon ma APK podpisany **release-keystore** (`~/mapatur.keystore`, alias `mapatur`, hasło w komendzie keytool usera / RELEASE.md secrets). Podpisz lokalny build TYM keystore + versionCode > obecnego (teraz **132**) → `adb install -r` ZACHOWUJE cache. Inaczej signature-mismatch → odinstalowanie = wipe ([[device-data-restore]], [[deploy-sign-release-keystore]]). adb: `C:\Program Files (x86)\Android\android-sdk\platform-tools`. Build: `-c Debug -p:EmbedAssembliesIntoApk=true -p:ApplicationVersion=133 -p:AndroidKeyStore=true -p:AndroidSigningKeyStore="$HOME\mapatur.keystore" -p:AndroidSigningKeyAlias=mapatur -p:AndroidSigningStorePass=<pass> -p:AndroidSigningKeyPass=<pass>`. Skasuj stare `bin/Debug/net10.0-android/*.apk` (Bash `rm`) przed buildem.
+
+### I. CO ZROBIĆ W NOWEJ SESJI (kolejność)
+1. **Wystaw stan LOD na ekran** (StatusMessage w `BuildPerTileDetailAsync`: zoom + cached/planned + online + patch=NULL). Wgraj vc 133 (podpisany). User patrzy na Jastrzębią → czyta pill. **GROUND TRUTH PRZED jakąkolwiek zmianą.**
+2. Rozstrzygnij: (a) patch SKIPPED przez `detailZoom ≤ 12`? → poluzuj bramkę / wymuś z16 bliżej. (b) z16 cache pusty/rzadki/osierocony? → policz kafle; jeśli osierocony (precedens `bbaf04e`) → re-key/re-download. (c) fetch nie działa? → log Connectivity/WCS.
+3. **Zdecyduj cache-only vs live-fetch** (§10). Domyślnie rozważ cofnięcie v131.
+4. **NIE ruszaj bazy (cap/ring)** — ślepa uliczka tej sesji (3 FPS, zero jakości).
+5. **Żaden „sukces" przed zrzutem+potwierdzeniem usera** (§18). Tej sesji złamałem to ~6×.
+
+---
+
 ## SESJA 2026-06-10 — „paski" na ortho LOD: regresja detalu + washboard bazy (ROZSTRZYGNIĘTE)
 
 > Pełny rozbiór: pamięć `ortho-grazing-stripes.md`. Skrót:
