@@ -932,10 +932,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  vec2 offNdc = (nrm * uHalfPx * aSide) / (uViewport * 0.5);\n" +
         "  gl_Position = clipA;\n" +
         "  gl_Position.xy += offNdc * clipA.w;\n" +
-        // Small depth bias toward the camera so the line WINS the depth test against the 1 m detail surface it
-        // lies on (the fine relief no longer overdraws/occludes trails + route) — yet small enough that a real
-        // ridge clearly in front still occludes the line behind it.
-        "  gl_Position.z -= 0.0010 * gl_Position.w;\n" +
+        // Depth bias toward the camera so the line wins the z-fight with the 1 m detail it lies on — but it MUST
+        // fade with distance or a ridge in front can't occlude the line. The old `* gl_Position.w` made it a
+        // CONSTANT NDC bias: at a far plane of tens of km the NDC-z of distant terrain bunches near 1, so the
+        // same bias that wins a near z-fight ALSO punched trails THROUGH faraway ridges ("szlaki widać przez
+        // skały"). Subtracting a constant in CLIP space (NO `* w`) makes the NDC bias = C/w — strong up close
+        // where the 1 m detail actually z-fights, ~0 far away where ridges must occlude. Plus 10 m TrailLift seating.
+        "  gl_Position.z -= 0.04;\n" +
         "}\n";
 
     private const float TrailHalfWidthPx = 1.6f;
@@ -953,10 +956,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private const float SkyB = 0xB0 / 255f;
 
     // Overlays are lifted above the surface so they sit on their own slope yet get occluded by mountains
-    // in front of them via the depth test.
-    private const float TrailLiftMeters = 6f;
-    private const float RouteLiftMeters = 9f;
-    private const float RoadLiftMeters = 4f;
+    // in front of them via the depth test. Raised (6→10 m) so the 1 m detail relief no longer pokes up over the
+    // lines in places ("szlaki przykrywane przez detal"); the lift is a WORLD-space vertical offset, so a real
+    // ridge IN FRONT still occludes (lift ≪ ridge height) — i.e. this fixes the cover-up WITHOUT re-introducing
+    // "szlaki przez skały" (that is the depth-bias's job, left untouched at -= 0.04).
+    private const float TrailLiftMeters = 10f;
+    private const float RouteLiftMeters = 14f;
+    private const float RoadLiftMeters = 7f;
 
     // Contour lines (warstwice): drawn IN the terrain shader from each fragment's elevation, so they lie on
     // whatever LOD is rendered (coarse base OR 1 m detail) — no float, no rock poke-through, crisp at any zoom.
