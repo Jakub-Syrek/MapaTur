@@ -37,6 +37,18 @@
 
 *Morskie Oko beneath the Mięguszowieckie Szczyty, Cubryna and Mnich — red, green and yellow PTTK trails seated on the 1 m relief, named summits, and the tarn's water surface. Windows desktop (ANGLE → Direct3D 11).*
 
+<p align="center">
+  <img src="docs/screenshots/3d-tatry-golden-hour.jpg" alt="MapaTur 3D — golden-hour lighting with volumetric sun streaks over Czarny Szczyt" width="92%" />
+</p>
+
+*Golden hour over Czarny Szczyt — a physically-driven sun position with warm aerial perspective and screen-space crepuscular rays ("god rays"), all rendered live in the terrain engine.*
+
+<p align="center">
+  <img src="docs/screenshots/tatry-real-photo.jpg" alt="The real Tatra mountains — a sharp granite peak under a summer sky" width="38%" />
+</p>
+
+*…and the real range it models — the Tatras on location.*
+
 ## About
 
 MapaTur is a hiking-trip companion for the Tatra mountains that **runs entirely offline**. Drop in any
