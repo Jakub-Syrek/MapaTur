@@ -139,4 +139,9 @@
 	  <ProjectReference Include="..\MapaTur.Domain\MapaTur.Domain.csproj" />
 	</ItemGroup>
 
+	<!-- LOCAL signing overrides (git-ignored): lets local device builds auto-sign with the release key so
+	     `adb install -r` upgrades in place without wiping on-device data. Absent on CI / other machines, so
+	     the Exists() guard makes this a no-op there and the repo never stores the signing passwords. -->
+	<Import Project="signing.local.props" Condition="Exists('signing.local.props')" />
+
 </Project>

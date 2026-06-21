@@ -9,6 +9,10 @@
 # Local scratch dirs (device screenshots, tile dumps)
 .tmp-*/
 
+# Local signing secrets (keystore passwords) — NEVER commit. Imported by MapaTur.App.csproj when present.
+*.local.props
+signing.local.props
+
 # User-specific files
 *.rsuser
 *.suo
