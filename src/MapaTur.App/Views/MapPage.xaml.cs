@@ -258,11 +258,12 @@ public partial class MapPage : ContentPage
 
         Border? panel = section switch
         {
-            1 => PanelMapa,
-            2 => PanelPogoda,
+            1 => PanelTrasa,
+            2 => PanelTryby,
             3 => PanelWidok,
-            4 => PanelDane,
-            5 => PanelUstawienia,
+            4 => PanelMapa,
+            5 => PanelPogoda,
+            6 => PanelUstawienia,
             _ => null,
         };
         if (panel is null)
@@ -312,6 +313,13 @@ public partial class MapPage : ContentPage
     private async void OnCameraFocusMoved(object? sender, Camera3D camera)
     {
         await viewModel.OnDetailFocusAsync(camera, TerrainView.SurfacePixelHeight);
+    }
+
+    // The user dragged a route stop to a new position (CollectionView CanReorderItems) — the stops collection
+    // is already reordered, so re-plan the chained route to follow the new sequence.
+    private async void OnRouteStopsReorderCompleted(object? sender, EventArgs e)
+    {
+        await viewModel.ReplanAfterReorderAsync();
     }
 
     // "Download whole Tatras offline": a big one-time pull meant for WiFi (no signal in the field). The

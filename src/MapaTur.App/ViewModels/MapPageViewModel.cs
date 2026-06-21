@@ -106,6 +106,13 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private string lodBadgeText = "LOD 1 m";
 
+    // The always-on find-me / teleport (search + location) bar can be collapsed to free screen space.
+    [ObservableProperty]
+    private bool isLocateBarExpanded = true;
+
+    [RelayCommand]
+    private void ToggleLocateBar() => IsLocateBarExpanded = !IsLocateBarExpanded;
+
     [ObservableProperty]
     private bool isBusy;
 
@@ -555,10 +562,10 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private string cacheSummary = "—";
 
-    // Refresh the cache counts whenever the Ustawienia panel (section 5) opens, so the figure is live.
+    // Refresh the cache counts whenever the Ustawienia panel (section 6) opens, so the figure is live.
     partial void OnActiveSectionChanged(int value)
     {
-        if (value == 5)
+        if (value == 6)
         {
             _ = RefreshCacheSummaryAsync();
         }
@@ -1985,6 +1992,10 @@ public sealed partial class MapPageViewModel : ObservableObject
 
         await ReplanRouteAsync().ConfigureAwait(true);
     }
+
+    // Drag-reorder finished in the route-stops list (CollectionView CanReorderItems): the ObservableCollection
+    // is already in the new order, so just re-plan the chained route to match the new stop sequence.
+    public Task ReplanAfterReorderAsync() => ReplanRouteAsync();
 
     // Renders the current stop markers, then (with ≥2 stops) plans the chained route over the trail
     // graph and renders it. A leg with no path names the gap so the user knows where the chain broke.
