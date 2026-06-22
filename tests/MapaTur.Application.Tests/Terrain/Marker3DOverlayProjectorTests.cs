@@ -5,6 +5,7 @@ using FluentAssertions;
 using MapaTur.Application.Terrain;
 using MapaTur.Domain.Climbing;
 using MapaTur.Domain.Geography;
+using MapaTur.Domain.Pois;
 using MapaTur.Domain.Terrain;
 
 namespace MapaTur.Application.Tests.Terrain;
@@ -246,6 +247,36 @@ public sealed class Marker3DOverlayProjectorTests
         var peaks = new[] { new TerrainPeak(new GeoPoint(49.5, 19.5), 2100.0, "Rysy") };
 
         var projected = PeakProjector().Project(peaks, null, BuildMesh(), LookDownCamera(), 800f, 600f, 40f);
+
+        projected.Single().ScreenPosition.Should().NotBeNull();
+    }
+
+    // A POI instantiation, mirroring how the view wires the bundled hut/pass overlay.
+    private static Marker3DOverlayProjector<MountainPoi, ProjectedPoi> PoiProjector()
+        => new(
+            (pois, raster, mesh, lift) => Poi3DProjection.ToWorld(pois, raster!, mesh, lift),
+            (source, screen) => new ProjectedPoi(source, screen));
+
+    [Fact]
+    public void Project_PoiBeyondLabelRadius_IsCulledToNullScreen()
+    {
+        // The "zasięg" slider must trim distant POI markers (huts, przełęcze, Honoratka) just like peak
+        // and lake labels: the camera sits 80 km out, so a 1 m radius drops the POI to a null screen.
+        var pois = new[] { new MountainPoi(-1, "Murowaniec", new GeoPoint(49.5, 19.5), PoiKind.Hut, 1500) };
+
+        var projected = PoiProjector().Project(
+            pois, BuildRaster(), BuildMesh(), LookDownCamera(), 800f, 600f, 25f, maxDistanceMeters: 1f);
+
+        projected.Single().ScreenPosition.Should().BeNull();
+    }
+
+    [Fact]
+    public void Project_PoiWithinLabelRadius_KeepsScreenPosition()
+    {
+        var pois = new[] { new MountainPoi(-1, "Murowaniec", new GeoPoint(49.5, 19.5), PoiKind.Hut, 1500) };
+
+        var projected = PoiProjector().Project(
+            pois, BuildRaster(), BuildMesh(), LookDownCamera(), 800f, 600f, 25f, maxDistanceMeters: 1_000_000f);
 
         projected.Single().ScreenPosition.Should().NotBeNull();
     }

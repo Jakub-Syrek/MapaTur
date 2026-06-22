@@ -1620,14 +1620,16 @@ public partial class Terrain3DView : ContentView
         if (ClimbingAreas is { Count: > 0 } areas && Raster is not null)
         {
             projectedClimbing = climbingProjector.Project(
-                areas, Raster, frame, Camera, e.Info.Width, e.Info.Height, ClimbingMarkerLiftMeters);
+                areas, Raster, frame, Camera, e.Info.Width, e.Info.Height, ClimbingMarkerLiftMeters,
+                maxDistanceMeters: (float)PeakLabelRadiusMeters); // obey the "zasięg" slider, like POI + peaks
         }
 
         IReadOnlyList<ProjectedPoi>? projectedPois = null;
         if (Pois is { Count: > 0 } pois && Raster is not null)
         {
             projectedPois = poiProjector.Project(
-                pois, Raster, frame, Camera, e.Info.Width, e.Info.Height, PoiMarkerLiftMeters);
+                pois, Raster, frame, Camera, e.Info.Width, e.Info.Height, PoiMarkerLiftMeters,
+                maxDistanceMeters: (float)PeakLabelRadiusMeters); // obey the "zasięg" slider, same as peak + lake labels
             occlusionMarkers += projectedPois.Count;
             var sw = DebugEnabled ? System.Diagnostics.Stopwatch.StartNew() : null;
             projectedPois = HideOccludedPois(projectedPois, frame, occlusionRecompute);
