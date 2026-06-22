@@ -239,7 +239,7 @@
             <!-- 🧭 TRASA -->
             <Border x:Name="PanelTrasa" Style="{StaticResource GlassSurface}" Padding="16,14"
                     IsVisible="{Binding ActiveSection, Converter={StaticResource IntEquals}, ConverterParameter=1}">
-                <ScrollView MaximumHeightRequest="600">
+                <ScrollView MaximumHeightRequest="{Binding Height, Source={x:Reference PageRoot}, Converter={StaticResource HeightMinus}, ConverterParameter=150}">
                 <VerticalStackLayout Spacing="12">
                     <Label Text="{x:Static loc:AppStrings.SectionRouteTitle}" Style="{StaticResource GlassTitle}" />
 
@@ -347,7 +347,7 @@
             <!-- 🎚️ TRYBY -->
             <Border x:Name="PanelTryby" Style="{StaticResource GlassSurface}" Padding="16,14"
                     IsVisible="{Binding ActiveSection, Converter={StaticResource IntEquals}, ConverterParameter=2}">
-                <ScrollView MaximumHeightRequest="600">
+                <ScrollView MaximumHeightRequest="{Binding Height, Source={x:Reference PageRoot}, Converter={StaticResource HeightMinus}, ConverterParameter=150}">
                 <VerticalStackLayout Spacing="12">
                     <Label Text="{x:Static loc:AppStrings.SectionModesTitle}" Style="{StaticResource GlassTitle}" />
 
@@ -567,7 +567,7 @@
                     IsVisible="{Binding ActiveSection, Converter={StaticResource IntEquals}, ConverterParameter=4}">
                 <!-- Scrollable: the Mapa panel carries the GUGiK / offline buttons and the
                      download-for-view group, so cap its height and let it scroll. -->
-                <ScrollView MaximumHeightRequest="600">
+                <ScrollView MaximumHeightRequest="{Binding Height, Source={x:Reference PageRoot}, Converter={StaticResource HeightMinus}, ConverterParameter=150}">
                 <VerticalStackLayout Spacing="12">
                     <Label Text="{x:Static loc:AppStrings.SectionMapTitle}" Style="{StaticResource GlassTitle}" />
 
@@ -653,7 +653,7 @@
             <Border x:Name="PanelUstawienia" Style="{StaticResource GlassSurface}" Padding="16,14"
                     IsVisible="{Binding ActiveSection, Converter={StaticResource IntEquals}, ConverterParameter=6}">
                 <!-- Scrollable: JĘZYK + JAKOŚĆ + PAMIĘĆ + DEBUG overflow a phone screen, so cap + scroll like the other panels. -->
-                <ScrollView MaximumHeightRequest="600">
+                <ScrollView MaximumHeightRequest="{Binding Height, Source={x:Reference PageRoot}, Converter={StaticResource HeightMinus}, ConverterParameter=150}">
                 <VerticalStackLayout Spacing="12">
                     <Label Text="{x:Static loc:AppStrings.SectionSettingsTitle}" Style="{StaticResource GlassTitle}" />
 

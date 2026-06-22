@@ -18,6 +18,7 @@
             <converters:IntEqualsConverter x:Key="IntEquals" />
             <converters:IntToBoolConverter x:Key="IntToBool" />
             <converters:BoolToBrushConverter x:Key="BoolToBrush" />
+            <converters:HeightMinusConverter x:Key="HeightMinus" />
         </ResourceDictionary>
     </Application.Resources>
 </Application>
