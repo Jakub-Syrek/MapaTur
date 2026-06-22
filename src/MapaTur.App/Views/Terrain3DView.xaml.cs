@@ -2357,6 +2357,7 @@ public partial class Terrain3DView : ContentView
     private const float KeyPanPixelStep = 24f;
     private const float KeyZoomFactor = 1.1f;
     private const float KeyTiltPixelStep = 10f; // ~2.9° per repeat — view pitch (R/F, PgUp/PgDn)
+    private const float KeyYawPixelStep = 20f; // rotate-in-place (look-around) yaw per repeat (Q/E)
 
     private void OnCanvasHandlerChanged(object? sender, EventArgs e)
     {
@@ -2553,11 +2554,20 @@ public partial class Terrain3DView : ContentView
                 controller.ApplyPan(0f, -KeyPanPixelStep);
                 break;
 
-            // Vertical pan (raise / lower the camera target).
+            // Q / E rotate the view IN PLACE (look-around): the camera stays put and turns its gaze left / right
+            // ("turn my head", not circle the target). Q looks left, E looks right.
             case Windows.System.VirtualKey.Q:
-                controller.ApplyVertical(KeyPanPixelStep);
+                controller.ApplyLookAround(-KeyYawPixelStep, 0f);
                 break;
             case Windows.System.VirtualKey.E:
+                controller.ApplyLookAround(KeyYawPixelStep, 0f);
+                break;
+
+            // T / G raise / lower the camera (vertical pan), same as the on-screen altitude pad.
+            case Windows.System.VirtualKey.T:
+                controller.ApplyVertical(KeyPanPixelStep);
+                break;
+            case Windows.System.VirtualKey.G:
                 controller.ApplyVertical(-KeyPanPixelStep);
                 break;
 
