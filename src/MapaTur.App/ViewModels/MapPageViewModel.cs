@@ -100,12 +100,12 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private string statusMessage = string.Empty;
 
-    // Text of the always-on "LOD 1 m" badge. Default = the old static label so DESKTOP is unchanged; on mobile
+    // Text of the always-on LOD badge. Default = the quiet label; when the "LOD diagnostics" debug toggle is on,
     // OnDetailFocusAsync overwrites it with the live LOD detail decision (LodDetailDiagnostics) — the badge is the
     // only LOD element that is permanently visible (IsLodStreaming), so it is where the on-device ground truth must
     // go (the status pill auto-hides). This also stops the badge from lying that 1 m is on when detail is null.
     [ObservableProperty]
-    private string lodBadgeText = "LOD 1 m";
+    private string lodBadgeText = QuietLodBadgeText;
 
     // The always-on find-me / teleport (search + location) bar can be collapsed to free screen space.
     [ObservableProperty]
@@ -668,6 +668,25 @@ public sealed partial class MapPageViewModel : ObservableObject
             : Serilog.Events.LogEventLevel.Information;
         logger.LogInformation("Verbose logging {State}", value ? "ON" : "OFF");
     }
+
+    /// <summary>
+    /// Whether the LOD badge shows the full detail diagnostic (zoom tier, ON/OFF, cache ratio, mesh step,
+    /// distance) instead of the quiet "LOD 1 m" label. Toggled from Ustawienia → DEBUG; works on both
+    /// desktop and mobile. The next camera move repaints the badge; turning it off restores the quiet label.
+    /// </summary>
+    [ObservableProperty]
+    private bool showLodDiagnostics;
+
+    partial void OnShowLodDiagnosticsChanged(bool value)
+    {
+        if (!value)
+        {
+            LodBadgeText = QuietLodBadgeText;
+        }
+    }
+
+    /// <summary>The quiet LOD badge label shown when the detail diagnostic is off.</summary>
+    private const string QuietLodBadgeText = "LOD 1 m";
 
     /// <summary>
     /// Serialized 3D camera state, two-way bound to <c>Terrain3DView.CameraState</c>. The view
@@ -3307,10 +3326,9 @@ public sealed partial class MapPageViewModel : ObservableObject
             }
             // On-screen LOD ground truth — logcat/Serilog comes back empty on the phone, so surface the detail
             // decision on the always-visible LOD badge (the status pill auto-hides): was the 1 m patch nulled by the
-            // zoom floor (the "plasticine" cause), and how much z16 is actually cached. Runtime-guarded to mobile so
-            // the desktop badge stays "LOD 1 m" (a runtime check, not #if, keeps the diag vars "used" so the desktop
-            // build stays warning-clean).
-            if (!OperatingSystem.IsWindows())
+            // zoom floor (the "plasticine" cause), and how much z16 is actually cached. Gated behind the
+            // "LOD diagnostics" debug toggle (Ustawienia → DEBUG); off = the quiet "LOD 1 m" label, both platforms.
+            if (ShowLodDiagnostics)
             {
                 // OnDetailFocusAsync is raised from the renderer's camera-moved event (a GL/render thread, NOT the
                 // UI thread). LodBadgeText is bound to a Label, and touching a view off the UI thread crashes Android

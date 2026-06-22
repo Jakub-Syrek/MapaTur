@@ -431,6 +431,8 @@ public static class AppStrings
     public static string SettingsFpsOverlay => Get(nameof(SettingsFpsOverlay));
     /// <summary>"Verbose logging" toggle.</summary>
     public static string SettingsVerboseLogs => Get(nameof(SettingsVerboseLogs));
+    /// <summary>"LOD diagnostics (detail badge)" toggle.</summary>
+    public static string SettingsLodDiagnostics => Get(nameof(SettingsLodDiagnostics));
     /// <summary>"LANGUAGE" sub-header.</summary>
     public static string SettingsLanguageHeader => Get(nameof(SettingsLanguageHeader));
     /// <summary>Format for the cache-summary line; {0}=trails, {1}=POI, {2}=climbing.</summary>

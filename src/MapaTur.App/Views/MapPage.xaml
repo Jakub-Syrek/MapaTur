@@ -718,6 +718,10 @@
                         <Label Grid.Column="0" Text="{x:Static loc:AppStrings.SettingsVerboseLogs}" Style="{StaticResource GlassLabel}" />
                         <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding VerboseLogging}" />
                     </Grid>
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <Label Grid.Column="0" Text="{x:Static loc:AppStrings.SettingsLodDiagnostics}" Style="{StaticResource GlassLabel}" />
+                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowLodDiagnostics}" />
+                    </Grid>
                 </VerticalStackLayout>
             </Border>
 

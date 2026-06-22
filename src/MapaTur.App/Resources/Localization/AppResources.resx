@@ -344,6 +344,7 @@
   <data name="SettingsDebugHeader" xml:space="preserve"><value>DEBUG</value></data>
   <data name="SettingsFpsOverlay" xml:space="preserve"><value>FPS / stats overlay</value></data>
   <data name="SettingsVerboseLogs" xml:space="preserve"><value>Verbose logging</value></data>
+  <data name="SettingsLodDiagnostics" xml:space="preserve"><value>LOD diagnostics (detail badge)</value></data>
   <data name="SettingsLanguageHeader" xml:space="preserve"><value>LANGUAGE</value></data>
   <data name="CacheSummaryFormat" xml:space="preserve">
     <value>Trails: {0} · POI: {1} · Climbing: {2}</value>

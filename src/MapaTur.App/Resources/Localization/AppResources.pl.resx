@@ -344,6 +344,7 @@
   <data name="SettingsDebugHeader" xml:space="preserve"><value>DEBUG</value></data>
   <data name="SettingsFpsOverlay" xml:space="preserve"><value>Nakładka FPS / statystyki</value></data>
   <data name="SettingsVerboseLogs" xml:space="preserve"><value>Szczegółowe logi</value></data>
+  <data name="SettingsLodDiagnostics" xml:space="preserve"><value>Diagnostyka LOD (badge detalu)</value></data>
   <data name="SettingsLanguageHeader" xml:space="preserve"><value>JĘZYK</value></data>
   <data name="CacheSummaryFormat" xml:space="preserve">
     <value>Szlaki: {0} · POI: {1} · Wspinaczka: {2}</value>
