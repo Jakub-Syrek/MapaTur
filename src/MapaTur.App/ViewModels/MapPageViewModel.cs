@@ -3317,7 +3317,9 @@ public sealed partial class MapPageViewModel : ObservableObject
     public async Task OnDetailFocusAsync(MapaTur.Application.Terrain.Camera3D camera, int viewportHeightPixels = 0)
     {
         ArgumentNullException.ThrowIfNull(camera);
-        if (!IsLodStreaming || lodDetailLoading || lodBaseTiles is null || regionDemLoader is null)
+        // NOTE: lodDetailLoading is checked LOWER DOWN (before the rebuild), not here — so the diagnostic badge
+        // still refreshes the tier/distance on every camera move even while a detail build (15–26 s) is in flight.
+        if (!IsLodStreaming || lodBaseTiles is null || regionDemLoader is null)
         {
             return;
         }
@@ -3363,17 +3365,10 @@ public sealed partial class MapPageViewModel : ObservableObject
             "LOD origin-probe (NO-OP): origin {OLat:F4},{OLon:F4} → focus {FLat:F4},{FLon:F4}; drift {Drift:F0} m; wouldReanchor={Re}",
             lodAnchor.Latitude, lodAnchor.Longitude, focus.Latitude, focus.Longitude, originDriftMeters, originProbe.ShouldReanchor);
 
-        if (!LodTerrainWindow.ShouldReload(lodDetailCentre, focus, LodDetailReloadThresholdMeters))
-        {
-            return;
-        }
-
-        if (DateTime.UtcNow - lastLodDetailReloadUtc < LodDetailReloadCooldown)
-        {
-            return;
-        }
-
         // Adaptive detail zoom (Krok 2/3): screen-space error from the camera→look-at distance picks the zoom.
+        // Computed BEFORE the reload gates so the on-screen LOD diagnostic tracks the CURRENT tier even on a pure
+        // zoom-in/out — that changes the distance (and tier) but NOT the look-at, so the detail patch isn't
+        // rebuilt and the badge used to freeze on the last reload's tier ("z14 nie zmienia się przy przybliżaniu").
         double cameraToLookAt = effectiveLookAt is { } w2
             ? System.Numerics.Vector3.Distance(camera.Position, w2)
             : camera.Distance;
@@ -3397,6 +3392,34 @@ public sealed partial class MapPageViewModel : ObservableObject
         logger.LogInformation(
             "LOD focus [{Source}]: target {TLat:F4},{TLon:F4} → {FLat:F4},{FLon:F4}; cam→look-at {Dist:F0} m → detail z{Zoom}",
             focusSource, targetGeo.Latitude, targetGeo.Longitude, focus.Latitude, focus.Longitude, cameraToLookAt, detailZoom);
+
+        // Refresh the diagnostic badge on EVERY camera move with the current tier/distance, reusing the last
+        // build's cache/step figures (those change only on an actual reload below). Without this the badge stayed
+        // frozen until the look-at drifted past the reload gate — so a pure zoom never updated the z## tier.
+        if (ShowLodDiagnostics)
+        {
+            string liveBadge = LodDetailDiagnostics.Format(
+                focusSource, cameraToLookAt, viewportHeight, detailZoom, BaseDetailZoomFloor,
+                lastPerTileRequested, lastPerTileCached, lastPerTileAvgStep, lastPerTileFinestStep, lastPerTileNote);
+            MainThread.BeginInvokeOnMainThread(() => LodBadgeText = liveBadge);
+        }
+
+        // A detail build is already running (15–26 s) — the badge above is up to date, but don't queue another
+        // rebuild on top of it.
+        if (lodDetailLoading)
+        {
+            return;
+        }
+
+        if (!LodTerrainWindow.ShouldReload(lodDetailCentre, focus, LodDetailReloadThresholdMeters))
+        {
+            return;
+        }
+
+        if (DateTime.UtcNow - lastLodDetailReloadUtc < LodDetailReloadCooldown)
+        {
+            return;
+        }
 
         // Wider-coverage P1 streaming PROBE (NO-OP): plan the base tiles this view would stream + the residency
         // load/keep/evict decision and LOG them. No fetch, no swap — just validates the streaming planner on real

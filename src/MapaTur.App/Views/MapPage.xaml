@@ -649,9 +649,11 @@
                 </ScrollView>
             </Border>
 
-            <!-- ⚙️ USTAWIENIA (backend wired in a later stage) -->
+            <!-- ⚙️ USTAWIENIA -->
             <Border x:Name="PanelUstawienia" Style="{StaticResource GlassSurface}" Padding="16,14"
                     IsVisible="{Binding ActiveSection, Converter={StaticResource IntEquals}, ConverterParameter=6}">
+                <!-- Scrollable: JĘZYK + JAKOŚĆ + PAMIĘĆ + DEBUG overflow a phone screen, so cap + scroll like the other panels. -->
+                <ScrollView MaximumHeightRequest="600">
                 <VerticalStackLayout Spacing="12">
                     <Label Text="{x:Static loc:AppStrings.SectionSettingsTitle}" Style="{StaticResource GlassTitle}" />
 
@@ -738,6 +740,7 @@
                         <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowLodDiagnostics}" />
                     </Grid>
                 </VerticalStackLayout>
+                </ScrollView>
             </Border>
 
         </VerticalStackLayout>
