@@ -23,8 +23,11 @@ public static class Trail3DWorldProjection
     /// <summary>Sentinel world position for a trail vertex outside the DEM — projected to a null screen point (a polyline break).</summary>
     private static readonly Vector3 OutsideDem = new(float.NaN, float.NaN, float.NaN);
 
-    /// <summary>Max spacing (m) between seated trail vertices — sparse OSM segments are subdivided to this so the line hugs the 1 m terrain.</summary>
-    private const double DensifySpacingMeters = 12.0;
+    /// <summary>Max spacing (m) between seated trail vertices — sparse OSM segments are subdivided to this so the
+    /// line hugs the 1 m terrain. 5 m (down from 12) keeps the chord short enough that the line no longer
+    /// visibly lifts off the fine detail over bumps/dips; vertices are recomputed only on a detail reload
+    /// (cached off the per-frame path), so the extra points cost nothing during gestures.</summary>
+    private const double DensifySpacingMeters = 5.0;
 
     /// <summary>
     /// Lifts every trail vertex to its DEM elevation and converts it into mesh world space. Trails

@@ -17,8 +17,10 @@ namespace MapaTur.Application.Terrain;
 /// </summary>
 public static class Route3DWorldProjection
 {
-    /// <summary>Max spacing (m) between seated route vertices — sparse segments are subdivided to this so the line hugs the 1 m terrain.</summary>
-    private const double DensifySpacingMeters = 12.0;
+    /// <summary>Max spacing (m) between seated route vertices — sparse segments are subdivided to this so the line
+    /// hugs the 1 m terrain. 5 m (down from 12) shortens the chord so the route no longer lifts off the fine
+    /// detail over bumps/dips; recomputed only on a detail reload, so the extra points are off the per-frame path.</summary>
+    private const double DensifySpacingMeters = 5.0;
 
     /// <summary>
     /// Lifts every route vertex to its DEM elevation and converts it into mesh world space.

@@ -941,7 +941,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  gl_Position.z -= 0.04;\n" +
         "}\n";
 
-    private const float TrailHalfWidthPx = 1.6f;
+    private const float TrailHalfWidthPx = 1.0f;   // thinner trails — the 1.6 px ribbon read too heavy/loud on the scene
     private const float RouteHalfWidthPx = 2.6f;
     private const float RoadHalfWidthPx = 1.8f;
 
