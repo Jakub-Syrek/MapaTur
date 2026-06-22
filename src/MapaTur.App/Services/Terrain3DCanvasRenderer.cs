@@ -737,13 +737,13 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
 
     private static string PoiKindLabel(MapaTur.Domain.Pois.PoiKind kind) => kind switch
     {
-        MapaTur.Domain.Pois.PoiKind.Hut => "Hut",
-        MapaTur.Domain.Pois.PoiKind.WildernessHut => "Shelter hut",
-        MapaTur.Domain.Pois.PoiKind.Chalet => "Chalet",
-        MapaTur.Domain.Pois.PoiKind.Shelter => "Shelter",
-        MapaTur.Domain.Pois.PoiKind.Viewpoint => "Viewpoint",
-        MapaTur.Domain.Pois.PoiKind.Parking => "Parking",
-        MapaTur.Domain.Pois.PoiKind.Pass => "Przełęcz",
+        MapaTur.Domain.Pois.PoiKind.Hut => MapaTur.App.Localization.AppStrings.PoiKindHut,
+        MapaTur.Domain.Pois.PoiKind.WildernessHut => MapaTur.App.Localization.AppStrings.PoiKindWildernessHut,
+        MapaTur.Domain.Pois.PoiKind.Chalet => MapaTur.App.Localization.AppStrings.PoiKindChalet,
+        MapaTur.Domain.Pois.PoiKind.Shelter => MapaTur.App.Localization.AppStrings.PoiKindShelter,
+        MapaTur.Domain.Pois.PoiKind.Viewpoint => MapaTur.App.Localization.AppStrings.PoiKindViewpoint,
+        MapaTur.Domain.Pois.PoiKind.Parking => MapaTur.App.Localization.AppStrings.PoiKindParking,
+        MapaTur.Domain.Pois.PoiKind.Pass => MapaTur.App.Localization.AppStrings.PoiKindPass,
         _ => "POI",
     };
 

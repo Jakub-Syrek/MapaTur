@@ -440,5 +440,113 @@ public static class AppStrings
     /// <summary>Status shown when clearing the cache fails.</summary>
     public static string StatusCacheClearFailed => Get(nameof(StatusCacheClearFailed));
 
+    // ── Status messages (MapPageViewModel) ──
+    /// <summary>"Loaded: {0}" (MBTiles).</summary>
+    public static string StatusMbtilesLoadedFormat => Get(nameof(StatusMbtilesLoadedFormat));
+    /// <summary>"Could not load archive: {0}".</summary>
+    public static string StatusArchiveLoadFailedFormat => Get(nameof(StatusArchiveLoadFailedFormat));
+    /// <summary>"Could not load hillshade: {0}".</summary>
+    public static string StatusHillshadeLoadFailedFormat => Get(nameof(StatusHillshadeLoadFailedFormat));
+    /// <summary>"Loaded {0}: {1} km, +{2} m / -{3} m." (TCX track).</summary>
+    public static string StatusTcxLoadedFormat => Get(nameof(StatusTcxLoadedFormat));
+    /// <summary>"Could not parse TCX: {0}".</summary>
+    public static string StatusTcxParseFailedFormat => Get(nameof(StatusTcxParseFailedFormat));
+    /// <summary>"Overpass request failed: {0}".</summary>
+    public static string StatusOverpassRequestFailedFormat => Get(nameof(StatusOverpassRequestFailedFormat));
+    /// <summary>"Could not parse Overpass response: {0}".</summary>
+    public static string StatusOverpassParseFailedFormat => Get(nameof(StatusOverpassParseFailedFormat));
+    /// <summary>"Start: {0}. Add another stop.".</summary>
+    public static string StatusFirstStopFormat => Get(nameof(StatusFirstStopFormat));
+    /// <summary>"No trail between “{0}” and “{1}”.".</summary>
+    public static string StatusNoTrailBetweenFormat => Get(nameof(StatusNoTrailBetweenFormat));
+    /// <summary>"Route: {0} pts · {1} km · +{2} m · ~{3}".</summary>
+    public static string StatusRouteSummaryFormat => Get(nameof(StatusRouteSummaryFormat));
+    /// <summary>"Could not plan route: {0}".</summary>
+    public static string StatusRoutePlanFailedFormat => Get(nameof(StatusRoutePlanFailedFormat));
+    /// <summary>"Could not parse DEM: {0}".</summary>
+    public static string StatusDemParseFailedFormat => Get(nameof(StatusDemParseFailedFormat));
+    /// <summary>"Could not load DEM: {0}".</summary>
+    public static string StatusDemLoadFailedFormat => Get(nameof(StatusDemLoadFailedFormat));
+    /// <summary>"Online terrain source unavailable".</summary>
+    public static string StatusOnlineTerrainUnavailable => Get(nameof(StatusOnlineTerrainUnavailable));
+    /// <summary>"Downloading 1 m terrain (Tatras, GUGiK)…".</summary>
+    public static string StatusDownloadingTerrain1m => Get(nameof(StatusDownloadingTerrain1m));
+    /// <summary>"Downloading 1 m terrain… {0}% ({1}/{2} tiles)".</summary>
+    public static string StatusDownloadingTerrain1mProgressFormat => Get(nameof(StatusDownloadingTerrain1mProgressFormat));
+    /// <summary>"Could not download terrain (no network/coverage)".</summary>
+    public static string StatusTerrainDownloadFailed => Get(nameof(StatusTerrainDownloadFailed));
+    /// <summary>"Region terrain download error".</summary>
+    public static string StatusRegionTerrainError => Get(nameof(StatusRegionTerrainError));
+    /// <summary>Scene label "Tatras 1 m (z{0})".</summary>
+    public static string SceneLabelTatra1mFormat => Get(nameof(SceneLabelTatra1mFormat));
+    /// <summary>"Offline download unavailable".</summary>
+    public static string StatusOfflineUnavailable => Get(nameof(StatusOfflineUnavailable));
+    /// <summary>"Downloading Tatras offline…".</summary>
+    public static string StatusDownloadingTatraOffline => Get(nameof(StatusDownloadingTatraOffline));
+    /// <summary>", {0} skipped" suffix.</summary>
+    public static string StatusOfflineSkippedSuffixFormat => Get(nameof(StatusOfflineSkippedSuffixFormat));
+    /// <summary>"Downloading Tatras offline… {0}% ({1}/{2}{3})".</summary>
+    public static string StatusDownloadingTatraOfflineProgressFormat => Get(nameof(StatusDownloadingTatraOfflineProgressFormat));
+    /// <summary>"Downloading Tatras offline z{0}…".</summary>
+    public static string StatusDownloadingTatraOfflineZoomFormat => Get(nameof(StatusDownloadingTatraOfflineZoomFormat));
+    /// <summary>"Tatras offline ready: {0} tiles …".</summary>
+    public static string StatusTatraOfflineDoneFormat => Get(nameof(StatusTatraOfflineDoneFormat));
+    /// <summary>"Tatras offline: {0}/{1} tiles …".</summary>
+    public static string StatusTatraOfflinePartialFormat => Get(nameof(StatusTatraOfflinePartialFormat));
+    /// <summary>"Tatras offline download error".</summary>
+    public static string StatusTatraOfflineError => Get(nameof(StatusTatraOfflineError));
+    /// <summary>"Package download unavailable".</summary>
+    public static string StatusPackagesUnavailable => Get(nameof(StatusPackagesUnavailable));
+    /// <summary>"Checking available packages…".</summary>
+    public static string StatusCheckingPackages => Get(nameof(StatusCheckingPackages));
+    /// <summary>"All data packages are up to date".</summary>
+    public static string StatusPackagesUpToDate => Get(nameof(StatusPackagesUpToDate));
+    /// <summary>"Downloading {0} ({1}/{2})… {3}%".</summary>
+    public static string StatusDownloadingPackageFormat => Get(nameof(StatusDownloadingPackageFormat));
+    /// <summary>"Data packages ready: {0} downloaded. Restart…".</summary>
+    public static string StatusPackagesReadyFormat => Get(nameof(StatusPackagesReadyFormat));
+    /// <summary>"Data package download error".</summary>
+    public static string StatusPackagesError => Get(nameof(StatusPackagesError));
+    /// <summary>"LOD unavailable".</summary>
+    public static string StatusLodUnavailable => Get(nameof(StatusLodUnavailable));
+    /// <summary>"Map is loading — try again in a moment".</summary>
+    public static string StatusMapLoading => Get(nameof(StatusMapLoading));
+    /// <summary>"LOD: 30 m base…".</summary>
+    public static string StatusLodBase => Get(nameof(StatusLodBase));
+    /// <summary>"LOD: no base (network?)".</summary>
+    public static string StatusLodNoBase => Get(nameof(StatusLodNoBase));
+    /// <summary>"LOD: 1 m tile…".</summary>
+    public static string StatusLodDetail => Get(nameof(StatusLodDetail));
+    /// <summary>"LOD: base + 1 m follows the camera (Stage 3)".</summary>
+    public static string StatusLodReady => Get(nameof(StatusLodReady));
+    /// <summary>"LOD error".</summary>
+    public static string StatusLodError => Get(nameof(StatusLodError));
+    /// <summary>"Exported GPX to {0}".</summary>
+    public static string StatusGpxExportedFormat => Get(nameof(StatusGpxExportedFormat));
+    /// <summary>"Could not write GPX file: {0}".</summary>
+    public static string StatusGpxExportFailedFormat => Get(nameof(StatusGpxExportFailedFormat));
+    /// <summary>"Auto-loaded: {0}".</summary>
+    public static string StatusAutoLoadedFormat => Get(nameof(StatusAutoLoadedFormat));
+
+    // ── WiFi confirmation dialogs (MapPage.xaml.cs) ──
+    /// <summary>Dialog title "No WiFi".</summary>
+    public static string DialogNoWifiTitle => Get(nameof(DialogNoWifiTitle));
+    /// <summary>Body: download-all-Tatras size warning; {0}=MB, {1}=tiles.</summary>
+    public static string DialogDownloadTatraBodyFormat => Get(nameof(DialogDownloadTatraBodyFormat));
+    /// <summary>Body: data-packages size warning.</summary>
+    public static string DialogDownloadPackagesBody => Get(nameof(DialogDownloadPackagesBody));
+    /// <summary>"Download anyway" accept button.</summary>
+    public static string DialogDownloadAnyway => Get(nameof(DialogDownloadAnyway));
+    /// <summary>"Cancel" button.</summary>
+    public static string DialogCancel => Get(nameof(DialogCancel));
+
+    // ── 3D scene labels ──
+    /// <summary>Moon phase label "Moon {0}%".</summary>
+    public static string MoonLabelFormat => Get(nameof(MoonLabelFormat));
+    /// <summary>POI kind "Parking".</summary>
+    public static string PoiKindParking => Get(nameof(PoiKindParking));
+    /// <summary>POI kind "Pass".</summary>
+    public static string PoiKindPass => Get(nameof(PoiKindPass));
+
     private static string Get(string key) => Manager.GetString(key) ?? key;
 }

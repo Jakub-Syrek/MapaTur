@@ -591,6 +591,13 @@ public sealed partial class MapPageViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// Formats a localized status string under the current UI culture (so numbers use the user's
+    /// language conventions). Shorthand for the status messages assigned throughout the view-model.
+    /// </summary>
+    private static string Fmt(string format, params object?[] args) =>
+        string.Format(System.Globalization.CultureInfo.CurrentUICulture, format, args);
+
     /// <summary>Human-readable summary of cached record counts, shown in the Ustawienia "Cache" block.</summary>
     [ObservableProperty]
     private string cacheSummary = "—";
@@ -1584,7 +1591,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             }
 
             ExtendBasemapBounds(mapLoader.LoadMBTilesArchive(Map, path));
-            StatusMessage = $"Loaded: {Path.GetFileName(path)}";
+            StatusMessage = Fmt(Localization.AppStrings.StatusMbtilesLoadedFormat, Path.GetFileName(path));
             logger.LogInformation("Loaded MBTiles archive {Path}", path);
         }
         catch (FileNotFoundException ex)
@@ -1599,7 +1606,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             int? hresult = ex.HResult != 0 ? ex.HResult : null;
             string hresultText = hresult is not null ? $" (0x{hresult:X8})" : string.Empty;
             string detail = string.IsNullOrEmpty(ex.Message) ? "(no message)" : ex.Message;
-            StatusMessage = $"Could not load archive: {ex.GetType().Name}{hresultText}: {detail}";
+            StatusMessage = Fmt(Localization.AppStrings.StatusArchiveLoadFailedFormat, $"{ex.GetType().Name}{hresultText}: {detail}");
             logger.LogError(ex, "Failed to open MBTiles archive");
         }
     }
@@ -1635,7 +1642,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             int? hresult = ex.HResult != 0 ? ex.HResult : null;
             string hresultText = hresult is not null ? $" (0x{hresult:X8})" : string.Empty;
             string detail = string.IsNullOrEmpty(ex.Message) ? "(no message)" : ex.Message;
-            StatusMessage = $"Could not load hillshade: {ex.GetType().Name}{hresultText}: {detail}";
+            StatusMessage = Fmt(Localization.AppStrings.StatusHillshadeLoadFailedFormat, $"{ex.GetType().Name}{hresultText}: {detail}");
             logger.LogError(ex, "Failed to open hillshade archive");
         }
     }
@@ -1667,7 +1674,7 @@ public sealed partial class MapPageViewModel : ObservableObject
 
             double distanceKilometers = track.ComputeDistanceMeters() / 1000.0;
             var profile = track.ComputeElevationProfile();
-            StatusMessage = $"Loaded {track.Name}: {distanceKilometers:F2} km, +{profile.TotalAscentMeters:F0} m / -{profile.TotalDescentMeters:F0} m.";
+            StatusMessage = Fmt(Localization.AppStrings.StatusTcxLoadedFormat, track.Name, distanceKilometers, profile.TotalAscentMeters, profile.TotalDescentMeters);
             logger.LogInformation("Imported TCX {Path} with {PointCount} points", path, track.Points.Count);
         }
         catch (FileNotFoundException ex)
@@ -1677,7 +1684,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         }
         catch (InvalidDataException ex)
         {
-            StatusMessage = $"Could not parse TCX: {ex.Message}";
+            StatusMessage = Fmt(Localization.AppStrings.StatusTcxParseFailedFormat, ex.Message);
             logger.LogError(ex, "Failed to parse TCX file");
         }
     }
@@ -1717,12 +1724,12 @@ public sealed partial class MapPageViewModel : ObservableObject
         }
         catch (HttpRequestException ex)
         {
-            StatusMessage = $"Overpass request failed: {ex.Message}";
+            StatusMessage = Fmt(Localization.AppStrings.StatusOverpassRequestFailedFormat, ex.Message);
             logger.LogError(ex, "Overpass HTTP request failed");
         }
         catch (InvalidDataException ex)
         {
-            StatusMessage = $"Could not parse Overpass response: {ex.Message}";
+            StatusMessage = Fmt(Localization.AppStrings.StatusOverpassParseFailedFormat, ex.Message);
             logger.LogError(ex, "Overpass response parse failure");
         }
         catch (TaskCanceledException ex)
@@ -1773,12 +1780,12 @@ public sealed partial class MapPageViewModel : ObservableObject
         }
         catch (HttpRequestException ex)
         {
-            StatusMessage = $"Overpass request failed: {ex.Message}";
+            StatusMessage = Fmt(Localization.AppStrings.StatusOverpassRequestFailedFormat, ex.Message);
             logger.LogError(ex, "Overpass climbing request failed");
         }
         catch (InvalidDataException ex)
         {
-            StatusMessage = $"Could not parse Overpass response: {ex.Message}";
+            StatusMessage = Fmt(Localization.AppStrings.StatusOverpassParseFailedFormat, ex.Message);
             logger.LogError(ex, "Overpass climbing parse failure");
         }
         catch (TaskCanceledException ex)
@@ -1844,12 +1851,12 @@ public sealed partial class MapPageViewModel : ObservableObject
         }
         catch (HttpRequestException ex)
         {
-            StatusMessage = $"Overpass request failed: {ex.Message}";
+            StatusMessage = Fmt(Localization.AppStrings.StatusOverpassRequestFailedFormat, ex.Message);
             logger.LogError(ex, "Overpass POI request failed");
         }
         catch (InvalidDataException ex)
         {
-            StatusMessage = $"Could not parse Overpass response: {ex.Message}";
+            StatusMessage = Fmt(Localization.AppStrings.StatusOverpassParseFailedFormat, ex.Message);
             logger.LogError(ex, "Overpass POI parse failure");
         }
         catch (TaskCanceledException ex)
@@ -1901,12 +1908,12 @@ public sealed partial class MapPageViewModel : ObservableObject
         }
         catch (HttpRequestException ex)
         {
-            StatusMessage = $"Overpass request failed: {ex.Message}";
+            StatusMessage = Fmt(Localization.AppStrings.StatusOverpassRequestFailedFormat, ex.Message);
             logger.LogError(ex, "Overpass road request failed");
         }
         catch (InvalidDataException ex)
         {
-            StatusMessage = $"Could not parse Overpass response: {ex.Message}";
+            StatusMessage = Fmt(Localization.AppStrings.StatusOverpassParseFailedFormat, ex.Message);
             logger.LogError(ex, "Overpass road parse failure");
         }
         catch (TaskCanceledException ex)
@@ -2049,7 +2056,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             HasPlannedRoute = false;
             RouteSummary = string.Empty;
             StatusMessage = RouteStops.Count == 1
-                ? $"Start: {RouteStops[0].Name}. Dodaj kolejny przystanek."
+                ? Fmt(Localization.AppStrings.StatusFirstStopFormat, RouteStops[0].Name)
                 : Localization.AppStrings.StatusRoutePlanningOn;
             return;
         }
@@ -2066,7 +2073,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             if (result.Route is null)
             {
                 int leg = result.FailedLegIndex ?? 0;
-                StatusMessage = $"Brak szlaku między „{RouteStops[leg].Name}” a „{RouteStops[leg + 1].Name}”.";
+                StatusMessage = Fmt(Localization.AppStrings.StatusNoTrailBetweenFormat, RouteStops[leg].Name, RouteStops[leg + 1].Name);
                 LastPlannedRoute = null;
                 Route3DOverlay = null;
                 HasPlannedRoute = false;
@@ -2086,7 +2093,10 @@ public sealed partial class MapPageViewModel : ObservableObject
 
             double km = result.Route.TotalDistanceMeters / 1000.0;
             TimeSpan eta = TimeSpan.FromSeconds(result.Route.TotalDurationSeconds);
-            StatusMessage = $"Trasa: {RouteStops.Count} pkt · {km:F1} km · +{result.Route.TotalAscentMeters:F0} m · ~{eta:hh\\:mm}";
+            StatusMessage = Fmt(
+                Localization.AppStrings.StatusRouteSummaryFormat,
+                RouteStops.Count, km, result.Route.TotalAscentMeters,
+                eta.ToString(@"hh\:mm", System.Globalization.CultureInfo.InvariantCulture));
             logger.LogInformation(
                 "Multi-stop route: {Stops} stops, {Segments} segments, {Km:F2} km",
                 RouteStops.Count, result.Route.Segments.Count, km);
@@ -2107,7 +2117,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
         {
-            StatusMessage = $"Nie udało się wyznaczyć trasy: {ex.Message}";
+            StatusMessage = Fmt(Localization.AppStrings.StatusRoutePlanFailedFormat, ex.Message);
             logger.LogError(ex, "Multi-stop route planning failed");
         }
         finally
@@ -2139,7 +2149,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         }
         catch (InvalidDataException ex)
         {
-            StatusMessage = $"Could not parse DEM: {ex.Message}";
+            StatusMessage = Fmt(Localization.AppStrings.StatusDemParseFailedFormat, ex.Message);
             logger.LogError(ex, "DEM parse failure");
         }
         catch (Exception ex)
@@ -2147,7 +2157,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             int? hresult = ex.HResult != 0 ? ex.HResult : null;
             string hresultText = hresult is not null ? $" (0x{hresult:X8})" : string.Empty;
             string detail = string.IsNullOrEmpty(ex.Message) ? "(no message)" : ex.Message;
-            StatusMessage = $"Could not load DEM: {ex.GetType().Name}{hresultText}: {detail}";
+            StatusMessage = Fmt(Localization.AppStrings.StatusDemLoadFailedFormat, $"{ex.GetType().Name}{hresultText}: {detail}");
             logger.LogError(ex, "Failed to load DEM");
         }
     }
@@ -2338,7 +2348,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     {
         if (regionDemLoader is null)
         {
-            StatusMessage = "Źródło terenu online niedostępne";
+            StatusMessage = Localization.AppStrings.StatusOnlineTerrainUnavailable;
             return;
         }
 
@@ -2350,7 +2360,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         try
         {
             IsBusy = true;
-            StatusMessage = "Pobieranie terenu 1 m (Tatry, GUGiK)…";
+            StatusMessage = Localization.AppStrings.StatusDownloadingTerrain1m;
 
             // High Tatra core around Morskie Oko (see TatraDemRegion): the budget is sized so the planner
             // picks z16 (≈1.5 m/px, near GUGiK's native 1 m) over the largest area whose native-resolution
@@ -2364,7 +2374,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             var progress = new Progress<RegionLoadProgress>(p =>
             {
                 int percent = p.Total > 0 ? (int)(100L * p.Completed / p.Total) : 0;
-                StatusMessage = $"Pobieranie terenu 1 m… {percent}% ({p.Completed}/{p.Total} kafli)";
+                StatusMessage = Fmt(Localization.AppStrings.StatusDownloadingTerrain1mProgressFormat, percent, p.Completed, p.Total);
                 logger.LogInformation("GUGiK region tiles: {Completed}/{Total} ({Percent}%)", p.Completed, p.Total, percent);
             });
 
@@ -2372,7 +2382,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             if (raster is null)
             {
                 logger.LogWarning("GUGiK region load returned no raster (no network / coverage)");
-                StatusMessage = "Nie udało się pobrać terenu (brak sieci/pokrycia)";
+                StatusMessage = Localization.AppStrings.StatusTerrainDownloadFailed;
                 return;
             }
 
@@ -2389,7 +2399,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             orthoGridCols = 1;
             orthoGridRows = 1;
 
-            await BuildSceneFromRasterAsync(raster, $"Tatry 1 m (z{zoom})").ConfigureAwait(true);
+            await BuildSceneFromRasterAsync(raster, Fmt(Localization.AppStrings.SceneLabelTatra1mFormat, zoom)).ConfigureAwait(true);
 
             // Land in 3D with the camera-movement pads — the 3D view (and its only movement controls)
             // is hidden in 2D mode. Loading a region must take the user INTO the headline 3D view, not
@@ -2404,7 +2414,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         catch (Exception ex)
         {
             logger.LogError(ex, "Online region DEM load failed");
-            StatusMessage = "Błąd pobierania terenu regionu";
+            StatusMessage = Localization.AppStrings.StatusRegionTerrainError;
         }
         finally
         {
@@ -2424,7 +2434,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     {
         if (offlineDownloader is null)
         {
-            StatusMessage = "Pobieranie offline niedostępne";
+            StatusMessage = Localization.AppStrings.StatusOfflineUnavailable;
             return;
         }
 
@@ -2436,14 +2446,14 @@ public sealed partial class MapPageViewModel : ObservableObject
         try
         {
             IsBusy = true;
-            StatusMessage = "Pobieranie Tatr offline…";
+            StatusMessage = Localization.AppStrings.StatusDownloadingTatraOffline;
             logger.LogInformation("Offline Tatra download start: base z{Base}+z14+detail z{Detail}", LodBaseZoom, TatraOfflineRegion.DownloadZoom);
 
             var progress = new Progress<OfflineDownloadProgress>(p =>
             {
                 int percent = p.Total > 0 ? (int)(100L * p.Completed / p.Total) : 0;
-                string failed = p.Failed > 0 ? $", {p.Failed} pominięto" : string.Empty;
-                StatusMessage = $"Pobieranie Tatr offline… {percent}% ({p.Completed}/{p.Total}{failed})";
+                string failed = p.Failed > 0 ? Fmt(Localization.AppStrings.StatusOfflineSkippedSuffixFormat, p.Failed) : string.Empty;
+                StatusMessage = Fmt(Localization.AppStrings.StatusDownloadingTatraOfflineProgressFormat, percent, p.Completed, p.Total, failed);
             });
 
             // Download the SMOOTH base zooms (z13/z14) over the whole region AND the 1 m detail (z16). The wide
@@ -2453,7 +2463,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             int totDownloaded = 0, totCached = 0, totFailed = 0, totTotal = 0;
             foreach (int z in zooms)
             {
-                StatusMessage = $"Pobieranie Tatr offline z{z}…";
+                StatusMessage = Fmt(Localization.AppStrings.StatusDownloadingTatraOfflineZoomFormat, z);
                 OfflineDownloadResult r = await offlineDownloader.DownloadAsync(
                     TatraOfflineRegion.Bounds, z, progress).ConfigureAwait(true);
                 totDownloaded += r.Downloaded; totCached += r.AlreadyCached; totFailed += r.Failed; totTotal += r.Total;
@@ -2463,13 +2473,13 @@ public sealed partial class MapPageViewModel : ObservableObject
             }
 
             StatusMessage = totFailed == 0
-                ? $"Tatry offline gotowe: {totTotal} kafli (baza z13/14 + 1 m z16) na dysku"
-                : $"Tatry offline: {totTotal - totFailed}/{totTotal} kafli (sieć/pokrycie — ponów, by dobrać resztę)";
+                ? Fmt(Localization.AppStrings.StatusTatraOfflineDoneFormat, totTotal)
+                : Fmt(Localization.AppStrings.StatusTatraOfflinePartialFormat, totTotal - totFailed, totTotal);
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Offline Tatra download failed");
-            StatusMessage = "Błąd pobierania Tatr offline";
+            StatusMessage = Localization.AppStrings.StatusTatraOfflineError;
         }
         finally
         {
@@ -2488,7 +2498,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     {
         if (packageService is null)
         {
-            StatusMessage = "Pobieranie paczek niedostępne";
+            StatusMessage = Localization.AppStrings.StatusPackagesUnavailable;
             return;
         }
 
@@ -2500,12 +2510,12 @@ public sealed partial class MapPageViewModel : ObservableObject
         try
         {
             IsBusy = true;
-            StatusMessage = "Sprawdzanie dostępnych paczek…";
+            StatusMessage = Localization.AppStrings.StatusCheckingPackages;
             IReadOnlyList<PackageStatus> catalog = await packageService.GetCatalogAsync().ConfigureAwait(true);
             var todo = catalog.Where(p => p.State != PackageState.Installed).Select(p => p.Package).ToList();
             if (todo.Count == 0)
             {
-                StatusMessage = "Wszystkie paczki danych są aktualne";
+                StatusMessage = Localization.AppStrings.StatusPackagesUpToDate;
                 return;
             }
 
@@ -2516,19 +2526,19 @@ public sealed partial class MapPageViewModel : ObservableObject
                 var progress = new Progress<PackageDownloadProgress>(p =>
                 {
                     int percent = p.TotalBytes > 0 ? (int)(100L * p.BytesReceived / p.TotalBytes) : 0;
-                    StatusMessage = $"Pobieranie {package.Name} ({index}/{todo.Count})… {percent}%";
+                    StatusMessage = Fmt(Localization.AppStrings.StatusDownloadingPackageFormat, package.Name, index, todo.Count, percent);
                 });
                 logger.LogInformation("Package download start: {Id} v{Version}", package.Id, package.Version);
                 await packageService.InstallAsync(package, progress).ConfigureAwait(true);
                 logger.LogInformation("Package installed: {Id} v{Version}", package.Id, package.Version);
             }
 
-            StatusMessage = $"Paczki danych gotowe: {todo.Count} pobrano. Uruchom ponownie, by wczytać nowe dane.";
+            StatusMessage = Fmt(Localization.AppStrings.StatusPackagesReadyFormat, todo.Count);
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Data package download failed");
-            StatusMessage = "Błąd pobierania paczek danych";
+            StatusMessage = Localization.AppStrings.StatusPackagesError;
         }
         finally
         {
@@ -2558,7 +2568,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     {
         if (regionDemLoader is null)
         {
-            StatusMessage = "LOD demo niedostępne";
+            StatusMessage = Localization.AppStrings.StatusLodUnavailable;
             return;
         }
 
@@ -2566,14 +2576,14 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             // Another scene load (e.g. the startup auto-load) is running — say so instead of silently doing
             // nothing (a silent return made the button look DEAD: "przycisk nie działa").
-            StatusMessage = "Trwa ładowanie mapy — spróbuj za chwilę";
+            StatusMessage = Localization.AppStrings.StatusMapLoading;
             return;
         }
 
         try
         {
             IsBusy = true;
-            StatusMessage = "LOD demo: baza 30 m…";
+            StatusMessage = Localization.AppStrings.StatusLodBase;
             LoadProgress = 0.3;
 
             var center = new GeoPoint(
@@ -2594,7 +2604,7 @@ public sealed partial class MapPageViewModel : ObservableObject
                 : await regionDemLoader.LoadRegionAsync(LodTerrainWindow.Around(center, LodBaseHalfWidthMeters), LodBaseZoom, fillNoData: false).ConfigureAwait(true);
             if (baseRaster is null)
             {
-                StatusMessage = "LOD demo: brak bazy (sieć?)";
+                StatusMessage = Localization.AppStrings.StatusLodNoBase;
                 return;
             }
 
@@ -2639,7 +2649,7 @@ public sealed partial class MapPageViewModel : ObservableObject
                 "LOD base: {Cols}x{Rows}, centre {Lat:F4},{Lon:F4}, elev {Min:F0}-{Max:F0} m",
                 baseRaster.Columns, baseRaster.Rows, baseCentre.Latitude, baseCentre.Longitude, bMin, bMax);
 
-            StatusMessage = "LOD demo: kafel 1 m…";
+            StatusMessage = Localization.AppStrings.StatusLodDetail;
             LoadProgress = 0.7;
             var options = new MapaTur.Application.Terrain.TerrainMeshOptions
             {
@@ -2741,12 +2751,12 @@ public sealed partial class MapPageViewModel : ObservableObject
             IsLodStreaming = true;
             LoadProgress = 1.0;
             logger.LogInformation("LOD built: {BaseTiles} base + {Total} total tiles; detail streaming ON", baseTiles.Count, combined.Count);
-            StatusMessage = "LOD: baza + 1 m podąża za kamerą (Etap 3)";
+            StatusMessage = Localization.AppStrings.StatusLodReady;
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "LOD demo failed");
-            StatusMessage = "Błąd LOD demo";
+            StatusMessage = Localization.AppStrings.StatusLodError;
         }
         finally
         {
@@ -3375,12 +3385,12 @@ public sealed partial class MapPageViewModel : ObservableObject
             }
 
             await exportRouteToGpxUseCase.HandleAsync(LastPlannedRoute, destinationPath, fileName).ConfigureAwait(true);
-            StatusMessage = $"Exported GPX to {destinationPath}";
+            StatusMessage = Fmt(Localization.AppStrings.StatusGpxExportedFormat, destinationPath);
             logger.LogInformation("Exported route to {Path}", destinationPath);
         }
         catch (IOException ex)
         {
-            StatusMessage = $"Could not write GPX file: {ex.Message}";
+            StatusMessage = Fmt(Localization.AppStrings.StatusGpxExportFailedFormat, ex.Message);
             logger.LogError(ex, "GPX export failed");
         }
     }
@@ -3584,7 +3594,7 @@ public sealed partial class MapPageViewModel : ObservableObject
 
             if (loaded.Count > 0)
             {
-                StatusMessage = $"Auto-loaded: {string.Join(", ", loaded)}";
+                StatusMessage = Fmt(Localization.AppStrings.StatusAutoLoadedFormat, string.Join(", ", loaded));
             }
 
             // Start in 3D when a terrain mesh is available — the app's headline view. Falls back to

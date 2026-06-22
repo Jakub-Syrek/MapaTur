@@ -351,4 +351,64 @@
   </data>
   <data name="StatusCacheCleared" xml:space="preserve"><value>Wyczyszczono pobrane dane.</value></data>
   <data name="StatusCacheClearFailed" xml:space="preserve"><value>Nie udało się wyczyścić cache.</value></data>
+
+  <!-- ════ Komunikaty statusu (MapPageViewModel) ════ -->
+  <data name="StatusMbtilesLoadedFormat" xml:space="preserve"><value>Wczytano: {0}</value></data>
+  <data name="StatusArchiveLoadFailedFormat" xml:space="preserve"><value>Nie udało się wczytać archiwum: {0}</value></data>
+  <data name="StatusHillshadeLoadFailedFormat" xml:space="preserve"><value>Nie udało się wczytać hillshade: {0}</value></data>
+  <data name="StatusTcxLoadedFormat" xml:space="preserve"><value>Wczytano {0}: {1:F2} km, +{2:F0} m / -{3:F0} m.</value></data>
+  <data name="StatusTcxParseFailedFormat" xml:space="preserve"><value>Nie udało się odczytać TCX: {0}</value></data>
+  <data name="StatusOverpassRequestFailedFormat" xml:space="preserve"><value>Żądanie Overpass nie powiodło się: {0}</value></data>
+  <data name="StatusOverpassParseFailedFormat" xml:space="preserve"><value>Nie udało się odczytać odpowiedzi Overpass: {0}</value></data>
+  <data name="StatusFirstStopFormat" xml:space="preserve"><value>Start: {0}. Dodaj kolejny przystanek.</value></data>
+  <data name="StatusNoTrailBetweenFormat" xml:space="preserve"><value>Brak szlaku między „{0}” a „{1}”.</value></data>
+  <data name="StatusRouteSummaryFormat" xml:space="preserve">
+    <value>Trasa: {0} pkt · {1:F1} km · +{2:F0} m · ~{3}</value>
+    <comment>{0}=liczba przystanków, {1}=km, {2}=podejście m, {3}=ETA hh:mm.</comment>
+  </data>
+  <data name="StatusRoutePlanFailedFormat" xml:space="preserve"><value>Nie udało się wyznaczyć trasy: {0}</value></data>
+  <data name="StatusDemParseFailedFormat" xml:space="preserve"><value>Nie udało się odczytać DEM: {0}</value></data>
+  <data name="StatusDemLoadFailedFormat" xml:space="preserve"><value>Nie udało się wczytać DEM: {0}</value></data>
+  <data name="StatusOnlineTerrainUnavailable" xml:space="preserve"><value>Źródło terenu online niedostępne</value></data>
+  <data name="StatusDownloadingTerrain1m" xml:space="preserve"><value>Pobieranie terenu 1 m (Tatry, GUGiK)…</value></data>
+  <data name="StatusDownloadingTerrain1mProgressFormat" xml:space="preserve"><value>Pobieranie terenu 1 m… {0}% ({1}/{2} kafli)</value></data>
+  <data name="StatusTerrainDownloadFailed" xml:space="preserve"><value>Nie udało się pobrać terenu (brak sieci/pokrycia)</value></data>
+  <data name="StatusRegionTerrainError" xml:space="preserve"><value>Błąd pobierania terenu regionu</value></data>
+  <data name="SceneLabelTatra1mFormat" xml:space="preserve"><value>Tatry 1 m (z{0})</value></data>
+  <data name="StatusOfflineUnavailable" xml:space="preserve"><value>Pobieranie offline niedostępne</value></data>
+  <data name="StatusDownloadingTatraOffline" xml:space="preserve"><value>Pobieranie Tatr offline…</value></data>
+  <data name="StatusOfflineSkippedSuffixFormat" xml:space="preserve"><value>, {0} pominięto</value></data>
+  <data name="StatusDownloadingTatraOfflineProgressFormat" xml:space="preserve"><value>Pobieranie Tatr offline… {0}% ({1}/{2}{3})</value></data>
+  <data name="StatusDownloadingTatraOfflineZoomFormat" xml:space="preserve"><value>Pobieranie Tatr offline z{0}…</value></data>
+  <data name="StatusTatraOfflineDoneFormat" xml:space="preserve"><value>Tatry offline gotowe: {0} kafli (baza z13/14 + 1 m z16) na dysku</value></data>
+  <data name="StatusTatraOfflinePartialFormat" xml:space="preserve"><value>Tatry offline: {0}/{1} kafli (sieć/pokrycie — ponów, by dobrać resztę)</value></data>
+  <data name="StatusTatraOfflineError" xml:space="preserve"><value>Błąd pobierania Tatr offline</value></data>
+  <data name="StatusPackagesUnavailable" xml:space="preserve"><value>Pobieranie paczek niedostępne</value></data>
+  <data name="StatusCheckingPackages" xml:space="preserve"><value>Sprawdzanie dostępnych paczek…</value></data>
+  <data name="StatusPackagesUpToDate" xml:space="preserve"><value>Wszystkie paczki danych są aktualne</value></data>
+  <data name="StatusDownloadingPackageFormat" xml:space="preserve"><value>Pobieranie {0} ({1}/{2})… {3}%</value></data>
+  <data name="StatusPackagesReadyFormat" xml:space="preserve"><value>Paczki danych gotowe: {0} pobrano. Uruchom ponownie, by wczytać nowe dane.</value></data>
+  <data name="StatusPackagesError" xml:space="preserve"><value>Błąd pobierania paczek danych</value></data>
+  <data name="StatusLodUnavailable" xml:space="preserve"><value>LOD niedostępne</value></data>
+  <data name="StatusMapLoading" xml:space="preserve"><value>Trwa ładowanie mapy — spróbuj za chwilę</value></data>
+  <data name="StatusLodBase" xml:space="preserve"><value>LOD: baza 30 m…</value></data>
+  <data name="StatusLodNoBase" xml:space="preserve"><value>LOD: brak bazy (sieć?)</value></data>
+  <data name="StatusLodDetail" xml:space="preserve"><value>LOD: kafel 1 m…</value></data>
+  <data name="StatusLodReady" xml:space="preserve"><value>LOD: baza + 1 m podąża za kamerą (Etap 3)</value></data>
+  <data name="StatusLodError" xml:space="preserve"><value>Błąd LOD</value></data>
+  <data name="StatusGpxExportedFormat" xml:space="preserve"><value>Wyeksportowano GPX do {0}</value></data>
+  <data name="StatusGpxExportFailedFormat" xml:space="preserve"><value>Nie udało się zapisać pliku GPX: {0}</value></data>
+  <data name="StatusAutoLoadedFormat" xml:space="preserve"><value>Wczytano automatycznie: {0}</value></data>
+
+  <!-- ════ Dialogi potwierdzenia WiFi (MapPage.xaml.cs) ════ -->
+  <data name="DialogNoWifiTitle" xml:space="preserve"><value>Brak WiFi</value></data>
+  <data name="DialogDownloadTatraBodyFormat" xml:space="preserve"><value>Pobranie całych Tatr to ~{0} MB ({1} kafli 1 m). Nie masz WiFi — pobrać teraz na danych mobilnych?</value></data>
+  <data name="DialogDownloadPackagesBody" xml:space="preserve"><value>Paczki danych (DEM 1 m + ortofoto) potrafią ważyć od kilkuset MB do kilku GB. Nie masz WiFi — pobrać teraz na danych mobilnych?</value></data>
+  <data name="DialogDownloadAnyway" xml:space="preserve"><value>Pobierz mimo to</value></data>
+  <data name="DialogCancel" xml:space="preserve"><value>Anuluj</value></data>
+
+  <!-- ════ Etykiety sceny 3D ════ -->
+  <data name="MoonLabelFormat" xml:space="preserve"><value>Księżyc {0:F0}%</value></data>
+  <data name="PoiKindParking" xml:space="preserve"><value>Parking</value></data>
+  <data name="PoiKindPass" xml:space="preserve"><value>Przełęcz</value></data>
 </root>

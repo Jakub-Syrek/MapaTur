@@ -1866,7 +1866,7 @@ public partial class Terrain3DView : ContentView
         MoonSky moon = NightSky.MoonForLocalDate(
             now.Year, now.Month, now.Day, atmo.TimeOfDayHours, anchor.Latitude, anchor.Longitude);
         IReadOnlyList<StarLabel> moonHit = StarLabelProjector.Project(
-            new[] { (moon.MoonDirection, 0f, $"Księżyc {moon.IlluminatedFraction * 100f:F0}%") },
+            new[] { (moon.MoonDirection, 0f, string.Format(System.Globalization.CultureInfo.CurrentUICulture, AppStrings.MoonLabelFormat, moon.IlluminatedFraction * 100f)) },
             viewProjection, width, height);
         if (moonHit.Count > 0)
         {

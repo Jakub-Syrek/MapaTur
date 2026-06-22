@@ -351,4 +351,64 @@
   </data>
   <data name="StatusCacheCleared" xml:space="preserve"><value>Downloaded data cleared.</value></data>
   <data name="StatusCacheClearFailed" xml:space="preserve"><value>Failed to clear the cache.</value></data>
+
+  <!-- ════ Status messages (MapPageViewModel) ════ -->
+  <data name="StatusMbtilesLoadedFormat" xml:space="preserve"><value>Loaded: {0}</value></data>
+  <data name="StatusArchiveLoadFailedFormat" xml:space="preserve"><value>Could not load archive: {0}</value></data>
+  <data name="StatusHillshadeLoadFailedFormat" xml:space="preserve"><value>Could not load hillshade: {0}</value></data>
+  <data name="StatusTcxLoadedFormat" xml:space="preserve"><value>Loaded {0}: {1:F2} km, +{2:F0} m / -{3:F0} m.</value></data>
+  <data name="StatusTcxParseFailedFormat" xml:space="preserve"><value>Could not parse TCX: {0}</value></data>
+  <data name="StatusOverpassRequestFailedFormat" xml:space="preserve"><value>Overpass request failed: {0}</value></data>
+  <data name="StatusOverpassParseFailedFormat" xml:space="preserve"><value>Could not parse Overpass response: {0}</value></data>
+  <data name="StatusFirstStopFormat" xml:space="preserve"><value>Start: {0}. Add another stop.</value></data>
+  <data name="StatusNoTrailBetweenFormat" xml:space="preserve"><value>No trail between “{0}” and “{1}”.</value></data>
+  <data name="StatusRouteSummaryFormat" xml:space="preserve">
+    <value>Route: {0} pts · {1:F1} km · +{2:F0} m · ~{3}</value>
+    <comment>{0}=stop count, {1}=km, {2}=ascent m, {3}=ETA hh:mm.</comment>
+  </data>
+  <data name="StatusRoutePlanFailedFormat" xml:space="preserve"><value>Could not plan route: {0}</value></data>
+  <data name="StatusDemParseFailedFormat" xml:space="preserve"><value>Could not parse DEM: {0}</value></data>
+  <data name="StatusDemLoadFailedFormat" xml:space="preserve"><value>Could not load DEM: {0}</value></data>
+  <data name="StatusOnlineTerrainUnavailable" xml:space="preserve"><value>Online terrain source unavailable</value></data>
+  <data name="StatusDownloadingTerrain1m" xml:space="preserve"><value>Downloading 1 m terrain (Tatras, GUGiK)…</value></data>
+  <data name="StatusDownloadingTerrain1mProgressFormat" xml:space="preserve"><value>Downloading 1 m terrain… {0}% ({1}/{2} tiles)</value></data>
+  <data name="StatusTerrainDownloadFailed" xml:space="preserve"><value>Could not download terrain (no network/coverage)</value></data>
+  <data name="StatusRegionTerrainError" xml:space="preserve"><value>Region terrain download error</value></data>
+  <data name="SceneLabelTatra1mFormat" xml:space="preserve"><value>Tatras 1 m (z{0})</value></data>
+  <data name="StatusOfflineUnavailable" xml:space="preserve"><value>Offline download unavailable</value></data>
+  <data name="StatusDownloadingTatraOffline" xml:space="preserve"><value>Downloading Tatras offline…</value></data>
+  <data name="StatusOfflineSkippedSuffixFormat" xml:space="preserve"><value>, {0} skipped</value></data>
+  <data name="StatusDownloadingTatraOfflineProgressFormat" xml:space="preserve"><value>Downloading Tatras offline… {0}% ({1}/{2}{3})</value></data>
+  <data name="StatusDownloadingTatraOfflineZoomFormat" xml:space="preserve"><value>Downloading Tatras offline z{0}…</value></data>
+  <data name="StatusTatraOfflineDoneFormat" xml:space="preserve"><value>Tatras offline ready: {0} tiles (base z13/14 + 1 m z16) on disk</value></data>
+  <data name="StatusTatraOfflinePartialFormat" xml:space="preserve"><value>Tatras offline: {0}/{1} tiles (network/coverage — retry to fetch the rest)</value></data>
+  <data name="StatusTatraOfflineError" xml:space="preserve"><value>Tatras offline download error</value></data>
+  <data name="StatusPackagesUnavailable" xml:space="preserve"><value>Package download unavailable</value></data>
+  <data name="StatusCheckingPackages" xml:space="preserve"><value>Checking available packages…</value></data>
+  <data name="StatusPackagesUpToDate" xml:space="preserve"><value>All data packages are up to date</value></data>
+  <data name="StatusDownloadingPackageFormat" xml:space="preserve"><value>Downloading {0} ({1}/{2})… {3}%</value></data>
+  <data name="StatusPackagesReadyFormat" xml:space="preserve"><value>Data packages ready: {0} downloaded. Restart to load the new data.</value></data>
+  <data name="StatusPackagesError" xml:space="preserve"><value>Data package download error</value></data>
+  <data name="StatusLodUnavailable" xml:space="preserve"><value>LOD unavailable</value></data>
+  <data name="StatusMapLoading" xml:space="preserve"><value>Map is loading — try again in a moment</value></data>
+  <data name="StatusLodBase" xml:space="preserve"><value>LOD: 30 m base…</value></data>
+  <data name="StatusLodNoBase" xml:space="preserve"><value>LOD: no base (network?)</value></data>
+  <data name="StatusLodDetail" xml:space="preserve"><value>LOD: 1 m tile…</value></data>
+  <data name="StatusLodReady" xml:space="preserve"><value>LOD: base + 1 m follows the camera (Stage 3)</value></data>
+  <data name="StatusLodError" xml:space="preserve"><value>LOD error</value></data>
+  <data name="StatusGpxExportedFormat" xml:space="preserve"><value>Exported GPX to {0}</value></data>
+  <data name="StatusGpxExportFailedFormat" xml:space="preserve"><value>Could not write GPX file: {0}</value></data>
+  <data name="StatusAutoLoadedFormat" xml:space="preserve"><value>Auto-loaded: {0}</value></data>
+
+  <!-- ════ WiFi confirmation dialogs (MapPage.xaml.cs) ════ -->
+  <data name="DialogNoWifiTitle" xml:space="preserve"><value>No WiFi</value></data>
+  <data name="DialogDownloadTatraBodyFormat" xml:space="preserve"><value>Downloading all the Tatras is ~{0} MB ({1} 1 m tiles). You're not on WiFi — download now on mobile data?</value></data>
+  <data name="DialogDownloadPackagesBody" xml:space="preserve"><value>Data packages (DEM 1 m + orthophoto) can weigh from a few hundred MB to several GB. You're not on WiFi — download now on mobile data?</value></data>
+  <data name="DialogDownloadAnyway" xml:space="preserve"><value>Download anyway</value></data>
+  <data name="DialogCancel" xml:space="preserve"><value>Cancel</value></data>
+
+  <!-- ════ 3D scene labels ════ -->
+  <data name="MoonLabelFormat" xml:space="preserve"><value>Moon {0:F0}%</value></data>
+  <data name="PoiKindParking" xml:space="preserve"><value>Parking</value></data>
+  <data name="PoiKindPass" xml:space="preserve"><value>Pass</value></data>
 </root>

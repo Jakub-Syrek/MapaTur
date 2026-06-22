@@ -336,10 +336,10 @@ public partial class MapPage : ContentPage
         if (!onWifi)
         {
             bool proceed = await DisplayAlertAsync(
-                "Brak WiFi",
-                $"Pobranie całych Tatr to ~{megabytes} MB ({tiles} kafli 1 m). Nie masz WiFi — pobrać teraz na danych mobilnych?",
-                "Pobierz mimo to",
-                "Anuluj");
+                AppStrings.DialogNoWifiTitle,
+                string.Format(CultureInfo.CurrentUICulture, AppStrings.DialogDownloadTatraBodyFormat, megabytes, tiles),
+                AppStrings.DialogDownloadAnyway,
+                AppStrings.DialogCancel);
             if (!proceed)
             {
                 return;
@@ -359,11 +359,10 @@ public partial class MapPage : ContentPage
         if (!onWifi)
         {
             bool proceed = await DisplayAlertAsync(
-                "Brak WiFi",
-                "Paczki danych (DEM 1 m + ortofoto) potrafią ważyć od kilkuset MB do kilku GB. "
-                    + "Nie masz WiFi — pobrać teraz na danych mobilnych?",
-                "Pobierz mimo to",
-                "Anuluj");
+                AppStrings.DialogNoWifiTitle,
+                AppStrings.DialogDownloadPackagesBody,
+                AppStrings.DialogDownloadAnyway,
+                AppStrings.DialogCancel);
             if (!proceed)
             {
                 return;
