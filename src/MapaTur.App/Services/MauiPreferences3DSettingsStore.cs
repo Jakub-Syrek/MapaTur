@@ -16,6 +16,7 @@ public sealed class MauiPreferences3DSettingsStore : I3DSettingsStore
     private const string CameraStateKey = "Terrain3D.CameraState";
     private const string RouteStopsKey = "Terrain3D.RouteStops";
     private const string LanguageKey = "App.Language";
+    private const string FollowCameraKey = "App.FollowCamera";
     private const double SentinelMissing = double.NaN;
 
     /// <inheritdoc />
@@ -226,5 +227,12 @@ public sealed class MauiPreferences3DSettingsStore : I3DSettingsStore
                 Preferences.Default.Set(LanguageKey, value);
             }
         }
+    }
+
+    /// <inheritdoc />
+    public bool FollowCamera
+    {
+        get => Preferences.Default.Get(FollowCameraKey, false);
+        set => Preferences.Default.Set(FollowCameraKey, value);
     }
 }

@@ -75,6 +75,25 @@ public readonly record struct GeoPoint
         return EarthRadiusMeters * c;
     }
 
+    /// <summary>
+    /// Computes the initial great-circle bearing (forward azimuth) from this point to <paramref name="other"/>,
+    /// in degrees clockwise from true north, normalized to [0, 360). Used to orient a follow camera along the
+    /// direction of travel between two consecutive GPS fixes. Elevation is ignored.
+    /// </summary>
+    public double InitialBearingDegreesTo(GeoPoint other)
+    {
+        double lat1 = ToRadians(Latitude);
+        double lat2 = ToRadians(other.Latitude);
+        double deltaLon = ToRadians(other.Longitude - Longitude);
+
+        double y = Math.Sin(deltaLon) * Math.Cos(lat2);
+        double x = (Math.Cos(lat1) * Math.Sin(lat2))
+                 - (Math.Sin(lat1) * Math.Cos(lat2) * Math.Cos(deltaLon));
+
+        double bearing = Math.Atan2(y, x) * 180.0 / Math.PI;
+        return (bearing + 360.0) % 360.0;
+    }
+
     /// <summary>Returns an invariant-culture string representation of the point.</summary>
     public override string ToString()
     {

@@ -253,6 +253,7 @@
   <data name="LocateCenterOnMe" xml:space="preserve"><value>🎯  Na mnie</value></data>
   <data name="TeleportPlaceholder" xml:space="preserve"><value>Teleportuj: szczyt, schronisko, jezioro…</value></data>
   <data name="TeleportFly" xml:space="preserve"><value>🎯 Lecę</value></data>
+  <data name="FollowCamera" xml:space="preserve"><value>Podążaj kamerą (z tyłu)</value></data>
 
   <!-- ════ Tytuły sekcji ════ -->
   <data name="SectionRouteTitle" xml:space="preserve"><value>🧭  Trasa</value></data>

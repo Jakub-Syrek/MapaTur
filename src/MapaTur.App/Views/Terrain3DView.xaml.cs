@@ -1328,6 +1328,8 @@ public partial class Terrain3DView : ContentView
 
     private const float TeleportViewDistanceMeters = 3200f; // how far back the camera sits after a name-search teleport
     private const float TeleportViewPitchRadians = 0.52f;   // ~30° above the place, looking down at it
+    private const float FollowViewDistanceMeters = 600f;    // chase distance the follow camera trails the user by
+    private const float FollowViewPitchRadians = 0.5f;      // ~29° down-tilt for the follow ("chase") view
 
     /// <summary>
     /// Jumps the camera to sit over a named place (from the search picker): centres the orbit target on the
@@ -1352,6 +1354,36 @@ public partial class Terrain3DView : ContentView
         Camera.Target = frame.GeoToWorld(place.Location, (float)elevM);
         Camera.Distance = TeleportViewDistanceMeters;
         Camera.PitchRadians = TeleportViewPitchRadians;
+        Canvas.InvalidateSurface();
+    }
+
+    /// <summary>
+    /// Follow ("chase") camera: seats the camera behind the user at <paramref name="position"/>, looking
+    /// forward along <paramref name="bearingDegrees"/> (the detected travel direction). A null bearing keeps
+    /// the current azimuth — the user is standing still, so recenter without spinning the view. Driven by the
+    /// follow-camera tracking option on every GPS fix.
+    /// </summary>
+    public void FollowTo(MapaTur.Domain.Geography.GeoPoint position, double? bearingDegrees)
+    {
+        if (WorldFrame is not { } frame)
+        {
+            return;
+        }
+
+        double elevM = Raster?.SampleBilinear(position.Longitude, position.Latitude) ?? 1500.0;
+        if (double.IsNaN(elevM) || elevM < 0.0)
+        {
+            elevM = 1500.0;
+        }
+
+        Camera.Target = frame.GeoToWorld(position, (float)elevM);
+        Camera.Distance = FollowViewDistanceMeters;
+        Camera.PitchRadians = FollowViewPitchRadians;
+        if (bearingDegrees is { } bearing)
+        {
+            Camera.AzimuthRadians = MapaTur.Application.Terrain.ChaseCamera.AzimuthRadiansForBearingDegrees(bearing);
+        }
+
         Canvas.InvalidateSurface();
     }
 

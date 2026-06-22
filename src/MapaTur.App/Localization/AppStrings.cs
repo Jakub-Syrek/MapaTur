@@ -263,6 +263,8 @@ public static class AppStrings
     public static string TeleportPlaceholder => Get(nameof(TeleportPlaceholder));
     /// <summary>"Fly" button on a place result.</summary>
     public static string TeleportFly => Get(nameof(TeleportFly));
+    /// <summary>"Follow camera (chase from behind)" tracking option toggle.</summary>
+    public static string FollowCamera => Get(nameof(FollowCamera));
 
     // ── Section titles ──
     /// <summary>Route panel title.</summary>

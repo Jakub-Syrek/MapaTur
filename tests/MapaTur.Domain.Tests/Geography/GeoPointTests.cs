@@ -76,4 +76,28 @@ public sealed class GeoPointTests
 
         ab.Should().BeApproximately(ba, 1e-6);
     }
+
+    [Theory]
+    [InlineData(0.001, 0.0, 0.0)]    // due north
+    [InlineData(0.0, 0.001, 90.0)]   // due east
+    [InlineData(-0.001, 0.0, 180.0)] // due south
+    [InlineData(0.0, -0.001, 270.0)] // due west
+    public void InitialBearing_CardinalDirections(double dLat, double dLon, double expectedDegrees)
+    {
+        var from = new GeoPoint(49.0, 20.0);
+        var to = new GeoPoint(49.0 + dLat, 20.0 + dLon);
+
+        from.InitialBearingDegreesTo(to).Should().BeApproximately(expectedDegrees, 0.5);
+    }
+
+    [Fact]
+    public void InitialBearing_IsAlwaysInZeroTo360()
+    {
+        var from = new GeoPoint(49.0, 20.0);
+        var to = new GeoPoint(48.9, 19.9); // moving south-west → bearing in the (180, 270) quadrant
+
+        double bearing = from.InitialBearingDegreesTo(to);
+
+        bearing.Should().BeInRange(180.0, 270.0);
+    }
 }

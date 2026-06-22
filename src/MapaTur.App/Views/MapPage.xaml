@@ -201,6 +201,13 @@
                                 Text="{Binding IsLocationTracking, Converter={StaticResource LocationTrackingLabel}}"
                                 Command="{Binding ToggleLocationTrackingCommand}" />
                     </Grid>
+                    <!-- Tracking option: while tracking, the 3D camera chases the user from behind, oriented
+                         along the detected direction of travel (see FollowCamera in the view-model). -->
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <Label Grid.Column="0" Text="{x:Static loc:AppStrings.FollowCamera}" Style="{StaticResource GlassLabel}"
+                               FontSize="13" VerticalOptions="Center" />
+                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding FollowCamera}" />
+                    </Grid>
                     <Border Style="{StaticResource GlassBar}" Padding="10,2">
                         <Entry Placeholder="{x:Static loc:AppStrings.TeleportPlaceholder}" Text="{Binding PlaceQuery, Mode=TwoWay}"
                                TextColor="White" PlaceholderColor="#88FFFFFF" BackgroundColor="Transparent" />

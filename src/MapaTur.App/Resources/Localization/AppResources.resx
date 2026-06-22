@@ -253,6 +253,7 @@
   <data name="LocateCenterOnMe" xml:space="preserve"><value>🎯  Center on me</value></data>
   <data name="TeleportPlaceholder" xml:space="preserve"><value>Teleport: peak, hut, lake…</value></data>
   <data name="TeleportFly" xml:space="preserve"><value>🎯 Fly</value></data>
+  <data name="FollowCamera" xml:space="preserve"><value>Follow camera (chase from behind)</value></data>
 
   <!-- ════ Section titles ════ -->
   <data name="SectionRouteTitle" xml:space="preserve"><value>🧭  Route</value></data>

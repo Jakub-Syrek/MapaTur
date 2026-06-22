@@ -71,4 +71,10 @@ public interface I3DSettingsStore
     /// Null until the user picks one, in which case the app starts in Polish (the default).
     /// </summary>
     string? Language { get; set; }
+
+    /// <summary>
+    /// Whether the "follow camera" tracking option is on: while GPS tracking is active the 3D camera
+    /// chases the user from behind, oriented along the detected direction of travel. Defaults to false.
+    /// </summary>
+    bool FollowCamera { get; set; }
 }

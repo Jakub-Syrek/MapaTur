@@ -51,6 +51,7 @@ public partial class MapPage : ContentPage
         viewModel.PropertyChanged += OnViewModelPropertyChanged;
         viewModel.TerrainReframeRequested += OnTerrainReframeRequested;
         viewModel.TeleportRequested += OnTeleportRequested;
+        viewModel.FollowRequested += OnFollowRequested;
         viewModel.RouteFilmRequested += OnRouteFilmRequested;
     }
 
@@ -299,6 +300,13 @@ public partial class MapPage : ContentPage
     private void OnTeleportRequested(object? sender, Domain.Routing.RouteWaypoint place)
     {
         Dispatcher.Dispatch(() => TerrainView.TeleportTo(place));
+    }
+
+    // Follow-camera tracking: each GPS fix (while the option is on) chases the user from behind, oriented
+    // along their travel direction. Dispatched onto the UI thread like the other camera moves.
+    private void OnFollowRequested(object? sender, MapPageViewModel.FollowCameraRequest req)
+    {
+        Dispatcher.Dispatch(() => TerrainView.FollowTo(req.Position, req.BearingDegrees));
     }
 
     // "Film z trasy": start the cinematic fly-through along the planned route (records to MP4).

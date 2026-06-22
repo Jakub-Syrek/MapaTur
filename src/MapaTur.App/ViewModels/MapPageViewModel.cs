@@ -720,6 +720,70 @@ public sealed partial class MapPageViewModel : ObservableObject
             centerOnNextFix = false;
             RaiseCenterOnLocation(fix);
         }
+
+        // Follow-camera tracking option: chase the user from behind on every fix, oriented along the
+        // detected direction of travel (held when standing still). Only while tracking is active.
+        if (FollowCamera && IsLocationTracking && value is { } followFix)
+        {
+            FollowRequested?.Invoke(this, new FollowCameraRequest(followFix.Position, ComputeHeadingDegrees(followFix)));
+        }
+    }
+
+    /// <summary>
+    /// "Follow camera" tracking option: while GPS tracking is on, the 3D camera chases the user from behind,
+    /// oriented along the detected direction of travel. Persisted; takes effect only while tracking is on.
+    /// </summary>
+    [ObservableProperty]
+    private bool followCamera;
+
+    // Last fix used as the heading baseline, and the most recent confident travel bearing (degrees).
+    private UserLocation? lastHeadingFix;
+    private double? lastHeadingDegrees;
+
+    // Below this movement (m) between fixes the heading is HELD — GPS jitter while standing still must not
+    // spin the camera. ~4 m clears typical consumer-GPS noise; real walking advances past it each fix.
+    private const double FollowHeadingMinMoveMeters = 4.0;
+
+    partial void OnFollowCameraChanged(bool value)
+    {
+        settingsStore.FollowCamera = value;
+        if (!value)
+        {
+            ResetFollowHeading();
+            return;
+        }
+
+        // Snap straight into the follow view if we are already tracking and have a fix.
+        if (IsLocationTracking && UserLocation is { } fix)
+        {
+            FollowRequested?.Invoke(this, new FollowCameraRequest(fix.Position, ComputeHeadingDegrees(fix)));
+        }
+    }
+
+    private void ResetFollowHeading()
+    {
+        lastHeadingFix = null;
+        lastHeadingDegrees = null;
+    }
+
+    // Updates + returns the travel bearing from consecutive fixes. Returns the held bearing (possibly null
+    // on the first fixes) until the user has moved past the jitter threshold, then the fresh bearing.
+    private double? ComputeHeadingDegrees(UserLocation fix)
+    {
+        if (lastHeadingFix is { } prev)
+        {
+            if (prev.Position.HaversineDistanceMetersTo(fix.Position) >= FollowHeadingMinMoveMeters)
+            {
+                lastHeadingDegrees = prev.Position.InitialBearingDegreesTo(fix.Position);
+                lastHeadingFix = fix;
+            }
+        }
+        else
+        {
+            lastHeadingFix = fix;
+        }
+
+        return lastHeadingDegrees;
     }
 
     /// <summary>
@@ -738,6 +802,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             userLocationService.Stop();
             IsLocationTracking = false;
             UserLocation = null;
+            ResetFollowHeading();
             StatusMessage = Localization.AppStrings.StatusLocationTrackingStopped;
             return;
         }
@@ -1112,6 +1177,12 @@ public sealed partial class MapPageViewModel : ObservableObject
 
     /// <summary>Raised when the user picks a place to fly the 3D camera over — the page moves the camera there.</summary>
     public event EventHandler<Domain.Routing.RouteWaypoint>? TeleportRequested;
+
+    /// <summary>A follow-camera update for the 3D view: the user's position and, when known, their travel bearing.</summary>
+    public sealed record FollowCameraRequest(GeoPoint Position, double? BearingDegrees);
+
+    /// <summary>Raised on each GPS fix while the follow-camera option is on, so the view can chase the user.</summary>
+    public event EventHandler<FollowCameraRequest>? FollowRequested;
 
     [RelayCommand]
     private void TeleportToPlace(Domain.Routing.RouteWaypoint? place)
@@ -1512,6 +1583,8 @@ public sealed partial class MapPageViewModel : ObservableObject
         // Restore the chosen UI language for the Ustawienia selector. Set the backing field directly so the
         // OnLanguageIndexChanged hook does NOT fire a restart on launch (App already applied the culture).
         languageIndex = AppLanguage.Normalize(settingsStore.Language) == AppLanguage.English ? 1 : 0;
+        // Restore the follow-camera tracking option (backing field, so OnFollowCameraChanged doesn't fire before the view exists).
+        followCamera = settingsStore.FollowCamera;
         this.trackRenderer = trackRenderer;
         this.trailRenderer = trailRenderer;
         this.routeRenderer = routeRenderer;
