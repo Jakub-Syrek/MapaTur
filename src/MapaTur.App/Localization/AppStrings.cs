@@ -321,6 +321,10 @@ public static class AppStrings
     public static string ToggleTrails => Get(nameof(ToggleTrails));
     /// <summary>"Roads" toggle.</summary>
     public static string ToggleRoads => Get(nameof(ToggleRoads));
+    /// <summary>"Exposed routes" toggle.</summary>
+    public static string ToggleExposedRoutes => Get(nameof(ToggleExposedRoutes));
+    /// <summary>Caption under the "Exposed routes" toggle.</summary>
+    public static string ToggleExposedRoutesHint => Get(nameof(ToggleExposedRoutesHint));
     /// <summary>"TRAIL COLOURS" sub-header.</summary>
     public static string TrailColoursHeader => Get(nameof(TrailColoursHeader));
     /// <summary>Trail colour "Red".</summary>

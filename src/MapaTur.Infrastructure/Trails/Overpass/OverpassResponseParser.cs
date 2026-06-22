@@ -66,6 +66,81 @@ public static class OverpassResponseParser
         }
     }
 
+    /// <summary>
+    /// Parses an Overpass response of standalone ways (from an <c>out geom</c> query) into one
+    /// <see cref="Trail"/> per way that has usable geometry. Used for the exposed-routes overlay
+    /// (sac_scale / via_ferrata ways), which — unlike hiking relations — are individual ways. The name
+    /// comes from the way's <c>name</c> tag, falling back to its <c>sac_scale</c> grade or a generic label;
+    /// the marking is the default (the exposed overlay is drawn with its own fixed style, not the PTTK colour).
+    /// </summary>
+    public static IReadOnlyList<Trail> ParseWays(ReadOnlySpan<byte> utf8Json)
+    {
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(utf8Json.ToArray());
+        }
+        catch (JsonException ex)
+        {
+            throw new InvalidDataException("Overpass response is not valid JSON.", ex);
+        }
+
+        using (document)
+        {
+            if (!document.RootElement.TryGetProperty("elements", out var elementsArray)
+                || elementsArray.ValueKind != JsonValueKind.Array)
+            {
+                throw new InvalidDataException("Overpass response is missing the 'elements' array.");
+            }
+
+            var defaultMarking = OsmcSymbolParser.Parse(null);
+            var trails = new List<Trail>();
+            foreach (var element in elementsArray.EnumerateArray())
+            {
+                if (!element.TryGetProperty("type", out var typeElement) || typeElement.GetString() != "way")
+                {
+                    continue;
+                }
+
+                IReadOnlyList<GeoPoint> geometry = ExtractWayGeometry(element);
+                if (geometry.Count < 2)
+                {
+                    continue;
+                }
+
+                long id = element.TryGetProperty("id", out var idElement) ? idElement.GetInt64() : trails.Count;
+                string name = ExtractWayName(element);
+                trails.Add(new Trail(id, name, new List<TrailMarking> { defaultMarking }, geometry));
+            }
+
+            return trails;
+        }
+    }
+
+    private static string ExtractWayName(JsonElement way)
+    {
+        if (way.TryGetProperty("tags", out var tags))
+        {
+            if (tags.TryGetProperty("name", out var nameElement) && nameElement.ValueKind == JsonValueKind.String)
+            {
+                return nameElement.GetString() ?? "Exposed route";
+            }
+            if (tags.TryGetProperty("highway", out var hwElement) && hwElement.GetString() == "via_ferrata")
+            {
+                return "Via ferrata";
+            }
+            if (tags.TryGetProperty("via_ferrata_scale", out _))
+            {
+                return "Via ferrata";
+            }
+            if (tags.TryGetProperty("sac_scale", out var sacElement) && sacElement.ValueKind == JsonValueKind.String)
+            {
+                return sacElement.GetString() ?? "Exposed route";
+            }
+        }
+        return "Exposed route";
+    }
+
     private static IReadOnlyList<GeoPoint> ExtractWayGeometry(JsonElement way)
     {
         if (!way.TryGetProperty("geometry", out var geometryArray)

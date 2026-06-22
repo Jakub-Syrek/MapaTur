@@ -130,4 +130,16 @@ public sealed class PlaceGazetteerTests
         TatraHuts.All.Should().Contain(h => h.Name == "Téryho chata");        // Slovak side
         TatraHuts.All.Should().OnlyContain(h => h.Kind == PoiKind.Hut);
     }
+
+    // The curated TatraPasses gazetteer must make cols searchable offline — including Honoratka, which is
+    // absent from OSM and added by hand (the user's "czemu nie ma honoratki na orlej").
+    [Fact]
+    public void CuratedPasses_AreSearchableIncludingHonoratka()
+    {
+        var gazetteer = new PlaceGazetteer(pois: TatraPasses.All);
+
+        gazetteer.Search("honorat", 5).Should().Contain(w => w.Name == "Honoratka");
+        gazetteer.Search("zawrat", 5).Should().Contain(w => w.Name == "Zawrat");
+        TatraPasses.All.Should().OnlyContain(p => p.Kind == PoiKind.Pass);
+    }
 }

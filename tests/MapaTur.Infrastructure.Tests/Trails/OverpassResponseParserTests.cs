@@ -11,6 +11,28 @@ public sealed class OverpassResponseParserTests
         Path.Combine(AppContext.BaseDirectory, "testdata", "trails", "overpass-tatry-sample.json");
 
     [Fact]
+    public void ParseWays_EmitsOneTrailPerWayWithGeometry()
+    {
+        const string json = """
+        {"elements":[
+          {"type":"way","id":501,"tags":{"sac_scale":"demanding_mountain_hiking","name":"Orla Perć"},
+           "geometry":[{"lat":49.22,"lon":20.01},{"lat":49.221,"lon":20.012},{"lat":49.222,"lon":20.014}]},
+          {"type":"way","id":502,"tags":{"highway":"via_ferrata"},
+           "geometry":[{"lat":49.20,"lon":20.05}]},
+          {"type":"way","id":503,"tags":{"via_ferrata_scale":"3"},
+           "geometry":[{"lat":49.18,"lon":20.06},{"lat":49.181,"lon":20.061}]}
+        ]}
+        """;
+
+        var routes = OverpassResponseParser.ParseWays(System.Text.Encoding.UTF8.GetBytes(json));
+
+        // Way 502 has a single point (< 2) and is dropped; 501 and 503 remain.
+        routes.Should().HaveCount(2);
+        routes.Should().Contain(t => t.Id == 501 && t.Name == "Orla Perć" && t.Geometry.Count == 3);
+        routes.Should().Contain(t => t.Id == 503 && t.Name == "Via ferrata"); // named from the via_ferrata_scale tag
+    }
+
+    [Fact]
     public void Parse_ReturnsTrailsForRelationsWithGeometry()
     {
         byte[] payload = File.ReadAllBytes(FixturePath);

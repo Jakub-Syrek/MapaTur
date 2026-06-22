@@ -285,6 +285,8 @@
   <data name="ToggleSlopeMapHint" xml:space="preserve"><value>kolor wg stromości stoku (lawinowa)</value></data>
   <data name="ToggleTrails" xml:space="preserve"><value>Szlaki turystyczne</value></data>
   <data name="ToggleRoads" xml:space="preserve"><value>Drogi</value></data>
+  <data name="ToggleExposedRoutes" xml:space="preserve"><value>Drogi eksponowane</value></data>
+  <data name="ToggleExposedRoutesHint" xml:space="preserve"><value>trudne / via ferrata (kropki) — pobierane ze szlakami</value></data>
   <data name="TrailColoursHeader" xml:space="preserve"><value>KOLORY SZLAKÓW</value></data>
   <data name="ColourRed" xml:space="preserve"><value>Czerwony</value></data>
   <data name="ColourBlue" xml:space="preserve"><value>Niebieski</value></data>

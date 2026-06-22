@@ -375,6 +375,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             case "PoiParking": ShowParking = !ShowParking; break;
             case "PoiPasses": ShowPasses = !ShowPasses; break;
             case "Trails": ShowTrails = !ShowTrails; break;
+            case "ExposedRoutes": ShowExposedRoutes = !ShowExposedRoutes; break;
             case "PeakNames": ShowPeakNames = !ShowPeakNames; break;
             case "NightSky": ShowNightSky = !ShowNightSky; break;
             case "CableCar": ShowCableCar = !ShowCableCar; break;
@@ -942,6 +943,25 @@ public sealed partial class MapPageViewModel : ObservableObject
         }
     }
 
+    /// <summary>Exposed/guide-route overlay for the 3D view (sac_scale / via_ferrata ways), drawn as dots; null when hidden.</summary>
+    [ObservableProperty]
+    private IReadOnlyList<Trail>? exposedRoutes3DOverlay;
+
+    // Last-downloaded exposed routes (simplified for the 3D overlay), kept so the toggle re-applies without a refetch.
+    private IReadOnlyList<Trail>? rawExposedRoutes3D;
+
+    /// <summary>Master show/hide for the exposed/guide routes (dotted) overlay.</summary>
+    [ObservableProperty]
+    private bool showExposedRoutes = true;
+
+    partial void OnShowExposedRoutesChanged(bool value) => ApplyExposedRoutes();
+
+    /// <summary>Re-applies exposed-route visibility to the 3D overlay from the last download.</summary>
+    private void ApplyExposedRoutes()
+    {
+        ExposedRoutes3DOverlay = (ShowExposedRoutes && rawExposedRoutes3D is not null) ? rawExposedRoutes3D : null;
+    }
+
     /// <summary>Master show/hide for all trails; when off, no trail renders regardless of the colour/region filter.</summary>
     /// <summary>Whether the orthophoto drape is shown on the 3D terrain (else hypsometric shading).</summary>
     [ObservableProperty] private bool showOrtho = true;
@@ -1197,23 +1217,14 @@ public sealed partial class MapPageViewModel : ObservableObject
     }
 
     // Rebuilds the searchable place picker from the current named-place sets. Cheap; called after the
-    // peak / lake / POI data changes. The curated TatraHuts gazetteer is always unioned in so well-known
-    // huts (e.g. "Murowaniec") are searchable offline even when no POIs were downloaded for the area —
-    // downloaded OSM huts (rawPois) win, so a hut already present by name is not duplicated.
+    // peak / lake / POI data changes. Uses EffectivePois() so the bundled offline gazetteers (huts +
+    // Tatra-core cols/passes, incl. Honoratka) are searchable even with no POI download; ApplyPoiFilter
+    // then makes those same bundled features visible as markers without one.
     private void RebuildPlaceGazetteer()
     {
-        var pois = new List<MapaTur.Domain.Pois.MountainPoi>(rawPois ?? Array.Empty<MapaTur.Domain.Pois.MountainPoi>());
-        var present = new HashSet<string>(pois.Select(p => p.Name), StringComparer.OrdinalIgnoreCase);
-        foreach (MapaTur.Domain.Pois.MountainPoi hut in TatraHuts.All)
-        {
-            if (present.Add(hut.Name))
-            {
-                pois.Add(hut);
-            }
-        }
-
-        placeGazetteer = new PlaceGazetteer(Peaks3DOverlay, MountainLakeData.All, pois);
+        placeGazetteer = new PlaceGazetteer(Peaks3DOverlay, MountainLakeData.All, EffectivePois());
         RefreshPlaceResults();
+        ApplyPoiFilter();
     }
 
     [ObservableProperty]
@@ -1263,16 +1274,33 @@ public sealed partial class MapPageViewModel : ObservableObject
         _ => true,
     };
 
-    /// <summary>Re-applies the per-kind filter to the last-downloaded POIs across the 2D map and 3D view.</summary>
+    /// <summary>Re-applies the per-kind filter to the effective POI set across the 2D map and 3D view.</summary>
     private void ApplyPoiFilter()
     {
-        if (rawPois is null)
-        {
-            return;
-        }
-        var filtered = rawPois.Where(poi => IsPoiKindVisible(poi.Kind)).ToList();
+        var filtered = EffectivePois().Where(poi => IsPoiKindVisible(poi.Kind)).ToList();
         poiRenderer.RenderPois(Map, filtered);
         Pois3DOverlay = filtered;
+    }
+
+    /// <summary>
+    /// The POI set actually shown + searched: downloaded/cached POIs unioned with the bundled offline
+    /// gazetteers (huts + Tatra-core cols/passes), so well-known huts and przełęcze (incl. Honoratka) are
+    /// visible AND searchable without a POI download. Downloaded OSM features win — a bundled entry whose
+    /// name already arrived from OSM is skipped (dedup by name).
+    /// </summary>
+    private IReadOnlyList<MapaTur.Domain.Pois.MountainPoi> EffectivePois()
+    {
+        var result = new List<MapaTur.Domain.Pois.MountainPoi>(
+            rawPois ?? (IReadOnlyList<MapaTur.Domain.Pois.MountainPoi>)Array.Empty<MapaTur.Domain.Pois.MountainPoi>());
+        var present = new HashSet<string>(result.Select(p => p.Name), StringComparer.OrdinalIgnoreCase);
+        foreach (MapaTur.Domain.Pois.MountainPoi bundled in TatraHuts.All.Concat(TatraPasses.All))
+        {
+            if (present.Add(bundled.Name))
+            {
+                result.Add(bundled);
+            }
+        }
+        return result;
     }
 
     /// <summary>
@@ -1820,6 +1848,20 @@ public sealed partial class MapPageViewModel : ObservableObject
 
             var trails = await overpassClient.FetchHikingTrailsAsync(bounds.Value).ConfigureAwait(true);
             await ApplyTrailsAsync(trails).ConfigureAwait(true);
+
+            // Best-effort: also pull the exposed/guide routes (sac_scale / via_ferrata) for the same box and
+            // build the dotted overlay. A failure here must not sink the trails result, so swallow + log.
+            try
+            {
+                var exposed = await overpassClient.FetchExposedRoutesAsync(bounds.Value).ConfigureAwait(true);
+                rawExposedRoutes3D = SimplifyForOverlay3D(exposed);
+                ApplyExposedRoutes();
+                logger.LogInformation("Downloaded {Count} exposed routes for bounds {Bounds}", exposed.Count, bounds);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Exposed-route download failed (non-fatal)");
+            }
 
             StatusMessage = trails.Count == 0
                 ? Localization.AppStrings.StatusNoTrailsFound

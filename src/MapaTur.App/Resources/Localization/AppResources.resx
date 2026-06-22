@@ -285,6 +285,8 @@
   <data name="ToggleSlopeMapHint" xml:space="preserve"><value>colour by slope steepness (avalanche)</value></data>
   <data name="ToggleTrails" xml:space="preserve"><value>Hiking trails</value></data>
   <data name="ToggleRoads" xml:space="preserve"><value>Roads</value></data>
+  <data name="ToggleExposedRoutes" xml:space="preserve"><value>Exposed routes</value></data>
+  <data name="ToggleExposedRoutesHint" xml:space="preserve"><value>demanding / via ferrata (dotted) — fetched with trails</value></data>
   <data name="TrailColoursHeader" xml:space="preserve"><value>TRAIL COLOURS</value></data>
   <data name="ColourRed" xml:space="preserve"><value>Red</value></data>
   <data name="ColourBlue" xml:space="preserve"><value>Blue</value></data>

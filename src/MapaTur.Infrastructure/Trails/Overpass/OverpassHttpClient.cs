@@ -43,4 +43,13 @@ public sealed class OverpassHttpClient : IOverpassClient
             httpClient, endpoints, query, cancellationToken).ConfigureAwait(false);
         return OverpassResponseParser.Parse(payload);
     }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<Trail>> FetchExposedRoutesAsync(MapBounds bounds, CancellationToken cancellationToken = default)
+    {
+        string query = OverpassExposedRouteQueryBuilder.BuildExposedRoutesQuery(bounds);
+        byte[] payload = await OverpassRequestExecutor.PostWithFailoverAsync(
+            httpClient, endpoints, query, cancellationToken).ConfigureAwait(false);
+        return OverpassResponseParser.ParseWays(payload);
+    }
 }

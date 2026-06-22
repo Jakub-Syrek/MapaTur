@@ -102,6 +102,19 @@ public partial class Terrain3DView : ContentView
         set => SetValue(RoadsProperty, value);
     }
 
+    /// <summary>Bindable exposed/guide routes (Trail polylines) drawn as dotted lines, distinct from marked trails.</summary>
+    public static readonly BindableProperty ExposedRoutesProperty = BindableProperty.Create(
+        nameof(ExposedRoutes),
+        typeof(IReadOnlyList<Trail>),
+        typeof(Terrain3DView),
+        propertyChanged: OnOverlayDataChanged);
+
+    public IReadOnlyList<Trail>? ExposedRoutes
+    {
+        get => (IReadOnlyList<Trail>?)GetValue(ExposedRoutesProperty);
+        set => SetValue(ExposedRoutesProperty, value);
+    }
+
     /// <summary>Bindable planned route rendered as a distinct violet polyline on top of trails.</summary>
     public static readonly BindableProperty RouteProperty = BindableProperty.Create(
         nameof(Route),
@@ -2747,7 +2760,7 @@ public partial class Terrain3DView : ContentView
             // Today's local date drives the night-sky star pass (with the time-of-day slider as the local
             // hour); the stars fade in only once the slider puts the sun below the horizon.
             IReadOnlyList<TreeInstance>? forest = EnsureForest(tiles);
-            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere, forest, DetailElevation, ShowNightSky ? DateOnly.FromDateTime(DateTime.Now) : null);
+            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere, forest, DetailElevation, ShowNightSky ? DateOnly.FromDateTime(DateTime.Now) : null, ExposedRoutes);
             if (terrainTextureId == 0)
             {
                 return false;

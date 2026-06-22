@@ -938,10 +938,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // same bias that wins a near z-fight ALSO punched trails THROUGH faraway ridges ("szlaki widać przez
         // skały"). Subtracting a constant in CLIP space (NO `* w`) makes the NDC bias = C/w — strong up close
         // where the 1 m detail actually z-fights, ~0 far away where ridges must occlude. Plus 10 m TrailLift seating.
-        "  gl_Position.z -= 0.04;\n" +
+        // 0.09 (was 0.04): the 1 m detail still poked over trails here and there. Because this is a CLIP-space
+        // subtract (NDC bias = C/w), a bigger C only strengthens the NEAR field where the detail z-fights —
+        // far ridges (large w) still get ~0 bias and keep occluding, so no return of "szlaki przez skały".
+        "  gl_Position.z -= 0.09;\n" +
         "}\n";
 
-    private const float TrailHalfWidthPx = 1.0f;   // thinner trails — the 1.6 px ribbon read too heavy/loud on the scene
+    private const float TrailHalfWidthPx = 0.7f;   // very thin trails — the line should read as a delicate thread, not a ribbon
     private const float RouteHalfWidthPx = 2.6f;
     private const float RoadHalfWidthPx = 1.8f;
 
@@ -960,9 +963,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // lines in places ("szlaki przykrywane przez detal"); the lift is a WORLD-space vertical offset, so a real
     // ridge IN FRONT still occludes (lift ≪ ridge height) — i.e. this fixes the cover-up WITHOUT re-introducing
     // "szlaki przez skały" (that is the depth-bias's job, left untouched at -= 0.04).
-    private const float TrailLiftMeters = 10f;
-    private const float RouteLiftMeters = 14f;
-    private const float RoadLiftMeters = 7f;
+    private const float TrailLiftMeters = 13f;   // bumped from 10: a bit more clearance over 1 m detail bumps (pairs with the stronger depth bias)
+    private const float RouteLiftMeters = 16f;
+    private const float RoadLiftMeters = 9f;
+    private const float ExposedRouteLiftMeters = 18f;     // well ABOVE trails (10 m) so the dots sit clearly on top of a coincident trail line (Orla Perć is both a red trail and a demanding route)
+    private const float ExposedRouteHalfWidthPx = 2.4f;   // fat dots that clearly punctuate over the thin (0.7 px) trail line beneath
+    // Bright orange for the exposed / guide routes (sac_scale demanding / via_ferrata) — lighter/yellower than the PTTK red so it pops where it runs along a red trail.
+    private const byte ExposedR = 0xFF, ExposedG = 0x8C, ExposedB = 0x00;
 
     // Contour lines (warstwice): drawn IN the terrain shader from each fragment's elevation, so they lie on
     // whatever LOD is rendered (coarse base OR 1 m detail) — no float, no rock poke-through, crisp at any zoom.
@@ -1384,6 +1391,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private TerrainMesh3D? lastRoadMesh;
     private DetailElevationField? lastRoadDetail;
 
+    private LineBuffers? exposedLines;
+    private IReadOnlyList<Trail>? lastExposed;
+    private DemRaster? lastExposedRaster;
+    private TerrainMesh3D? lastExposedMesh;
+    private DetailElevationField? lastExposedDetail;
+
     private LineBuffers? cableLines;
     private CableCarLine? lastCableCarBuilt;
     private TerrainMesh3D? lastCableMesh;
@@ -1501,7 +1514,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         Atmosphere? atmosphere = null,
         IReadOnlyList<TreeInstance>? forest = null,
         DetailElevationField? detail = null,
-        DateOnly? localDate = null)
+        DateOnly? localDate = null,
+        IReadOnlyList<Trail>? exposedRoutes = null)
     {
         gl ??= PlatformGl.Get();
 
@@ -1529,6 +1543,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             lastRoadRaster = null;
             lastRoadMesh = null;
             lastRoadDetail = null;
+            exposedLines = null;
+            lastExposed = null;
+            lastExposedRaster = null;
+            lastExposedMesh = null;
+            lastExposedDetail = null;
             cableLines = null;
             lastCableCarBuilt = null;
             lastCableMesh = null;
@@ -2386,6 +2405,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         TerrainMesh3D frame = tiles[0];
         DrawRoadLines(gl, roads, raster, frame, detail);
         DrawTrailLines(gl, trails, raster, frame, detail);
+        DrawExposedRoutes(gl, exposedRoutes, raster, frame, detail);
         DrawRouteLine(gl, route, raster, frame, detail);
         DrawCableCar(gl, frame, raster, detail);
 
@@ -4259,6 +4279,42 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         DrawLine(g, routeLines, RouteHalfWidthPx);
     }
 
+    private void DrawExposedRoutes(GL g, IReadOnlyList<Trail>? exposed, DemRaster? raster, TerrainMesh3D mesh, DetailElevationField? detail)
+    {
+        if (exposed is null || exposed.Count == 0 || raster is null)
+        {
+            return;
+        }
+
+        if (exposedLines is null
+            || !ReferenceEquals(lastExposed, exposed)
+            || !ReferenceEquals(lastExposedRaster, raster)
+            || !ReferenceEquals(lastExposedMesh, mesh)
+            || !ReferenceEquals(lastExposedDetail, detail))
+        {
+            DeleteLine(g, ref exposedLines);
+            // Exposed routes are Trail polylines (sac_scale / via_ferrata); reuse the trail world projection
+            // (which densifies + seats them on the 1 m detail), then draw DASHED so they read as dotted lines.
+            IReadOnlyList<TrailWorldLine> world = Trail3DWorldProjection.ToWorld(exposed, raster, mesh, ExposedRouteLiftMeters, detail);
+
+            var ribbon = new RibbonBuilder();
+            foreach (TrailWorldLine line in world)
+            {
+                // dash=1 / gap=3 over the ~5 m densified segments → ~5 m mark every ~20 m: clearly separated dots
+                // sitting on top of (and punctuating) any trail the exposed route runs along.
+                ribbon.AppendDashed(line.World, ExposedR, ExposedG, ExposedB, dashSegments: 1, gapSegments: 3);
+            }
+
+            exposedLines = UploadLine(g, ribbon);
+            lastExposed = exposed;
+            lastExposedRaster = raster;
+            lastExposedMesh = mesh;
+            lastExposedDetail = detail;
+        }
+
+        DrawLine(g, exposedLines, ExposedRouteHalfWidthPx);
+    }
+
     private const float CableHalfWidthPx = 2.2f;     // drawn cable ribbon half-width
     private const float CableMastHeightM = 30f;      // station mast height the cable attaches to
     private const float CableSagFraction = 0.03f;    // mid-span droop as a fraction of the span's horizontal length
@@ -4402,6 +4458,42 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             for (int i = 0; i < world.Count - 1; i++)
             {
+                Vector3 a = world[i];
+                Vector3 c = world[i + 1];
+                if (float.IsNaN(a.X) || float.IsNaN(c.X))
+                {
+                    continue;
+                }
+
+                uint v = (uint)(Positions.Count / 3);
+                AddVertex(a, c, +1f, r, g, b);
+                AddVertex(a, c, -1f, r, g, b);
+                AddVertex(c, a, -1f, r, g, b);
+                AddVertex(c, a, +1f, r, g, b);
+                Indices.Add(v + 0);
+                Indices.Add(v + 1);
+                Indices.Add(v + 2);
+                Indices.Add(v + 2);
+                Indices.Add(v + 1);
+                Indices.Add(v + 3);
+            }
+        }
+
+        /// <summary>
+        /// Appends a DASHED ribbon: emits <paramref name="dashSegments"/> consecutive segments, then skips
+        /// <paramref name="gapSegments"/>, repeating along the (densified) polyline — so the line reads as a
+        /// row of dots/dashes. With ~5 m densification, dash=1/gap=2 gives ~5 m marks every ~15 m.
+        /// </summary>
+        public void AppendDashed(IReadOnlyList<Vector3> world, byte r, byte g, byte b, int dashSegments, int gapSegments)
+        {
+            int period = Math.Max(1, dashSegments + gapSegments);
+            for (int i = 0; i < world.Count - 1; i++)
+            {
+                if (i % period >= dashSegments)
+                {
+                    continue; // gap
+                }
+
                 Vector3 a = world[i];
                 Vector3 c = world[i + 1];
                 if (float.IsNaN(a.X) || float.IsNaN(c.X))
@@ -5337,6 +5429,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         DeleteLine(gl, ref trailLines);
         DeleteLine(gl, ref routeLines);
         DeleteLine(gl, ref roadLines);
+        DeleteLine(gl, ref exposedLines);
         gl.DeleteFramebuffer(msaaFbo);
         gl.DeleteRenderbuffer(msaaColorRb);
         gl.DeleteRenderbuffer(msaaDepthRb);

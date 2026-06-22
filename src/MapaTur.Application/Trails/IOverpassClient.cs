@@ -18,4 +18,13 @@ public interface IOverpassClient
     /// <exception cref="HttpRequestException">Thrown when the request fails.</exception>
     /// <exception cref="InvalidDataException">Thrown when the response cannot be parsed.</exception>
     Task<IReadOnlyList<Trail>> FetchHikingTrailsAsync(MapBounds bounds, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Fetches exposed/secured route ways (sac_scale demanding/alpine, via_ferrata) intersecting the box —
+    /// the demanding "guide" routes drawn as a dotted overlay, distinct from ordinary marked trails.
+    /// </summary>
+    /// <param name="bounds">Bounding box.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>One trail per exposed way. Empty when the area contains none.</returns>
+    Task<IReadOnlyList<Trail>> FetchExposedRoutesAsync(MapBounds bounds, CancellationToken cancellationToken = default);
 }
