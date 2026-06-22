@@ -1,5 +1,6 @@
 using FluentAssertions;
 
+using MapaTur.Application.Pois;
 using MapaTur.Application.Routing;
 using MapaTur.Application.Terrain;
 using MapaTur.Domain.Geography;
@@ -110,5 +111,23 @@ public sealed class PlaceGazetteerTests
 
         rysy.Location.Latitude.Should().BeApproximately(49.179, 1e-3);
         rysy.ElevationMeters.Should().Be(2503, "the peak's published label elevation is preferred");
+    }
+
+    // The curated TatraHuts gazetteer must make well-known huts searchable offline (the phone bug:
+    // "muro" found nothing without downloaded POIs, while the desktop had them cached).
+    [Fact]
+    public void CuratedHuts_AreSearchableByPartialName()
+    {
+        var gazetteer = new PlaceGazetteer(pois: TatraHuts.All);
+
+        gazetteer.Search("muro", 5).Should().Contain(w => w.Name == "Murowaniec");
+    }
+
+    [Fact]
+    public void CuratedHuts_IncludeBothSides()
+    {
+        TatraHuts.All.Should().Contain(h => h.Name == "Murowaniec");          // Polish side
+        TatraHuts.All.Should().Contain(h => h.Name == "Téryho chata");        // Slovak side
+        TatraHuts.All.Should().OnlyContain(h => h.Kind == PoiKind.Hut);
     }
 }

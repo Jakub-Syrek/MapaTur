@@ -1197,10 +1197,22 @@ public sealed partial class MapPageViewModel : ObservableObject
     }
 
     // Rebuilds the searchable place picker from the current named-place sets. Cheap; called after the
-    // peak / lake / POI data changes.
+    // peak / lake / POI data changes. The curated TatraHuts gazetteer is always unioned in so well-known
+    // huts (e.g. "Murowaniec") are searchable offline even when no POIs were downloaded for the area —
+    // downloaded OSM huts (rawPois) win, so a hut already present by name is not duplicated.
     private void RebuildPlaceGazetteer()
     {
-        placeGazetteer = new PlaceGazetteer(Peaks3DOverlay, MountainLakeData.All, rawPois);
+        var pois = new List<MapaTur.Domain.Pois.MountainPoi>(rawPois ?? Array.Empty<MapaTur.Domain.Pois.MountainPoi>());
+        var present = new HashSet<string>(pois.Select(p => p.Name), StringComparer.OrdinalIgnoreCase);
+        foreach (MapaTur.Domain.Pois.MountainPoi hut in TatraHuts.All)
+        {
+            if (present.Add(hut.Name))
+            {
+                pois.Add(hut);
+            }
+        }
+
+        placeGazetteer = new PlaceGazetteer(Peaks3DOverlay, MountainLakeData.All, pois);
         RefreshPlaceResults();
     }
 
