@@ -9,15 +9,16 @@ namespace MapaTur.Application.Pois;
 /// Sourced from OSM (<c>natural=saddle</c> / <c>mountain_pass</c>, WGS84) so they are searchable AND drawn as
 /// pass markers OFFLINE, without a POI download. The live "Pobierz POI (widok)" download still adds/overrides
 /// these (deduped by name). Honoratka is added by hand — it is NOT mapped in OSM (its coordinates are
-/// approximate, on Orla Perć by Kozia Przełęcz Wyżnia).
+/// approximate, on Orla Perć by Mały Kozi Wierch, on the Zawrat-side approach).
 /// </summary>
 public static class TatraPasses
 {
     /// <summary>Curated named cols / passes, modelled as <see cref="PoiKind.Pass"/> POIs.</summary>
     public static IReadOnlyList<MountainPoi> All { get; } = new[]
     {
-        // Honoratka — famous notch on Orla Perć, absent from OSM; approximate position by Kozia Przełęcz Wyżnia.
-        new MountainPoi(-100, "Honoratka", new GeoPoint(49.218600, 20.029200), PoiKind.Pass, 2115),
+        // Honoratka — famous ledge/notch on Orla Perć, absent from OSM; approximate position between Zawrat
+        // and Mały Kozi Wierch (on the Zawrat-side approach to Mały Kozi, NOT by the higher Kozi Wierch).
+        new MountainPoi(-100, "Honoratka", new GeoPoint(49.219100, 20.018400), PoiKind.Pass, 2100),
 
         new MountainPoi(-101, "Liliowe / Ľaliové sedlo", new GeoPoint(49.225551, 19.991338), PoiKind.Pass, 1952),
         new MountainPoi(-102, "Karb", new GeoPoint(49.228811, 20.011708), PoiKind.Pass, 1853),
