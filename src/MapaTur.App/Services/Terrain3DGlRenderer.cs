@@ -945,6 +945,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "}\n";
 
     private const float TrailHalfWidthPx = 0.7f;   // very thin trails — the line should read as a delicate thread, not a ribbon
+    private const float TrailBlackHalfWidthPx = 1.15f; // black trails are drawn a touch thicker: a thin black thread on the dark terrain is nearly invisible, so widen it for legibility
     private const float RouteHalfWidthPx = 2.6f;
     private const float RoadHalfWidthPx = 1.8f;
 
@@ -1376,6 +1377,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private IReadOnlyList<TerrainMesh3D>? lastTiles;
 
     private LineBuffers? trailLines;
+    private LineBuffers? trailLinesBlack; // black trails drawn in a second pass at a thicker width (legibility on dark terrain)
     private IReadOnlyList<Trail>? lastTrails;
     private DemRaster? lastTrailRaster;
     private TerrainMesh3D? lastTrailMesh;
@@ -4200,16 +4202,28 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             || !ReferenceEquals(lastTrailDetail, detail))
         {
             DeleteLine(g, ref trailLines);
+            DeleteLine(g, ref trailLinesBlack);
             IReadOnlyList<TrailWorldLine> world = Trail3DWorldProjection.ToWorld(trails, raster, mesh, TrailLiftMeters, detail);
 
+            // Black trails go in their own ribbon so they can be drawn thicker (a thin black line is nearly
+            // invisible on the dark terrain); every other colour stays on the delicate-thread width.
             var ribbon = new RibbonBuilder();
+            var ribbonBlack = new RibbonBuilder();
             foreach (TrailWorldLine line in world)
             {
                 (byte r, byte gg, byte b) = PttkRgb(line.Source.PrimaryColor);
-                ribbon.Append(line.World, r, gg, b);
+                if (line.Source.PrimaryColor == PttkColor.Black)
+                {
+                    ribbonBlack.Append(line.World, r, gg, b);
+                }
+                else
+                {
+                    ribbon.Append(line.World, r, gg, b);
+                }
             }
 
             trailLines = UploadLine(g, ribbon);
+            trailLinesBlack = UploadLine(g, ribbonBlack);
             lastTrails = trails;
             lastTrailRaster = raster;
             lastTrailMesh = mesh;
@@ -4217,6 +4231,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         DrawLine(g, trailLines, TrailHalfWidthPx);
+        DrawLine(g, trailLinesBlack, TrailBlackHalfWidthPx);
     }
 
     private void DrawRoadLines(GL g, IReadOnlyList<Trail>? roads, DemRaster? raster, TerrainMesh3D mesh, DetailElevationField? detail)
@@ -5429,6 +5444,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         ReleaseTiles(gl);
         DeleteLine(gl, ref trailLines);
+        DeleteLine(gl, ref trailLinesBlack);
         DeleteLine(gl, ref routeLines);
         DeleteLine(gl, ref roadLines);
         DeleteLine(gl, ref exposedLines);
