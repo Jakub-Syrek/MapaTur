@@ -114,7 +114,11 @@ public sealed class Atmosphere
         // Visual presets are keyed on a 0..1 "altitude score" — saturating sin(elevation) so
         // the horizon-to-zenith transition feels physical without modelling true scattering.
         float dayness = MathF.Max(0f, MathF.Sin(sunElevation));         // 0 at horizon / night, ~0.9 at noon
-        float warmth = MathF.Max(0f, 1f - MathF.Abs(sunElevation / 0.35f));// peaks when sun is within ±20° of horizon
+        // Golden-hour width: warmth = 1 at the horizon, fading to 0 by ±0.55 rad (~31°) of sun elevation.
+        // Widened from 0.35 (~20°) so the orange sunrise/sunset light lingers noticeably longer through the
+        // day cycle (the warm sun colour, orange horizon and golden fog all key off this). Noon (~64°) stays
+        // fully white — 64°/31° ≫ 1 ⇒ warmth 0 — so only the low-sun hours warm up, just for longer.
+        float warmth = MathF.Max(0f, 1f - MathF.Abs(sunElevation / 0.55f));
 
         // Sky colours: cool blue at zenith during the day, warm orange at the horizon during
         // sunrise/sunset, deep blue (not black) across the dome at night. The daytime zenith
