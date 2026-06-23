@@ -25,6 +25,9 @@ public static class LodDetailDiagnostics
     /// <param name="avgStep">average per-tile subsample step of the built mesh (≈1 = true 1 m; ≥2 = budget-demoted/coarse), or null when the detail mesh did not render.</param>
     /// <param name="finestStep">finest per-tile subsample step in the built mesh, or null when the detail mesh did not render.</param>
     /// <param name="note">why the detail did/didn't render ("ok" | "no-raster" | "no-terrain"); shown as →BASE(note) when the mesh came back null so the bare base is on screen.</param>
+    /// <param name="building">true while a detail rebuild is in flight — what is CURRENTLY drawn is still the
+    /// previous detail / bare base, not the target zoom, so the badge shows "⌛bld" instead of a step that
+    /// hasn't rendered yet (the achieved step replaces it once the build completes).</param>
     public static string Format(
         string source,
         double distanceMeters,
@@ -35,7 +38,8 @@ public static class LodDetailDiagnostics
         int? cachedTiles,
         double? avgStep = null,
         int? finestStep = null,
-        string? note = null)
+        string? note = null,
+        bool building = false)
     {
         bool skipped = detailZoom <= baseDetailZoomFloor;
         string dist = FormatDistance(distanceMeters);
@@ -51,6 +55,13 @@ public static class LodDetailDiagnostics
         string counts = requestedTiles is { } requested && cachedTiles is { } cached
             ? $" {cached}/{requested}"
             : string.Empty;
+
+        // A rebuild is running: the target zoom is NOT on screen yet (base / previous detail is). Say so instead of
+        // showing a step the user isn't actually looking at — directly answers "what resolution do I have NOW?".
+        if (building)
+        {
+            return $"LOD →z{detailZoom}{counts} ⌛bld · {dist} · vh{vh} · {source}";
+        }
 
         // Outcome of the per-tile build. avgStep≈1 = true 1 m, s≥2 = budget-demoted (blocky). When no step came
         // back the mesh did NOT render and the bare base is on screen — flag it explicitly with the reason note,

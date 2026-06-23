@@ -958,15 +958,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private const float SkyG = 0x8E / 255f;
     private const float SkyB = 0xB0 / 255f;
 
-    // Overlays are lifted above the surface so they sit on their own slope yet get occluded by mountains
-    // in front of them via the depth test. Raised (6→10 m) so the 1 m detail relief no longer pokes up over the
-    // lines in places ("szlaki przykrywane przez detal"); the lift is a WORLD-space vertical offset, so a real
-    // ridge IN FRONT still occludes (lift ≪ ridge height) — i.e. this fixes the cover-up WITHOUT re-introducing
-    // "szlaki przez skały" (that is the depth-bias's job, left untouched at -= 0.04).
-    private const float TrailLiftMeters = 13f;   // bumped from 10: a bit more clearance over 1 m detail bumps (pairs with the stronger depth bias)
-    private const float RouteLiftMeters = 16f;
-    private const float RoadLiftMeters = 9f;
-    private const float ExposedRouteLiftMeters = 18f;     // well ABOVE trails (10 m) so the dots sit clearly on top of a coincident trail line (Orla Perć is both a red trail and a demanding route)
+    // Overlays drape on the surface. Occlusion + the z-fight with the 1 m detail they lie on is handled by
+    // the CLIP-space depth bias in the line shader (gl_Position.z -= 0.09: strong up close, ~0 far, so the
+    // line wins the near z-fight but real ridges in front still occlude it — no "szlaki przez skały"). So the
+    // WORLD-space lift only needs to be a hair of clearance, NOT a big offset: a large lift (was 13–18 m) made
+    // the line visibly float a dozen-plus metres above steep walls up close (Orla Perć/Zawrat) — exactly the
+    // "szlaki latają" complaint. Kept tiny + ordered (exposed slightly above trail so its dots sit on top of a
+    // coincident trail line). Occlusion clearance is the depth bias's job, not the lift's.
+    private const float TrailLiftMeters = 0.5f;           // basically on the surface now — overlays seat on the rendered mesh (step-aware) and the clip-space depth bias keeps them drawn on top, so the lift only needs to be a hair to avoid exact coplanarity. Was 2 m (read as ~1 m off the rock).
+    private const float RouteLiftMeters = 0.8f;
+    private const float RoadLiftMeters = 0.3f;
+    private const float ExposedRouteLiftMeters = 1.0f;    // a touch above trails so the dots sit on a coincident trail line (Orla Perć is both a red trail and a demanding route)
     private const float ExposedRouteHalfWidthPx = 2.4f;   // fat dots that clearly punctuate over the thin (0.7 px) trail line beneath
     // Bright orange for the exposed / guide routes (sac_scale demanding / via_ferrata) — lighter/yellower than the PTTK red so it pops where it runs along a red trail.
     private const byte ExposedR = 0xFF, ExposedG = 0x8C, ExposedB = 0x00;

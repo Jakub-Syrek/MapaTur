@@ -235,4 +235,34 @@ public sealed class MauiPreferences3DSettingsStore : I3DSettingsStore
         get => Preferences.Default.Get(FollowCameraKey, false);
         set => Preferences.Default.Set(FollowCameraKey, value);
     }
+
+    // Per-platform suffix so the desktop and mobile toggle sets are stored independently (the user asked for
+    // them to be remembered "osobno na desktop osobno"). Even on one device this keeps a Windows-published
+    // build and the same-machine dev build from clobbering each other only when they happen to share storage.
+    private static readonly string PlatformTag =
+#if WINDOWS
+        "win";
+#elif ANDROID
+        "android";
+#elif IOS
+        "ios";
+#else
+        "other";
+#endif
+
+    private static string FlagKey(string name) => $"Terrain3D.Flag.{name}.{PlatformTag}";
+
+    private static string ChoiceKey(string name) => $"Terrain3D.Choice.{name}.{PlatformTag}";
+
+    /// <inheritdoc />
+    public bool GetFlag(string name, bool defaultValue) => Preferences.Default.Get(FlagKey(name), defaultValue);
+
+    /// <inheritdoc />
+    public void SetFlag(string name, bool value) => Preferences.Default.Set(FlagKey(name), value);
+
+    /// <inheritdoc />
+    public int GetChoice(string name, int defaultValue) => Preferences.Default.Get(ChoiceKey(name), defaultValue);
+
+    /// <inheritdoc />
+    public void SetChoice(string name, int value) => Preferences.Default.Set(ChoiceKey(name), value);
 }

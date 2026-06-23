@@ -77,4 +77,22 @@ public interface I3DSettingsStore
     /// chases the user from behind, oriented along the detected direction of travel. Defaults to false.
     /// </summary>
     bool FollowCamera { get; set; }
+
+    // ── Generic per-platform flag/choice store ────────────────────────────────────────────────────────
+    // Backs the many Tryby + Ustawienia toggles (layers, materials, POI kinds, render quality, debug) so
+    // they survive a restart. Keys are suffixed with the running platform, so the DESKTOP set and the
+    // MOBILE set are independent — the desktop can keep all layers + high quality while the phone keeps a
+    // leaner set, and neither overwrites the other.
+
+    /// <summary>Reads a persisted boolean toggle by <paramref name="name"/> (platform-scoped), or <paramref name="defaultValue"/> if unset.</summary>
+    bool GetFlag(string name, bool defaultValue);
+
+    /// <summary>Persists a boolean toggle by <paramref name="name"/> (platform-scoped).</summary>
+    void SetFlag(string name, bool value);
+
+    /// <summary>Reads a persisted integer choice by <paramref name="name"/> (platform-scoped), or <paramref name="defaultValue"/> if unset.</summary>
+    int GetChoice(string name, int defaultValue);
+
+    /// <summary>Persists an integer choice by <paramref name="name"/> (platform-scoped).</summary>
+    void SetChoice(string name, int value);
 }

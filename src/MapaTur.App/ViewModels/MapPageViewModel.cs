@@ -1645,6 +1645,84 @@ public sealed partial class MapPageViewModel : ObservableObject
         this.logger = logger;
         Map = new Map();
         StatusMessage = Localization.AppStrings.StatusInitial;
+
+        // Restore the persisted Tryby + Ustawienia toggles (per-platform) so the user's last layer/material/POI
+        // /quality/debug choices survive a restart. Must run AFTER the store + Map exist (POI toggles re-filter).
+        LoadPersistedModeSettings();
+    }
+
+    // ── Persisted Tryby + Ustawienia toggles (per-platform — see I3DSettingsStore.GetFlag) ───────────────
+    // One table maps each persisted bool property to its getter/setter; LoadPersistedModeSettings() restores
+    // them from the store and the OnPropertyChanged override below writes any user change straight back.
+    // RenderQuality (an int choice) is handled alongside. Keys are platform-scoped in the store, so desktop
+    // and mobile remember their toggle sets independently.
+    private bool isLoadingPersistedSettings;
+    private Dictionary<string, (Func<bool> Get, Action<bool> Set)>? persistedFlags;
+
+    private Dictionary<string, (Func<bool> Get, Action<bool> Set)> PersistedFlags => persistedFlags ??=
+        new Dictionary<string, (Func<bool> Get, Action<bool> Set)>(StringComparer.Ordinal)
+        {
+            [nameof(ShowOrtho)] = (() => ShowOrtho, v => ShowOrtho = v),
+            [nameof(RockMaterialOn)] = (() => RockMaterialOn, v => RockMaterialOn = v),
+            [nameof(BiomeMaterialOn)] = (() => BiomeMaterialOn, v => BiomeMaterialOn = v),
+            [nameof(SlopeMapMode)] = (() => SlopeMapMode, v => SlopeMapMode = v),
+            [nameof(ShowTrails)] = (() => ShowTrails, v => ShowTrails = v),
+            [nameof(ShowRoads)] = (() => ShowRoads, v => ShowRoads = v),
+            [nameof(ShowExposedRoutes)] = (() => ShowExposedRoutes, v => ShowExposedRoutes = v),
+            [nameof(TrailColourRedEnabled)] = (() => TrailColourRedEnabled, v => TrailColourRedEnabled = v),
+            [nameof(TrailColourBlueEnabled)] = (() => TrailColourBlueEnabled, v => TrailColourBlueEnabled = v),
+            [nameof(TrailColourGreenEnabled)] = (() => TrailColourGreenEnabled, v => TrailColourGreenEnabled = v),
+            [nameof(TrailColourYellowEnabled)] = (() => TrailColourYellowEnabled, v => TrailColourYellowEnabled = v),
+            [nameof(TrailColourBlackEnabled)] = (() => TrailColourBlackEnabled, v => TrailColourBlackEnabled = v),
+            [nameof(ShowPeakNames)] = (() => ShowPeakNames, v => ShowPeakNames = v),
+            [nameof(ShowNightSky)] = (() => ShowNightSky, v => ShowNightSky = v),
+            [nameof(ShowContours)] = (() => ShowContours, v => ShowContours = v),
+            [nameof(ShowHuts)] = (() => ShowHuts, v => ShowHuts = v),
+            [nameof(ShowWildernessHuts)] = (() => ShowWildernessHuts, v => ShowWildernessHuts = v),
+            [nameof(ShowChalets)] = (() => ShowChalets, v => ShowChalets = v),
+            [nameof(ShowShelters)] = (() => ShowShelters, v => ShowShelters = v),
+            [nameof(ShowViewpoints)] = (() => ShowViewpoints, v => ShowViewpoints = v),
+            [nameof(ShowParking)] = (() => ShowParking, v => ShowParking = v),
+            [nameof(ShowPasses)] = (() => ShowPasses, v => ShowPasses = v),
+            [nameof(ShowDebugOverlay)] = (() => ShowDebugOverlay, v => ShowDebugOverlay = v),
+            [nameof(VerboseLogging)] = (() => VerboseLogging, v => VerboseLogging = v),
+            [nameof(ShowLodDiagnostics)] = (() => ShowLodDiagnostics, v => ShowLodDiagnostics = v),
+        };
+
+    private void LoadPersistedModeSettings()
+    {
+        isLoadingPersistedSettings = true;
+        try
+        {
+            RenderQuality = settingsStore.GetChoice(nameof(RenderQuality), RenderQuality);
+            foreach (var (name, fns) in PersistedFlags)
+            {
+                fns.Set(settingsStore.GetFlag(name, fns.Get()));
+            }
+        }
+        finally
+        {
+            isLoadingPersistedSettings = false;
+        }
+    }
+
+    /// <inheritdoc />
+    protected override void OnPropertyChanged(System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        base.OnPropertyChanged(e);
+        if (isLoadingPersistedSettings || e.PropertyName is not { } name)
+        {
+            return;
+        }
+
+        if (name == nameof(RenderQuality))
+        {
+            settingsStore.SetChoice(name, RenderQuality);
+        }
+        else if (PersistedFlags.TryGetValue(name, out (Func<bool> Get, Action<bool> Set) fns))
+        {
+            settingsStore.SetFlag(name, fns.Get());
+        }
     }
 
     /// <summary>The route most recently planned, or null when no route has been computed yet.</summary>
@@ -3023,7 +3101,7 @@ public sealed partial class MapPageViewModel : ObservableObject
 #endif
     private const int NearDetailZoom = 16;                                // finest detail zoom (GUGiK native 1 m)
     private static readonly int[] DetailZoomCandidates = { 16, 14, 12 };  // finest → coarsest, fed to ScreenSpaceLod
-    private const double DetailMaxErrorPixels = 2.0;                      // per-tile screen-space error budget
+    private const double DetailMaxErrorPixels = 1.0;                      // per-tile screen-space error budget (tightened 2.0→1.0: with the 48 M desktop budget barely used, keep near/mid tiles at step 1 so the rendered mesh — and the trail seated on it — tracks the true 1 m rock, not a smoothed 2 m surface; far tiles still coarsen)
     private const int BaseDetailZoomFloor = 12;                          // chosen zoom at/below base (z12) ⇒ no detail patch
     private const double DetailCoverageFloorMeters = 100.0;              // below this ⇒ GUGiK out-of-coverage flat-0 → hole (Tatra-context guard)
     private const int DetailEdgeMatchRows = 8;                           // morph band: blend the patch perimeter into the base over N rows
@@ -3045,7 +3123,7 @@ public sealed partial class MapPageViewModel : ObservableObject
 
     private const int PerTileMaxTileSide = 250;                          // skirt + 16-bit index limit
 #if WINDOWS
-    private const long PerTileVertexBudget = 6_000_000;                 // desktop GPU: 4× the phone budget — 1 m holds across the whole (larger) window
+    private const long PerTileVertexBudget = 48_000_000;                // desktop GPU (sized to a discrete card, e.g. RTX-class 16 GB VRAM + ample RAM): the 3.5 km z16 window is ~49 M cells @1 m, so 48 M lets the budget essentially STOP demoting tiles — geometry is then as fine as the screen-space-error metric wants (near/mid = step 1, far coarsens by SSE, the correct reason, not budget starvation). Was 6 M (phone value left in by mistake) → ~⅔ of tiles demoted to an 8 m "plasticine" mesh under the 1 m photo. ~2 GB VRAM for verts; detail rebuild is slower (off-thread, no freeze). Lower this if running on a weaker desktop GPU.
 #else
     private const long PerTileVertexBudget = 6_000_000;                  // raised 3 M→6 M: a 2200 m z16 window is ~7.95 M cells @1 m, so 3 M forced ConstrainToBudget to demote most tiles to step 2/4 (~3-6 m = the "plasticine" mesh even with z16 ON). 6 M holds near-step-1. FPS/mem to verify on device.
 #endif
@@ -3194,6 +3272,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         // The finished detail raster (1 m + base-filled voids) is carried back out of the worker so trails /
         // roads / route can seat on the SAME surface the tiles render. The await below is the memory barrier.
         DemRaster? builtDetailRaster = null;
+        IReadOnlyList<MapaTur.Application.Terrain.PerTileLodDecision>? builtPlan = null; // per-tile steps → overlays seat on the SAME subsampled surface the mesh draws
         IReadOnlyList<TerrainMesh3D>? perTileResult = await Task.Run(() =>
         {
             var totalTimer = System.Diagnostics.Stopwatch.StartNew();
@@ -3239,6 +3318,7 @@ public sealed partial class MapPageViewModel : ObservableObject
                 PerTileRoughnessStride, PerTileRoughnessNeighborDistance,
                 PerTileCameraBubbleRadiusMeters, PerTileCameraBubbleStep);
             IReadOnlyList<PerTileLodDecision> plan = planResult.Tiles;
+            builtPlan = plan; // carried out so DetailElevation reconstructs the rendered (subsampled) surface, not raw 1 m
 
             long totalVertices = 0;
             foreach (PerTileLodDecision d in plan)
@@ -3301,7 +3381,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         if (perTileResult is not null)
         {
             LodDetailBounds = window; // fine detail covers this area → lake water keeps its legacy seating here
-            DetailElevation = builtDetailRaster is not null ? new DetailElevationField(builtDetailRaster) : null;
+            DetailElevation = builtDetailRaster is not null ? new DetailElevationField(builtDetailRaster, builtPlan) : null;
         }
 
         return perTileResult;
@@ -3400,7 +3480,8 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             string liveBadge = LodDetailDiagnostics.Format(
                 focusSource, cameraToLookAt, viewportHeight, detailZoom, BaseDetailZoomFloor,
-                lastPerTileRequested, lastPerTileCached, lastPerTileAvgStep, lastPerTileFinestStep, lastPerTileNote);
+                lastPerTileRequested, lastPerTileCached, lastPerTileAvgStep, lastPerTileFinestStep, lastPerTileNote,
+                building: lodDetailLoading); // a rebuild is mid-flight ⇒ show ⌛bld (base/old detail is what's drawn now)
             MainThread.BeginInvokeOnMainThread(() => LodBadgeText = liveBadge);
         }
 
@@ -3439,6 +3520,16 @@ public sealed partial class MapPageViewModel : ObservableObject
 
         lodDetailLoading = true;
         lastLodDetailReloadUtc = DateTime.UtcNow;
+
+        // Flag the badge as building NOW for this focus (the ~15 s rebuild starts below; base/old detail is on
+        // screen until it finishes) — so the readout reflects the CURRENT surface, not the not-yet-drawn target.
+        if (ShowLodDiagnostics)
+        {
+            string buildingBadge = LodDetailDiagnostics.Format(
+                focusSource, cameraToLookAt, viewportHeight, detailZoom, BaseDetailZoomFloor,
+                lastPerTileRequested, lastPerTileCached, null, null, null, building: true);
+            MainThread.BeginInvokeOnMainThread(() => LodBadgeText = buildingBadge);
+        }
         try
         {
             // ONE stitched detail patch at the look-at's adaptive zoom — a single crack-free surface.

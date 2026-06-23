@@ -24,10 +24,13 @@ public static class Trail3DWorldProjection
     private static readonly Vector3 OutsideDem = new(float.NaN, float.NaN, float.NaN);
 
     /// <summary>Max spacing (m) between seated trail vertices — sparse OSM segments are subdivided to this so the
-    /// line hugs the 1 m terrain. 5 m (down from 12) keeps the chord short enough that the line no longer
-    /// visibly lifts off the fine detail over bumps/dips; vertices are recomputed only on a detail reload
-    /// (cached off the per-frame path), so the extra points cost nothing during gestures.</summary>
-    private const double DensifySpacingMeters = 5.0;
+    /// line hugs the 1 m terrain. 1.5 m (down from 5): each vertex seats on the 1 m detail, but the GPU draws a
+    /// STRAIGHT 3D chord between consecutive vertices, so on the jagged Orla Perć grań a 5 m chord bridged the
+    /// narrow notches/żleby (a 10-plus m drop inside a sub-5 m span left the line floating a dozen-plus metres
+    /// over the rock — "szlak po cięciwie, mostki nad żlebami"). At ~1.5 m the chord tracks the 1 m relief, so the
+    /// line reads as glued to the surface (SharpMap-style) even on near-vertical steps. Vertices are recomputed only
+    /// on a detail reload (cached off the per-frame path), so the extra points cost nothing during gestures.</summary>
+    private const double DensifySpacingMeters = 1.0;
 
     /// <summary>
     /// Lifts every trail vertex to its DEM elevation and converts it into mesh world space. Trails
@@ -90,9 +93,9 @@ public static class Trail3DWorldProjection
                     continue;
                 }
 
-                double ground = detail is not null && detail.TryGetElevation(geo.Longitude, geo.Latitude, out double detailElevation)
-                    ? detailElevation
-                    : raster.SampleBilinear(geo.Longitude, geo.Latitude);
+                double detailElevation = 0.0;
+                bool gotDetail = detail is not null && detail.TryGetElevation(geo.Longitude, geo.Latitude, out detailElevation);
+                double ground = gotDetail ? detailElevation : raster.SampleBilinear(geo.Longitude, geo.Latitude);
                 world[i] = mesh.GeoToWorld(geo, (float)ground + liftElevation);
             }
 
