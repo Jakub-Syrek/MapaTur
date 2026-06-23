@@ -16,9 +16,9 @@ public static class TatraPasses
     /// <summary>Curated named cols / passes, modelled as <see cref="PoiKind.Pass"/> POIs.</summary>
     public static IReadOnlyList<MountainPoi> All { get; } = new[]
     {
-        // Honoratka — famous ledge/notch on Orla Perć, absent from OSM; approximate position between Zawrat
-        // and Mały Kozi Wierch (on the Zawrat-side approach to Mały Kozi, NOT by the higher Kozi Wierch).
-        new MountainPoi(-100, "Honoratka", new GeoPoint(49.219100, 20.018400), PoiKind.Pass, 2100),
+        // Honoratka — famous ledge on Orla Perć, absent from OSM; it sits AT Zmarzła Przełączka Wyżnia
+        // (user-confirmed), whose saddle node is in OSM at 49.218842, 20.020172.
+        new MountainPoi(-100, "Honoratka", new GeoPoint(49.218842, 20.020172), PoiKind.Pass, 2100),
 
         new MountainPoi(-101, "Liliowe / Ľaliové sedlo", new GeoPoint(49.225551, 19.991338), PoiKind.Pass, 1952),
         new MountainPoi(-102, "Karb", new GeoPoint(49.228811, 20.011708), PoiKind.Pass, 1853),
