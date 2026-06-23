@@ -234,12 +234,21 @@
                 </VerticalStackLayout>
             </Border>
 
-            <!-- ── Section panels (one visible at a time) ── -->
+        </VerticalStackLayout>
+
+        <!-- ── Section panels: root-Grid overlays (NOT inside MenuOverlay), so each gets a window-bounded
+             height below the top bar and its ScrollView actually scrolls. A ScrollView stacked in the
+             MenuOverlay VerticalStackLayout never received a bounded height, so it never scrolled. Each
+             panel is VerticalOptions="Fill" with a top Margin clearing the bar; only one is visible at a
+             time (ActiveSection), so the empty area never blocks the map. Wrapped in a ChromeVisible Grid
+             so an open panel still hides during a cinematic fly-through, like the menu used to. -->
+        <Grid IsVisible="{Binding ChromeVisible}" InputTransparent="True" CascadeInputTransparent="False">
 
             <!-- 🧭 TRASA -->
             <Border x:Name="PanelTrasa" Style="{StaticResource GlassSurface}" Padding="16,14"
+                    VerticalOptions="Fill" Margin="10,120,10,12"
                     IsVisible="{Binding ActiveSection, Converter={StaticResource IntEquals}, ConverterParameter=1}">
-                <ScrollView MaximumHeightRequest="{Binding Height, Source={x:Reference PageRoot}, Converter={StaticResource HeightMinus}, ConverterParameter=150}">
+                <ScrollView VerticalScrollBarVisibility="Always">
                 <VerticalStackLayout Spacing="12">
                     <Label Text="{x:Static loc:AppStrings.SectionRouteTitle}" Style="{StaticResource GlassTitle}" />
 
@@ -346,8 +355,9 @@
 
             <!-- 🎚️ TRYBY -->
             <Border x:Name="PanelTryby" Style="{StaticResource GlassSurface}" Padding="16,14"
+                    VerticalOptions="Fill" Margin="10,120,10,12"
                     IsVisible="{Binding ActiveSection, Converter={StaticResource IntEquals}, ConverterParameter=2}">
-                <ScrollView MaximumHeightRequest="{Binding Height, Source={x:Reference PageRoot}, Converter={StaticResource HeightMinus}, ConverterParameter=150}">
+                <ScrollView VerticalScrollBarVisibility="Always">
                 <VerticalStackLayout Spacing="12">
                     <Label Text="{x:Static loc:AppStrings.SectionModesTitle}" Style="{StaticResource GlassTitle}" />
 
@@ -514,6 +524,7 @@
 
             <!-- 🌦️ POGODA -->
             <Border x:Name="PanelPogoda" Style="{StaticResource GlassSurface}" Padding="16,14"
+                    VerticalOptions="Start" Margin="10,120,10,12"
                     IsVisible="{Binding ActiveSection, Converter={StaticResource IntEquals}, ConverterParameter=5}">
                 <VerticalStackLayout Spacing="14">
                     <Label Text="{x:Static loc:AppStrings.SectionWeatherTitle}" Style="{StaticResource GlassTitle}" />
@@ -546,6 +557,7 @@
 
             <!-- 🎥 WIDOK -->
             <Border x:Name="PanelWidok" Style="{StaticResource GlassSurface}" Padding="16,14"
+                    VerticalOptions="Start" Margin="10,120,10,12"
                     IsVisible="{Binding ActiveSection, Converter={StaticResource IntEquals}, ConverterParameter=3}">
                 <VerticalStackLayout Spacing="14">
                     <Label Text="{x:Static loc:AppStrings.SectionViewTitle}" Style="{StaticResource GlassTitle}" />
@@ -564,10 +576,11 @@
 
             <!-- 🗺️ MAPA (data: regions, terrain loads, viewport downloads) -->
             <Border x:Name="PanelMapa" Style="{StaticResource GlassSurface}" Padding="16,14"
+                    VerticalOptions="Fill" Margin="10,120,10,12"
                     IsVisible="{Binding ActiveSection, Converter={StaticResource IntEquals}, ConverterParameter=4}">
                 <!-- Scrollable: the Mapa panel carries the GUGiK / offline buttons and the
                      download-for-view group, so cap its height and let it scroll. -->
-                <ScrollView MaximumHeightRequest="{Binding Height, Source={x:Reference PageRoot}, Converter={StaticResource HeightMinus}, ConverterParameter=150}">
+                <ScrollView VerticalScrollBarVisibility="Always">
                 <VerticalStackLayout Spacing="12">
                     <Label Text="{x:Static loc:AppStrings.SectionMapTitle}" Style="{StaticResource GlassTitle}" />
 
@@ -651,9 +664,10 @@
 
             <!-- ⚙️ USTAWIENIA -->
             <Border x:Name="PanelUstawienia" Style="{StaticResource GlassSurface}" Padding="16,14"
+                    VerticalOptions="Fill" Margin="10,120,10,12"
                     IsVisible="{Binding ActiveSection, Converter={StaticResource IntEquals}, ConverterParameter=6}">
                 <!-- Scrollable: JĘZYK + JAKOŚĆ + PAMIĘĆ + DEBUG overflow a phone screen, so cap + scroll like the other panels. -->
-                <ScrollView MaximumHeightRequest="{Binding Height, Source={x:Reference PageRoot}, Converter={StaticResource HeightMinus}, ConverterParameter=150}">
+                <ScrollView VerticalScrollBarVisibility="Always">
                 <VerticalStackLayout Spacing="12">
                     <Label Text="{x:Static loc:AppStrings.SectionSettingsTitle}" Style="{StaticResource GlassTitle}" />
 
@@ -743,7 +757,7 @@
                 </ScrollView>
             </Border>
 
-        </VerticalStackLayout>
+        </Grid>
 
         <!-- ON-MAP busy + status pill (the ONLY one — the old settings-stack twin showed alongside it).
              Driven by IsStatusPillVisible, not IsBusy: pops on every status change and LINGERS a few
