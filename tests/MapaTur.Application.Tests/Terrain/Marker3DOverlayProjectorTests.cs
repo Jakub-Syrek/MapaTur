@@ -48,7 +48,7 @@ public sealed class Marker3DOverlayProjectorTests
     // A climbing-area instantiation of the generic projector, mirroring how the view wires it.
     private static Marker3DOverlayProjector<ClimbingArea, ProjectedClimbingArea> ClimbingProjector()
         => new(
-            (areas, raster, mesh, lift) => Climbing3DProjection.ToWorld(areas, raster!, mesh, lift),
+            (areas, raster, mesh, lift, _) => Climbing3DProjection.ToWorld(areas, raster!, mesh, lift),
             (source, screen) => new ProjectedClimbingArea(source, screen));
 
     [Fact]
@@ -64,7 +64,7 @@ public sealed class Marker3DOverlayProjectorTests
     public void Ctor_NullResultFactory_Throws()
     {
         Action act = () => _ = new Marker3DOverlayProjector<ClimbingArea, ProjectedClimbingArea>(
-            (areas, raster, mesh, lift) => Climbing3DProjection.ToWorld(areas, raster!, mesh, lift), null!);
+            (areas, raster, mesh, lift, _) => Climbing3DProjection.ToWorld(areas, raster!, mesh, lift), null!);
 
         act.Should().Throw<ArgumentNullException>();
     }
@@ -200,7 +200,7 @@ public sealed class Marker3DOverlayProjectorTests
         var camera = LookDownCamera();
 
         var peakProjector = new Marker3DOverlayProjector<TerrainPeak, ProjectedPeak>(
-            (items, _, m, lift) => Peak3DProjection.ToWorld(items, m, lift),
+            (items, _, m, lift, _) => Peak3DProjection.ToWorld(items, m, lift),
             (source, screen) => new ProjectedPeak(source, screen));
 
         var eager = Peak3DProjection.Project(peaks, mesh, camera, 800f, 600f, markerLiftMeters: 40f);
@@ -213,7 +213,7 @@ public sealed class Marker3DOverlayProjectorTests
     // A summit-name instantiation, mirroring how the view wires the peak overlay.
     private static Marker3DOverlayProjector<TerrainPeak, ProjectedPeak> PeakProjector()
         => new(
-            (items, _, m, lift) => Peak3DProjection.ToWorld(items, m, lift),
+            (items, _, m, lift, _) => Peak3DProjection.ToWorld(items, m, lift),
             (source, screen) => new ProjectedPeak(source, screen));
 
     [Fact]
@@ -254,7 +254,7 @@ public sealed class Marker3DOverlayProjectorTests
     // A POI instantiation, mirroring how the view wires the bundled hut/pass overlay.
     private static Marker3DOverlayProjector<MountainPoi, ProjectedPoi> PoiProjector()
         => new(
-            (pois, raster, mesh, lift) => Poi3DProjection.ToWorld(pois, raster!, mesh, lift),
+            (pois, raster, mesh, lift, detail) => Poi3DProjection.ToWorld(pois, raster!, mesh, lift, detail),
             (source, screen) => new ProjectedPoi(source, screen));
 
     [Fact]

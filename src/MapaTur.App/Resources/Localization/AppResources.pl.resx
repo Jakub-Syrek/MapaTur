@@ -250,6 +250,8 @@
 
   <!-- ════ Pasek lokalizacji / teleportu ════ -->
   <data name="LocateBarHeader" xml:space="preserve"><value>🔍  Lokalizacja i szukanie</value></data>
+  <data name="LocationStale" xml:space="preserve"><value>⚠ Pozycja GPS nieaktualna</value></data>
+  <data name="LocationLost" xml:space="preserve"><value>⚠ Utracono sygnał GPS — ostatnia znana pozycja</value></data>
   <data name="LocateCenterOnMe" xml:space="preserve"><value>🎯  Na mnie</value></data>
   <data name="TeleportPlaceholder" xml:space="preserve"><value>Teleportuj: szczyt, schronisko, jezioro…</value></data>
   <data name="TeleportFly" xml:space="preserve"><value>🎯 Lecę</value></data>
@@ -287,6 +289,8 @@
   <data name="ToggleRoads" xml:space="preserve"><value>Drogi</value></data>
   <data name="ToggleExposedRoutes" xml:space="preserve"><value>Drogi eksponowane</value></data>
   <data name="ToggleExposedRoutesHint" xml:space="preserve"><value>trudne / via ferrata (kropki) — pobierane ze szlakami</value></data>
+  <data name="ToggleSauronTower" xml:space="preserve"><value>Wieża Saurona</value></data>
+  <data name="ToggleSauronTowerHint" xml:space="preserve"><value>mroczna wieża ze świecącym okiem na Świnicy (easter egg)</value></data>
   <data name="TrailColoursHeader" xml:space="preserve"><value>KOLORY SZLAKÓW</value></data>
   <data name="ColourRed" xml:space="preserve"><value>Czerwony</value></data>
   <data name="ColourBlue" xml:space="preserve"><value>Niebieski</value></data>
@@ -318,6 +322,8 @@
   <data name="WeatherWindHint" xml:space="preserve"><value>Siła wiatru</value></data>
   <data name="WeatherSnow" xml:space="preserve"><value>Śnieg</value></data>
   <data name="WeatherSnowHint" xml:space="preserve"><value>Pokrywa śnieżna</value></data>
+  <data name="WeatherStorm" xml:space="preserve"><value>Burza</value></data>
+  <data name="WeatherStormHint" xml:space="preserve"><value>Siła burzy — ciemniejsze chmury i pioruny</value></data>
 
   <!-- ════ Panel Widok ════ -->
   <data name="ViewVertical" xml:space="preserve"><value>Pion</value></data>

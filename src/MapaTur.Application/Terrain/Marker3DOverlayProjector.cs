@@ -24,7 +24,7 @@ namespace MapaTur.Application.Terrain;
 /// <typeparam name="TProjected">Projected marker type returned to the renderer.</typeparam>
 public sealed class Marker3DOverlayProjector<TSource, TProjected>
 {
-    private readonly Func<IReadOnlyList<TSource>, DemRaster?, TerrainMesh3D, float, IReadOnlyList<MarkerWorldPoint<TSource>>> worldBuilder;
+    private readonly Func<IReadOnlyList<TSource>, DemRaster?, TerrainMesh3D, float, DetailElevationField?, IReadOnlyList<MarkerWorldPoint<TSource>>> worldBuilder;
     private readonly Func<TSource, Vector3?, TProjected> resultFactory;
 
     private IReadOnlyList<MarkerWorldPoint<TSource>>? worldCache;
@@ -32,6 +32,7 @@ public sealed class Marker3DOverlayProjector<TSource, TProjected>
     private DemRaster? cachedRaster;
     private TerrainMesh3D? cachedMesh;
     private float cachedLift;
+    private DetailElevationField? cachedDetail;
 
     private TProjected[]? results;
 
@@ -44,7 +45,7 @@ public sealed class Marker3DOverlayProjector<TSource, TProjected>
     /// </param>
     /// <param name="resultFactory">Wraps a source marker + its (possibly null) screen position into the projected type.</param>
     public Marker3DOverlayProjector(
-        Func<IReadOnlyList<TSource>, DemRaster?, TerrainMesh3D, float, IReadOnlyList<MarkerWorldPoint<TSource>>> worldBuilder,
+        Func<IReadOnlyList<TSource>, DemRaster?, TerrainMesh3D, float, DetailElevationField?, IReadOnlyList<MarkerWorldPoint<TSource>>> worldBuilder,
         Func<TSource, Vector3?, TProjected> resultFactory)
     {
         ArgumentNullException.ThrowIfNull(worldBuilder);
@@ -64,6 +65,7 @@ public sealed class Marker3DOverlayProjector<TSource, TProjected>
     /// <param name="screenWidth">Viewport width in pixels.</param>
     /// <param name="screenHeight">Viewport height in pixels.</param>
     /// <param name="liftMeters">Vertical offset above the surface so the marker sits clear of the ground.</param>
+    /// <param name="detail">Optional 1 m LOD detail field; inside its window markers seat on the rendered detail surface instead of the coarse base, so they don't float over saddles the base smooths up.</param>
     /// <param name="maxDistanceMeters">
     /// Maximum camera-to-marker world distance (metres) for which a marker is projected; markers beyond it
     /// get a null screen position, so the renderer skips them. Defaults to <see cref="float.PositiveInfinity"/>
@@ -77,6 +79,7 @@ public sealed class Marker3DOverlayProjector<TSource, TProjected>
         float screenWidth,
         float screenHeight,
         float liftMeters,
+        DetailElevationField? detail = null,
         float maxDistanceMeters = float.PositiveInfinity)
     {
         ArgumentNullException.ThrowIfNull(items);
@@ -87,13 +90,15 @@ public sealed class Marker3DOverlayProjector<TSource, TProjected>
             || !ReferenceEquals(cachedItems, items)
             || !ReferenceEquals(cachedRaster, raster)
             || !ReferenceEquals(cachedMesh, mesh)
-            || cachedLift != liftMeters)
+            || cachedLift != liftMeters
+            || !ReferenceEquals(cachedDetail, detail))
         {
-            worldCache = worldBuilder(items, raster, mesh, liftMeters);
+            worldCache = worldBuilder(items, raster, mesh, liftMeters, detail);
             cachedItems = items;
             cachedRaster = raster;
             cachedMesh = mesh;
             cachedLift = liftMeters;
+            cachedDetail = detail;
             results = new TProjected[worldCache.Count];
         }
 

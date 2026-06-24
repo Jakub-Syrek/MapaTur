@@ -49,6 +49,10 @@ public sealed partial class MapPageViewModel : ObservableObject
     private readonly MBTilesOrthoCompositor? orthoCompositor;
     private readonly I3DSettingsStore settingsStore;
     private readonly IUserLocationService? userLocationService;
+
+    // Validates + de-jitters raw GPS fixes (offline-robust: rejects teleports, duplicates, out-of-order and
+    // coarse readings; never blanks the marker) before they reach the map. See LocationResolver + its TDD spec.
+    private readonly LocationResolver locationResolver = new();
     private readonly IUserLocationLayerRenderer? userLocationRenderer;
     private ViewportAwareTrailLayerController? viewportTrailController;
     private readonly ITrackLayerRenderer trackRenderer;
@@ -240,6 +244,34 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <summary>Current GPS fix or null. Bound by both the 2D map renderer and the 3D view.</summary>
     [ObservableProperty]
     private UserLocation? userLocation;
+
+    /// <summary>
+    /// How current the shown fix is, re-evaluated on every fix AND on every poll heartbeat so it ages toward
+    /// Stale/Lost when GPS goes silent (a gorge, no signal). Drives the "GPS nieaktualny / sygnał utracony"
+    /// badge and the faded marker. <see cref="LocationResolver"/> computes it.
+    /// </summary>
+    [ObservableProperty]
+    private LocationFreshness locationFreshness = LocationFreshness.None;
+
+    /// <summary>True when the shown fix is no longer Live (Stale or Lost) — surfaces the staleness badge.</summary>
+    public bool IsLocationStale => LocationFreshness is LocationFreshness.Stale or LocationFreshness.Lost;
+
+    /// <summary>Badge text for a non-Live fix; empty when Live/None.</summary>
+    public string LocationStatusText => LocationFreshness switch
+    {
+        LocationFreshness.Stale => Localization.AppStrings.LocationStale,
+        LocationFreshness.Lost => Localization.AppStrings.LocationLost,
+        _ => string.Empty,
+    };
+
+    partial void OnLocationFreshnessChanged(LocationFreshness value)
+    {
+        OnPropertyChanged(nameof(IsLocationStale));
+        OnPropertyChanged(nameof(LocationStatusText));
+    }
+
+    private void RefreshLocationFreshness()
+        => LocationFreshness = locationResolver.ResolveAt(DateTimeOffset.UtcNow).Freshness;
 
     /// <summary>True when the location service is actively polling for fixes. Drives the button label.</summary>
     [ObservableProperty]
@@ -457,6 +489,14 @@ public sealed partial class MapPageViewModel : ObservableObject
     private double snow;
 
     /// <summary>
+    /// Storm intensity, [0,1]: 0 = no storm (default), 1 = heavy storm. The further right, the darker the
+    /// clouds turn and the more often lightning strikes (the renderer flashes the clouds + ground). Feeds
+    /// <see cref="Atmosphere"/>. Persisted.
+    /// </summary>
+    [ObservableProperty]
+    private double storm;
+
+    /// <summary>
     /// Forest density, [0,1]: 0 = no trees, 1 = densest. Drives how many trees the 3D renderer scatters
     /// over the terrain below the treeline (bound into <c>Terrain3DView.ForestDensity</c>). Persisted.
     /// </summary>
@@ -480,7 +520,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <see cref="Wind"/> and <see cref="Snow"/>. Recomputed whenever any change and bound straight
     /// into <c>Terrain3DView.Atmosphere</c>. Cheap to build so deriving per change is fine.
     /// </summary>
-    public Atmosphere Atmosphere => new((float)TimeOfDayHours, (float)Cloudiness, (float)Wind, (float)Snow);
+    public Atmosphere Atmosphere => new((float)TimeOfDayHours, (float)Cloudiness, (float)Wind, (float)Snow, (float)Storm);
 
     partial void OnTimeOfDayHoursChanged(double value)
     {
@@ -504,6 +544,12 @@ public sealed partial class MapPageViewModel : ObservableObject
     partial void OnSnowChanged(double value)
     {
         settingsStore.Snow = value;
+        OnPropertyChanged(nameof(Atmosphere));
+    }
+
+    partial void OnStormChanged(double value)
+    {
+        settingsStore.Storm = value;
         OnPropertyChanged(nameof(Atmosphere));
     }
 
@@ -968,6 +1014,9 @@ public sealed partial class MapPageViewModel : ObservableObject
 
     /// <summary>Whether summit glyphs + elevation labels are drawn over the 3D terrain.</summary>
     [ObservableProperty] private bool showPeakNames = true;
+
+    /// <summary>Easter egg: a dark tower topped by the glowing Eye of Sauron on Świnica. Off by default. Persisted.</summary>
+    [ObservableProperty] private bool showSauronTower;
 
     /// <summary>Whether the night-sky pass (stars + name labels + constellation lines) is drawn after dusk.</summary>
     [ObservableProperty] private bool showNightSky = true;
@@ -1567,15 +1616,29 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             userLocationService.LocationChanged += (_, fix) =>
             {
+                // Run the raw fix through the resolver: only an ACCEPTED fix advances the displayed position, so
+                // a teleport / duplicate / out-of-order / coarse reading can't make the dot jump or the heading
+                // spin when GPS gets noisy in the mountains. A rejected fix leaves the marker where it was.
+                void Apply()
+                {
+                    if (locationResolver.Offer(fix).Accepted)
+                    {
+                        UserLocation = locationResolver.LastAccepted;
+                    }
+
+                    RefreshLocationFreshness();
+                }
+
                 if (MainThread.IsMainThread)
                 {
-                    UserLocation = fix;
+                    Apply();
                 }
                 else
                 {
-                    MainThread.BeginInvokeOnMainThread(() => UserLocation = fix);
+                    MainThread.BeginInvokeOnMainThread(Apply);
                 }
             };
+            userLocationService.Polled += (_, _) => MainThread.BeginInvokeOnMainThread(RefreshLocationFreshness);
             userLocationService.PermissionDenied += (_, _) =>
             {
                 MainThread.BeginInvokeOnMainThread(() =>
@@ -1611,13 +1674,17 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             snow = Math.Clamp(savedSnow, 0.0, 1.0);
         }
+        if (settingsStore.Storm is { } savedStorm)
+        {
+            storm = Math.Clamp(savedStorm, 0.0, 1.0);
+        }
         if (settingsStore.Forest is { } savedForest)
         {
             forestDensity = Math.Clamp(savedForest, 0.0, 1.0);
         }
         if (settingsStore.PeakLabelRadiusMeters is { } savedPeakRadius)
         {
-            peakLabelRadiusMeters = Math.Clamp(savedPeakRadius, 1000.0, 80_000.0);
+            peakLabelRadiusMeters = Math.Clamp(savedPeakRadius, 1000.0, 30_000.0);
         }
         cameraState = settingsStore.CameraState;
         // Restore the chosen UI language for the Ustawienia selector. Set the backing field directly so the
@@ -1675,6 +1742,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             [nameof(TrailColourYellowEnabled)] = (() => TrailColourYellowEnabled, v => TrailColourYellowEnabled = v),
             [nameof(TrailColourBlackEnabled)] = (() => TrailColourBlackEnabled, v => TrailColourBlackEnabled = v),
             [nameof(ShowPeakNames)] = (() => ShowPeakNames, v => ShowPeakNames = v),
+            [nameof(ShowSauronTower)] = (() => ShowSauronTower, v => ShowSauronTower = v),
             [nameof(ShowNightSky)] = (() => ShowNightSky, v => ShowNightSky = v),
             [nameof(ShowContours)] = (() => ShowContours, v => ShowContours = v),
             [nameof(ShowHuts)] = (() => ShowHuts, v => ShowHuts = v),
@@ -2547,11 +2615,15 @@ public sealed partial class MapPageViewModel : ObservableObject
             IReadOnlyList<OsmPeak> peaks = OverpassPeakResponseParser.Parse(buffer.ToArray());
             // Collapse OSM's multi-summit massifs (Rysy/Wysoka as separate nodes) before merging, so the
             // overlay doesn't stack two or three labels on one apex.
-            IReadOnlyList<NamedSummit> osmSummits = SummitSources.Deduplicate(OsmPeakSummitMapper.ToSummits(peaks));
+            // Cut-off lowered 1500→1300 m: now that the "zasięg" slider culls distant labels, a fuller peak
+            // set no longer clutters the view, so surface the notable lower summits too (Gęsia Szyja 1489,
+            // Opalone Wierchy, Furkaska, …). Range handles density; raise/lower this to taste.
+            const double peakMinElevationMeters = 1300.0;
+            IReadOnlyList<NamedSummit> osmSummits = SummitSources.Deduplicate(OsmPeakSummitMapper.ToSummits(peaks, peakMinElevationMeters));
             tatraGazetteer = SummitSources.Combine(osmSummits, TatraSummits.All);
             logger.LogInformation(
-                "Tatra gazetteer: {Osm} OSM peaks (named, ≥1500 m) + {Fallback} curated → {Total} summits",
-                osmSummits.Count, TatraSummits.All.Count, tatraGazetteer.Count);
+                "Tatra gazetteer: {Osm} OSM peaks (named, ≥{Min:F0} m) + {Fallback} curated → {Total} summits",
+                osmSummits.Count, peakMinElevationMeters, TatraSummits.All.Count, tatraGazetteer.Count);
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
         {
@@ -3062,8 +3134,8 @@ public sealed partial class MapPageViewModel : ObservableObject
     private double lastPerTileAvgStep;
     private int lastPerTileFinestStep;
     private string lastPerTileNote = string.Empty; // why the per-tile detail did/didn't render: "ok" | "no-raster" | "no-terrain"
-    private const double LodDetailReloadThresholdMeters = 700;            // re-centre after ~700 m drift (the 2 km patch has headroom)
-    private static readonly TimeSpan LodDetailReloadCooldown = TimeSpan.FromMilliseconds(1200);
+    private const double LodDetailReloadThresholdMeters = 1000;           // re-centre after ~1000 m drift (was 700). Looser gate = fewer expensive per-tile rebuilds while panning → less stutter; the detail patch re-centres slightly later on a fast pan. Pure timing — no effect on glue/budget/geometry.
+    private static readonly TimeSpan LodDetailReloadCooldown = TimeSpan.FromMilliseconds(2500); // min spacing between rebuilds (was 1200): spaces out the costly builds during continuous camera motion.
 
     // Wider-coverage P0 (shared world origin). STEP 1 = NO-OP: this threshold is deliberately enormous so
     // WorldOriginPolicy NEVER re-anchors and nothing moves — we only log the camera↔origin drift to confirm

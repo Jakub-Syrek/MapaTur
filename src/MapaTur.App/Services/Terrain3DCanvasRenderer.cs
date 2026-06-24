@@ -1,6 +1,8 @@
+using System.Linq;
 using System.Numerics;
 
 using MapaTur.Application.Terrain;
+using MapaTur.Domain.Location;
 using MapaTur.Domain.Trails;
 
 using SkiaSharp;
@@ -45,6 +47,9 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
     private const float UserLocationDotRadiusPx = 7f;
     private const float UserLocationOutlineWidthPx = 2.5f;
     private const float UserLocationHaloMaxRadiusPx = 26f;
+
+    /// <summary>Freshness of the user-location fix; Stale/Lost fade the marker and widen its halo. Set per frame.</summary>
+    public LocationFreshness UserLocationFreshness { get; set; } = LocationFreshness.Live;
     private const float PeakMarkerHalfWidthPx = 6f;
     private const float PeakMarkerHeightPx = 12f;
     private const float PeakLabelSizePx = 12.5f;
@@ -53,9 +58,11 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
 
     /// <summary>Font size (px) for night-sky star-name labels — a touch smaller than peak names.</summary>
     private const float StarLabelSizePx = 13f;
-    // Minimum on-screen spacing between peak markers; closer ones are dropped so labels don't overlap.
-    private const float MinPeakSeparationPx = 52f;
-    private readonly List<SKPoint> drawnPeakAnchors = new();
+    // De-clutter by LABEL FOOTPRINT (not marker distance): a peak's name+elevation text box is kept only when
+    // it doesn't overlap an already-drawn one, so densely-packed summits whose labels sit side-by-side both
+    // show — only true text overlaps drop (the old 52 px marker circle dropped far too many on Orla Perć).
+    private const float PeakLabelPadPx = 3f;
+    private readonly List<SKRect> drawnPeakRects = new();
 
     // Trail / route / climbing vertices are only culled when their NDC depth
     // exceeds the local mesh depth by more than this much. The minimum-per-bin
@@ -788,21 +795,23 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         // summits). NAMED summits are drawn in a FIRST pass so they win every cluster — otherwise a
         // slightly higher but unnamed detected maximum next door would suppress "Kozi Wierch" and
         // the flight would show only bare elevations. A second pass fills the gaps with unnamed maxima.
-        drawnPeakAnchors.Clear();
+        drawnPeakRects.Clear();
 
-        foreach (var peak in peaks)
+        // Named summits first, CURATED (iconic) before others, then highest-elevation-first — so the major
+        // summit wins each cluster (the iconic Kościelec keeps its label over the marginally taller Zadni
+        // Kościelec next door). A second pass fills the gaps with unnamed maxima.
+        foreach (var peak in peaks
+            .Where(p => !string.IsNullOrEmpty(p.Source.Name))
+            .OrderByDescending(p => p.Source.Curated)
+            .ThenByDescending(p => p.Source.LabelElevationMeters ?? p.Source.ElevationMeters))
         {
-            if (!string.IsNullOrEmpty(peak.Source.Name))
-            {
-                TryDrawPeak(canvas, peak, depthMap);
-            }
+            TryDrawPeak(canvas, peak, depthMap);
         }
-        foreach (var peak in peaks)
+        foreach (var peak in peaks
+            .Where(p => string.IsNullOrEmpty(p.Source.Name))
+            .OrderByDescending(p => p.Source.LabelElevationMeters ?? p.Source.ElevationMeters))
         {
-            if (string.IsNullOrEmpty(peak.Source.Name))
-            {
-                TryDrawPeak(canvas, peak, depthMap);
-            }
+            TryDrawPeak(canvas, peak, depthMap);
         }
     }
 
@@ -821,16 +830,26 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         float x = screen.Value.X;
         float y = screen.Value.Y;
 
-        foreach (SKPoint anchor in drawnPeakAnchors)
+        // Footprint of this peak's labels (name + elevation), centred on the marker. Keep the peak only if its
+        // box doesn't overlap an already-drawn one — side-by-side summits both show; only true overlaps drop.
+        bool named = !string.IsNullOrEmpty(peak.Source.Name);
+        double labelElevation = peak.Source.LabelElevationMeters ?? peak.Source.ElevationMeters;
+        string eleText = $"{Math.Round(labelElevation)} m";
+        float labelY = y - PeakMarkerHeightPx - 4f;
+        float nameY = labelY - PeakLabelSizePx - 3f;
+        float textW = Math.Max(peakFont!.MeasureText(eleText), named ? peakNameFont!.MeasureText(peak.Source.Name) : 0f);
+        float halfW = (Math.Max(textW, PeakMarkerHalfWidthPx * 2f) * 0.5f) + PeakLabelPadPx;
+        float top = (named ? nameY - PeakNameSizePx : labelY - PeakLabelSizePx) - PeakLabelPadPx;
+        float left = x - halfW, right = x + halfW, bottom = y + PeakLabelPadPx;
+
+        foreach (SKRect d in drawnPeakRects)
         {
-            float dx = anchor.X - x;
-            float dy = anchor.Y - y;
-            if ((dx * dx) + (dy * dy) < MinPeakSeparationPx * MinPeakSeparationPx)
+            if (left < d.Right && right > d.Left && top < d.Bottom && bottom > d.Top)
             {
                 return;
             }
         }
-        drawnPeakAnchors.Add(new SKPoint(x, y));
+        drawnPeakRects.Add(new SKRect(left, top, right, bottom));
 
         // Mountain glyph: base sits on the projected summit point, apex points up.
         peakPath!.Reset();
@@ -841,19 +860,14 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         canvas.DrawPath(peakPath, peakFillPaint!);
         canvas.DrawPath(peakPath, peakOutlinePaint!);
 
-        // Elevation label above the apex; halo first, then fill, for contrast. Prefer the
-        // authoritative (gazetteer) height when present — the DEM-sampled seat elevation
-        // under-reports sharp summits.
-        double labelElevation = peak.Source.LabelElevationMeters ?? peak.Source.ElevationMeters;
-        string label = $"{Math.Round(labelElevation)} m";
-        float labelY = y - PeakMarkerHeightPx - 4f;
-        canvas.DrawText(label, x, labelY, SKTextAlign.Center, peakFont!, peakLabelHaloPaint!);
-        canvas.DrawText(label, x, labelY, SKTextAlign.Center, peakFont!, peakLabelFillPaint!);
+        // Elevation label above the apex; halo first, then fill, for contrast. Prefer the authoritative
+        // (gazetteer) height when present — the DEM-sampled seat elevation under-reports sharp summits.
+        canvas.DrawText(eleText, x, labelY, SKTextAlign.Center, peakFont!, peakLabelHaloPaint!);
+        canvas.DrawText(eleText, x, labelY, SKTextAlign.Center, peakFont!, peakLabelFillPaint!);
 
         // Named summits get their name on the line above the elevation.
-        if (!string.IsNullOrEmpty(peak.Source.Name))
+        if (named)
         {
-            float nameY = labelY - PeakLabelSizePx - 3f;
             canvas.DrawText(peak.Source.Name, x, nameY, SKTextAlign.Center, peakNameFont!, peakLabelHaloPaint!);
             canvas.DrawText(peak.Source.Name, x, nameY, SKTextAlign.Center, peakNameFont!, peakLabelFillPaint!);
         }
@@ -993,13 +1007,30 @@ public sealed class Terrain3DCanvasRenderer : IDisposable
         // Halo radius: scale linearly with the reported accuracy, clamp to a sensible max so a 200 m
         // fix doesn't paint a quarter of the screen blue. Alpha drops as the halo grows so wider
         // (= less certain) halos read as softer, not louder.
+        // Freshness fade: a Live fix is solid; Stale/Lost fade the dot and widen + dim the halo so the user can
+        // tell at a glance the position may be out of date (GPS lost in a gorge) — the marker NEVER vanishes.
+        float freshnessAlpha = UserLocationFreshness switch
+        {
+            LocationFreshness.Stale => 0.55f,
+            LocationFreshness.Lost => 0.30f,
+            _ => 1f,
+        };
+        float staleGrowthPx = UserLocationFreshness switch
+        {
+            LocationFreshness.Stale => 10f,
+            LocationFreshness.Lost => 20f,
+            _ => 0f,
+        };
+
         double accuracy = Math.Max(1.0, location.Source.AccuracyMeters);
-        float haloRadius = Math.Min(UserLocationHaloMaxRadiusPx, UserLocationDotRadiusPx + (float)accuracy * 0.4f);
-        byte haloAlpha = (byte)Math.Max(30, 96 - (int)(accuracy * 1.2));
+        float haloRadius = Math.Min(UserLocationHaloMaxRadiusPx + staleGrowthPx, UserLocationDotRadiusPx + ((float)accuracy * 0.4f) + staleGrowthPx);
+        byte haloAlpha = (byte)(Math.Max(30, 96 - (int)(accuracy * 1.2)) * freshnessAlpha);
         userLocationHaloPaint.Color = UserLocationHalo.WithAlpha(haloAlpha);
         canvas.DrawCircle(x, y, haloRadius, userLocationHaloPaint);
 
-        // Inner dot + outline.
+        // Inner dot + outline, faded by freshness.
+        userLocationFillPaint.Color = UserLocationFill.WithAlpha((byte)(255 * freshnessAlpha));
+        userLocationOutlinePaint.Color = UserLocationOutline.WithAlpha((byte)(255 * freshnessAlpha));
         canvas.DrawCircle(x, y, UserLocationDotRadiusPx, userLocationFillPaint);
         canvas.DrawCircle(x, y, UserLocationDotRadiusPx, userLocationOutlinePaint);
     }

@@ -41,6 +41,11 @@ public sealed class Atmosphere
     /// as this rises, concentrated on flatter slopes so cliffs stay bare.</summary>
     public float SnowAmount { get; }
 
+    /// <summary>Storm intensity in [0,1]. 0 = no storm; the higher it goes the darker the clouds turn (toward
+    /// charcoal) and the more often lightning strikes — the renderer flashes the clouds + ground. Independent
+    /// of <see cref="Wind"/>, which still drives drift speed.</summary>
+    public float Storm { get; }
+
     /// <summary>Unit vector from the surface toward the sun, in world frame (X east, Y north, Z up).</summary>
     public Vector3 SunDirection { get; }
 
@@ -86,12 +91,13 @@ public sealed class Atmosphere
     /// coverage in [0,1]. Default coverage = 0.35 (scattered cirrus, the look that fits a
     /// blue-sky day with high-altitude wisps).
     /// </summary>
-    public Atmosphere(float timeOfDayHours, float cloudCoverage = 0.35f, float wind = 0.3f, float snow = 0f)
+    public Atmosphere(float timeOfDayHours, float cloudCoverage = 0.35f, float wind = 0.3f, float snow = 0f, float storm = 0f)
     {
         TimeOfDayHours = WrapToDay(timeOfDayHours);
         CloudCoverage = Math.Clamp(cloudCoverage, 0f, 1f);
         Wind = Math.Clamp(wind, 0f, 1f);
         SnowAmount = Math.Clamp(snow, 0f, 1f);
+        Storm = Math.Clamp(storm, 0f, 1f);
 
         // Sun arc: sin(π · t/12) shapes a half-cycle that peaks at noon and bottoms at midnight.
         // Scaling by PeakElevationRadians gives a max of ~64° above the horizon during the day

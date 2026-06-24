@@ -257,6 +257,10 @@ public static class AppStrings
     // ── Find-me / teleport bar ──
     /// <summary>Header of the collapsible find-me / search bar.</summary>
     public static string LocateBarHeader => Get(nameof(LocateBarHeader));
+    /// <summary>Badge: the GPS fix is aging (no recent update).</summary>
+    public static string LocationStale => Get(nameof(LocationStale));
+    /// <summary>Badge: GPS signal lost — showing the last-known position.</summary>
+    public static string LocationLost => Get(nameof(LocationLost));
     /// <summary>"Center on me" button.</summary>
     public static string LocateCenterOnMe => Get(nameof(LocateCenterOnMe));
     /// <summary>Placeholder for the teleport search entry.</summary>
@@ -325,6 +329,10 @@ public static class AppStrings
     public static string ToggleExposedRoutes => Get(nameof(ToggleExposedRoutes));
     /// <summary>Caption under the "Exposed routes" toggle.</summary>
     public static string ToggleExposedRoutesHint => Get(nameof(ToggleExposedRoutesHint));
+    /// <summary>"Sauron's Tower" easter-egg toggle label.</summary>
+    public static string ToggleSauronTower => Get(nameof(ToggleSauronTower));
+    /// <summary>Caption under the "Sauron's Tower" toggle.</summary>
+    public static string ToggleSauronTowerHint => Get(nameof(ToggleSauronTowerHint));
     /// <summary>"TRAIL COLOURS" sub-header.</summary>
     public static string TrailColoursHeader => Get(nameof(TrailColoursHeader));
     /// <summary>Trail colour "Red".</summary>
@@ -385,6 +393,10 @@ public static class AppStrings
     public static string WeatherSnow => Get(nameof(WeatherSnow));
     /// <summary>Accessibility hint for the snow slider.</summary>
     public static string WeatherSnowHint => Get(nameof(WeatherSnowHint));
+    /// <summary>"Storm" slider label.</summary>
+    public static string WeatherStorm => Get(nameof(WeatherStorm));
+    /// <summary>Accessibility hint for the storm slider.</summary>
+    public static string WeatherStormHint => Get(nameof(WeatherStormHint));
 
     // ── View panel ──
     /// <summary>"Vertical" exaggeration slider label.</summary>

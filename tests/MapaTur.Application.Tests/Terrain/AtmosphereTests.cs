@@ -44,6 +44,23 @@ public sealed class AtmosphereTests
     }
 
     [Fact]
+    public void Storm_DefaultsToZero()
+    {
+        new Atmosphere(timeOfDayHours: 12f).Storm.Should().Be(0f);
+    }
+
+    [Theory]
+    [InlineData(-0.5f, 0f)]
+    [InlineData(0f, 0f)]
+    [InlineData(0.6f, 0.6f)]
+    [InlineData(1f, 1f)]
+    [InlineData(2f, 1f)]
+    public void Storm_IsClampedToUnitRange(float input, float expected)
+    {
+        new Atmosphere(timeOfDayHours: 12f, storm: input).Storm.Should().Be(expected);
+    }
+
+    [Fact]
     public void SunDirection_AtSunrise_IsAtHorizonInTheEast()
     {
         var atmo = new Atmosphere(timeOfDayHours: 6f);

@@ -66,7 +66,8 @@ public static class Poi3DProjection
         IReadOnlyList<MountainPoi> pois,
         DemRaster raster,
         TerrainMesh3D mesh,
-        float markerLiftMeters = 25f)
+        float markerLiftMeters = 25f,
+        DetailElevationField? detail = null)
     {
         ArgumentNullException.ThrowIfNull(pois);
         ArgumentNullException.ThrowIfNull(raster);
@@ -87,8 +88,14 @@ public static class Poi3DProjection
                 continue;
             }
 
-            float groundElevation = (float)raster.SampleBilinear(lon, lat);
-            Vector3 world = mesh.GeoToWorld(poi.Position, groundElevation + markerLiftMeters);
+            // Prefer the rendered 1 m detail surface where it covers this POI: the coarse base smooths the
+            // notch of a saddle upward, so a pass marker seated on the base floats above the drawn terrain.
+            // The detail field reconstructs the actual rendered (subsampled) surface — same seating the trail
+            // overlay uses, so dots and trails sit on the identical ground. Falls back to the base outside it.
+            double groundElevation = (detail is not null && detail.TryGetElevation(lon, lat, out double detailElevation))
+                ? detailElevation
+                : raster.SampleBilinear(lon, lat);
+            Vector3 world = mesh.GeoToWorld(poi.Position, (float)groundElevation + markerLiftMeters);
             result.Add(new MarkerWorldPoint<MountainPoi>(poi, world));
         }
 

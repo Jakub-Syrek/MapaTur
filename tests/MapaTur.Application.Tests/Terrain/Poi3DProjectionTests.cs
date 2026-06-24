@@ -153,4 +153,42 @@ public sealed class Poi3DProjectionTests
         float highY = withBigLift.Single().ScreenPosition!.Value.Y;
         highY.Should().BeLessThan(lowY);
     }
+
+    private static DetailElevationField BuildDetail(float elevation, MapBounds bounds)
+    {
+        var samples = new float[8 * 8];
+        Array.Fill(samples, elevation);
+        return new DetailElevationField(new DemRaster(8, 8, bounds, samples));
+    }
+
+    [Fact]
+    public void ToWorld_SeatsOnDetailSurfaceWhenItCoversThePoi()
+    {
+        // The coarse base reads 1000 m here, but the rendered 1 m detail dips to 900 m (a saddle the base
+        // smooths upward). The marker must seat on the detail surface, not float on the over-reporting base.
+        var poi = BuildPoiInsideRaster();
+        var mesh = BuildMesh();
+        var detail = BuildDetail(900f, new MapBounds(new GeoPoint(49.4, 19.4), new GeoPoint(49.6, 19.6)));
+
+        var seatedOnDetail = Poi3DProjection.ToWorld(new[] { poi }, BuildRaster(1000f), mesh, 0f, detail);
+        var seatedOnBase900 = Poi3DProjection.ToWorld(new[] { poi }, BuildRaster(900f), mesh, 0f);
+        var seatedOnBase1000 = Poi3DProjection.ToWorld(new[] { poi }, BuildRaster(1000f), mesh, 0f);
+
+        seatedOnDetail.Single().World.Should().Be(seatedOnBase900.Single().World);
+        seatedOnDetail.Single().World.Should().NotBe(seatedOnBase1000.Single().World);
+    }
+
+    [Fact]
+    public void ToWorld_FallsBackToBaseOutsideDetailWindow()
+    {
+        // A POI outside the detail window has no rendered-surface sample → seat on the coarse base, unchanged.
+        var poi = BuildPoiInsideRaster();
+        var mesh = BuildMesh();
+        var detailFarAway = BuildDetail(900f, new MapBounds(new GeoPoint(49.0, 19.0), new GeoPoint(49.2, 19.2)));
+
+        var withDetail = Poi3DProjection.ToWorld(new[] { poi }, BuildRaster(1000f), mesh, 0f, detailFarAway);
+        var baseOnly = Poi3DProjection.ToWorld(new[] { poi }, BuildRaster(1000f), mesh, 0f);
+
+        withDetail.Single().World.Should().Be(baseOnly.Single().World);
+    }
 }

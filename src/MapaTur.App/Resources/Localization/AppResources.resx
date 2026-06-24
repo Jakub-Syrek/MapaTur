@@ -250,6 +250,8 @@
 
   <!-- ════ Find-me / teleport bar ════ -->
   <data name="LocateBarHeader" xml:space="preserve"><value>🔍  Location &amp; search</value></data>
+  <data name="LocationStale" xml:space="preserve"><value>⚠ GPS position out of date</value></data>
+  <data name="LocationLost" xml:space="preserve"><value>⚠ GPS signal lost — last-known position</value></data>
   <data name="LocateCenterOnMe" xml:space="preserve"><value>🎯  Center on me</value></data>
   <data name="TeleportPlaceholder" xml:space="preserve"><value>Teleport: peak, hut, lake…</value></data>
   <data name="TeleportFly" xml:space="preserve"><value>🎯 Fly</value></data>
@@ -287,6 +289,8 @@
   <data name="ToggleRoads" xml:space="preserve"><value>Roads</value></data>
   <data name="ToggleExposedRoutes" xml:space="preserve"><value>Exposed routes</value></data>
   <data name="ToggleExposedRoutesHint" xml:space="preserve"><value>demanding / via ferrata (dotted) — fetched with trails</value></data>
+  <data name="ToggleSauronTower" xml:space="preserve"><value>Sauron's Tower</value></data>
+  <data name="ToggleSauronTowerHint" xml:space="preserve"><value>a dark tower with a glowing eye on Świnica (easter egg)</value></data>
   <data name="TrailColoursHeader" xml:space="preserve"><value>TRAIL COLOURS</value></data>
   <data name="ColourRed" xml:space="preserve"><value>Red</value></data>
   <data name="ColourBlue" xml:space="preserve"><value>Blue</value></data>
@@ -318,6 +322,8 @@
   <data name="WeatherWindHint" xml:space="preserve"><value>Wind strength</value></data>
   <data name="WeatherSnow" xml:space="preserve"><value>Snow</value></data>
   <data name="WeatherSnowHint" xml:space="preserve"><value>Snow cover</value></data>
+  <data name="WeatherStorm" xml:space="preserve"><value>Storm</value></data>
+  <data name="WeatherStormHint" xml:space="preserve"><value>Storm intensity — darker clouds and lightning</value></data>
 
   <!-- ════ View panel ════ -->
   <data name="ViewVertical" xml:space="preserve"><value>Vertical</value></data>

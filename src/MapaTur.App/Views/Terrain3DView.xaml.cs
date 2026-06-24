@@ -178,6 +178,28 @@ public partial class Terrain3DView : ContentView
         set => SetValue(ShowPeakNamesProperty, value);
     }
 
+    public static readonly BindableProperty ShowSauronTowerProperty = BindableProperty.Create(
+        nameof(ShowSauronTower), typeof(bool), typeof(Terrain3DView), false,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
+
+    /// <summary>Easter egg: a dark tower with the glowing Eye of Sauron on Świnica.</summary>
+    public bool ShowSauronTower
+    {
+        get => (bool)GetValue(ShowSauronTowerProperty);
+        set => SetValue(ShowSauronTowerProperty, value);
+    }
+
+    public static readonly BindableProperty UserLocationFreshnessProperty = BindableProperty.Create(
+        nameof(UserLocationFreshness), typeof(LocationFreshness), typeof(Terrain3DView), LocationFreshness.Live,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
+
+    /// <summary>Freshness of the GPS fix — the marker fades + its halo widens when Stale/Lost.</summary>
+    public LocationFreshness UserLocationFreshness
+    {
+        get => (LocationFreshness)GetValue(UserLocationFreshnessProperty);
+        set => SetValue(UserLocationFreshnessProperty, value);
+    }
+
     /// <summary>Whether the night-sky pass (stars + name labels + constellation lines) is drawn after dusk.</summary>
     public static readonly BindableProperty ShowNightSkyProperty = BindableProperty.Create(
         nameof(ShowNightSky), typeof(bool), typeof(Terrain3DView), true,
@@ -574,22 +596,24 @@ public partial class Terrain3DView : ContentView
     // and each frame fills a reused results buffer. One generic projector serves both — they differ
     // only in their world-build (climbing samples the DEM; summits carry their own elevation).
     private const float ClimbingMarkerLiftMeters = 30f;
-    private const float PoiMarkerLiftMeters = 25f;
+    // Now that POIs seat on the rendered 1 m detail surface (not the saddle-smoothing coarse base), the lift
+    // is purely "hover clear of the ground" — a smaller value sits the pass dot on the pass, not above it.
+    private const float PoiMarkerLiftMeters = 10f;
     private const float PeakMarkerLiftMeters = 40f;
 
     private readonly Marker3DOverlayProjector<ClimbingArea, ProjectedClimbingArea> climbingProjector =
         new(
-            (areas, raster, mesh, lift) => Climbing3DProjection.ToWorld(areas, raster!, mesh, lift),
+            (areas, raster, mesh, lift, _) => Climbing3DProjection.ToWorld(areas, raster!, mesh, lift),
             (source, screen) => new ProjectedClimbingArea(source, screen));
 
     private readonly Marker3DOverlayProjector<MountainPoi, ProjectedPoi> poiProjector =
         new(
-            (pois, raster, mesh, lift) => Poi3DProjection.ToWorld(pois, raster!, mesh, lift),
+            (pois, raster, mesh, lift, detail) => Poi3DProjection.ToWorld(pois, raster!, mesh, lift, detail),
             (source, screen) => new ProjectedPoi(source, screen));
 
     private readonly Marker3DOverlayProjector<TerrainPeak, ProjectedPeak> peakProjector =
         new(
-            (peaks, _, mesh, lift) => Peak3DProjection.ToWorld(peaks, mesh, lift),
+            (peaks, _, mesh, lift, _) => Peak3DProjection.ToWorld(peaks, mesh, lift),
             (source, screen) => new ProjectedPeak(source, screen));
 
     // GPS marker: prefer the OS-reported altitude when present (UserLocation3DProjection takes care
@@ -598,7 +622,7 @@ public partial class Terrain3DView : ContentView
     private const float UserLocationMarkerLiftMeters = 20f;
     private readonly Marker3DOverlayProjector<UserLocation, ProjectedUserLocation> userLocationProjector =
         new(
-            (fixes, raster, mesh, lift) => UserLocation3DProjection.ToWorld(fixes, raster, mesh, lift),
+            (fixes, raster, mesh, lift, _) => UserLocation3DProjection.ToWorld(fixes, raster, mesh, lift),
             (source, screen) => new ProjectedUserLocation(source, screen));
     // Reused one-element buffer so a fix update doesn't allocate a fresh list per frame; the
     // projector compares by reference so we only swap the contained UserLocation when it changes.
@@ -1052,6 +1076,8 @@ public partial class Terrain3DView : ContentView
     // sun visibly lowers into golden hour over the course of the flight.
     private float flightBaseCloud;
     private float flightBaseWind;
+    private float flightBaseSnow;
+    private float flightBaseStorm;
     private Atmosphere? flightAtmosphere;
 
     // In-app MP4 recording of the cinematic fly-through. The encoder is created per platform (Android:
@@ -1142,11 +1168,14 @@ public partial class Terrain3DView : ContentView
         Camera.FarPlane = FlightFarPlane;
         IsFlying = true;
         // Cinematic time arc independent of the slider (the non-linear FlightTimeKeys day arc); cloud + wind
-        // come from the user's settings.
+        // + snow come from the user's settings (snow was previously dropped to 0 for the flight — the demo
+        // melted the snow the user had set; keep it).
         Atmosphere? a = Atmosphere;
         flightBaseCloud = a?.CloudCoverage ?? 0.35f;
         flightBaseWind = a?.Wind ?? 0.3f;
-        flightAtmosphere = new Atmosphere(FlightTimeOfDay(0f), flightBaseCloud, flightBaseWind);
+        flightBaseSnow = a?.SnowAmount ?? 0f;
+        flightBaseStorm = a?.Storm ?? 0f;
+        flightAtmosphere = new Atmosphere(FlightTimeOfDay(0f), flightBaseCloud, flightBaseWind, flightBaseSnow, flightBaseStorm);
         SetChromeVisible(false); // clear the screen for a clean cinematic shot
         // Request an MP4 capture of the flight; it starts on the next paint once the surface size is known.
         recordingRequested = videoRecorder?.IsSupported ?? false;
@@ -1219,7 +1248,7 @@ public partial class Terrain3DView : ContentView
         // speed keeps it obviously moving the whole way.
         float p = (float)raw;
         // Time-of-day follows the day arc (long red morning → day → evening → brief night) over the flight.
-        flightAtmosphere = new Atmosphere(FlightTimeOfDay(p), flightBaseCloud, flightBaseWind);
+        flightAtmosphere = new Atmosphere(FlightTimeOfDay(p), flightBaseCloud, flightBaseWind, flightBaseSnow, flightBaseStorm);
         Vector3 here = SampleFlightPath(p);
         Vector3 ahead = SampleFlightPath(MathF.Min(1f, p + 0.025f));
 
@@ -1629,6 +1658,7 @@ public partial class Terrain3DView : ContentView
         {
             projectedPois = poiProjector.Project(
                 pois, Raster, frame, Camera, e.Info.Width, e.Info.Height, PoiMarkerLiftMeters,
+                detail: DetailElevation, // seat on the rendered 1 m surface so pass dots don't float over saddles
                 maxDistanceMeters: (float)PeakLabelRadiusMeters); // obey the "zasięg" slider, same as peak + lake labels
             occlusionMarkers += projectedPois.Count;
             var sw = DebugEnabled ? System.Diagnostics.Stopwatch.StartNew() : null;
@@ -1692,6 +1722,7 @@ public partial class Terrain3DView : ContentView
             // GL already drew the (depth-occluded) trails + route; Skia only adds the markers/labels on top.
             // POI text labels only when the camera is close — a far view of 1000+ POIs is a wall of text.
             bool poiLabelsVisible = Camera.Distance < Services.Terrain3DCanvasRenderer.PoiLabelMaxDistanceWorld;
+            renderer.UserLocationFreshness = UserLocationFreshness;
             renderer.DrawOverlays(canvas, null, null, projectedClimbing, projectedPois, projectedPeaks, projectedUserLocation, poiLabelsVisible);
             DrawLakeLabelsOverScene(canvas, frame, e.Info.Width, e.Info.Height);
             DrawStarLabelsOverScene(canvas, frame, e.Info.Width, e.Info.Height);
@@ -1720,6 +1751,7 @@ public partial class Terrain3DView : ContentView
 
         // depthMap = null disables trail / route / climbing occlusion: trails are drawn always on top
         // of the mesh (the visual the user wants) and it drops a per-frame depth-grid fill.
+        renderer.UserLocationFreshness = UserLocationFreshness;
         renderer.RenderTiles(canvas, e.Info.Width, e.Info.Height, tiles, Camera, frameScratch, null, projectedTrails, projectedRoute, projectedClimbing, projectedPois, projectedPeaks, projectedUserLocation);
         DrawNightLights(canvas, projectedPois);
         ServiceRecording(e);
@@ -2762,7 +2794,7 @@ public partial class Terrain3DView : ContentView
             // Today's local date drives the night-sky star pass (with the time-of-day slider as the local
             // hour); the stars fade in only once the slider puts the sun below the horizon.
             IReadOnlyList<TreeInstance>? forest = EnsureForest(tiles);
-            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere, forest, DetailElevation, ShowNightSky ? DateOnly.FromDateTime(DateTime.Now) : null, ExposedRoutes);
+            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere, forest, DetailElevation, ShowNightSky ? DateOnly.FromDateTime(DateTime.Now) : null, ExposedRoutes, ShowSauronTower);
             if (terrainTextureId == 0)
             {
                 return false;

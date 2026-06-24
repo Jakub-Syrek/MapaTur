@@ -232,7 +232,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "      vec2 warp = vec2(fbmT(p * 0.5 + uCloudTime * 0.010),\n" +
         "                       fbmT(p * 0.5 + vec2(5.2, 1.3) + uCloudTime * 0.012));\n" +
         "      float n = fbmT(p + (warp - 0.5) * 1.6);\n" +
-        "      float thr = 0.72 - (uCloudCoverage * 0.34);\n" + // match the sea-of-clouds layer threshold
+        "      float thr = 0.62 - (uCloudCoverage * 0.42);\n" + // match the cumulus / sea-of-clouds layer threshold
         "      sunShadow = smoothstep(thr, thr + 0.20, n);\n" +
         "    }\n" +
         "  }\n" +
@@ -499,8 +499,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    vec2 cloudUv = viewDir.xy / h;\n" +
         "    cloudUv = vec2(cloudUv.x * 0.42, cloudUv.y * 2.0) + (uCloudDrift * uTime);\n" +
         "    float clouds = fbm(cloudUv * 1.25);\n" + // 5-octave fBm: soft WISPY cirrus, no value-noise grid (kills the angular/pixelated bands)
-        "    float threshold = 0.56 - (uCloudCoverage * 0.26);\n" +
-        "    cloudDensity = smoothstep(threshold, threshold + 0.30, clouds) * 0.6;\n" + // wide band = feathered (pierzaste) edges, not hard angular ones
+        "    float threshold = 0.48 - (uCloudCoverage * 0.34);\n" + // lower base + stronger coverage pull = much more cloud
+        "    cloudDensity = smoothstep(threshold, threshold + 0.30, clouds) * 0.8;\n" + // wide band = feathered (pierzaste) edges, not hard angular ones
         // Fade clouds out near the horizon (h -> 0) where the overhead-plane projection
         // stretches to infinity and would smear into a hard band.
         "    cloudDensity *= smoothstep(0.015, 0.18, h);\n" +
@@ -788,12 +788,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  vec2 warp = vec2(fbmC(p * 0.5 + uTime * 0.010),\n" +
         "                   fbmC(p * 0.5 + vec2(5.2, 1.3) + uTime * 0.012));\n" +
         "  float n = fbmC(p + (warp - 0.5) * 1.6);\n" +
-        "  float thr = 0.72 - (uCoverage * 0.34);\n" + // higher threshold = fewer, sparser low clouds
+        "  float thr = 0.62 - (uCoverage * 0.42);\n" + // lower threshold = more, denser low clouds
         "  float a = smoothstep(thr, thr + 0.20, n);\n" +
         // Soft-fade the quad's outer ring so the (finite) sheet doesn't show a hard rectangular
         // edge out toward the horizon.
         "  float edge = smoothstep(1.0, 0.65, max(abs(vLocal.x), abs(vLocal.y)));\n" +
-        "  a *= edge * 0.55;\n" + // lower peak opacity so the sheet is lighter / less obtrusive
+        "  a *= edge * (0.45 + (uCoverage * 0.5));\n" + // opacity tracks coverage: a light veil when scattered, a near-solid deck at 100%
                                   // Billow shading from the surface height: crests catch the light (brighter, a touch denser),
                                   // troughs fall into shade — turns the flat veil into a rolling 3D sea of clouds.
         "  a = clamp(a * (0.88 + (0.34 * max(vCrest, 0.0))), 0.0, 1.0);\n" +
@@ -824,7 +824,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "void main(){\n" +
         "  float s = aSizeSeed.x;\n" +
         "  vSeed = aSizeSeed.y;\n" +
-        "  vec3 center = vec3(uFieldCenter + aOffset.xy + uDrift, uBaseAltitude + aOffset.z);\n" +
+        "  vec2 drifted = aOffset.xy + uDrift;\n" +
+        // Wrap the field into a 32 km torus around the scene centre so cumulus drift downwind forever without
+        // the finite field sliding off one side (matches BuildCumulusField's 16 km radius).
+        "  drifted = mod(drifted + 16000.0, 32000.0) - 16000.0;\n" +
+        "  vec3 center = vec3(uFieldCenter + drifted, uBaseAltitude + aOffset.z);\n" +
         "  vec3 toEye = uCameraPos - center;\n" +
         "  vec3 horiz = vec3(toEye.xy, 0.0);\n" +
         "  float hl = length(horiz);\n" +
@@ -877,6 +881,102 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  float dist = length(vWorldPos - uCameraPos);\n" +
         "  col = mix(col, uFogColor, 1.0 - exp(-dist * uFogDensity));\n" +
         "  fragColor = vec4(col, clamp(density, 0.0, 1.0) * uOpacity);\n" +
+        "}\n";
+
+    // ── Sauron's tower (easter egg) ───────────────────────────────────────────────────────────────────
+    // A dark tapered spire on Świnica topped by a glowing eye that blooms like a small sun (the bloom pass
+    // turns the full-bright emissive orb into a sun). Flat sun-lit dark stone for the tower; emissive orb for
+    // the eye. One non-instanced position+normal+colour+emissive mesh, built once. Toggled from the menu.
+    private const string SauronVertexShaderSource =
+        "#version 300 es\n" +
+        "layout(location=0) in vec3 aPos;\n" +
+        "layout(location=1) in vec3 aNormal;\n" +
+        "layout(location=2) in vec3 aColor;\n" +
+        "layout(location=3) in float aEmissive;\n" +
+        "uniform mat4 uViewProj;\n" +
+        "uniform vec3 uModelOffset;\n" +    // Świnica's world position (base of the tower)
+        "uniform float uVerticalScale;\n" + // terrain vertical exaggeration, so the tower scales with the relief
+        "uniform vec3 uCameraPos;\n" +
+        "out vec3 vNormal;\n" +
+        "out vec3 vColor;\n" +
+        "out float vEmissive;\n" +
+        "out vec3 vWorldPos;\n" +
+        "out vec2 vCard;\n" +
+        "void main(){\n" +
+        "  vEmissive = aEmissive;\n" +
+        "  vColor = aColor;\n" +
+        "  vCard = vec2(0.0);\n" +
+        "  vec3 world;\n" +
+        "  if (aEmissive > 0.5) {\n" +
+        // The eye is a camera-facing billboard centred above the tower top; aPos.xy carries the quad card.
+        "    vec2 card = aPos.xy;\n" +
+        "    vCard = card;\n" +
+        "    vec3 center = vec3(0.0, 0.0, 230.0 * uVerticalScale) + uModelOffset;\n" +
+        "    vec3 toCam = normalize(uCameraPos - center);\n" +
+        "    vec3 right = normalize(cross(vec3(0.0, 0.0, 1.0), toCam));\n" +
+        "    vec3 up = normalize(cross(toCam, right));\n" +
+        "    world = center + (right * (card.x * 60.0)) + (up * (card.y * 80.0));\n" + // eye taller than wide
+        "    vNormal = toCam;\n" +
+        "  } else {\n" +
+        "    world = vec3(aPos.x, aPos.y, aPos.z * uVerticalScale) + uModelOffset;\n" +
+        "    vNormal = aNormal;\n" +
+        "  }\n" +
+        "  vWorldPos = world;\n" +
+        "  gl_Position = uViewProj * vec4(world, 1.0);\n" +
+        "}\n";
+
+    private const string SauronFragmentShaderSource =
+        "#version 300 es\n" +
+        "precision highp float;\n" +
+        "in vec3 vNormal;\n" +
+        "in vec3 vColor;\n" +
+        "in float vEmissive;\n" +
+        "in vec3 vWorldPos;\n" +
+        "in vec2 vCard;\n" +
+        "uniform vec3 uSunDir;\n" +
+        "uniform vec3 uSunColor;\n" +
+        "uniform float uAmbient;\n" +
+        "uniform vec3 uCameraPos;\n" +
+        "uniform vec3 uFogColor;\n" +
+        "uniform float uFogDensity;\n" +
+        "uniform float uEyePulse;\n" +
+        "uniform float uTime;\n" +
+        "out vec4 fragColor;\n" +
+        "float h21(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n" +
+        "float n2(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);\n" +
+        "  return mix(mix(h21(i), h21(i+vec2(1,0)), f.x), mix(h21(i+vec2(0,1)), h21(i+vec2(1,1)), f.x), f.y); }\n" +
+        "float fbm(vec2 p){ float v=0.0, a=0.5; for(int i=0;i<4;i++){ v+=a*n2(p); p=p*2.0; a*=0.5; } return v; }\n" +
+        "void main(){\n" +
+        "  if (vEmissive < 0.5) {\n" + // ── the tower (opaque, sun-lit dark stone) ──
+        "    float lambert = max(dot(normalize(vNormal), uSunDir), 0.0);\n" +
+        "    vec3 col = vColor * uSunColor * (uAmbient + ((1.0 - uAmbient) * lambert));\n" +
+        "    float dist = length(vWorldPos - uCameraPos);\n" +
+        "    col = mix(col, uFogColor, 1.0 - exp(-dist * uFogDensity));\n" +
+        "    fragColor = vec4(col, 1.0);\n" +
+        "    return;\n" +
+        "  }\n" +
+        // ── the Eye of Sauron (camera-facing, additive) ──
+        "  vec2 c = vCard;\n" +
+        "  vec2 e = vec2(c.x / 0.62, c.y / 0.96);\n" +   // normalise to the almond's inner extent
+        "  float r = length(e);\n" +
+        "  float flame  = fbm((c * 3.5) + vec2(0.0, -uTime * 1.7));\n" +   // flames licking upward
+        "  float flame2 = fbm((c * 7.0) + vec2(uTime * 0.4, -uTime * 2.6));\n" +
+        // Fiery iris: white-hot core → orange → deep-red rim, churned by the flame noise. HDR (>1) so it blooms.
+        "  vec3 hot = vec3(2.8, 2.3, 1.2);\n" +
+        "  vec3 mid = vec3(2.4, 0.85, 0.12);\n" +
+        "  vec3 rim = vec3(1.5, 0.18, 0.02);\n" +
+        "  vec3 iris = mix(hot, mid, smoothstep(0.0, 0.55, r));\n" +
+        "  iris = mix(iris, rim, smoothstep(0.55, 1.0, r));\n" +
+        "  iris *= 0.6 + (0.8 * flame);\n" +
+        // Vertical slit pupil: narrow in x, tall in y, tapering toward the tips.
+        "  float slit = (1.0 - smoothstep(0.04, 0.11, abs(c.x))) * (1.0 - smoothstep(0.55, 0.82, abs(c.y)));\n" +
+        "  vec3 eyeCol = mix(iris, vec3(0.01, 0.0, 0.0), slit);\n" +
+        "  float core = smoothstep(1.08, 0.25, r);\n" +                  // bright inside the almond
+        "  float halo = exp(-r * 1.6) * (0.55 + (0.6 * flame2));\n" +    // soft surrounding glow
+        "  vec3 col = (eyeCol * core) + (vec3(1.6, 0.55, 0.12) * halo);\n" +
+        "  float alpha = clamp(max(core, halo), 0.0, 1.0);\n" +
+        "  if (alpha < 0.01) { discard; }\n" +
+        "  fragColor = vec4(col * uEyePulse, alpha);\n" + // additive blend → blazing eye + halo, no fog
         "}\n";
 
     // Fragment shader for the line/ribbon program (trails/route/roads): vertex colour + the SAME aerial-
@@ -1287,6 +1387,27 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private uint cumulusInstanceVbo;
     private int cumulusInstanceCount;
     private bool cumulusUnsupported; // a cumulus shader/link failure disables clouds only, never the whole engine
+
+    // Sauron's tower (easter egg): one program + one static mesh (tower cone + emissive eye orb), placed on Świnica.
+    private uint sauronProgram;
+    private int sauronViewProjLocation = -1;
+    private int sauronModelOffsetLocation = -1;
+    private int sauronVerticalScaleLocation = -1;
+    private int sauronSunDirLocation = -1;
+    private int sauronSunColorLocation = -1;
+    private int sauronAmbientLocation = -1;
+    private int sauronCameraPosLocation = -1;
+    private int sauronFogColorLocation = -1;
+    private int sauronFogDensityLocation = -1;
+    private int sauronEyePulseLocation = -1;
+    private int sauronTimeLocation = -1;
+    private uint sauronVao;
+    private uint sauronVbo;
+    private int sauronVertexCount;
+    private int sauronTowerVertexCount; // the tower verts come first; the last 6 are the eye billboard quad
+    private bool sauronUnsupported; // a shader/link failure disables the easter egg only, never the whole engine
+    private static readonly GeoPoint SwinicaLocation = new(49.219417, 20.009306);
+
     private bool programReady;
 
     // Off-screen multisampled target. We render the terrain into our own MSAA colour+depth renderbuffers
@@ -1519,7 +1640,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         IReadOnlyList<TreeInstance>? forest = null,
         DetailElevationField? detail = null,
         DateOnly? localDate = null,
-        IReadOnlyList<Trail>? exposedRoutes = null)
+        IReadOnlyList<Trail>? exposedRoutes = null,
+        bool showSauronTower = false)
     {
         gl ??= PlatformGl.Get();
 
@@ -1559,6 +1681,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             cumulusProgram = 0;
             cumulusInstanceCount = 0;
             cumulusUnsupported = false;
+            sauronProgram = 0;
+            sauronVertexCount = 0;
+            sauronUnsupported = false;
             programReady = false;
             mvpLocation = -1;
             modelOffsetLocation = -1;
@@ -1846,18 +1971,49 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             + (MathF.Sin((weatherT * 0.031f) + 1.7f) * 0.3f)
             + (MathF.Sin((weatherT * 0.057f) + 4.2f) * 0.2f); // ~[-1,1]
         // Multiplicative weather variation around the user's base coverage, so a base of 0 stays a
-        // dead-clear sky (an additive bump used to leave ~0.35 coverage even at the 0% slider).
-        float effectiveCoverage = Math.Clamp(baseCoverage * (1f + (0.6f * weatherNoise)), 0f, 1f);
+        // dead-clear sky (an additive bump used to leave ~0.35 coverage even at the 0% slider). The wobble
+        // FADES OUT as the slider nears 100% so a full slider is a steady, fully-overcast sky — the weather
+        // dip used to leave only a sparse field (~40% of the puffs) even at 100%. Variety stays in the mid range.
+        float weatherFadeT = Math.Clamp((baseCoverage - 0.70f) / 0.30f, 0f, 1f);
+        float weatherFade = 1f - (weatherFadeT * weatherFadeT * (3f - (2f * weatherFadeT)));
+        float effectiveCoverage = Math.Clamp(baseCoverage * (1f + (0.6f * weatherNoise * weatherFade)), 0f, 1f);
         // Wind in noise-units/sec: slowly rotating heading + gently pulsing speed, scaled by the
         // user's wind setting (calm → barely drifting, gale → racing). The same setting darkens the
         // clouds toward storm-grey: stormDarken multiplies every cloud colour below.
         float wind = atmosphere?.Wind ?? 0.3f;
+        float storm = atmosphere?.Storm ?? 0f;
         float windScale = 0.35f + (3.0f * wind); // ~0.35× at calm, ~3.35× at full gale
         float windAngle = (MathF.Sin(weatherT * 0.008f) * 0.9f) + (MathF.Sin((weatherT * 0.017f) + 2f) * 0.5f);
         float windSpeed = (0.012f + (0.010f * MathF.Sin(weatherT * 0.005f))) * windScale;
         var windVec = new Vector2(MathF.Cos(windAngle) * windSpeed, MathF.Sin(windAngle) * windSpeed);
-        // Storm darkening: high wind dims the clouds toward grey (down to ~40% brightness at gale).
-        float stormDarken = 1f - (0.60f * wind);
+        // Cloud darkening is driven SOLELY by the Storm slider now (wind only drifts the clouds): no storm =
+        // full-brightness white clouds, a full storm drags them to ~20% (charcoal thundercloud).
+        float stormDarken = 1f - (0.80f * storm);
+
+        // Lightning. The Storm slider sets BOTH how often bolts strike and how bright the flash is. Time is
+        // diced into windows whose length shrinks with storm (frequent strikes in a heavy storm); each window
+        // is hashed to decide whether a bolt fires and when, then the flash is a sharp attack + exponential
+        // decay with a fast re-strike flicker. Folded into the cloud colours + terrain ambient below (no extra
+        // shader uniforms): the dark thundercloud briefly lights up blue-white and the ground flashes with it.
+        float lightningFlash = 0f;
+        if (storm > 0.001f)
+        {
+            float windowLen = 7.0f - (5.5f * storm);                 // ~7 s between strikes (light) → ~1.5 s (heavy)
+            float win = MathF.Floor(weatherT / windowLen);
+            float strikeProb = 0.45f + (0.55f * storm);
+            if (Hash01((win * 1.37f) + 0.5f) < strikeProb)
+            {
+                float jitter = Hash01((win * 2.11f) + 4.3f);         // where in the window the bolt strikes
+                float localT = weatherT - ((win + (jitter * 0.7f)) * windowLen);
+                if (localT >= 0f && localT < 1.2f)
+                {
+                    float envelope = MathF.Exp(-localT * 7.5f);          // sharp attack, ~250 ms tail
+                    float flicker = 0.6f + (0.4f * MathF.Sin(localT * 55f)); // bolt re-strike flicker
+                    lightningFlash = Math.Clamp(envelope * flicker, 0f, 1f) * (0.55f + (0.45f * storm));
+                }
+            }
+        }
+        var lightningTint = new Vector3(0.80f, 0.85f, 1.0f);
 
         // Cloud-layer geometry, computed once and shared by BOTH the sea-of-clouds draw and the
         // terrain's cloud-shadow lookup so the shadows on the ground register with the clouds above.
@@ -1893,11 +2049,21 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         float invRaw = (0.55f * (0.5f + (0.5f * invNoise))) + (0.45f * lowSun);
         float invT = Math.Clamp((invRaw - 0.30f) / 0.40f, 0f, 1f);
         float inversion = invT * invT * (3f - (2f * invT)); // smoothstep — lingers at both regimes
-        float seaGate = inversion;
+        // The cloud SLIDER (not the weather noise) now drives the deck height, per the user's ask: above ~80%
+        // it drops onto the peaks as a low ~2000 m overcast; below that it parks high above them. lowDeck ramps
+        // in over [0.78, 1.0]; liftClear raises the deck as the sky clears. Weather (inversion/altNoise) still
+        // adds the "czasem" wander on top so the same slider value isn't a fixed height.
+        float cloudSlider = baseCoverage;
+        float lowDeck = Math.Clamp((cloudSlider - 0.78f) / 0.22f, 0f, 1f);
+        lowDeck = lowDeck * lowDeck * (3f - (2f * lowDeck)); // smoothstep — 0 below ~80%, 1 at 100%
+        float liftClear = 1f - cloudSlider;
+        float seaGate = Math.Max(inversion, lowDeck); // a high slider forces the low sheet on, no inversion needed
 
-        // Inversion pulls the sheet DOWN into the valleys (peaks poke through); in the fair regime it parks
-        // high but seaCoverage gates it off anyway, leaving only cumulus.
-        float altFraction = Math.Clamp((0.62f - (0.40f * inversion)) + (0.06f * altNoise), 0.18f, 0.78f);
+        // Inversion pulls the sheet DOWN into the valleys (peaks poke through); a high slider drops it the same
+        // way (lowDeck ~2000 m onto the ridges), while a clear sky lifts it above the peaks (liftClear).
+        float altFraction = Math.Clamp(
+            0.62f + (0.45f * liftClear) - (0.40f * inversion) - (0.40f * lowDeck) - (0.30f * storm) + (0.06f * altNoise),
+            -0.25f, 1.20f); // floor BELOW the frame centre so a full overcast / storm deck can sink into the valleys (~1500 m and lower)
         float cloudAltitude = float.IsNegativeInfinity(cloudMaxZ)
             ? 0f
             : geomFrame.Center.Z + ((cloudMaxZ - geomFrame.Center.Z) * altFraction);
@@ -1908,10 +2074,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Cumulus sit over the ridges (bases ~at peak level, tops rising into the sky) — a VISIBLE level for a
         // terrain-facing camera, NOT tied to the inversion (which would lift them off the top of the screen).
         // The regime variety comes from their opacity (they thin as inversion deepens) + the sea-of-clouds sheet.
+        // Above ~80% the slider (lowDeck) drops the cumulus down onto the ridges with the sea sheet, so the
+        // whole low sky fills in — not a thin band of puffs parked high above an otherwise clear view.
         float cumulusBase = float.IsNegativeInfinity(cloudMaxZ)
             ? 0f
-            : geomFrame.Center.Z + ((cloudMaxZ - geomFrame.Center.Z) * 0.62f) + 350f;
-        float cumulusOpacity = 0.92f * (1f - (0.55f * inversion));
+            : geomFrame.Center.Z + ((cloudMaxZ - geomFrame.Center.Z) * (0.62f - (0.40f * lowDeck) - (0.25f * storm))) + (350f * (1f - (0.7f * lowDeck)));
+        // Keep the cumulus opaque even as an inversion deepens at a high slider (lowDeck cancels the thinning),
+        // so a 100% storm sky stays packed rather than fading to the bare sea sheet.
+        float cumulusOpacity = 1.0f * (1f - (0.35f * inversion * (1f - lowDeck)));
         // Cloud-shadow darkening of direct sun where a cloud blocks the ray (0 = off).
         const float CloudShadowStrength = 0.55f;
 
@@ -2072,6 +2242,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         TerrainMesh3D lightFrame = tiles[0];
         Vector3 light = atmosphere?.SunDirection ?? lightFrame.LightDirection;
         float ambient = (atmosphere?.AmbientFactor ?? lightFrame.AmbientFactor) * AmbientStrengthScale;
+        // A lightning strike briefly lights the whole landscape: lift the ambient floor with the flash.
+        ambient = Math.Min(ambient + (lightningFlash * 0.6f), 1.4f);
         gl.Uniform3(lightDirLocation, light.X, light.Y, light.Z);
         gl.Uniform1(ambientLocation, ambient);
 
@@ -2426,7 +2598,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             float dayness = Math.Clamp(atmosphere!.SunDirection.Z + 0.1f, 0f, 1f);
             Vector3 white = new(0.97f, 0.97f, 0.99f);
             Vector3 tint = Vector3.Lerp(atmosphere.SkyHorizonColor, white, dayness);
-            Vector3 cloudCol = tint * (0.35f + (0.65f * dayness)) * stormDarken;
+            Vector3 cloudCol = (tint * (0.55f + (0.45f * dayness)) * stormDarken) + (lightningTint * lightningFlash);
 
             gl.Enable(EnableCap.Blend);
             gl.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
@@ -2469,12 +2641,39 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
             if (!cumulusUnsupported && cumulusOpacity > 0.02f)
             {
-                var cumDrift = new Vector2(windVec.X * weatherT * 0.5f, windVec.Y * weatherT * 0.5f);
+                // Cumulus drift downwind at a REAL world speed (metres), so the wind slider visibly moves them —
+                // the old windVec·t was in noise units (~0.5 m/min, i.e. frozen). The vertex shader wraps the
+                // field into a torus, so this can grow without the puffs sliding off the scene.
+                Vector2 windDir = windVec.LengthSquared() > 1e-9f ? Vector2.Normalize(windVec) : new Vector2(1f, 0f);
+                float windWorldSpeed = 3f + (28f * wind); // m/s: a gentle drift when calm → racing storm clouds at full wind
+                var cumDrift = windDir * (windWorldSpeed * weatherT);
                 // The "Zachmurzenie" slider (effectiveCoverage) sets HOW MANY cumulus draw: 0 % = clear sky,
                 // 100 % = the full field.
                 int cumCount = (int)MathF.Round(cumulusInstanceCount * Math.Clamp(effectiveCoverage, 0f, 1f));
                 DrawCumulus(gl, m, camera, atmosphere!, new Vector2(geomFrame.Center.X, geomFrame.Center.Y),
-                    cumulusBase, cumDrift, cumulusOpacity, cumCount, fogColor, fogDensity);
+                    cumulusBase, cumDrift, cumulusOpacity, cumCount, fogColor, fogDensity, stormDarken, lightningFlash);
+            }
+        }
+
+        // Sauron's tower easter egg on Świnica — drawn into the scene BEFORE the post-process so the bloom pass
+        // turns its eye into a small glowing sun. Depth-tested, so ridges in front occlude the lower tower.
+        if (showSauronTower && atmosphere is not null && raster is not null && !sauronUnsupported)
+        {
+            try
+            {
+                EnsureSauronProgram(gl);
+            }
+            catch (Exception ex)
+            {
+                sauronUnsupported = true;
+                Log.Warning(ex, "[GL3D] Sauron tower disabled (shader/link failure)");
+            }
+
+            if (!sauronUnsupported)
+            {
+                float seat = (float)raster.SampleBilinear(SwinicaLocation.Longitude, SwinicaLocation.Latitude);
+                Vector3 baseWorld = geomFrame.GeoToWorld(SwinicaLocation, seat);
+                DrawSauron(gl, m, camera, atmosphere, baseWorld, geomFrame.VerticalExaggeration, weatherT, fogColor, fogDensity);
             }
         }
 
@@ -5136,20 +5335,30 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
     // Builds the static per-puff instance buffer ONCE: scattered cumulus clusters (each a handful of puffs)
     // as (offsetX, offsetY, offsetZ, radius, seed), local to the field centre. Fixed seed → a stable cloudscape.
+    // Deterministic hash → [0,1) for a scalar (lightning strike timing). fract(sin(x)·k), the classic GLSL hash.
+    private static float Hash01(float x)
+    {
+        double s = Math.Sin((x * 12.9898) + 78.233) * 43758.5453;
+        return (float)(s - Math.Floor(s));
+    }
+
     private static float[] BuildCumulusField()
     {
         var rng = new Random(20260613);
-        const int clusters = 52;          // 2× the cumulus count
+        const int clusters = 150;         // dense field so a 100% slider reads as heavy overcast, not scattered puffs
         const float fieldRadius = 16000f; // m around the scene centre
         const float deckSpread = 2800f;   // taller vertical spread so cumulus sit at clearly DIFFERENT heights
-        var data = new List<float>(clusters * 6 * 5);
+        var data = new List<float>(clusters * 9 * 5);
         for (int ci = 0; ci < clusters; ci++)
         {
             float cx = ((float)rng.NextDouble() * 2f - 1f) * fieldRadius;
             float cy = ((float)rng.NextDouble() * 2f - 1f) * fieldRadius;
             float cz = (float)rng.NextDouble() * deckSpread;
-            int puffs = 3 + rng.Next(4);                                   // 3..6 puffs per cumulus
-            float clusterScale = 380f + ((float)rng.NextDouble() * 520f);  // base puff radius (m)
+            // ~30% of the cumulus are noticeably BIGGER (more, larger puffs) — a varied sky with the odd towering
+            // cloud rather than a uniform field of same-size blobs.
+            bool big = rng.NextDouble() < 0.30;
+            int puffs = big ? 5 + rng.Next(5) : 3 + rng.Next(4);                                          // big: 5..9, normal: 3..6
+            float clusterScale = (big ? 680f : 360f) + ((float)rng.NextDouble() * (big ? 950f : 480f));   // big: 680..1630 m, normal: 360..840 m
             for (int p = 0; p < puffs; p++)
             {
                 float ox = cx + (((float)rng.NextDouble() * 2f - 1f) * clusterScale * 1.3f);
@@ -5224,7 +5433,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // Draws the scattered cumulus billboards above the terrain. Alpha-blended, depth-tested (foreground peaks
     // occlude clouds behind them), depth-write off. mvp must be the ABSOLUTE scene mvp (puffs are absolute world).
     private void DrawCumulus(GL g, ReadOnlySpan<float> mvp, Camera3D camera, Atmosphere atmosphere,
-        Vector2 fieldCenter, float baseAltitude, Vector2 drift, float opacity, int drawCount, Vector3 fogColor, float fogDensity)
+        Vector2 fieldCenter, float baseAltitude, Vector2 drift, float opacity, int drawCount, Vector3 fogColor,
+        float fogDensity, float cloudDark, float lightningFlash)
     {
         // drawCount lets the weather slider thin the field out: only the first N puffs are drawn (the clusters
         // are at random positions, so the tail is a random spatial subset → fewer/more clouds, not "a wedge").
@@ -5234,11 +5444,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             return;
         }
 
-        // Lit-top / shaded-base colours from the sun, matching the sky + sea-of-clouds tinting.
+        // Lit-top / shaded-base colours from the sun, matching the sky + sea-of-clouds tinting. The storm
+        // slider (cloudDark) drives them toward charcoal; a lightning strike (lightningFlash) lights them
+        // blue-white for a frame or two so the dark thundercloud flickers.
         float dayness = Math.Clamp(atmosphere.SunDirection.Z + 0.1f, 0f, 1f);
         Vector3 white = new(1.0f, 0.99f, 0.97f);
-        Vector3 lit = Vector3.Lerp(atmosphere.SkyHorizonColor * 1.2f, white, dayness);
-        Vector3 shadow = lit * (0.45f + (0.1f * dayness));
+        var lightning = new Vector3(0.80f, 0.85f, 1.0f) * lightningFlash;
+        Vector3 lit = (Vector3.Lerp(atmosphere.SkyHorizonColor * 1.2f, white, dayness) * cloudDark) + lightning;
+        Vector3 shadow = (lit * (0.45f + (0.1f * dayness))) + (lightning * 0.7f);
         shadow = new Vector3(shadow.X * 0.92f, shadow.Y * 0.97f, shadow.Z * 1.08f); // cool the underside
 
         g.Enable(EnableCap.Blend);
@@ -5263,6 +5476,173 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.BindVertexArray(0);
         g.DepthMask(true);
         g.Disable(EnableCap.Blend);
+    }
+
+    // Builds Sauron's tower + glowing eye as a triangle list of [pos.xyz, normal.xyz, colour.rgb, emissive]
+    // vertices in LOCAL space (tower base at z=0, +z up). The eye is one emissive orb; the tower a tapered
+    // cone with a four-pronged crown. Placed/scaled at draw time via uModelOffset + uVerticalScale.
+    private static float[] BuildSauronMesh()
+    {
+        var v = new List<float>(8192);
+        var stone = new Vector3(0.05f, 0.05f, 0.07f);
+        var eye = new Vector3(1.0f, 0.50f, 0.10f);
+
+        void Add(Vector3 p, Vector3 n, Vector3 c, float e)
+        {
+            v.Add(p.X); v.Add(p.Y); v.Add(p.Z);
+            v.Add(n.X); v.Add(n.Y); v.Add(n.Z);
+            v.Add(c.X); v.Add(c.Y); v.Add(c.Z);
+            v.Add(e);
+        }
+        void Tri(Vector3 a, Vector3 b, Vector3 c, Vector3 col, float e)
+        {
+            Vector3 n = Vector3.Cross(b - a, c - a);
+            n = n.LengthSquared() > 1e-9f ? Vector3.Normalize(n) : Vector3.UnitZ;
+            Add(a, n, col, e);
+            Add(b, n, col, e);
+            Add(c, n, col, e);
+        }
+
+        // Tapered tower cone (base sunk a little so there's no gap on the summit).
+        const int sides = 16;
+        const float baseR = 24f, topR = 8f, height = 185f, sink = 25f;
+        for (int i = 0; i < sides; i++)
+        {
+            float a0 = (float)(i * 2.0 * Math.PI / sides);
+            float a1 = (float)((i + 1) * 2.0 * Math.PI / sides);
+            var b0 = new Vector3(baseR * MathF.Cos(a0), baseR * MathF.Sin(a0), -sink);
+            var b1 = new Vector3(baseR * MathF.Cos(a1), baseR * MathF.Sin(a1), -sink);
+            var t0 = new Vector3(topR * MathF.Cos(a0), topR * MathF.Sin(a0), height);
+            var t1 = new Vector3(topR * MathF.Cos(a1), topR * MathF.Sin(a1), height);
+            Tri(b0, b1, t1, stone, 0f);
+            Tri(b0, t1, t0, stone, 0f);
+        }
+
+        // Four crown prongs angling out + up from the rim (the forked battlement silhouette).
+        for (int i = 0; i < 4; i++)
+        {
+            float a = (float)((i * Math.PI / 2.0) + (Math.PI / 4.0));
+            var rim = new Vector3(topR * MathF.Cos(a), topR * MathF.Sin(a), height);
+            var tip = new Vector3((topR + 26f) * MathF.Cos(a), (topR + 26f) * MathF.Sin(a), height + 44f);
+            var tangent = new Vector3(-MathF.Sin(a), MathF.Cos(a), 0f) * 5f;
+            var p0 = rim + tangent;
+            var p1 = rim - tangent;
+            Tri(p0, p1, tip, stone, 0f);
+            Tri(p1, p0, tip, stone, 0f); // both windings → visible from either side
+        }
+
+        // Eye of Sauron: a single camera-facing billboard quad. aPos.xy carries the card [-1,1]; the vertex
+        // shader expands it to face the camera around the tower-top centre, the fragment paints the eye. MUST
+        // be the LAST 6 vertices — DrawSauron draws the tower opaque, then this quad additively.
+        Span<Vector2> card = stackalloc Vector2[6]
+        {
+            new(-1f, -1f), new(1f, -1f), new(1f, 1f),
+            new(-1f, -1f), new(1f, 1f), new(-1f, 1f),
+        };
+        foreach (Vector2 cc in card)
+        {
+            Add(new Vector3(cc.X, cc.Y, 0f), Vector3.UnitZ, eye, 1f);
+        }
+        return v.ToArray();
+    }
+
+    private unsafe void EnsureSauronProgram(GL g)
+    {
+        if (sauronProgram != 0)
+        {
+            return;
+        }
+
+        uint vs = CompileShader(g, ShaderType.VertexShader, SauronVertexShaderSource);
+        uint fs = CompileShader(g, ShaderType.FragmentShader, SauronFragmentShaderSource);
+        sauronProgram = g.CreateProgram();
+        g.AttachShader(sauronProgram, vs);
+        g.AttachShader(sauronProgram, fs);
+        g.LinkProgram(sauronProgram);
+        g.GetProgram(sauronProgram, ProgramPropertyARB.LinkStatus, out int linked);
+        if (linked == 0)
+        {
+            string log = g.GetProgramInfoLog(sauronProgram);
+            throw new InvalidOperationException("Sauron shader link failed: " + log);
+        }
+        g.DetachShader(sauronProgram, vs);
+        g.DetachShader(sauronProgram, fs);
+        g.DeleteShader(vs);
+        g.DeleteShader(fs);
+        sauronViewProjLocation = g.GetUniformLocation(sauronProgram, "uViewProj");
+        sauronModelOffsetLocation = g.GetUniformLocation(sauronProgram, "uModelOffset");
+        sauronVerticalScaleLocation = g.GetUniformLocation(sauronProgram, "uVerticalScale");
+        sauronSunDirLocation = g.GetUniformLocation(sauronProgram, "uSunDir");
+        sauronSunColorLocation = g.GetUniformLocation(sauronProgram, "uSunColor");
+        sauronAmbientLocation = g.GetUniformLocation(sauronProgram, "uAmbient");
+        sauronCameraPosLocation = g.GetUniformLocation(sauronProgram, "uCameraPos");
+        sauronFogColorLocation = g.GetUniformLocation(sauronProgram, "uFogColor");
+        sauronFogDensityLocation = g.GetUniformLocation(sauronProgram, "uFogDensity");
+        sauronEyePulseLocation = g.GetUniformLocation(sauronProgram, "uEyePulse");
+        sauronTimeLocation = g.GetUniformLocation(sauronProgram, "uTime");
+
+        float[] mesh = BuildSauronMesh();
+        sauronVertexCount = mesh.Length / 10;
+        sauronTowerVertexCount = sauronVertexCount - 6; // last 6 verts are the eye billboard quad
+        sauronVao = g.GenVertexArray();
+        g.BindVertexArray(sauronVao);
+        sauronVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, sauronVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(mesh.Length * sizeof(float)), mesh, BufferUsageARB.StaticDraw);
+        const int stride = 10 * sizeof(float);
+        g.EnableVertexAttribArray(0);
+        g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, stride, (void*)0);
+        g.EnableVertexAttribArray(1);
+        g.VertexAttribPointer(1, 3, VertexAttribPointerType.Float, false, stride, (void*)(3 * sizeof(float)));
+        g.EnableVertexAttribArray(2);
+        g.VertexAttribPointer(2, 3, VertexAttribPointerType.Float, false, stride, (void*)(6 * sizeof(float)));
+        g.EnableVertexAttribArray(3);
+        g.VertexAttribPointer(3, 1, VertexAttribPointerType.Float, false, stride, (void*)(9 * sizeof(float)));
+        g.BindVertexArray(0);
+    }
+
+    // Draws Sauron's tower at baseWorld (Świnica). Depth-tested so ridges occlude the lower tower; the eye is
+    // emissive + unfogged so the bloom pass turns it into a small glowing sun.
+    private void DrawSauron(GL g, ReadOnlySpan<float> viewProj, Camera3D camera, Atmosphere atmosphere,
+        Vector3 baseWorld, float verticalScale, float weatherT, Vector3 fogColor, float fogDensity)
+    {
+        if (sauronProgram == 0 || sauronVertexCount == 0)
+        {
+            return;
+        }
+
+        g.Enable(EnableCap.DepthTest);
+        g.DepthMask(true);
+        g.Disable(EnableCap.Blend);
+        g.UseProgram(sauronProgram);
+        g.UniformMatrix4(sauronViewProjLocation, 1, false, viewProj);
+        g.Uniform3(sauronModelOffsetLocation, baseWorld.X, baseWorld.Y, baseWorld.Z);
+        g.Uniform1(sauronVerticalScaleLocation, verticalScale);
+        Vector3 sun = atmosphere.SunDirection;
+        g.Uniform3(sauronSunDirLocation, sun.X, sun.Y, sun.Z);
+        Vector3 sc = atmosphere.SunColor;
+        g.Uniform3(sauronSunColorLocation, sc.X, sc.Y, sc.Z);
+        g.Uniform1(sauronAmbientLocation, Math.Clamp(atmosphere.AmbientFactor + 0.15f, 0.2f, 1f));
+        Vector3 cam = camera.Position;
+        g.Uniform3(sauronCameraPosLocation, cam.X, cam.Y, cam.Z);
+        g.Uniform3(sauronFogColorLocation, fogColor.X, fogColor.Y, fogColor.Z);
+        g.Uniform1(sauronFogDensityLocation, fogDensity);
+        g.Uniform1(sauronTimeLocation, weatherT);
+        // The eye flickers like a flame and never drops below bright, so it always blazes.
+        float pulse = 1.4f + (0.35f * MathF.Sin(weatherT * 2.2f)) + (0.15f * MathF.Sin(weatherT * 7.3f));
+        g.Uniform1(sauronEyePulseLocation, pulse);
+        g.BindVertexArray(sauronVao);
+        // Tower: opaque, depth-written (set up by the caller above).
+        g.DrawArrays(PrimitiveType.Triangles, 0, (uint)sauronTowerVertexCount);
+        // Eye: ADDITIVE so it blazes and haloes regardless of the bloom pass; depth-tested (ridges/tower
+        // occlude it) but no depth write so it doesn't carve a hole.
+        g.Enable(EnableCap.Blend);
+        g.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.One);
+        g.DepthMask(false);
+        g.DrawArrays(PrimitiveType.Triangles, sauronTowerVertexCount, 6u);
+        g.DepthMask(true);
+        g.Disable(EnableCap.Blend);
+        g.BindVertexArray(0);
     }
 
     private unsafe void EnsureForestImpostorProgram(GL g)
@@ -5553,6 +5933,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             cloudIbo = 0;
             cumulusProgram = 0;
             cumulusInstanceCount = 0;
+            sauronProgram = 0;
+            sauronVertexCount = 0;
+            sauronUnsupported = false;
             programReady = false;
         }
         if (forestProgram != 0)

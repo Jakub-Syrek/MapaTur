@@ -40,6 +40,12 @@ public interface I3DSettingsStore
     double? Snow { get; set; }
 
     /// <summary>
+    /// Last-used storm intensity, [0,1]; darkens the clouds and drives lightning in the 3D renderer.
+    /// Null until the user moves the slider, in which case the view-model keeps its default (0 = no storm).
+    /// </summary>
+    double? Storm { get; set; }
+
+    /// <summary>
     /// Last-used forest density, [0,1]; drives how many trees the 3D renderer scatters over the
     /// terrain (below the treeline). Null until the user moves the slider (view-model default ~0.6).
     /// </summary>
