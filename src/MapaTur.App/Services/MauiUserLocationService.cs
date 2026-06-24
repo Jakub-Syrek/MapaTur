@@ -51,6 +51,9 @@ public sealed class MauiUserLocationService : IUserLocationService, IAsyncDispos
     public event EventHandler<UserLocation>? LocationChanged;
 
     /// <inheritdoc />
+    public event EventHandler? Polled;
+
+    /// <inheritdoc />
     public event EventHandler? PermissionDenied;
 
     /// <inheritdoc />
@@ -119,6 +122,10 @@ public sealed class MauiUserLocationService : IUserLocationService, IAsyncDispos
                 // killing the loop — the next iteration will retry once we're back outdoors.
                 logger.LogDebug(ex, "Location poll failed; retrying after the next interval");
             }
+
+            // Heartbeat every cycle (fix or no fix) so the freshness state can age toward Stale/Lost while GPS
+            // is silent — without this the marker would stay "Live" forever after the signal drops.
+            Polled?.Invoke(this, EventArgs.Empty);
 
             try
             {

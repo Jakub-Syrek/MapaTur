@@ -26,6 +26,13 @@ public interface IUserLocationService
     /// <summary>Fires on every new GPS fix, on a thread chosen by the platform layer.</summary>
     event EventHandler<UserLocation>? LocationChanged;
 
+    /// <summary>
+    /// Fires once per poll cycle while tracking, whether or not a fix was obtained — a heartbeat so subscribers
+    /// can re-evaluate location freshness (Live → Stale → Lost) even when GPS produces NO new fix (a gorge, a
+    /// dead cold start). Fired on the poll thread.
+    /// </summary>
+    event EventHandler? Polled;
+
     /// <summary>Fires when the OS or user revokes/declines location permission.</summary>
     event EventHandler? PermissionDenied;
 
