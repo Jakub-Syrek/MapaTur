@@ -333,6 +333,10 @@ public static class AppStrings
     public static string ToggleSauronTower => Get(nameof(ToggleSauronTower));
     /// <summary>Caption under the "Sauron's Tower" toggle.</summary>
     public static string ToggleSauronTowerHint => Get(nameof(ToggleSauronTowerHint));
+    /// <summary>"Eagles" easter-egg toggle label.</summary>
+    public static string ToggleEagles => Get(nameof(ToggleEagles));
+    /// <summary>Caption under the "Eagles" toggle.</summary>
+    public static string ToggleEaglesHint => Get(nameof(ToggleEaglesHint));
     /// <summary>"TRAIL COLOURS" sub-header.</summary>
     public static string TrailColoursHeader => Get(nameof(TrailColoursHeader));
     /// <summary>Trail colour "Red".</summary>

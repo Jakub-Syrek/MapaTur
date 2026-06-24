@@ -291,6 +291,8 @@
   <data name="ToggleExposedRoutesHint" xml:space="preserve"><value>trudne / via ferrata (kropki) — pobierane ze szlakami</value></data>
   <data name="ToggleSauronTower" xml:space="preserve"><value>Wieża Saurona</value></data>
   <data name="ToggleSauronTowerHint" xml:space="preserve"><value>mroczna wieża ze świecącym okiem na Świnicy (easter egg)</value></data>
+  <data name="ToggleEagles" xml:space="preserve"><value>Orły</value></data>
+  <data name="ToggleEaglesHint" xml:space="preserve"><value>orły szybujące nad granią Orlej Perci (easter egg)</value></data>
   <data name="TrailColoursHeader" xml:space="preserve"><value>KOLORY SZLAKÓW</value></data>
   <data name="ColourRed" xml:space="preserve"><value>Czerwony</value></data>
   <data name="ColourBlue" xml:space="preserve"><value>Niebieski</value></data>

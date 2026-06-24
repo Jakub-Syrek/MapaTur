@@ -291,6 +291,8 @@
   <data name="ToggleExposedRoutesHint" xml:space="preserve"><value>demanding / via ferrata (dotted) — fetched with trails</value></data>
   <data name="ToggleSauronTower" xml:space="preserve"><value>Sauron's Tower</value></data>
   <data name="ToggleSauronTowerHint" xml:space="preserve"><value>a dark tower with a glowing eye on Świnica (easter egg)</value></data>
+  <data name="ToggleEagles" xml:space="preserve"><value>Eagles</value></data>
+  <data name="ToggleEaglesHint" xml:space="preserve"><value>eagles soaring over the Orla Perć ridge (easter egg)</value></data>
   <data name="TrailColoursHeader" xml:space="preserve"><value>TRAIL COLOURS</value></data>
   <data name="ColourRed" xml:space="preserve"><value>Red</value></data>
   <data name="ColourBlue" xml:space="preserve"><value>Blue</value></data>

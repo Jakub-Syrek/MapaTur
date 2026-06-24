@@ -1018,6 +1018,9 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <summary>Easter egg: a dark tower topped by the glowing Eye of Sauron on Świnica. Off by default. Persisted.</summary>
     [ObservableProperty] private bool showSauronTower;
 
+    /// <summary>Easter egg: eagles soaring on thermals over the Orla Perć ridge. Off by default. Persisted.</summary>
+    [ObservableProperty] private bool showEagles;
+
     /// <summary>Whether the night-sky pass (stars + name labels + constellation lines) is drawn after dusk.</summary>
     [ObservableProperty] private bool showNightSky = true;
 
@@ -1743,6 +1746,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             [nameof(TrailColourBlackEnabled)] = (() => TrailColourBlackEnabled, v => TrailColourBlackEnabled = v),
             [nameof(ShowPeakNames)] = (() => ShowPeakNames, v => ShowPeakNames = v),
             [nameof(ShowSauronTower)] = (() => ShowSauronTower, v => ShowSauronTower = v),
+            [nameof(ShowEagles)] = (() => ShowEagles, v => ShowEagles = v),
             [nameof(ShowNightSky)] = (() => ShowNightSky, v => ShowNightSky = v),
             [nameof(ShowContours)] = (() => ShowContours, v => ShowContours = v),
             [nameof(ShowHuts)] = (() => ShowHuts, v => ShowHuts = v),

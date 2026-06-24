@@ -911,11 +911,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // The eye is a camera-facing billboard centred above the tower top; aPos.xy carries the quad card.
         "    vec2 card = aPos.xy;\n" +
         "    vCard = card;\n" +
-        "    vec3 center = vec3(0.0, 0.0, 230.0 * uVerticalScale) + uModelOffset;\n" +
+        "    vec3 center = vec3(0.0, 0.0, 400.0 * uVerticalScale) + uModelOffset;\n" + // between the two flanking spires
         "    vec3 toCam = normalize(uCameraPos - center);\n" +
         "    vec3 right = normalize(cross(vec3(0.0, 0.0, 1.0), toCam));\n" +
         "    vec3 up = normalize(cross(toCam, right));\n" +
-        "    world = center + (right * (card.x * 60.0)) + (up * (card.y * 80.0));\n" + // eye taller than wide
+        "    world = center + (right * (card.x * 40.0)) + (up * (card.y * 26.0));\n" + // wide Eye, sized to the slim tower
         "    vNormal = toCam;\n" +
         "  } else {\n" +
         "    world = vec3(aPos.x, aPos.y, aPos.z * uVerticalScale) + uModelOffset;\n" +
@@ -957,26 +957,86 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  }\n" +
         // ── the Eye of Sauron (camera-facing, additive) ──
         "  vec2 c = vCard;\n" +
-        "  vec2 e = vec2(c.x / 0.62, c.y / 0.96);\n" +   // normalise to the almond's inner extent
-        "  float r = length(e);\n" +
-        "  float flame  = fbm((c * 3.5) + vec2(0.0, -uTime * 1.7));\n" +   // flames licking upward
-        "  float flame2 = fbm((c * 7.0) + vec2(uTime * 0.4, -uTime * 2.6));\n" +
-        // Fiery iris: white-hot core → orange → deep-red rim, churned by the flame noise. HDR (>1) so it blooms.
-        "  vec3 hot = vec3(2.8, 2.3, 1.2);\n" +
-        "  vec3 mid = vec3(2.4, 0.85, 0.12);\n" +
-        "  vec3 rim = vec3(1.5, 0.18, 0.02);\n" +
-        "  vec3 iris = mix(hot, mid, smoothstep(0.0, 0.55, r));\n" +
-        "  iris = mix(iris, rim, smoothstep(0.55, 1.0, r));\n" +
-        "  iris *= 0.6 + (0.8 * flame);\n" +
-        // Vertical slit pupil: narrow in x, tall in y, tapering toward the tips.
-        "  float slit = (1.0 - smoothstep(0.04, 0.11, abs(c.x))) * (1.0 - smoothstep(0.55, 0.82, abs(c.y)));\n" +
-        "  vec3 eyeCol = mix(iris, vec3(0.01, 0.0, 0.0), slit);\n" +
-        "  float core = smoothstep(1.08, 0.25, r);\n" +                  // bright inside the almond
-        "  float halo = exp(-r * 1.6) * (0.55 + (0.6 * flame2));\n" +    // soft surrounding glow
-        "  vec3 col = (eyeCol * core) + (vec3(1.6, 0.55, 0.12) * halo);\n" +
-        "  float alpha = clamp(max(core, halo), 0.0, 1.0);\n" +
+        // Eye SOCKET — a wide horizontal almond; the sclera (conjunctiva) fills it, the iris floats on top.
+        "  vec2 socket = vec2(c.x / 0.97, c.y / 0.60);\n" +
+        "  float rs = length(socket);\n" +
+        "  float socketMask = smoothstep(1.06, 0.86, rs);\n" + // 1 inside the almond, feathered rim
+        "  float flame  = fbm((c * 3.2) + vec2(0.0, -uTime * 1.7));\n" +   // flames licking upward
+        "  float flame2 = fbm((c * 6.5) + vec2(uTime * 0.4, -uTime * 2.6));\n" +
+        // GAZE — the iris + pupil drift so the eye visibly looks around within the (fixed) conjunctiva.
+        "  vec2 gaze = vec2(0.24 * sin(uTime * 0.7), 0.07 * sin((uTime * 0.53) + 1.3));\n" +
+        "  vec2 ce = c - gaze;\n" +
+        "  vec2 iris = vec2(ce.x / 0.52, ce.y / 0.50);\n" +
+        "  float ri = length(iris);\n" +
+        // Sclera (conjunctiva): a glowing pale-amber membrane filling the socket, veined by the flame noise.
+        "  vec3 sclera = vec3(1.7, 1.15, 0.45) * (0.45 + (0.55 * flame2));\n" +
+        // Fiery iris: white-hot core → orange → deep-red rim, churned by the flame. HDR (>1) so it blooms.
+        "  vec3 hot = vec3(3.0, 2.4, 1.2);\n" +
+        "  vec3 mid = vec3(2.6, 0.9, 0.12);\n" +
+        "  vec3 rim = vec3(1.6, 0.18, 0.02);\n" +
+        "  vec3 irisCol = mix(hot, mid, smoothstep(0.0, 0.55, ri));\n" +
+        "  irisCol = mix(irisCol, rim, smoothstep(0.55, 1.0, ri));\n" +
+        "  irisCol *= 0.6 + (0.8 * flame);\n" +
+        "  float irisMask = smoothstep(1.02, 0.72, ri);\n" +
+        "  vec3 col = mix(sclera, irisCol, irisMask);\n" +
+        // Vertical slit pupil, moving with the gaze.
+        "  float slit = (1.0 - smoothstep(0.035, 0.10, abs(ce.x))) * (1.0 - smoothstep(0.40, 0.60, abs(ce.y)));\n" +
+        "  col = mix(col, vec3(0.01, 0.0, 0.0), slit * irisMask);\n" +
+        "  col *= socketMask;\n" +                                      // confine the eyeball to the socket
+        "  float halo = exp(-rs * 1.5) * (0.5 + (0.6 * flame2));\n" +   // soft surrounding glow (the sun-like bloom)
+        "  col += vec3(1.6, 0.55, 0.12) * halo * (1.0 - socketMask);\n" +
+        "  float alpha = clamp(max(socketMask, halo), 0.0, 1.0);\n" +
         "  if (alpha < 0.01) { discard; }\n" +
         "  fragColor = vec4(col * uEyePulse, alpha);\n" + // additive blend → blazing eye + halo, no fog
+        "}\n";
+
+    // ── Eagles soaring over Orla Perć (easter egg) ──────────────────────────────────────────────────────
+    // Instanced camera-facing billboards: each eagle circles on a thermal (the vertex shader does the orbit +
+    // the billboard), the fragment paints a dark soaring silhouette with slowly flapping, swept-back wings.
+    private const string EagleVertexShaderSource =
+        "#version 300 es\n" +
+        "layout(location=0) in vec2 aCard;\n" +     // quad corner [-1,1]
+        "layout(location=1) in vec4 aOrbit;\n" +    // orbit centre world (x,y,z) + radius
+        "layout(location=2) in vec4 aMotion;\n" +   // phase, angularSpeed, size, flapPhase
+        "uniform mat4 uViewProj;\n" +
+        "uniform vec3 uCameraPos;\n" +
+        "uniform float uTime;\n" +
+        "out vec2 vCard;\n" +
+        "out float vFlapPhase;\n" +
+        "void main(){\n" +
+        "  float ang = (uTime * aMotion.y) + aMotion.x;\n" +
+        "  vec3 pos = vec3(aOrbit.x + (aOrbit.w * cos(ang)), aOrbit.y + (aOrbit.w * sin(ang)), aOrbit.z);\n" +
+        "  vec3 toCam = normalize(uCameraPos - pos);\n" +
+        "  vec3 right = normalize(cross(vec3(0.0, 0.0, 1.0), toCam));\n" +
+        "  vec3 up = normalize(cross(toCam, right));\n" +
+        "  float s = aMotion.z;\n" +
+        "  vec3 world = pos + (right * (aCard.x * s)) + (up * (aCard.y * s * 0.55));\n" + // wingspan wider than fore-aft
+        "  vCard = aCard;\n" +
+        "  vFlapPhase = aMotion.w;\n" +
+        "  gl_Position = uViewProj * vec4(world, 1.0);\n" +
+        "}\n";
+
+    private const string EagleFragmentShaderSource =
+        "#version 300 es\n" +
+        "precision highp float;\n" +
+        "in vec2 vCard;\n" +
+        "in float vFlapPhase;\n" +
+        "uniform float uTime;\n" +
+        "uniform vec3 uEagleColor;\n" +
+        "out vec4 fragColor;\n" +
+        "void main(){\n" +
+        "  vec2 c = vCard;\n" +              // x = wingspan, y = fore (+) / aft (-)
+        "  float ax = abs(c.x);\n" +
+        "  float flap = sin((uTime * 6.0) + vFlapPhase);\n" +
+        // Wing centreline: swept back toward the tail + flap lifting the tips; thickness tapers to the tip.
+        "  float centre = (-0.18 * ax * ax) + ((0.04 + 0.32 * flap) * ax);\n" +
+        "  float halfT = max(0.012, 0.15 * (1.0 - (ax / 0.98)));\n" +
+        "  float wing = (ax < 0.98) ? (1.0 - smoothstep(halfT * 0.55, halfT, abs(c.y - centre))) : 0.0;\n" +
+        "  float body = 1.0 - smoothstep(0.85, 1.0, length(vec2(c.x / 0.12, (c.y - 0.05) / 0.36)));\n" +
+        "  float tail = (ax < 0.06) ? (smoothstep(-0.58, -0.50, c.y) * (1.0 - smoothstep(-0.34, -0.28, c.y))) : 0.0;\n" +
+        "  float a = clamp(max(max(wing, body), tail), 0.0, 1.0);\n" +
+        "  if (a < 0.03) { discard; }\n" +
+        "  fragColor = vec4(uEagleColor, a);\n" +
         "}\n";
 
     // Fragment shader for the line/ribbon program (trails/route/roads): vertex colour + the SAME aerial-
@@ -1386,6 +1446,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private uint cumulusQuadVbo;
     private uint cumulusInstanceVbo;
     private int cumulusInstanceCount;
+    private Vector2 cumulusDriftAccum;        // integrated downwind drift of the cumulus field (m), accumulated per frame
+    private float lastCumulusDriftSeconds = -1f;
     private bool cumulusUnsupported; // a cumulus shader/link failure disables clouds only, never the whole engine
 
     // Sauron's tower (easter egg): one program + one static mesh (tower cone + emissive eye orb), placed on Świnica.
@@ -1407,6 +1469,26 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int sauronTowerVertexCount; // the tower verts come first; the last 6 are the eye billboard quad
     private bool sauronUnsupported; // a shader/link failure disables the easter egg only, never the whole engine
     private static readonly GeoPoint SwinicaLocation = new(49.219417, 20.009306);
+
+    // Eagles soaring over Orla Perć (easter egg): one instanced billboard program, instances rebuilt per frame
+    // (orbit centres are geo points along the ridge, projected into the current world frame).
+    private uint eagleProgram;
+    private int eagleViewProjLocation = -1;
+    private int eagleCameraPosLocation = -1;
+    private int eagleTimeLocation = -1;
+    private int eagleColorLocation = -1;
+    private uint eagleVao;
+    private uint eagleQuadVbo;
+    private uint eagleInstanceVbo;
+    private int eagleInstanceCount;
+    private bool eagleUnsupported;
+    // Orbit centres strung along the Orla Perć ridge (Świnica → Granaty); a few eagles thermal over each.
+    private static readonly GeoPoint[] EagleOrbitCenters =
+    {
+        new(49.2205, 20.0125),
+        new(49.2270, 20.0285),
+        new(49.2335, 20.0460),
+    };
 
     private bool programReady;
 
@@ -1641,7 +1723,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         DetailElevationField? detail = null,
         DateOnly? localDate = null,
         IReadOnlyList<Trail>? exposedRoutes = null,
-        bool showSauronTower = false)
+        bool showSauronTower = false,
+        bool showEagles = false)
     {
         gl ??= PlatformGl.Get();
 
@@ -1684,6 +1767,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             sauronProgram = 0;
             sauronVertexCount = 0;
             sauronUnsupported = false;
+            eagleProgram = 0;
+            eagleInstanceCount = 0;
+            eagleUnsupported = false;
             programReady = false;
             mvpLocation = -1;
             modelOffsetLocation = -1;
@@ -2641,12 +2727,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
             if (!cumulusUnsupported && cumulusOpacity > 0.02f)
             {
-                // Cumulus drift downwind at a REAL world speed (metres), so the wind slider visibly moves them —
-                // the old windVec·t was in noise units (~0.5 m/min, i.e. frozen). The vertex shader wraps the
-                // field into a torus, so this can grow without the puffs sliding off the scene.
+                // Cumulus drift downwind at a REAL world speed (metres), so the wind slider visibly moves them.
                 Vector2 windDir = windVec.LengthSquared() > 1e-9f ? Vector2.Normalize(windVec) : new Vector2(1f, 0f);
                 float windWorldSpeed = 3f + (28f * wind); // m/s: a gentle drift when calm → racing storm clouds at full wind
-                var cumDrift = windDir * (windWorldSpeed * weatherT);
+                // INTEGRATE velocity across frames (∫ v·dt) — NOT windDir·speed·t. The wind heading slowly rotates
+                // and the slider changes speed; multiplying the CURRENT direction/speed by the WHOLE elapsed time
+                // teleported the entire field by speed·t on any change ("the wind broke"). dt is clamped so a pause
+                // (clouds toggled off, a stall) can't accumulate into a jump either. The vertex shader wraps the
+                // field into a torus, so the accumulator can grow without the puffs sliding off the scene.
+                float driftDt = lastCumulusDriftSeconds < 0f ? 0f : Math.Clamp(weatherT - lastCumulusDriftSeconds, 0f, 0.1f);
+                lastCumulusDriftSeconds = weatherT;
+                cumulusDriftAccum += windDir * (windWorldSpeed * driftDt);
+                Vector2 cumDrift = cumulusDriftAccum;
                 // The "Zachmurzenie" slider (effectiveCoverage) sets HOW MANY cumulus draw: 0 % = clear sky,
                 // 100 % = the full field.
                 int cumCount = (int)MathF.Round(cumulusInstanceCount * Math.Clamp(effectiveCoverage, 0f, 1f));
@@ -2674,6 +2766,25 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 float seat = (float)raster.SampleBilinear(SwinicaLocation.Longitude, SwinicaLocation.Latitude);
                 Vector3 baseWorld = geomFrame.GeoToWorld(SwinicaLocation, seat);
                 DrawSauron(gl, m, camera, atmosphere, baseWorld, geomFrame.VerticalExaggeration, weatherT, fogColor, fogDensity);
+            }
+        }
+
+        // Eagles soaring over Orla Perć — depth-tested billboards, drawn into the scene before the post-process.
+        if (showEagles && raster is not null && !eagleUnsupported)
+        {
+            try
+            {
+                EnsureEagleProgram(gl);
+            }
+            catch (Exception ex)
+            {
+                eagleUnsupported = true;
+                Log.Warning(ex, "[GL3D] eagles disabled (shader/link failure)");
+            }
+
+            if (!eagleUnsupported)
+            {
+                DrawEagles(gl, m, camera, geomFrame, raster, weatherT);
             }
         }
 
@@ -5503,32 +5614,133 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             Add(c, n, col, e);
         }
 
-        // Tapered tower cone (base sunk a little so there's no gap on the summit).
-        const int sides = 16;
-        const float baseR = 24f, topR = 8f, height = 185f, sink = 25f;
-        for (int i = 0; i < sides; i++)
+        // ── A monumental FORTRESS carved out of the WHOLE summit (Barad-dûr): a very wide, deeply-buried,
+        // many-tiered, ribbed mass sprawling with asymmetric side-turrets + overhanging galleries, narrowing
+        // only near a massive crown that bears the Eye. The mountain IS the base — the lowest tiers sink far
+        // into the rock. Seeded RNG fixes the irregular "built & rebuilt over millennia" silhouette.
+        const int sides = 22;
+        var rng = new Random(31337);
+
+        // Frustum side wall between two radii over a z span, centred at (cx,cy) so turrets reuse it.
+        void Wall(float cx, float cy, float rBot, float rTop, float zBot, float zTop, int n)
         {
-            float a0 = (float)(i * 2.0 * Math.PI / sides);
-            float a1 = (float)((i + 1) * 2.0 * Math.PI / sides);
-            var b0 = new Vector3(baseR * MathF.Cos(a0), baseR * MathF.Sin(a0), -sink);
-            var b1 = new Vector3(baseR * MathF.Cos(a1), baseR * MathF.Sin(a1), -sink);
-            var t0 = new Vector3(topR * MathF.Cos(a0), topR * MathF.Sin(a0), height);
-            var t1 = new Vector3(topR * MathF.Cos(a1), topR * MathF.Sin(a1), height);
-            Tri(b0, b1, t1, stone, 0f);
-            Tri(b0, t1, t0, stone, 0f);
+            for (int s = 0; s < n; s++)
+            {
+                float a0 = (float)(s * 2.0 * Math.PI / n);
+                float a1 = (float)((s + 1) * 2.0 * Math.PI / n);
+                var b0 = new Vector3(cx + (rBot * MathF.Cos(a0)), cy + (rBot * MathF.Sin(a0)), zBot);
+                var b1 = new Vector3(cx + (rBot * MathF.Cos(a1)), cy + (rBot * MathF.Sin(a1)), zBot);
+                var t0 = new Vector3(cx + (rTop * MathF.Cos(a0)), cy + (rTop * MathF.Sin(a0)), zTop);
+                var t1 = new Vector3(cx + (rTop * MathF.Cos(a1)), cy + (rTop * MathF.Sin(a1)), zTop);
+                Tri(b0, b1, t1, stone, 0f);
+                Tri(b0, t1, t0, stone, 0f);
+            }
         }
 
-        // Four crown prongs angling out + up from the rim (the forked battlement silhouette).
-        for (int i = 0; i < 4; i++)
+        // A horizontal terrace/gallery ring (can OVERHANG the tier above for a balcony lip).
+        void Ledge(float rInner, float rOuter, float z)
         {
-            float a = (float)((i * Math.PI / 2.0) + (Math.PI / 4.0));
-            var rim = new Vector3(topR * MathF.Cos(a), topR * MathF.Sin(a), height);
-            var tip = new Vector3((topR + 26f) * MathF.Cos(a), (topR + 26f) * MathF.Sin(a), height + 44f);
-            var tangent = new Vector3(-MathF.Sin(a), MathF.Cos(a), 0f) * 5f;
+            for (int s = 0; s < sides; s++)
+            {
+                float a0 = (float)(s * 2.0 * Math.PI / sides);
+                float a1 = (float)((s + 1) * 2.0 * Math.PI / sides);
+                var i0 = new Vector3(rInner * MathF.Cos(a0), rInner * MathF.Sin(a0), z);
+                var i1 = new Vector3(rInner * MathF.Cos(a1), rInner * MathF.Sin(a1), z);
+                var o0 = new Vector3(rOuter * MathF.Cos(a0), rOuter * MathF.Sin(a0), z);
+                var o1 = new Vector3(rOuter * MathF.Cos(a1), rOuter * MathF.Sin(a1), z);
+                Tri(i0, o0, o1, stone, 0f);
+                Tri(i0, o1, i1, stone, 0f);
+            }
+        }
+
+        // A vertical buttress rib protruding from a tier face (the gothic vertical-rib texture).
+        void Rib(float angle, float r, float zBot, float zTop, float protrude, float halfWidth)
+        {
+            var tang = new Vector3(-MathF.Sin(angle), MathF.Cos(angle), 0f) * halfWidth;
+            var outward = new Vector3(MathF.Cos(angle), MathF.Sin(angle), 0f);
+            var fBot = new Vector3(r * MathF.Cos(angle), r * MathF.Sin(angle), zBot);
+            var fTop = new Vector3(r * MathF.Cos(angle), r * MathF.Sin(angle), zTop);
+            var oBot = fBot + (outward * protrude);
+            var oTop = fTop + (outward * protrude);
+            Tri(oBot - tang, oBot + tang, oTop + tang, stone, 0f); // outer face
+            Tri(oBot - tang, oTop + tang, oTop - tang, stone, 0f);
+            Tri(fBot + tang, oBot + tang, oTop + tang, stone, 0f); // side cheeks
+            Tri(fBot + tang, oTop + tang, fTop + tang, stone, 0f);
+            Tri(fBot - tang, oTop - tang, oBot - tang, stone, 0f);
+            Tri(fBot - tang, fTop - tang, oTop - tang, stone, 0f);
+        }
+
+        // A forked horn angling out + up from (cx,cy,atZ), pointing along `dir`.
+        void Prong(float cx, float cy, float atZ, float baseR2, float dir, float reach, float rise, float halfWidth)
+        {
+            var rim = new Vector3(cx + (baseR2 * MathF.Cos(dir)), cy + (baseR2 * MathF.Sin(dir)), atZ);
+            var tip = new Vector3(cx + ((baseR2 + reach) * MathF.Cos(dir)), cy + ((baseR2 + reach) * MathF.Sin(dir)), atZ + rise);
+            var tangent = new Vector3(-MathF.Sin(dir), MathF.Cos(dir), 0f) * halfWidth;
             var p0 = rim + tangent;
             var p1 = rim - tangent;
             Tri(p0, p1, tip, stone, 0f);
             Tri(p1, p0, tip, stone, 0f); // both windings → visible from either side
+        }
+
+        // Stacked tiers — a slender TOWER roughly the Eye's width (a gentle taper, NOT a pyramid). The lowest
+        // tier is buried in Świnica. { rBottom, rTop, zBottom, zTop }.
+        float[][] tiers =
+        {
+            new[] { 55f, 52f, -70f, 30f },
+            new[] { 49f, 47f, 30f, 110f },
+            new[] { 44f, 42f, 110f, 190f },
+            new[] { 41f, 38f, 190f, 270f },
+            new[] { 37f, 35f, 270f, 345f }, // crown level
+        };
+        for (int t = 0; t < tiers.Length; t++)
+        {
+            float rBot = tiers[t][0], rTop = tiers[t][1], zBot = tiers[t][2], zTop = tiers[t][3];
+            Wall(0f, 0f, rBot, rTop, zBot, zTop, sides);
+            if (t + 1 < tiers.Length)
+            {
+                Ledge(tiers[t + 1][0], rTop + 4f, zTop); // a slim gallery lip
+            }
+            if (t is >= 1 and <= 3)
+            {
+                const int ribs = 10;
+                float rAvg = (rBot + rTop) * 0.5f;
+                for (int rIdx = 0; rIdx < ribs; rIdx++)
+                {
+                    Rib((float)(rIdx * 2.0 * Math.PI / ribs), rAvg, zBot, zTop, 3f, 2.2f);
+                }
+            }
+        }
+
+        // A few small asymmetric side-turrets for the "built over millennia" detail, kept slim so the silhouette
+        // stays a tower. Seeded → fixed but irregular.
+        for (int k = 0; k < 5; k++)
+        {
+            int ti = 1 + rng.Next(3);
+            float attachR = tiers[ti][1];
+            float ang = (float)(rng.NextDouble() * 2.0 * Math.PI);
+            float tcx = attachR * 0.9f * MathF.Cos(ang);
+            float tcy = attachR * 0.9f * MathF.Sin(ang);
+            float tBaseR = 5f + (rng.NextSingle() * 6f);
+            float tTop = tiers[ti][3] + 30f + (rng.NextSingle() * 70f);
+            Wall(tcx, tcy, tBaseR, tBaseR * 0.5f, tiers[ti][2] - 10f, tTop, 8);
+            Prong(tcx, tcy, tTop, tBaseR * 0.5f, ang, 7f, 18f, 2.5f);
+        }
+
+        // Two tall VERTICAL spires flanking the Eye — the Eye sits BETWEEN them — running straight down the
+        // sides (perpendicular), capped to a point above the Eye.
+        const float spireR = 7f, spireBot = 150f, spireTop = 432f, spireCapZ = 474f;
+        for (int side = -1; side <= 1; side += 2)
+        {
+            float fx = side * 43f; // just beyond the Eye's edge so the Eye is framed between them
+            Wall(fx, 0f, spireR + 2f, spireR, spireBot, spireTop, 9);
+            for (int s = 0; s < 9; s++)
+            {
+                float a0 = (float)(s * 2.0 * Math.PI / 9);
+                float a1 = (float)((s + 1) * 2.0 * Math.PI / 9);
+                var b0 = new Vector3(fx + (spireR * MathF.Cos(a0)), spireR * MathF.Sin(a0), spireTop);
+                var b1 = new Vector3(fx + (spireR * MathF.Cos(a1)), spireR * MathF.Sin(a1), spireTop);
+                Tri(b0, b1, new Vector3(fx, 0f, spireCapZ), stone, 0f); // pointed cap
+            }
         }
 
         // Eye of Sauron: a single camera-facing billboard quad. aPos.xy carries the card [-1,1]; the vertex
@@ -5643,6 +5855,106 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.DepthMask(true);
         g.Disable(EnableCap.Blend);
         g.BindVertexArray(0);
+    }
+
+    private unsafe void EnsureEagleProgram(GL g)
+    {
+        if (eagleProgram != 0)
+        {
+            return;
+        }
+
+        uint vs = CompileShader(g, ShaderType.VertexShader, EagleVertexShaderSource);
+        uint fs = CompileShader(g, ShaderType.FragmentShader, EagleFragmentShaderSource);
+        eagleProgram = g.CreateProgram();
+        g.AttachShader(eagleProgram, vs);
+        g.AttachShader(eagleProgram, fs);
+        g.LinkProgram(eagleProgram);
+        g.GetProgram(eagleProgram, ProgramPropertyARB.LinkStatus, out int linked);
+        if (linked == 0)
+        {
+            string log = g.GetProgramInfoLog(eagleProgram);
+            throw new InvalidOperationException("Eagle shader link failed: " + log);
+        }
+        g.DetachShader(eagleProgram, vs);
+        g.DetachShader(eagleProgram, fs);
+        g.DeleteShader(vs);
+        g.DeleteShader(fs);
+        eagleViewProjLocation = g.GetUniformLocation(eagleProgram, "uViewProj");
+        eagleCameraPosLocation = g.GetUniformLocation(eagleProgram, "uCameraPos");
+        eagleTimeLocation = g.GetUniformLocation(eagleProgram, "uTime");
+        eagleColorLocation = g.GetUniformLocation(eagleProgram, "uEagleColor");
+
+        float[] quad = { -1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f }; // triangle strip [-1,1]²
+        eagleVao = g.GenVertexArray();
+        g.BindVertexArray(eagleVao);
+        eagleQuadVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, eagleQuadVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(quad.Length * sizeof(float)), quad, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(0);
+        g.VertexAttribPointer(0, 2, VertexAttribPointerType.Float, false, 2 * sizeof(float), (void*)0);
+
+        eagleInstanceVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, eagleInstanceVbo);
+        const int stride = 8 * sizeof(float);
+        g.EnableVertexAttribArray(1); // aOrbit (cx,cy,cz,radius)
+        g.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, stride, (void*)0);
+        g.VertexAttribDivisor(1, 1);
+        g.EnableVertexAttribArray(2); // aMotion (phase,speed,size,flapPhase)
+        g.VertexAttribPointer(2, 4, VertexAttribPointerType.Float, false, stride, (void*)(4 * sizeof(float)));
+        g.VertexAttribDivisor(2, 1);
+        g.BindVertexArray(0);
+    }
+
+    // Draws eagles thermalling over the Orla Perć ridge. Instances are rebuilt each frame (the orbit centres are
+    // geo points projected into the current world frame); the vertex shader does the circling + camera-facing.
+    private unsafe void DrawEagles(GL g, ReadOnlySpan<float> viewProj, Camera3D camera, TerrainMesh3D frame, DemRaster raster, float timeSeconds)
+    {
+        if (eagleProgram == 0)
+        {
+            return;
+        }
+
+        var data = new List<float>(EagleOrbitCenters.Length * 3 * 8);
+        int idx = 0;
+        foreach (GeoPoint c in EagleOrbitCenters)
+        {
+            float ground = (float)raster.SampleBilinear(c.Longitude, c.Latitude);
+            for (int e = 0; e < 3; e++)
+            {
+                float radius = 130f + (e * 55f) + ((idx % 2) * 35f);
+                float alt = ground + 110f + (e * 40f); // soaring well above the crest
+                Vector3 w = frame.GeoToWorld(c, alt);
+                float phase = idx * 1.7f;
+                float speed = 0.05f + (0.018f * (idx % 3)); // rad/s — a slow thermal circle
+                float size = 20f + ((idx % 3) * 4f);
+                float flapPhase = idx * 2.3f;
+                data.Add(w.X); data.Add(w.Y); data.Add(w.Z); data.Add(radius);
+                data.Add(phase); data.Add(speed); data.Add(size); data.Add(flapPhase);
+                idx++;
+            }
+        }
+
+        eagleInstanceCount = idx;
+        float[] arr = data.ToArray();
+
+        g.Enable(EnableCap.Blend);
+        g.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+        g.Enable(EnableCap.DepthTest);
+        g.DepthMask(false); // soft silhouettes: test against terrain but don't write depth
+        g.UseProgram(eagleProgram);
+        g.BindVertexArray(eagleVao);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, eagleInstanceVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(arr.Length * sizeof(float)), arr, BufferUsageARB.DynamicDraw);
+        g.UniformMatrix4(eagleViewProjLocation, 1, false, viewProj);
+        Vector3 cam = camera.Position;
+        g.Uniform3(eagleCameraPosLocation, cam.X, cam.Y, cam.Z);
+        g.Uniform1(eagleTimeLocation, timeSeconds);
+        g.Uniform3(eagleColorLocation, 0.05f, 0.045f, 0.04f);
+        g.DrawArraysInstanced(PrimitiveType.TriangleStrip, 0, 4, (uint)eagleInstanceCount);
+        g.BindVertexArray(0);
+        g.DepthMask(true);
+        g.Disable(EnableCap.Blend);
     }
 
     private unsafe void EnsureForestImpostorProgram(GL g)
@@ -5936,6 +6248,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             sauronProgram = 0;
             sauronVertexCount = 0;
             sauronUnsupported = false;
+            eagleProgram = 0;
+            eagleInstanceCount = 0;
+            eagleUnsupported = false;
             programReady = false;
         }
         if (forestProgram != 0)

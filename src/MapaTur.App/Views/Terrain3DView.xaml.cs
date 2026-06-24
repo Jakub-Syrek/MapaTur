@@ -189,6 +189,17 @@ public partial class Terrain3DView : ContentView
         set => SetValue(ShowSauronTowerProperty, value);
     }
 
+    public static readonly BindableProperty ShowEaglesProperty = BindableProperty.Create(
+        nameof(ShowEagles), typeof(bool), typeof(Terrain3DView), false,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
+
+    /// <summary>Easter egg: eagles soaring over the Orla Perć ridge.</summary>
+    public bool ShowEagles
+    {
+        get => (bool)GetValue(ShowEaglesProperty);
+        set => SetValue(ShowEaglesProperty, value);
+    }
+
     public static readonly BindableProperty UserLocationFreshnessProperty = BindableProperty.Create(
         nameof(UserLocationFreshness), typeof(LocationFreshness), typeof(Terrain3DView), LocationFreshness.Live,
         propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
@@ -2794,7 +2805,7 @@ public partial class Terrain3DView : ContentView
             // Today's local date drives the night-sky star pass (with the time-of-day slider as the local
             // hour); the stars fade in only once the slider puts the sun below the horizon.
             IReadOnlyList<TreeInstance>? forest = EnsureForest(tiles);
-            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere, forest, DetailElevation, ShowNightSky ? DateOnly.FromDateTime(DateTime.Now) : null, ExposedRoutes, ShowSauronTower);
+            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere, forest, DetailElevation, ShowNightSky ? DateOnly.FromDateTime(DateTime.Now) : null, ExposedRoutes, ShowSauronTower, ShowEagles);
             if (terrainTextureId == 0)
             {
                 return false;

@@ -45,6 +45,7 @@
                              ShowPeakNames="{Binding ShowPeakNames}"
                              ShowNightSky="{Binding ShowNightSky}"
                              ShowSauronTower="{Binding ShowSauronTower}"
+                             ShowEagles="{Binding ShowEagles}"
                              UserLocationFreshness="{Binding LocationFreshness}"
                              ShowContours="{Binding ShowContours}"
                              PeakLabelRadiusMeters="{Binding PeakLabelRadiusMeters}"
@@ -419,6 +420,13 @@
                             <Label Text="{x:Static loc:AppStrings.ToggleSauronTowerHint}" Style="{StaticResource GlassCaption}" FontSize="10" />
                         </VerticalStackLayout>
                         <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowSauronTower}" />
+                    </Grid>
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <VerticalStackLayout Grid.Column="0" Spacing="0">
+                            <Label Text="{x:Static loc:AppStrings.ToggleEagles}" Style="{StaticResource GlassLabel}" />
+                            <Label Text="{x:Static loc:AppStrings.ToggleEaglesHint}" Style="{StaticResource GlassCaption}" FontSize="10" />
+                        </VerticalStackLayout>
+                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowEagles}" />
                     </Grid>
 
                     <Label Text="{x:Static loc:AppStrings.TrailColoursHeader}" Style="{StaticResource GlassCaption}" Margin="0,2,0,0" />
