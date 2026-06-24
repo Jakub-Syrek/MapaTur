@@ -10,4 +10,7 @@ namespace MapaTur.Application.Terrain;
 /// <param name="Name">Summit name.</param>
 /// <param name="Location">Published geographic position of the summit.</param>
 /// <param name="ElevationMeters">Published elevation in metres above sea level.</param>
-public readonly record struct NamedSummit(string Name, GeoPoint Location, double ElevationMeters);
+/// <param name="Curated">True when the hand-maintained list endorses this summit as iconic — the label
+/// de-clutter prefers a curated summit over a slightly higher but lesser neighbour (keeps the iconic
+/// Kościelec over the marginally taller Zadni Kościelec).</param>
+public readonly record struct NamedSummit(string Name, GeoPoint Location, double ElevationMeters, bool Curated = false);

@@ -54,7 +54,7 @@ public static class PeakNamer
             // height — the 60 m DEM under-reports sharp summits (e.g. Świnica), so the DEM value is right
             // for placement but wrong for the displayed elevation.
             (GeoPoint location, double elevation) = HighestCellNear(raster, summit.Location, snapRadiusMeters);
-            named.Add(new TerrainPeak(location, elevation, summit.Name, summit.ElevationMeters));
+            named.Add(new TerrainPeak(location, elevation, summit.Name, summit.ElevationMeters, summit.Curated));
         }
 
         var result = new List<TerrainPeak>(named.Count + detected.Count);

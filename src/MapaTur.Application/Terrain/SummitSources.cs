@@ -24,21 +24,29 @@ public static class SummitSources
         var combined = new List<NamedSummit>(primary.Count + fallback.Count);
         combined.AddRange(primary);
 
+        // The fallback list is the hand-curated set of iconic summits. When a curated summit matches a primary
+        // (OSM) one, the OSM summit is kept (drives the name/height) but flagged Curated — that endorsement
+        // lets the label de-clutter prefer it over a taller-but-lesser neighbour (keeps Kościelec, not Zadni
+        // Kościelec). A curated summit with no OSM match is added on its own, also Curated.
         foreach (NamedSummit candidate in fallback)
         {
-            bool duplicate = false;
+            int matchIndex = -1;
             for (int i = 0; i < primary.Count; i++)
             {
                 if (candidate.Location.HaversineDistanceMetersTo(primary[i].Location) <= dedupeMeters)
                 {
-                    duplicate = true;
+                    matchIndex = i;
                     break;
                 }
             }
 
-            if (!duplicate)
+            if (matchIndex >= 0)
             {
-                combined.Add(candidate);
+                combined[matchIndex] = combined[matchIndex] with { Curated = true };
+            }
+            else
+            {
+                combined.Add(candidate with { Curated = true });
             }
         }
 
@@ -46,9 +54,12 @@ public static class SummitSources
     }
 
     /// <summary>
-    /// Collapses near-duplicate summits within <paramref name="dedupeMeters"/> of each other, keeping the
-    /// highest of each cluster. OSM publishes multi-summit massifs (Rysy, Wysoka) as several adjacent
-    /// <c>natural=peak</c> nodes; without this the overlay stacks two or three labels on one apex.
+    /// Collapses near-duplicate summits — a multi-node OSM massif published as several adjacent
+    /// <c>natural=peak</c> nodes with the SAME name (e.g. two "Rysy" nodes) — keeping the highest of each
+    /// cluster. Crucially it only merges nodes that share a name: DISTINCT named summits that happen to sit
+    /// close together (Kościelec vs Zadni Kościelec ~180 m apart, the three Granaty along Orla Perć) are
+    /// kept separately — collapsing them by distance alone silently dropped real peaks. On-screen label
+    /// overlap between distinct neighbours is handled later by the renderer's footprint de-clutter.
     /// </summary>
     public static IReadOnlyList<NamedSummit> Deduplicate(
         IReadOnlyList<NamedSummit> summits,
@@ -56,7 +67,7 @@ public static class SummitSources
     {
         ArgumentNullException.ThrowIfNull(summits);
 
-        // Highest first so each cluster collapses onto its tallest summit.
+        // Highest first so each same-name cluster collapses onto its tallest node.
         List<NamedSummit> ordered = summits.OrderByDescending(s => s.ElevationMeters).ToList();
         var kept = new List<NamedSummit>(ordered.Count);
         foreach (NamedSummit candidate in ordered)
@@ -64,7 +75,8 @@ public static class SummitSources
             bool near = false;
             for (int i = 0; i < kept.Count; i++)
             {
-                if (candidate.Location.HaversineDistanceMetersTo(kept[i].Location) <= dedupeMeters)
+                if (string.Equals(candidate.Name, kept[i].Name, StringComparison.Ordinal)
+                    && candidate.Location.HaversineDistanceMetersTo(kept[i].Location) <= dedupeMeters)
                 {
                     near = true;
                     break;

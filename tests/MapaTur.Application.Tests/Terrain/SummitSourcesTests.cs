@@ -76,6 +76,46 @@ public sealed class SummitSourcesTests
     }
 
     [Fact]
+    public void Deduplicate_KeepsDistinctNamedSummitsThatSitClose()
+    {
+        // The iconic Kościelec (2155) and Zadni Kościelec (2162) are ~180 m apart — distinct peaks.
+        // Collapsing by distance alone silently dropped the lower one (Kościelec); different names must survive.
+        var koscielec = new NamedSummit("Kościelec", new GeoPoint(49.225278, 20.014444), 2155);
+        var zadniKoscielec = new NamedSummit("Zadni Kościelec", new GeoPoint(49.2237, 20.0156), 2162);
+
+        var deduped = SummitSources.Deduplicate(new[] { koscielec, zadniKoscielec });
+
+        deduped.Select(s => s.Name).Should().BeEquivalentTo("Kościelec", "Zadni Kościelec");
+    }
+
+    [Fact]
+    public void Combine_FlagsMatchedPrimaryAsCurated()
+    {
+        // A curated (fallback) summit matching an OSM (primary) one endorses the primary as iconic.
+        var curatedRysy = new NamedSummit("Rysy", new GeoPoint(49.1796, 20.0883), 2503);
+
+        var combined = SummitSources.Combine(new[] { Rysy }, new[] { curatedRysy }, dedupeMeters: 300);
+
+        combined.Should().ContainSingle().Which.Curated.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Combine_DoesNotFlagPrimaryWithoutCuratedMatch()
+    {
+        var combined = SummitSources.Combine(new[] { Rysy }, new[] { Giewont });
+
+        combined.Single(s => s.Name == "Rysy").Curated.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Combine_FlagsUnmatchedFallbackAsCurated()
+    {
+        var combined = SummitSources.Combine(new[] { Rysy }, new[] { Giewont });
+
+        combined.Single(s => s.Name == "Giewont").Curated.Should().BeTrue();
+    }
+
+    [Fact]
     public void Deduplicate_EmptyInput_ReturnsEmpty()
     {
         SummitSources.Deduplicate(Array.Empty<NamedSummit>()).Should().BeEmpty();

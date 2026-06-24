@@ -17,8 +17,11 @@ namespace MapaTur.Application.Terrain;
 /// Authoritative elevation to <em>display</em> (e.g. the gazetteer's published height), when it differs
 /// from the DEM-sampled <see cref="ElevationMeters"/>. Null → the label shows <see cref="ElevationMeters"/>.
 /// </param>
+/// <param name="Curated">True when this summit is endorsed by the hand-maintained iconic-peaks list — the
+/// renderer's label de-clutter keeps a curated summit over a taller-but-lesser neighbour.</param>
 public readonly record struct TerrainPeak(
     GeoPoint Location,
     double ElevationMeters,
     string? Name = null,
-    double? LabelElevationMeters = null);
+    double? LabelElevationMeters = null,
+    bool Curated = false);
