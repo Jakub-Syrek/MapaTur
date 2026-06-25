@@ -428,6 +428,13 @@
                         </VerticalStackLayout>
                         <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowEagles}" />
                     </Grid>
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <VerticalStackLayout Grid.Column="0" Spacing="0">
+                            <Label Text="{x:Static loc:AppStrings.ToggleAtmosphereEffects}" Style="{StaticResource GlassLabel}" />
+                            <Label Text="{x:Static loc:AppStrings.ToggleAtmosphereEffectsHint}" Style="{StaticResource GlassCaption}" FontSize="10" />
+                        </VerticalStackLayout>
+                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding AtmosphereEffectsEnabled}" />
+                    </Grid>
 
                     <Label Text="{x:Static loc:AppStrings.TrailColoursHeader}" Style="{StaticResource GlassCaption}" Margin="0,2,0,0" />
                     <FlexLayout Wrap="Wrap" JustifyContent="Start" AlignItems="Center">

@@ -1724,7 +1724,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         DateOnly? localDate = null,
         IReadOnlyList<Trail>? exposedRoutes = null,
         bool showSauronTower = false,
-        bool showEagles = false)
+        bool showEagles = false,
+        bool animateAtmosphere = true)
     {
         gl ??= PlatformGl.Get();
 
@@ -2082,7 +2083,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // decay with a fast re-strike flicker. Folded into the cloud colours + terrain ambient below (no extra
         // shader uniforms): the dark thundercloud briefly lights up blue-white and the ground flashes with it.
         float lightningFlash = 0f;
-        if (storm > 0.001f)
+        if (animateAtmosphere && storm > 0.001f)
         {
             float windowLen = 7.0f - (5.5f * storm);                 // ~7 s between strikes (light) → ~1.5 s (heavy)
             float win = MathF.Floor(weatherT / windowLen);
@@ -2156,7 +2157,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         float cloudHalfExtent = MathF.Max(geomFrame.HorizontalExtent * 4f, 20_000f);
         float cloudNoiseScale = 1f / MathF.Max(geomFrame.HorizontalExtent * 0.5f, 4_000f);
         float seaCoverage = effectiveCoverage * seaGate; // the sea-of-clouds sheet only forms during inversion
-        bool cloudsActive = atmosphere is not null && effectiveCoverage > 0.001f && !float.IsNegativeInfinity(cloudMaxZ);
+        bool cloudsActive = animateAtmosphere && atmosphere is not null && effectiveCoverage > 0.001f && !float.IsNegativeInfinity(cloudMaxZ);
         // Cumulus sit over the ridges (bases ~at peak level, tops rising into the sky) — a VISIBLE level for a
         // terrain-facing camera, NOT tied to the inversion (which would lift them off the top of the screen).
         // The regime variety comes from their opacity (they thin as inversion deepens) + the sea-of-clouds sheet.
@@ -2770,7 +2771,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         // Eagles soaring over Orla Perć — depth-tested billboards, drawn into the scene before the post-process.
-        if (showEagles && raster is not null && !eagleUnsupported)
+        if (showEagles && animateAtmosphere && raster is not null && !eagleUnsupported)
         {
             try
             {
@@ -2810,11 +2811,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         (bool sunVisible, Vector2 sunUv) = atmosphere is not null
             ? SunScreenProjection.Project(camera, atmosphere.SunDirection, vpWidth, vpHeight)
             : (false, Vector2.Zero);
-        float godrayIntensity = (sunVisible && atmosphere is not null) ? atmosphere.SunGlowIntensity * 1.3f : 0f;
+        // With animated effects off, skip the bloom blur + god-ray passes (their cost is only worth it for the
+        // glowing/golden look) — a flat composite keeps the still scene cheap.
+        float godrayIntensity = (animateAtmosphere && sunVisible && atmosphere is not null) ? atmosphere.SunGlowIntensity * 1.3f : 0f;
+        float bloomIntensity = animateAtmosphere ? (atmosphere?.BloomIntensity ?? 0f) : 0f;
 
         uint finalTex = RunPostProcess(
             gl, presentColorTex, vpWidth, vpHeight,
-            atmosphere?.BloomThreshold ?? 1f, atmosphere?.BloomIntensity ?? 0f,
+            atmosphere?.BloomThreshold ?? 1f, bloomIntensity,
             sunUv.X, sunUv.Y, godrayIntensity);
 
         // Unbind everything before returning. The caller will re-establish whatever framebuffer Skia

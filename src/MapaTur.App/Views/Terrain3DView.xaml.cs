@@ -200,6 +200,18 @@ public partial class Terrain3DView : ContentView
         set => SetValue(ShowEaglesProperty, value);
     }
 
+    public static readonly BindableProperty AtmosphereEffectsEnabledProperty = BindableProperty.Create(
+        nameof(AtmosphereEffectsEnabled), typeof(bool), typeof(Terrain3DView), true,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
+
+    /// <summary>Animated atmosphere (clouds/lightning/eagles/bloom) + the continuous repaint that drives it.
+    /// Off → the view stops auto-redrawing while the camera is still, so the GPU idles (battery saver).</summary>
+    public bool AtmosphereEffectsEnabled
+    {
+        get => (bool)GetValue(AtmosphereEffectsEnabledProperty);
+        set => SetValue(AtmosphereEffectsEnabledProperty, value);
+    }
+
     public static readonly BindableProperty UserLocationFreshnessProperty = BindableProperty.Create(
         nameof(UserLocationFreshness), typeof(LocationFreshness), typeof(Terrain3DView), LocationFreshness.Live,
         propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
@@ -831,9 +843,11 @@ public partial class Terrain3DView : ContentView
 
     private void OnAnimationTick(object? sender, EventArgs e)
     {
-        // Repaint only when the 3D view is on screen and there's live atmosphere to animate —
-        // otherwise this is a no-op so 2D mode pays nothing.
-        if (IsVisible && Atmosphere is not null)
+        // Repaint only when the 3D view is on screen, there's live atmosphere to animate, AND animated effects
+        // are enabled. With effects OFF the view stops auto-redrawing while the camera is still, so the GPU
+        // idles instead of rendering ~15 heavy fps forever — the main battery saver on mobile. Gestures and
+        // data changes still trigger their own InvalidateSurface, so the map stays responsive.
+        if (IsVisible && Atmosphere is not null && AtmosphereEffectsEnabled)
         {
             Canvas.InvalidateSurface();
         }
@@ -2805,7 +2819,7 @@ public partial class Terrain3DView : ContentView
             // Today's local date drives the night-sky star pass (with the time-of-day slider as the local
             // hour); the stars fade in only once the slider puts the sun below the horizon.
             IReadOnlyList<TreeInstance>? forest = EnsureForest(tiles);
-            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere, forest, DetailElevation, ShowNightSky ? DateOnly.FromDateTime(DateTime.Now) : null, ExposedRoutes, ShowSauronTower, ShowEagles);
+            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere, forest, DetailElevation, ShowNightSky ? DateOnly.FromDateTime(DateTime.Now) : null, ExposedRoutes, ShowSauronTower, ShowEagles, AtmosphereEffectsEnabled);
             if (terrainTextureId == 0)
             {
                 return false;

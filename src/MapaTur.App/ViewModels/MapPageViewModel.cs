@@ -1021,6 +1021,13 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <summary>Easter egg: eagles soaring on thermals over the Orla Perć ridge. Off by default. Persisted.</summary>
     [ObservableProperty] private bool showEagles;
 
+    /// <summary>
+    /// Animated atmosphere effects (drifting clouds, lightning, eagles, bloom/god-rays + the continuous repaint
+    /// that powers them). On by default. Turning it OFF stops the per-frame redraw when the camera is still, so
+    /// the GPU idles instead of rendering ~15 heavy fps forever — the main battery lever on mobile. Persisted.
+    /// </summary>
+    [ObservableProperty] private bool atmosphereEffectsEnabled = true;
+
     /// <summary>Whether the night-sky pass (stars + name labels + constellation lines) is drawn after dusk.</summary>
     [ObservableProperty] private bool showNightSky = true;
 
@@ -1747,6 +1754,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             [nameof(ShowPeakNames)] = (() => ShowPeakNames, v => ShowPeakNames = v),
             [nameof(ShowSauronTower)] = (() => ShowSauronTower, v => ShowSauronTower = v),
             [nameof(ShowEagles)] = (() => ShowEagles, v => ShowEagles = v),
+            [nameof(AtmosphereEffectsEnabled)] = (() => AtmosphereEffectsEnabled, v => AtmosphereEffectsEnabled = v),
             [nameof(ShowNightSky)] = (() => ShowNightSky, v => ShowNightSky = v),
             [nameof(ShowContours)] = (() => ShowContours, v => ShowContours = v),
             [nameof(ShowHuts)] = (() => ShowHuts, v => ShowHuts = v),

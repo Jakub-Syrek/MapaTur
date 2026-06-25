@@ -337,6 +337,10 @@ public static class AppStrings
     public static string ToggleEagles => Get(nameof(ToggleEagles));
     /// <summary>Caption under the "Eagles" toggle.</summary>
     public static string ToggleEaglesHint => Get(nameof(ToggleEaglesHint));
+    /// <summary>"Atmosphere effects" toggle label (battery saver when off).</summary>
+    public static string ToggleAtmosphereEffects => Get(nameof(ToggleAtmosphereEffects));
+    /// <summary>Caption under the "Atmosphere effects" toggle.</summary>
+    public static string ToggleAtmosphereEffectsHint => Get(nameof(ToggleAtmosphereEffectsHint));
     /// <summary>"TRAIL COLOURS" sub-header.</summary>
     public static string TrailColoursHeader => Get(nameof(TrailColoursHeader));
     /// <summary>Trail colour "Red".</summary>

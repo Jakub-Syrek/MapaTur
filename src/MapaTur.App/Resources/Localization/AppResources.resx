@@ -293,6 +293,8 @@
   <data name="ToggleSauronTowerHint" xml:space="preserve"><value>a dark tower with a glowing eye on Świnica (easter egg)</value></data>
   <data name="ToggleEagles" xml:space="preserve"><value>Eagles</value></data>
   <data name="ToggleEaglesHint" xml:space="preserve"><value>eagles soaring over the Orla Perć ridge (easter egg)</value></data>
+  <data name="ToggleAtmosphereEffects" xml:space="preserve"><value>Atmosphere effects</value></data>
+  <data name="ToggleAtmosphereEffectsHint" xml:space="preserve"><value>animated clouds, lightning, eagles, glow — off saves battery (stops the constant redraw)</value></data>
   <data name="TrailColoursHeader" xml:space="preserve"><value>TRAIL COLOURS</value></data>
   <data name="ColourRed" xml:space="preserve"><value>Red</value></data>
   <data name="ColourBlue" xml:space="preserve"><value>Blue</value></data>
