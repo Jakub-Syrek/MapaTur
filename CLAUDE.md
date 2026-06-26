@@ -34,6 +34,17 @@ NOTE: the `adb exec-out run-as ... tar -xf -` STDIN pipe HANGS — use the push-
 extract path above (app-uid can read the 644 tmp file). The per-tile build only re-runs on a camera move,
 so after pushing, pan the camera to see `cached` jump and the 1 m detail fill in.
 
+## Route „przez Granaty" zamiast Żlebem Kulczyńskiego — recurring, DON'T re-diagnose
+
+If a planned ridge route descends **via Granaty** instead of the **Żleb Kulczyńskiego** (or "enters the żleb and
+turns back"), it is a **DATA** regression, not code — and it **recurs after re-downloading trails**. The full
+routing fix is already in code (`simplificationEpsilonMeters: 0.0`, `OverpassResponseParser` member-stitching,
+`TrailRoutePlanner` snap, `RouteProfile.ShortestDistance`) — **do NOT touch or revert it.** A "Pobierz szlaki"
+re-download can drop the żleb's lower connector (Kozia Dolinka → Czarny Staw) → the descent dead-ends → route
+goes around via Granaty. **Fix = re-download trails with the WHOLE route area in frame (zoom out so the valley
+below the żleb is visible).** Full procedure + 10-second DB diagnostic in
+[`docs/TRAIL-ROUTING-ZLEB.md`](docs/TRAIL-ROUTING-ZLEB.md) — read it before spending any time on routing.
+
 ## Testing Conventions
 
 ### TDD Workflow
