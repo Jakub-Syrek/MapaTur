@@ -66,6 +66,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "in vec3 vWorldPos;\n" +          // RENDER frame — view-dependent terms only (view dir, camera distance, fog)
         "in vec3 vStableWorldPos;\n" +    // STABLE/global frame — all procedural sampling (noise/ripple/rock/cloud/water shape)
         "uniform vec3 uLightDir;\n" +
+        "uniform vec3 uSnowSun;\n" + // sun used for the SNOW-line sun-melt; pinned during a film so the cover holds while lighting sweeps
         "uniform float uAmbient;\n" +
         "uniform vec3 uSunColor;\n" +    // direct-sun colour (warm at sunset, white at noon)
         "uniform vec3 uSkyAmbient;\n" +  // ambient sky-fill colour for shadowed slopes
@@ -353,7 +354,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Insolation: south-facing (+Y north → south = -nrm.y) and faces square to the sun absorb more
         // energy → warmer → local snowline higher. Sun incidence is gated by the sun being up (uLightDir.z).
         "    float southness = max(0.0, -nrm.y);\n" +
-        "    float sunInc = max(0.0, dot(nrm, uLightDir)) * clamp(uLightDir.z, 0.0, 1.0);\n" +
+        "    float sunInc = max(0.0, dot(nrm, uSnowSun)) * clamp(uSnowSun.z, 0.0, 1.0);\n" +
         // Wind / curvature proxy: low-freq noise (2 cheap taps, not the 5-octave fbm that tanked FPS).
         "    float snowN = (noiseT(vStableWorldPos.xy * 0.012) * 0.6) + (noiseT(vStableWorldPos.xy * 0.030) * 0.4);\n" +
         // Warming weakens as the pack deepens: at the full slider every aspect is buried (uniform line →
@@ -1227,6 +1228,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int debugPolyVertexCount;
     private float[]? debugPolyFloats;
     private int lightDirLocation = -1;
+    private int snowSunLocation = -1;
+
+    /// <summary>
+    /// When set, the SNOW line uses this fixed sun direction instead of the live one — so a route film can
+    /// sweep the time (and thus the lighting) without melting/reforming the snow cover the user set. Null =
+    /// snow follows the live sun (normal behaviour).
+    /// </summary>
+    public Vector3? SnowSunOverride { get; set; }
     private int ambientLocation = -1;
     private int sunColorLocation = -1;
     private int skyAmbientLocation = -1;
@@ -1578,6 +1587,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
     private readonly Dictionary<TerrainMesh3D, TileBuffers> tileBuffers = new();
     private IReadOnlyList<TerrainMesh3D>? lastTiles;
+    // Deferred mesh upload: a detail reload can bring ~100 new tiles; uploading them all in the swap frame froze
+    // it ~300 ms. Instead enqueue here and upload a few per frame (DrainTileUploads) — the detail fills in over a
+    // few frames with no single-frame freeze. Reused (cached) tiles are already resident ⇒ never enqueued.
+    private readonly List<TerrainMesh3D> pendingTileUploads = new();
+    private const int TileUploadBudgetPerFrame = 6;
+    // Per-swap render-thread cost breakdown (the frame after a detail reload re-runs these over the new tile list).
+    private bool dbgTileSwapFrame;
+    private double dbgSwapSyncMs, dbgSwapOrthoMs, dbgSwapLakeMs;
+    // Frame-gap watchdog: catches stalls the per-pass timers miss (GC pauses, CPU starvation by the off-thread build).
+    private readonly System.Diagnostics.Stopwatch frameClock = System.Diagnostics.Stopwatch.StartNew();
+    private long dbgLastFrameMs;
+    private int dbgLastGen2;
 
     private LineBuffers? trailLines;
     private LineBuffers? trailLinesBlack; // black trails drawn in a second pass at a thicker width (legibility on dark terrain)
@@ -1728,6 +1749,21 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         bool animateAtmosphere = true)
     {
         gl ??= PlatformGl.Get();
+
+        // Frame-gap watchdog: a long gap since the previous frame = a stall the per-pass timers don't see.
+        // Logging the Gen2 delta + heap distinguishes a GC pause from off-thread-build CPU starvation.
+        long nowFrameMs = frameClock.ElapsedMilliseconds;
+        long frameGap = nowFrameMs - dbgLastFrameMs;
+        int gen2Now = GC.CollectionCount(2);
+        if (dbgLastFrameMs > 0 && frameGap > 150)
+        {
+            Log.Information(
+                "[GL3D] frame gap {Gap}ms (gen2 +{Gen2Delta}, totalGen2={Gen2}, heap={HeapMB}MB, pendingUploads={Pending})",
+                frameGap, gen2Now - dbgLastGen2, gen2Now, GC.GetTotalMemory(false) / (1024 * 1024), pendingTileUploads.Count);
+        }
+
+        dbgLastFrameMs = nowFrameMs;
+        dbgLastGen2 = gen2Now;
 
         // Resizing the window (e.g. maximise) makes SKGLView recreate the GL context, which invalidates
         // every GPU object ID we cached (shader program, VAOs, VBOs). Detect that — the old program ID is
@@ -1983,13 +2019,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         EnsureProgram(gl);
 
-        if (!ReferenceEquals(lastTiles, tiles))
+        dbgTileSwapFrame = !ReferenceEquals(lastTiles, tiles);
+        if (dbgTileSwapFrame)
         {
             // Incremental: keep the reused base tiles' VBOs, swap only the look-at detail patch (see SyncTiles).
-            // A detail reload no longer re-pushes the whole base — kills the per-reload upload hitch on move.
+            // SyncTiles now only evicts gone tiles + QUEUES new ones; the upload itself is spread over frames below.
+            var swSync = System.Diagnostics.Stopwatch.StartNew();
             SyncTiles(gl, tiles);
             lastTiles = tiles;
+            dbgSwapSyncMs = swSync.Elapsed.TotalMilliseconds;
         }
+
+        DrainTileUploads(gl); // upload a few queued tiles per frame so a reload never freezes one frame
 
         // Reclaim any GL textures retired by a previous SetOrthoTextures swap. The actual upload/eviction
         // is viewport-aware and runs in StreamOrthoTextures once the view-projection is known (below).
@@ -2038,7 +2079,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Viewport-aware ortho streaming: upload only the cells whose AABB is in-frustum, evicting the
         // least-recently-rendered ones past the VRAM budget. mvp is the world→clip matrix the frustum
         // test expects (same as Camera3D.ProjectToScreen). Must run before the terrain pass binds cells.
-        StreamOrthoTextures(gl, mvp, tiles);
+        if (dbgTileSwapFrame)
+        {
+            var swOrtho = System.Diagnostics.Stopwatch.StartNew();
+            StreamOrthoTextures(gl, mvp, tiles);
+            dbgSwapOrthoMs = swOrtho.Elapsed.TotalMilliseconds;
+        }
+        else
+        {
+            StreamOrthoTextures(gl, mvp, tiles);
+        }
 
         // Cascaded Shadow Maps depth pass (Krok 5): render terrain depth from the sun's POV into the cascade
         // shadow maps before the sky/terrain passes. Self-contained — restores the bound FBO + viewport.
@@ -2332,6 +2382,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // A lightning strike briefly lights the whole landscape: lift the ambient floor with the flash.
         ambient = Math.Min(ambient + (lightningFlash * 0.6f), 1.4f);
         gl.Uniform3(lightDirLocation, light.X, light.Y, light.Z);
+        // Snow-line sun: pinned (film) so the cover holds while the lighting sun sweeps; else follows the sun.
+        Vector3 snowSun = SnowSunOverride ?? light;
+        gl.Uniform3(snowSunLocation, snowSun.X, snowSun.Y, snowSun.Z);
         gl.Uniform1(ambientLocation, ambient);
 
         // Coloured-light uniforms. With an atmosphere: warm direct-sun colour (boosted a touch so
@@ -2606,7 +2659,24 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // so with DepthFunc=Less the FIRST triangle at a pixel writes that depth and any OVERLAPPING coplanar
         // triangle (same Z, not less) is rejected — each water pixel blends exactly ONCE, killing the bright
         // double-blend seams that survive ear-clipping. Each lake is shaded with its own centroid + radius.
-        BuildLakeWater(gl, tiles, raster);
+        if (dbgTileSwapFrame)
+        {
+            var swLake = System.Diagnostics.Stopwatch.StartNew();
+            BuildLakeWater(gl, tiles, raster);
+            dbgSwapLakeMs = swLake.Elapsed.TotalMilliseconds;
+            double swapTotal = dbgSwapSyncMs + dbgSwapOrthoMs + dbgSwapLakeMs;
+            if (swapTotal > 30.0) // only log genuine hitch frames
+            {
+                Log.Information(
+                    "[GL3D] tile-swap render hitch: sync={Sync:F0}ms ortho={Ortho:F0}ms lake={Lake:F0}ms total={Total:F0}ms ({Tiles} tiles)",
+                    dbgSwapSyncMs, dbgSwapOrthoMs, dbgSwapLakeMs, swapTotal, tiles.Count);
+            }
+        }
+        else
+        {
+            BuildLakeWater(gl, tiles, raster);
+        }
+
         if (debugPolyVertexCount > 0 && lakeDraws.Count > 0)
         {
             gl.Enable(EnableCap.Blend);
@@ -3691,14 +3761,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         foreach (TerrainMesh3D tile in tiles)
         {
             int idx = tile.OrthoTileIndex;
-            Vector3 min = new(float.PositiveInfinity);
-            Vector3 max = new(float.NegativeInfinity);
-            foreach (Vector3 v in tile.Vertices)
-            {
-                min = Vector3.Min(min, v);
-                max = Vector3.Max(max, v);
-            }
-
+            // Per-tile world AABB is precomputed at mesh construction (off-thread) — no per-swap vertex re-scan.
+            Vector3 min = tile.WorldMin;
+            Vector3 max = tile.WorldMax;
             if (orthoCellBounds.TryGetValue(idx, out var existing))
             {
                 min = Vector3.Min(min, existing.Min);
@@ -4038,6 +4103,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         reflectionEnabledLocation = g.GetUniformLocation(program, "uReflectionEnabled");
         viewportPxLocation = g.GetUniformLocation(program, "uViewportPx");
         lightDirLocation = g.GetUniformLocation(program, "uLightDir");
+        snowSunLocation = g.GetUniformLocation(program, "uSnowSun");
         ambientLocation = g.GetUniformLocation(program, "uAmbient");
         sunColorLocation = g.GetUniformLocation(program, "uSunColor");
         skyAmbientLocation = g.GetUniformLocation(program, "uSkyAmbient");
@@ -4439,6 +4505,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         g.BindVertexArray(0);
         tileBuffers[tile] = buffers;
+
+        // The CPU vertex buffers are now in GPU VBOs and nothing reads them again (this is their only reader),
+        // so return the big arrays to the pool — the next tile rebuild rents them instead of churning the LOH.
+        tile.ReturnBuffersToPool();
     }
 
     private void ReleaseTiles(GL g)
@@ -4490,11 +4560,31 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             }
         }
 
+        // Enqueue new (non-resident) tiles; DrainTileUploads pushes a few per frame so a big reload never freezes
+        // one frame. Recomputed each swap, so a tile that left the window before it uploaded is simply dropped.
+        pendingTileUploads.Clear();
         foreach (TerrainMesh3D t in tiles)
         {
             if (!tileBuffers.ContainsKey(t))
             {
+                pendingTileUploads.Add(t);
+            }
+        }
+    }
+
+    // Upload at most TileUploadBudgetPerFrame queued tiles this frame — call every frame, not just on a swap.
+    private void DrainTileUploads(GL g)
+    {
+        int budget = TileUploadBudgetPerFrame;
+        while (budget > 0 && pendingTileUploads.Count > 0)
+        {
+            int last = pendingTileUploads.Count - 1;
+            TerrainMesh3D t = pendingTileUploads[last];
+            pendingTileUploads.RemoveAt(last);
+            if (!tileBuffers.ContainsKey(t))
+            {
                 UploadTile(g, t);
+                budget--;
             }
         }
     }
@@ -4598,7 +4688,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             RouteWorldLine world = Route3DWorldProjection.ToWorld(route, raster, mesh, RouteLiftMeters, detail);
 
             var ribbon = new RibbonBuilder();
-            ribbon.Append(world.World, 0x7C, 0x3A, 0xED); // violet, matches 2D planner
+            // DASHED, not solid: ~10 m dash / ~10 m gap over the 5 m densified route, so the trail underneath
+            // shows through the gaps — you can SEE whether the planned route actually follows a marked trail
+            // (e.g. that it really descends the żleb). Violet matches the 2D planner.
+            ribbon.AppendDashed(world.World, 0x7C, 0x3A, 0xED, dashSegments: 2, gapSegments: 2);
 
             routeLines = UploadLine(g, ribbon);
             lastRoute = route;

@@ -167,10 +167,20 @@ public static class MauiProgram
         services.AddSingleton<ITcxParser, TcxParser>();
         services.AddTransient<ImportTcxFileUseCase>();
 
+        // Store trails at FULL geometry (no store-time simplification). Simplifying on store silently dropped
+        // junction vertices that two trails SHARE in OSM (e.g. where the Żleb Kulczyńskiego meets the green
+        // valley trail — a 0 m shared node became a 35 m gap), which disconnected the routing graph and forced
+        // absurd detours. Render consumers simplify on READ instead: the 2D layer via the (bounds, epsilon)
+        // overload, the 3D overlay via SimplifyForOverlay3D — so routing keeps the connectivity it needs.
         services.AddSingleton<ITrailRepository>(_ =>
             new SqliteTrailRepository(
                 Path.Combine(FileSystem.AppDataDirectory, "mapatur-trails.db"),
-                simplificationEpsilonMeters: 10.0));
+                simplificationEpsilonMeters: 0.0));
+        // Elevation source for the router: lifts trail geometry onto the base DEM so "fastest time" sees real
+        // slopes (in the mountains shortest != fastest). One instance, shared: the view-model sets its raster
+        // once the base DEM loads; the planner reads it.
+        services.AddSingleton<DemElevationSource>();
+        services.AddSingleton<IElevationSource>(sp => sp.GetRequiredService<DemElevationSource>());
         services.AddSingleton<IRoutePlanner, TrailRoutePlanner>();
         services.AddSingleton<IGpxWriter, GpxWriter>();
         services.AddTransient<PlanRouteUseCase>();

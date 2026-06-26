@@ -1029,6 +1029,7 @@ public partial class Terrain3DView : ContentView
     private const double CameraCeilingMeters = 8_000.0;
 
     private const double FlightDurationSeconds = 89.0; // Orla Perć round trip — a full 24 h day↔night cycle plays out slowly over this window
+    private const float RouteFilmDurationSeconds = 150f; // user route film: SLOWER than the demo so the 1 m detail streamer keeps up with the camera (less of the film on the coarse base)
     private const double FlightStartPauseSeconds = 14.0; // hold at the start (gaze tilted down, camera close) so the 1 m detail fully streams in before the camera moves
     private const float FlightSlalomAmplitude = 950f;  // world-metres of side-to-side weave (large so it reads at the stand-off distance)
     private const float FlightSlalomWeaves = 2.0f;     // fewer left-right swings — calmer rotation (was 3, read as too jerky)
@@ -1093,7 +1094,9 @@ public partial class Terrain3DView : ContentView
     // Frame-to-frame low-pass of the fly-through camera so abrupt heading changes ease out (see OnFlightTick).
     private Vector3 flightSmoothPos;
     private Vector3 flightSmoothLook;
+    private float flightSmoothDescend; // 0 = climbing/flat (camera behind), 1 = descending (camera in front)
     private bool flightSmoothInit;
+    private Vector3? flightMarkerWorld; // current point on the route during a film — drawn as a moving dot
     private float flightSavedFov; // camera FOV before the flight narrowed it (restored on stop)
     private float flightSavedNear; // camera near/far before the flight tightened them for depth precision (restored on stop)
     private float flightSavedFar;
@@ -1102,6 +1105,13 @@ public partial class Terrain3DView : ContentView
     private float flightBaseCloud;
     private float flightBaseWind;
     private float flightBaseSnow;
+    private Vector3? flightBaseSun; // sun at film start — pins the snow line so the cover holds while time sweeps
+    // Route-film progress timeline: maps elapsed moving-seconds → path progress, inserting a 3 s HOLD at each
+    // user route stop so the film lingers there. Null (built-in demo) = plain constant-speed linear progress.
+    private (float Time, float Progress)[]? flightProgressKeys;
+    private float flightTotalMovingSeconds = (float)FlightDurationSeconds;
+    private const float FlightStopHoldSeconds = 3f;
+    private const float RouteFilmInitialHoldSeconds = 5f; // sit at the start so the opening 1 m detail finishes building before the camera moves
     private float flightBaseStorm;
     private Atmosphere? flightAtmosphere;
 
@@ -1116,6 +1126,9 @@ public partial class Terrain3DView : ContentView
 
     /// <summary>Raised after a fly-through recording is finalized, with the saved MP4 file path.</summary>
     public event EventHandler<string>? RecordingSaved;
+
+    /// <summary>Raised when any fly-through ends, so the host can release route-film pre-cache state.</summary>
+    public event EventHandler? FlightEnded;
 
     // The atmosphere the renderer should use: the time-swept flight atmosphere while flying, else the
     // bound (slider-driven) one.
@@ -1141,12 +1154,16 @@ public partial class Terrain3DView : ContentView
             pts[i] = frame.GeoToWorld(new GeoPoint(lat, lon), (float)elev);
         }
 
+        flightProgressKeys = null; // built-in demo: plain linear progress, no stop holds
+        flightTotalMovingSeconds = (float)FlightDurationSeconds;
         BeginFlight(pts);
     }
 
     /// <summary>Starts a cinematic fly-through ALONG the planned tourist route — and records it to MP4 — so the
-    /// user can film their route. No-op until a DEM + raster + a planned route exist.</summary>
-    public void StartRouteFlight()
+    /// user can film their route. Holds 3 s at each <paramref name="stops"/> the user entered. No-op until a DEM
+    /// + raster + a planned route exist.</summary>
+    /// <param name="stops">The user's ordered route stops; the film pauses at each. Null = no holds.</param>
+    public void StartRouteFlight(IReadOnlyList<GeoPoint>? stops = null)
     {
         if (WorldFrame is not { } frame || Raster is null || Route is null)
         {
@@ -1171,7 +1188,102 @@ public partial class Terrain3DView : ContentView
             pts[i] = frame.GeoToWorld(poly[i], (float)elev);
         }
 
+        BuildRouteFilmTimeline(poly, stops);
         BeginFlight(pts);
+    }
+
+    // Builds the progress timeline that inserts a 3 s hold at each user stop. Each stop maps to its nearest
+    // route-polyline vertex (the legs join there) → a progress fraction; between stops the film advances at
+    // constant speed (the whole route over FlightDurationSeconds), then lingers FlightStopHoldSeconds.
+    private void BuildRouteFilmTimeline(IReadOnlyList<GeoPoint> poly, IReadOnlyList<GeoPoint>? stops)
+    {
+        if (stops is null || stops.Count == 0 || poly.Count < 2)
+        {
+            // No intermediate stops: still hold at the start so the opening detail builds, then run the route.
+            flightProgressKeys = new[]
+            {
+                (0f, 0f),
+                (RouteFilmInitialHoldSeconds, 0f),
+                (RouteFilmInitialHoldSeconds + RouteFilmDurationSeconds, 1f),
+            };
+            flightTotalMovingSeconds = RouteFilmInitialHoldSeconds + RouteFilmDurationSeconds;
+            return;
+        }
+
+        var pauses = new List<float>();
+        foreach (GeoPoint stop in stops)
+        {
+            int best = 0;
+            double bestD = double.MaxValue;
+            for (int i = 0; i < poly.Count; i++)
+            {
+                double d = poly[i].HaversineDistanceMetersTo(stop);
+                if (d < bestD)
+                {
+                    bestD = d;
+                    best = i;
+                }
+            }
+
+            float prog = best / (float)(poly.Count - 1);
+            if (prog is > 0.002f and < 0.998f)
+            {
+                pauses.Add(prog); // skip the very start/end: the start already pauses, the end stops the film
+            }
+        }
+
+        pauses.Sort();
+
+        // Hold at the start (progress 0) so the opening 1 m detail finishes building before the camera moves.
+        var keys = new List<(float Time, float Progress)> { (0f, 0f), (RouteFilmInitialHoldSeconds, 0f) };
+        float t = RouteFilmInitialHoldSeconds, prevP = 0f;
+        foreach (float q in pauses)
+        {
+            if (q <= prevP + 0.0005f)
+            {
+                continue; // de-dupe coincident stops
+            }
+
+            t += (q - prevP) * RouteFilmDurationSeconds; // travel to the stop (slower than the demo)
+            keys.Add((t, q));
+            t += FlightStopHoldSeconds;                  // hold there
+            keys.Add((t, q));
+            prevP = q;
+        }
+
+        t += (1f - prevP) * RouteFilmDurationSeconds; // run out to the end
+        keys.Add((t, 1f));
+        flightProgressKeys = keys.ToArray();
+        flightTotalMovingSeconds = t;
+    }
+
+    // Maps elapsed moving-seconds to path progress via the route-film timeline (constant speed + 3 s holds at
+    // stops). Falls back to plain linear progress when there's no timeline (the built-in demo).
+    private float ProgressAtMovingTime(float seconds)
+    {
+        var keys = flightProgressKeys;
+        if (keys is null || keys.Length < 2)
+        {
+            return Math.Clamp(seconds / (float)FlightDurationSeconds, 0f, 1f);
+        }
+
+        if (seconds <= 0f)
+        {
+            return 0f;
+        }
+
+        for (int i = 1; i < keys.Length; i++)
+        {
+            if (seconds <= keys[i].Time)
+            {
+                (float t0, float p0) = keys[i - 1];
+                (float t1, float p1) = keys[i];
+                float f = t1 > t0 ? (seconds - t0) / (t1 - t0) : 0f;
+                return p0 + ((p1 - p0) * f);
+            }
+        }
+
+        return 1f;
     }
 
     // Shared cinematic-flight start (Orla Perć demo OR the planned route): adopt the world path, reset the
@@ -1200,6 +1312,7 @@ public partial class Terrain3DView : ContentView
         flightBaseWind = a?.Wind ?? 0.3f;
         flightBaseSnow = a?.SnowAmount ?? 0f;
         flightBaseStorm = a?.Storm ?? 0f;
+        flightBaseSun = a?.SunDirection; // hold the snow cover at the pre-film sun while the time arc sweeps
         flightAtmosphere = new Atmosphere(FlightTimeOfDay(0f), flightBaseCloud, flightBaseWind, flightBaseSnow, flightBaseStorm);
         SetChromeVisible(false); // clear the screen for a clean cinematic shot
         // Request an MP4 capture of the flight; it starts on the next paint once the surface size is known.
@@ -1219,6 +1332,7 @@ public partial class Terrain3DView : ContentView
     {
         bool wasFlying = flightActive || IsFlying;
         flightActive = false;
+        flightMarkerWorld = null;
         flightTimer?.Stop();
 
         // Finalize the MP4 (if one was being captured) and surface its path to the host page.
@@ -1239,6 +1353,7 @@ public partial class Terrain3DView : ContentView
             Camera.FieldOfViewYRadians = flightSavedFov; // restore the pre-flight FOV
             Camera.NearPlane = flightSavedNear;
             Camera.FarPlane = flightSavedFar;
+            FlightEnded?.Invoke(this, EventArgs.Empty); // host releases route-film pre-cache + resumes streaming
         }
     }
 
@@ -1261,34 +1376,42 @@ public partial class Terrain3DView : ContentView
         flightElapsedSeconds = flightClock.Elapsed.TotalSeconds; // real wall-clock time so the flight lasts exactly FlightDurationSeconds
         // Hold at the start for FlightStartPauseSeconds so the 1 m detail streams in, then advance the path.
         double moving = flightElapsedSeconds - FlightStartPauseSeconds;
-        double raw = moving <= 0.0 ? 0.0 : moving / FlightDurationSeconds;
-        bool finished = raw >= 1.0;
-        if (finished)
-        {
-            raw = 1.0;
-        }
+        bool finished = moving >= flightTotalMovingSeconds;
 
-        // LINEAR progress (constant ground speed). A smoothstep ease-out made the camera crawl to a
-        // near-halt over the last third — which read as "the flight stopped in the middle". Constant
-        // speed keeps it obviously moving the whole way.
-        float p = (float)raw;
+        // Constant ground speed, with a 3 s HOLD at each user stop (the route-film timeline). The path point
+        // freezes during a hold, so the camera lingers on the stop; the built-in demo has no timeline → plain
+        // linear progress. (A smoothstep ease-out once made it crawl to a halt mid-flight; constant speed reads
+        // as obviously moving the whole way.)
+        float p = finished ? 1f : ProgressAtMovingTime((float)Math.Max(0.0, moving));
         // Time-of-day follows the day arc (long red morning → day → evening → brief night) over the flight.
         flightAtmosphere = new Atmosphere(FlightTimeOfDay(p), flightBaseCloud, flightBaseWind, flightBaseSnow, flightBaseStorm);
         Vector3 here = SampleFlightPath(p);
         Vector3 ahead = SampleFlightPath(MathF.Min(1f, p + 0.025f));
+        flightMarkerWorld = here; // the dot rides the route at the point the film is currently passing
 
         Vector3 tangent = ahead - here;
         tangent.Z = 0f;
         tangent = tangent.LengthSquared() > 1e-4f ? Vector3.Normalize(tangent) : new Vector3(1f, 0f, 0f);
         var perp = new Vector3(-tangent.Y, tangent.X, 0f); // horizontal, perpendicular to the ridge
 
-        float slalom = MathF.Sin((float)(raw * Math.PI * 2.0 * FlightSlalomWeaves)) * FlightSlalomAmplitude;
-        // Trail behind the ridge point (−tangent) and ride higher so the camera frames a wider sweep
-        // of the ridge ahead — keeps named peaks in view instead of filling the screen with one face.
-        Vector3 cameraPos = here - (tangent * FlightCameraBack) + (perp * slalom) + new Vector3(0f, 0f, FlightCameraHeight);
+        float slalom = MathF.Sin(p * MathF.PI * 2f * FlightSlalomWeaves) * FlightSlalomAmplitude;
 
-        // Look a little further along the ridge so the camera always faces the direction of travel.
-        Vector3 lookAt = SampleFlightPath(MathF.Min(1f, p + 0.06f));
+        // Stand on the DOWN-slope side of the route, looking UP toward the ridge: climb → camera BEHIND, descent
+        // → camera IN FRONT (the walker comes toward the lens). Filming a descent from behind (up-slope) just
+        // fills the frame with the mountain you're leaving ("góra zasłania"). vClimb<0 = the route drops ahead;
+        // ease the front/back swap so undulating ground doesn't whip the camera around.
+        float vClimb = ahead.Z - here.Z;
+        float descendTarget = Math.Clamp(-vClimb / 120f, 0f, 1f);
+        flightSmoothDescend = flightSmoothInit
+            ? flightSmoothDescend + ((descendTarget - flightSmoothDescend) * 0.06f)
+            : descendTarget;
+        float backSign = (flightSmoothDescend * 2f) - 1f; // −1 behind (climb) … +1 in front (descend)
+        Vector3 cameraPos = here + (tangent * (FlightCameraBack * backSign)) + (perp * slalom) + new Vector3(0f, 0f, FlightCameraHeight);
+
+        // Gaze toward the UP-slope side so the walker + the ridge above stay framed: ahead when climbing, back
+        // toward the descent's headwall when descending.
+        float lookAlong = (0.06f * (1f - flightSmoothDescend)) - (0.05f * flightSmoothDescend);
+        Vector3 lookAt = SampleFlightPath(Math.Clamp(p + lookAlong, 0f, 1f));
         lookAt.Z -= FlightLookDownMeters; // tilt the gaze down so the 1 m detail streams onto the near terrain, not the far sky
 
         // Night finale: in the last ~10 % the gaze pitches UP into the sky so the Big Dipper + Moon fill the
@@ -1312,6 +1435,12 @@ public partial class Terrain3DView : ContentView
             flightSmoothLook = Vector3.Lerp(flightSmoothLook, lookAt, follow);
         }
 
+        // Keep the camera ABOVE the terrain under it — never film THROUGH the rock. The camera trails behind
+        // the route point (−tangent); descending a slope puts that trailing point UP the face, where the ground
+        // is higher than here+height, so the fixed-height camera would punch through the rock (and a "behind"
+        // chase shot on a descent looks into the wall). Lift it over whatever ground is directly beneath it.
+        flightSmoothPos = LiftCameraAboveTerrain(flightSmoothPos);
+
         ApplyFreeCamera(flightSmoothPos, flightSmoothLook);
 
         // Drive the 1 m detail streaming directly. The camera-save timer only raises CameraFocusMoved when the
@@ -1330,7 +1459,9 @@ public partial class Terrain3DView : ContentView
             // streaming-only camera at the ridge point ahead (full elevation) so the patch lands ON the summit
             // before we arrive; its width (∝ camera→focus distance) still reaches back across the foreground.
             Vector3 streamEye = flightSmoothPos;
-            Vector3 streamFocus = SampleFlightPath(MathF.Min(1f, p + 0.06f));
+            // Aim the 1 m detail build well AHEAD of the camera — a patch takes seconds to mesh, so by the time
+            // it's ready the camera must be arriving at it, not have flown past (which left the film on the base).
+            Vector3 streamFocus = SampleFlightPath(MathF.Min(1f, p + 0.14f));
             Vector3 streamOffset = streamEye - streamFocus;
             float streamDist = MathF.Max(1f, streamOffset.Length());
             CameraFocusMoved?.Invoke(this, new Camera3D
@@ -1353,6 +1484,36 @@ public partial class Terrain3DView : ContentView
         {
             StopFlight();
         }
+    }
+
+    // World-Z the flight camera must clear the ground beneath it by — enough that steep faces behind a
+    // descent don't poke into the lens, without yanking the camera miles up on every little rise.
+    private const float FlightCameraTerrainClearance = 150f;
+
+    // Raises the camera so it sits at least FlightCameraTerrainClearance above the terrain directly under it
+    // (sampled from the base DEM at the camera's lon/lat). Pure clamp: it only ever lifts, never lowers, so a
+    // high cinematic vantage is untouched — it just stops the camera burrowing into rock on descents.
+    private Vector3 LiftCameraAboveTerrain(Vector3 position)
+    {
+        if (WorldFrame is not { } frame || Raster is not { } raster)
+        {
+            return position;
+        }
+
+        GeoPoint geo = frame.WorldToGeo(position);
+        double terrain = raster.SampleBilinear(geo.Longitude, geo.Latitude);
+        if (double.IsNaN(terrain) || terrain < 200 || terrain > 4000)
+        {
+            return position;
+        }
+
+        float minZ = frame.GeoToWorld(geo, (float)terrain).Z + FlightCameraTerrainClearance;
+        if (position.Z < minZ)
+        {
+            position.Z = minZ;
+        }
+
+        return position;
     }
 
     // Places the camera at an exact world position looking at a world point, by converting the
@@ -1752,6 +1913,7 @@ public partial class Terrain3DView : ContentView
             DrawLakeLabelsOverScene(canvas, frame, e.Info.Width, e.Info.Height);
             DrawStarLabelsOverScene(canvas, frame, e.Info.Width, e.Info.Height);
             DrawNightLights(canvas, projectedPois);
+            DrawFlightMarker(canvas, e.Info.Width, e.Info.Height);
             // Recording capture for this path happens inside TryRenderTerrainGl (GL FBO readback), not here.
             return;
         }
@@ -1948,6 +2110,32 @@ public partial class Terrain3DView : ContentView
     // Projects tonight's bundled named stars and draws their names over the GL scene — only at night (so the
     // labels track the GL star pass, which is gated the same way) and only for the few stars above the horizon
     // and in frame. Uses the shared world frame (tile 0) anchor + the time-of-day slider hour, exactly like the
+    // Moving "you are here" dot during a route film: projects the current route point to screen and draws a
+    // pulsing violet dot (matching the route line) with a white ring + halo, on top of the scene so it reads
+    // even when the spot is tucked behind a near ridge. Drawn only while the flight is running.
+    private void DrawFlightMarker(SKCanvas canvas, int width, int height)
+    {
+        if (flightMarkerWorld is not { } world)
+        {
+            return;
+        }
+
+        var viewProjection = Camera.BuildViewProjection((float)width / Math.Max(1, height));
+        if (Camera.ProjectToScreen(world, viewProjection, width, height) is not { } s)
+        {
+            return; // behind the camera / off-screen
+        }
+
+        float pulse = 1f + (0.22f * MathF.Sin((float)flightElapsedSeconds * 4.5f));
+        float r = 8f * pulse;
+        using var halo = new SKPaint { Color = new SKColor(0x7C, 0x3A, 0xED, 0x55), IsAntialias = true, Style = SKPaintStyle.Fill };
+        using var fill = new SKPaint { Color = new SKColor(0x7C, 0x3A, 0xED), IsAntialias = true, Style = SKPaintStyle.Fill };
+        using var ring = new SKPaint { Color = SKColors.White, IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 3f };
+        canvas.DrawCircle(s.X, s.Y, r * 2.1f, halo);
+        canvas.DrawCircle(s.X, s.Y, r, fill);
+        canvas.DrawCircle(s.X, s.Y, r, ring);
+    }
+
     // GL star buffer, so each name sits on its dot.
     private void DrawStarLabelsOverScene(SKCanvas canvas, TerrainMesh3D frame, int width, int height)
     {
@@ -2819,6 +3007,9 @@ public partial class Terrain3DView : ContentView
             // Today's local date drives the night-sky star pass (with the time-of-day slider as the local
             // hour); the stars fade in only once the slider puts the sun below the horizon.
             IReadOnlyList<TreeInstance>? forest = EnsureForest(tiles);
+            // During a film the time arc sweeps the sun; pin the snow line to the pre-film sun so the cover the
+            // user set doesn't melt/reform mid-shot (only the lighting moves). Off-film = snow follows the sun.
+            glRenderer.SnowSunOverride = flightActive ? flightBaseSun : null;
             uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere, forest, DetailElevation, ShowNightSky ? DateOnly.FromDateTime(DateTime.Now) : null, ExposedRoutes, ShowSauronTower, ShowEagles, AtmosphereEffectsEnabled);
             if (terrainTextureId == 0)
             {

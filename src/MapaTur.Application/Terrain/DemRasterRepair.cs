@@ -93,6 +93,49 @@ public static class DemRasterRepair
     }
 
     /// <summary>
+    /// <see cref="FillNoDataFrom"/> applied IN PLACE — mutates <paramref name="target"/>'s samples instead of
+    /// cloning a fresh ~window-sized array. Use only when the caller owns <paramref name="target"/>; avoids a
+    /// ~90 MB Large Object Heap allocation per detail build.
+    /// </summary>
+    public static void FillNoDataFromInPlace(DemRaster target, DemRaster source)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        ArgumentNullException.ThrowIfNull(source);
+
+        float noData = target.NoDataValue;
+        int cols = target.Columns;
+        int rows = target.Rows;
+        float[] s = target.Samples;
+
+        bool IsHole(float v) => v.Equals(noData) || float.IsNaN(v);
+
+        double west = target.West;
+        double east = target.East;
+        double north = target.North;
+        double south = target.South;
+
+        for (int r = 0; r < rows; r++)
+        {
+            double lat = rows > 1 ? north - ((double)r / (rows - 1) * (north - south)) : north;
+            for (int c = 0; c < cols; c++)
+            {
+                int i = (r * cols) + c;
+                if (!IsHole(s[i]))
+                {
+                    continue;
+                }
+
+                double lon = cols > 1 ? west + ((double)c / (cols - 1) * (east - west)) : west;
+                double v = source.SampleBilinear(lon, lat);
+                if (!v.Equals((double)source.NoDataValue) && !double.IsNaN(v))
+                {
+                    s[i] = (float)v;
+                }
+            }
+        }
+    }
+
+    /// <summary>
     /// Returns a copy with single-cell PITS raised to their neighbour minimum: a valid cell more than
     /// <paramref name="depthThresholdMeters"/> below the MIN of its valid 4-neighbours is a data artefact
     /// (tatry.dem carries one-cell shafts hundreds of metres deep at regular processing-grid positions —
@@ -195,6 +238,26 @@ public static class DemRasterRepair
         }
 
         return new DemRaster(raster.Columns, raster.Rows, raster.Bounds, s, noData);
+    }
+
+    /// <summary>
+    /// <see cref="HoleBelow"/> applied IN PLACE — mutates <paramref name="raster"/>'s samples instead of cloning a
+    /// fresh ~window-sized array. Use only when the caller owns the raster (e.g. a freshly-built detail window);
+    /// avoids a ~90 MB Large Object Heap allocation per detail build (a source of the GC stalls during a flight).
+    /// </summary>
+    public static void HoleBelowInPlace(DemRaster raster, double floorMeters)
+    {
+        ArgumentNullException.ThrowIfNull(raster);
+
+        float noData = raster.NoDataValue;
+        float[] s = raster.Samples;
+        for (int i = 0; i < s.Length; i++)
+        {
+            if (!s[i].Equals(noData) && s[i] < floorMeters)
+            {
+                s[i] = noData;
+            }
+        }
     }
 
     /// <summary>

@@ -1,6 +1,8 @@
+using MapaTur.Application.Terrain;
 using MapaTur.Application.Trails;
 using MapaTur.Domain.Geography;
 using MapaTur.Domain.Routing;
+using MapaTur.Domain.Trails;
 using MapaTur.Routing;
 using MapaTur.Routing.Costs;
 using MapaTur.Routing.Graph;
@@ -17,15 +19,22 @@ public sealed class TrailRoutePlanner : IRoutePlanner
     private const double SearchAreaBufferDegrees = 0.05;
 
     private readonly ITrailRepository repository;
+    private readonly IElevationSource? elevation;
 
     /// <summary>
     /// Initializes a new route planner.
     /// </summary>
     /// <param name="repository">Trail repository used as the data source.</param>
-    public TrailRoutePlanner(ITrailRepository repository)
+    /// <param name="elevation">
+    /// Optional terrain elevation source. When supplied, trail geometry is lifted onto the DEM before the graph
+    /// is built so the time-cost (Tobler) sees real slopes; without it the graph is flat and "fastest time"
+    /// degenerates to "shortest distance".
+    /// </param>
+    public TrailRoutePlanner(ITrailRepository repository, IElevationSource? elevation = null)
     {
         ArgumentNullException.ThrowIfNull(repository);
         this.repository = repository;
+        this.elevation = elevation;
     }
 
     /// <inheritdoc />
@@ -40,6 +49,12 @@ public sealed class TrailRoutePlanner : IRoutePlanner
             return null;
         }
 
+        if (elevation is not null)
+        {
+            trails = LiftOntoTerrain(trails, elevation);
+        }
+
+        // Full-geometry trails share junction nodes, so the 5 m snap connects them — no junction bridging hack.
         var graph = TrailGraph.Build(trails);
         var startNode = graph.FindNearestNode(request.Start);
         var goalNode = graph.FindNearestNode(request.End);
@@ -56,6 +71,28 @@ public sealed class TrailRoutePlanner : IRoutePlanner
 
         var router = new AStarRouter(graph);
         return router.FindPath(startNode, goalNode, costFunction);
+    }
+
+    /// <summary>
+    /// Returns copies of the trails with each geometry point lifted to the sampled terrain elevation (points
+    /// outside coverage keep their original, unset elevation). This is what lets the time-cost see real slopes.
+    /// </summary>
+    private static IReadOnlyList<Trail> LiftOntoTerrain(IReadOnlyList<Trail> trails, IElevationSource elevation)
+    {
+        var lifted = new List<Trail>(trails.Count);
+        foreach (Trail trail in trails)
+        {
+            var geometry = new List<GeoPoint>(trail.Geometry.Count);
+            foreach (GeoPoint point in trail.Geometry)
+            {
+                double? sampled = elevation.ElevationAt(point);
+                geometry.Add(sampled is { } e ? new GeoPoint(point.Latitude, point.Longitude, e) : point);
+            }
+
+            lifted.Add(new Trail(trail.Id, trail.Name, trail.Markings, geometry));
+        }
+
+        return lifted;
     }
 
     private static MapBounds ExpandBounds(GeoPoint a, GeoPoint b, double bufferDegrees)

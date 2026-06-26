@@ -53,7 +53,10 @@ public static class DemTileMosaic
         int columns = gridCols * tileW;
         int rows = gridRows * tileH;
 
-        var samples = new float[columns * rows];
+        // Rent the ~window-sized buffer from the pool (the detail streamer returns it after each build, so a moving
+        // window reuses ~one buffer instead of churning a fresh ~90 MB float[] every reload → Large Object Heap
+        // garbage → GC stalls). Array.Fill below fully initialises it, so a recycled (dirty) buffer is safe.
+        float[] samples = MeshBufferPool.Shared.RentSingle(columns * rows);
         Array.Fill(samples, noData);
 
         foreach (PlacedDemTile tile in tiles)

@@ -63,6 +63,13 @@ public sealed class TerrainMesh3D
     /// <summary>Lowest world-Z across this tile's vertices.</summary>
     public float MinElevationZ { get; }
 
+    /// <summary>World-space axis-aligned bounding box (min corner), computed once at construction so the renderer
+    /// never has to re-scan every vertex per frame (the ortho-cell-bounds pass did, ~360 ms on a big tile set).</summary>
+    public Vector3 WorldMin { get; }
+
+    /// <summary>World-space axis-aligned bounding box (max corner). See <see cref="WorldMin"/>.</summary>
+    public Vector3 WorldMax { get; }
+
     private TerrainMesh3D(
         Vector3[] vertices,
         Vector3[] normals,
@@ -94,24 +101,40 @@ public sealed class TerrainMesh3D
         LightDirection = lightDirection;
         AmbientFactor = ambientFactor;
 
-        // Compute Z range over vertices once at construction so the host can ask without iterating
-        // every frame. Empty meshes (shouldn't happen — Build guards) report 0..0.
-        float minZ = float.PositiveInfinity;
-        float maxZ = float.NegativeInfinity;
+        // Compute the world AABB (and Z range) over vertices ONCE at construction so the host can ask without
+        // iterating every frame. The ortho-cell-bounds pass re-scanned every vertex of every tile on each detail
+        // swap (~360 ms on a ~760-tile set) — now it just reads WorldMin/WorldMax. Empty meshes report Center.
+        float minX = float.PositiveInfinity, minY = float.PositiveInfinity, minZ = float.PositiveInfinity;
+        float maxX = float.NegativeInfinity, maxY = float.NegativeInfinity, maxZ = float.NegativeInfinity;
         for (int i = 0; i < vertices.Length; i++)
         {
-            float z = vertices[i].Z;
-            if (z < minZ)
-            {
-                minZ = z;
-            }
-            if (z > maxZ)
-            {
-                maxZ = z;
-            }
+            Vector3 v = vertices[i];
+            if (v.X < minX) { minX = v.X; }
+            if (v.X > maxX) { maxX = v.X; }
+            if (v.Y < minY) { minY = v.Y; }
+            if (v.Y > maxY) { maxY = v.Y; }
+            if (v.Z < minZ) { minZ = v.Z; }
+            if (v.Z > maxZ) { maxZ = v.Z; }
         }
+
         MinElevationZ = float.IsPositiveInfinity(minZ) ? 0f : minZ;
         MaxElevationZ = float.IsNegativeInfinity(maxZ) ? 0f : maxZ;
+        WorldMin = vertices.Length > 0 ? new Vector3(minX, minY, minZ) : center;
+        WorldMax = vertices.Length > 0 ? new Vector3(maxX, maxY, maxZ) : center;
+    }
+
+    /// <summary>
+    /// Returns this tile's large vertex buffers to the <see cref="MeshBufferPool"/> for reuse. Call ONLY once the
+    /// buffers will never be read again — i.e. right after the renderer has uploaded them to the GPU. After this the
+    /// <see cref="Vertices"/>/<see cref="Normals"/>/etc. arrays may be handed to (and overwritten by) another tile.
+    /// </summary>
+    public void ReturnBuffersToPool()
+    {
+        MeshBufferPool.Shared.Return(Vertices);
+        MeshBufferPool.Shared.Return(Normals);
+        MeshBufferPool.Shared.Return(Colors);
+        MeshBufferPool.Shared.Return(BaseColors);
+        MeshBufferPool.Shared.Return(TexCoords);
     }
 
     /// <summary>
@@ -500,6 +523,10 @@ public sealed class TerrainMesh3D
     /// internal tile seams keep full detail). Without it the patch boundary steps against a coarse base
     /// (displaced silhouette = a "duplicated ridge").</param>
     /// <param name="edgeMatchRows">Width (in raster cells) of the perimeter morph band; 1 pins only the edge.</param>
+    /// <param name="cache">Optional per-block mesh cache: an unchanged block (same key) is reused, not rebuilt,
+    /// so the renderer uploads only the delta across detail reloads. Null = legacy (always fresh objects).</param>
+    /// <param name="absColOrigin">Absolute z16-pixel column of the window's cell (0,0); makes cache keys stable across moves.</param>
+    /// <param name="absRowOrigin">Absolute z16-pixel row of the window's cell (0,0); makes cache keys stable across moves.</param>
     public static IReadOnlyList<TerrainMesh3D> BuildAdaptiveTiles(
         DemRaster raster,
         IReadOnlyList<PerTileLodDecision> plan,
@@ -508,7 +535,10 @@ public sealed class TerrainMesh3D
         OrthoCoverage? orthoCoverage = null,
         int orthoTileIndexOffset = 0,
         DemRaster? edgeHeightSource = null,
-        int edgeMatchRows = 1)
+        int edgeMatchRows = 1,
+        PerTileMeshCache? cache = null,
+        int absColOrigin = 0,
+        int absRowOrigin = 0)
     {
         ArgumentNullException.ThrowIfNull(raster);
         ArgumentNullException.ThrowIfNull(plan);
@@ -585,9 +615,28 @@ public sealed class TerrainMesh3D
                     int sc1 = colCuts[ci + 1];
                     int rW = sc0 == colStartT ? Ratio(d.EdgeStepWest) : 1;
                     int rE = sc1 == colEndT ? Ratio(d.EdgeStepEast) : 1;
-                    tiles.Add(BuildBlock(
-                        raster, options, frame, sc0, sc1, sr0, sr1, anchor, anchorOffset,
-                        default, edgeHeightSource, edgeMatchRows, orthoCoverage, orthoTileIndexOffset, rN, rS, rW, rE, step));
+
+                    // Capture the loop locals so the build closure (cache miss) reads THIS block's bounds.
+                    int bc0 = sc0, bc1 = sc1, br0 = sr0, br1 = sr1, bN = rN, bS = rS, bW = rW, bE = rE;
+                    TerrainMesh3D BuildThisBlock() => BuildBlock(
+                        raster, options, frame, bc0, bc1, br0, br1, anchor, anchorOffset,
+                        default, edgeHeightSource, edgeMatchRows, orthoCoverage, orthoTileIndexOffset, bN, bS, bW, bE, step);
+
+                    if (cache is null)
+                    {
+                        tiles.Add(BuildThisBlock());
+                    }
+                    else
+                    {
+                        // ABSOLUTE block identity (the window is z16-tile-aligned) ⇒ the same ground keeps the same
+                        // key across reloads ⇒ the cache hands back the SAME mesh object ⇒ the renderer (SyncTiles,
+                        // keyed by object) skips its GPU upload AND we skip re-meshing. Everything that changes the
+                        // geometry is in the key, so a hit is byte-identical.
+                        var key = new DetailBlockKey(
+                            absColOrigin + bc0, absRowOrigin + br0, absColOrigin + bc1, absRowOrigin + br1,
+                            step, bN, bS, bW, bE, (int)Math.Round(options.VerticalExaggeration * 1000f));
+                        tiles.Add(cache.GetOrBuild(key, BuildThisBlock));
+                    }
                 }
             }
         }
@@ -667,11 +716,14 @@ public sealed class TerrainMesh3D
         int vertexCount = tileCols * tileRows;
         float exaggeration = options.VerticalExaggeration;
 
-        var vertices = new Vector3[vertexCount];
-        var normals = new Vector3[vertexCount];
-        var colors = new uint[vertexCount];
-        var baseColors = new uint[vertexCount];
-        var texCoords = new float[vertexCount * 2];
+        // Rent the large vertex buffers from the pool — a streaming reload rebuilds ~170 tiles, each ~2.5 MB; pooling
+        // reuses the arrays instead of churning the Large Object Heap (the cause of the ~1.5 s GC stalls). The renderer
+        // returns them after the GL upload (the only post-build reader). Indices stay a List (small, grows by skirt).
+        Vector3[] vertices = MeshBufferPool.Shared.RentVector3(vertexCount);
+        Vector3[] normals = MeshBufferPool.Shared.RentVector3(vertexCount);
+        uint[] colors = MeshBufferPool.Shared.RentUInt32(vertexCount);
+        uint[] baseColors = MeshBufferPool.Shared.RentUInt32(vertexCount);
+        float[] texCoords = MeshBufferPool.Shared.RentSingle(vertexCount * 2);
         var indexList = new List<ushort>((tileCols - 1) * (tileRows - 1) * 6);
         float noDataValue = raster.NoDataValue;
 

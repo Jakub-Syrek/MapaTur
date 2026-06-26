@@ -89,6 +89,49 @@ public sealed class GpxWriterTests
         doc.Descendants(Gpx + "ele").Should().BeEmpty();
     }
 
+    [Fact]
+    public async Task WriteAsync_EmitsNamedWptForEachWaypoint_BeforeTrack()
+    {
+        var route = BuildSampleRoute();
+        var waypoints = new List<RouteWaypoint>
+        {
+            new("Kozi Wierch", new GeoPoint(49.2272, 20.0243, elevationMeters: 2291), WaypointKind.Peak, 2291),
+            new("Punkt na szlaku", new GeoPoint(49.2212, 20.0306), WaypointKind.TrailPoint),
+        };
+        var writer = new GpxWriter();
+        using var memory = new MemoryStream();
+
+        await writer.WriteAsync(route, memory, "Test track", waypoints);
+
+        memory.Position = 0;
+        var doc = XDocument.Load(memory);
+        var wpts = doc.Descendants(Gpx + "wpt").ToList();
+
+        wpts.Should().HaveCount(2);
+        wpts[0].Attribute("lat")!.Value.Should().Be("49.2272000");
+        wpts[0].Attribute("lon")!.Value.Should().Be("20.0243000");
+        wpts[0].Element(Gpx + "name")!.Value.Should().Be("Kozi Wierch");
+        wpts[0].Element(Gpx + "ele")!.Value.Should().Be("2291.00");
+        wpts[1].Element(Gpx + "name")!.Value.Should().Be("Punkt na szlaku");
+
+        // GPX schema requires wpt elements before trk.
+        var children = doc.Root!.Elements().Select(e => e.Name.LocalName).ToList();
+        children.IndexOf("wpt").Should().BeGreaterThan(-1).And.BeLessThan(children.IndexOf("trk"));
+    }
+
+    [Fact]
+    public async Task WriteAsync_WithoutWaypoints_EmitsNoWpt()
+    {
+        var route = BuildSampleRoute();
+        var writer = new GpxWriter();
+        using var memory = new MemoryStream();
+
+        await writer.WriteAsync(route, memory, "Test track");
+
+        memory.Position = 0;
+        XDocument.Load(memory).Descendants(Gpx + "wpt").Should().BeEmpty();
+    }
+
     private static Route BuildSampleRoute()
     {
         var segments = new List<RouteSegment>

@@ -18,7 +18,7 @@ public sealed class GpxWriter : IGpxWriter
     private const string Creator = "MapaTur";
 
     /// <inheritdoc />
-    public async Task WriteAsync(Route route, Stream output, string trackName, CancellationToken cancellationToken = default)
+    public async Task WriteAsync(Route route, Stream output, string trackName, IReadOnlyList<RouteWaypoint>? waypoints = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(route);
         ArgumentNullException.ThrowIfNull(output);
@@ -39,6 +39,7 @@ public sealed class GpxWriter : IGpxWriter
         await writer.WriteAttributeStringAsync(prefix: null, "creator", null, Creator).ConfigureAwait(false);
 
         await WriteMetadataAsync(writer, trackName).ConfigureAwait(false);
+        await WriteWaypointsAsync(writer, waypoints, cancellationToken).ConfigureAwait(false);
         await WriteTrackAsync(writer, route, trackName, cancellationToken).ConfigureAwait(false);
 
         await writer.WriteEndElementAsync().ConfigureAwait(false);
@@ -53,6 +54,34 @@ public sealed class GpxWriter : IGpxWriter
         await writer.WriteElementStringAsync(prefix: null, "time", GpxNamespace,
             DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)).ConfigureAwait(false);
         await writer.WriteEndElementAsync().ConfigureAwait(false);
+    }
+
+    private static async Task WriteWaypointsAsync(XmlWriter writer, IReadOnlyList<RouteWaypoint>? waypoints, CancellationToken cancellationToken)
+    {
+        if (waypoints is null)
+        {
+            return;
+        }
+
+        foreach (RouteWaypoint waypoint in waypoints)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await writer.WriteStartElementAsync(prefix: null, "wpt", GpxNamespace).ConfigureAwait(false);
+            await writer.WriteAttributeStringAsync(prefix: null, "lat", null,
+                waypoint.Location.Latitude.ToString("F7", CultureInfo.InvariantCulture)).ConfigureAwait(false);
+            await writer.WriteAttributeStringAsync(prefix: null, "lon", null,
+                waypoint.Location.Longitude.ToString("F7", CultureInfo.InvariantCulture)).ConfigureAwait(false);
+
+            // GPX wptType order: ele precedes name.
+            if (waypoint.ElevationMeters is { } elevation)
+            {
+                await writer.WriteElementStringAsync(prefix: null, "ele", GpxNamespace,
+                    elevation.ToString("F2", CultureInfo.InvariantCulture)).ConfigureAwait(false);
+            }
+
+            await writer.WriteElementStringAsync(prefix: null, "name", GpxNamespace, waypoint.Name).ConfigureAwait(false);
+            await writer.WriteEndElementAsync().ConfigureAwait(false); // wpt
+        }
     }
 
     private static async Task WriteTrackAsync(XmlWriter writer, Route route, string trackName, CancellationToken cancellationToken)

@@ -112,7 +112,10 @@ public static class PerTileDetailPlanner
         int roughnessStride = 1,
         int roughnessNeighborDistance = 1,
         double cameraBubbleRadiusMeters = 0.0,
-        int cameraBubbleStep = 1)
+        int cameraBubbleStep = 1,
+        int absColOrigin = -1,
+        int absRowOrigin = -1,
+        int tileQuantum = 256)
     {
         ArgumentNullException.ThrowIfNull(full);
         ArgumentNullException.ThrowIfNull(subsampleStepsFinestFirst);
@@ -142,9 +145,16 @@ public static class PerTileDetailPlanner
             }
         }
 
-        // Grid boundaries, clamped so each segment is at least 2 cells (a legal mesh raster).
-        int[] colBounds = GridBoundaries(full.Columns, gridN);
-        int[] rowBounds = GridBoundaries(full.Rows, gridN);
+        // Grid boundaries, clamped so each segment is at least 2 cells (a legal mesh raster). When an absolute
+        // origin is supplied, snap the tile boundaries to a FIXED absolute cell grid instead of N equal parts of
+        // THIS window — so the same ground keeps the same tiles as the window slides and the per-block mesh cache
+        // can reuse them across moves (no per-move full rebuild). Legacy (origin < 0) keeps the equal-part split.
+        int[] colBounds = absColOrigin >= 0
+            ? DetailTileGrid.AbsoluteBoundaries(absColOrigin, full.Columns, tileQuantum)
+            : GridBoundaries(full.Columns, gridN);
+        int[] rowBounds = absRowOrigin >= 0
+            ? DetailTileGrid.AbsoluteBoundaries(absRowOrigin, full.Rows, tileQuantum)
+            : GridBoundaries(full.Rows, gridN);
 
         int tileCapacity = (colBounds.Length - 1) * (rowBounds.Length - 1);
         var windows = new List<(int ColStart, int RowStart, int Columns, int Rows)>(tileCapacity);

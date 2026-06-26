@@ -25,15 +25,16 @@ public sealed class ExportRouteToGpxUseCase
     /// <param name="route">Route to export.</param>
     /// <param name="destinationPath">Absolute path of the output .gpx file.</param>
     /// <param name="trackName">Track name embedded in the GPX document.</param>
+    /// <param name="waypoints">Ordered route stops emitted as named GPX waypoints; null writes none.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>A task representing the asynchronous operation.</returns>
-    public async Task HandleAsync(Route route, string destinationPath, string trackName, CancellationToken cancellationToken = default)
+    public async Task HandleAsync(Route route, string destinationPath, string trackName, IReadOnlyList<RouteWaypoint>? waypoints = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(route);
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(trackName);
 
         await using var stream = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None);
-        await writer.WriteAsync(route, stream, trackName, cancellationToken).ConfigureAwait(false);
+        await writer.WriteAsync(route, stream, trackName, waypoints, cancellationToken).ConfigureAwait(false);
     }
 }

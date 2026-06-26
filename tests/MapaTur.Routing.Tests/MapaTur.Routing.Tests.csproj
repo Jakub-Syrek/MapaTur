@@ -26,4 +26,10 @@
     <ProjectReference Include="..\..\src\MapaTur.Domain\MapaTur.Domain.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="Fixtures\*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>

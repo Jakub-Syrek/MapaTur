@@ -76,6 +76,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     private readonly OnlineRegionDemLoader? regionDemLoader;
     private readonly OfflineRegionDownloader? offlineDownloader;
     private readonly OfflinePackageService? packageService;
+    private readonly DemElevationSource? elevationSource;
 
     // Cache-presence gate for the LOD render loop (Krok 4b): only already-cached 1 m tiles are loaded while
     // flying, so detail streaming never triggers a WCS download. Null when no GUGiK source is wired.
@@ -439,6 +440,10 @@ public sealed partial class MapPageViewModel : ObservableObject
 
     [ObservableProperty]
     private DemRaster? terrainRaster;
+
+    // Whenever the base terrain raster changes (any load path), hand it to the routing elevation source so the
+    // planner can lift trail geometry onto the DEM — that's what makes "fastest time" see real mountain slopes.
+    partial void OnTerrainRasterChanged(DemRaster? value) => elevationSource?.SetRaster(value);
 
     /// <summary>
     /// The retained 1 m LOD detail field (raster + window). Bound to the 3D view so trail / road / route
@@ -1547,6 +1552,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <param name="offlineDownloader">Optional bulk tile prefetcher (GUGiK 1 m); null disables the "download Tatras offline" button.</param>
     /// <param name="gugikDemSource">Optional GUGiK 1 m tile source; supplies the cache-only availability check used by LOD detail streaming; null disables it.</param>
     /// <param name="packageService">Optional region-package service (download DEM/ortho packages from the server); null disables the "download data packages" button.</param>
+    /// <param name="elevationSource">Optional routing elevation source; the base DEM is handed to it on load so "fastest time" routing sees real slopes; null disables elevation-aware routing.</param>
     public MapPageViewModel(
         IFilePickerService filePicker,
         IFileSaverService fileSaver,
@@ -1578,7 +1584,8 @@ public sealed partial class MapPageViewModel : ObservableObject
         OnlineRegionDemLoader? regionDemLoader = null,
         OfflineRegionDownloader? offlineDownloader = null,
         GugikNmtDemTileSource? gugikDemSource = null,
-        OfflinePackageService? packageService = null)
+        OfflinePackageService? packageService = null,
+        DemElevationSource? elevationSource = null)
     {
         ArgumentNullException.ThrowIfNull(filePicker);
         ArgumentNullException.ThrowIfNull(fileSaver);
@@ -1616,6 +1623,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         this.regionDemLoader = regionDemLoader;
         this.offlineDownloader = offlineDownloader;
         this.packageService = packageService;
+        this.elevationSource = elevationSource;
         this.detailTileCached = gugikDemSource is null ? null : gugikDemSource.IsCached;
 
         // Subscribe to the location feed once at construction. The service stays silent until the
@@ -2245,22 +2253,79 @@ public sealed partial class MapPageViewModel : ObservableObject
             return;
         }
 
-        Domain.Routing.RouteWaypoint stop = SnapToPlace(point)
-            ?? new Domain.Routing.RouteWaypoint("Punkt na szlaku", point, Domain.Routing.WaypointKind.TrailPoint);
-        await AddStopAsync(stop).ConfigureAwait(true);
+        await AddStopAsync(SnapTapToStop(point)).ConfigureAwait(true);
     }
 
-    // Nearest named place within the snap radius, or null when the tap is in open terrain.
-    private Domain.Routing.RouteWaypoint? SnapToPlace(GeoPoint point)
+    // How much farther a named place may be than the nearest trail vertex and still win the snap. Lets a
+    // summit/pass that sits ON the ridge keep its name, while a tap on the żleb (peak ~150 m away, trail a few
+    // metres away) snaps to the trail — not to a peak.
+    private const double NamedPlaceTieMeters = 40.0;
+
+    // A route-planning tap should land on a TRAIL (the route runs on trails), not jump to a peak 200 m away.
+    // So snap to the nearest trail vertex; a named place wins only when it essentially coincides with that
+    // trail point, or when no trail is within range. This is what lets you drop a point on the black żleb.
+    private Domain.Routing.RouteWaypoint SnapTapToStop(GeoPoint point)
     {
+        bool hasTrail = TryNearestTrailVertex(point, out GeoPoint trailVertex, out double trailMeters);
+        Domain.Routing.RouteWaypoint? place = NearestPlace(point, out double placeMeters);
+
+        bool trailInRange = hasTrail && trailMeters <= StopSnapRadiusMeters;
+        bool placeInRange = place is not null && placeMeters <= StopSnapRadiusMeters;
+
+        if (placeInRange && (!trailInRange || placeMeters <= trailMeters + NamedPlaceTieMeters))
+        {
+            return place!;
+        }
+
+        if (trailInRange)
+        {
+            return new Domain.Routing.RouteWaypoint("Punkt na szlaku", trailVertex, Domain.Routing.WaypointKind.TrailPoint);
+        }
+
+        return place ?? new Domain.Routing.RouteWaypoint("Punkt na szlaku", point, Domain.Routing.WaypointKind.TrailPoint);
+    }
+
+    // Nearest vertex on any loaded trail (full geometry if held, else the 3D-simplified set). False when no
+    // trails are in memory (e.g. they came straight from the viewport cache).
+    private bool TryNearestTrailVertex(GeoPoint point, out GeoPoint nearest, out double meters)
+    {
+        nearest = default;
+        meters = double.MaxValue;
+        IReadOnlyList<Trail>? trails = rawTrails ?? rawTrails3D;
+        if (trails is null)
+        {
+            return false;
+        }
+
+        bool found = false;
+        foreach (Trail trail in trails)
+        {
+            foreach (GeoPoint vertex in trail.Geometry)
+            {
+                double d = point.HaversineDistanceMetersTo(vertex);
+                if (d < meters)
+                {
+                    meters = d;
+                    nearest = vertex;
+                    found = true;
+                }
+            }
+        }
+
+        return found;
+    }
+
+    // Nearest named place (summit/pass/lake/POI), regardless of radius; caller applies the radius/tie rules.
+    private Domain.Routing.RouteWaypoint? NearestPlace(GeoPoint point, out double meters)
+    {
+        meters = double.MaxValue;
         Domain.Routing.RouteWaypoint? best = null;
-        double bestMeters = StopSnapRadiusMeters;
         foreach (Domain.Routing.RouteWaypoint candidate in placeGazetteer.All)
         {
-            double meters = point.HaversineDistanceMetersTo(candidate.Location);
-            if (meters <= bestMeters)
+            double d = point.HaversineDistanceMetersTo(candidate.Location);
+            if (d < meters)
             {
-                bestMeters = meters;
+                meters = d;
                 best = candidate;
             }
         }
@@ -2284,7 +2349,9 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <summary>Raised when the user asks to film the planned route — the page starts the route fly-through.</summary>
     public event EventHandler? RouteFilmRequested;
 
-    /// <summary>Films the planned tourist route: a cinematic fly-through ALONG it, recorded to MP4.</summary>
+    /// <summary>Films the planned tourist route: a cinematic fly-through ALONG it, recorded to MP4. The 1 m
+    /// detail stays smooth via the persistent per-tile mesh cache (no upfront pre-build / "game with a 30 s
+    /// precache" — unchanged ground is reused, only new tiles build as the camera advances).</summary>
     [RelayCommand]
     private void MakeRouteFilm()
     {
@@ -2295,6 +2362,103 @@ public sealed partial class MapPageViewModel : ObservableObject
 
         ActiveSection = 0; // clear the panel for a clean cinematic shot
         RouteFilmRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    // Patches are ~7 km windows (PerTileWindowRadiusMeters 3.5 km radius). Step ~5 km so 2-3 overlapping patches
+    // cover a typical 10 km route — NOT 8 small ones (that re-meshed the same ground and ate memory for nothing).
+    private const double RouteFilmPatchStepMeters = 5000.0;     // focus spacing along the route for pre-cache patches
+    private const float RouteFilmPreCacheCamDistance = 950f;    // a close build camera so each patch comes back at 1 m
+
+    // DESKTOP-ONLY route-film pre-cache: step a build-camera along the route and build+RETAIN a 1 m patch at each
+    // step, so the whole corridor is ready before the camera moves. Suppresses per-move rebuilds for the film.
+    private async Task PreCacheRouteFilmDetailAsync(IReadOnlyList<GeoPoint> poly)
+    {
+        if (!OperatingSystem.IsWindows() || lodBaseTiles is null || TerrainRaster is null || poly.Count < 2)
+        {
+            return; // desktop only; needs a live LOD scene to overlay onto
+        }
+
+        // Focuses every ~RouteFilmPatchStepMeters along the route, capped to MaxRouteFilmPatches.
+        double total = 0;
+        for (int i = 0; i < poly.Count - 1; i++)
+        {
+            total += poly[i].HaversineDistanceMetersTo(poly[i + 1]);
+        }
+
+        double step = Math.Max(RouteFilmPatchStepMeters, total / MaxRouteFilmPatches);
+        var focuses = new List<GeoPoint> { poly[0] };
+        double acc = 0;
+        for (int i = 0; i < poly.Count - 1; i++)
+        {
+            acc += poly[i].HaversineDistanceMetersTo(poly[i + 1]);
+            if (acc >= step)
+            {
+                focuses.Add(poly[i + 1]);
+                acc = 0;
+            }
+        }
+
+        if (focuses.Count == 0 || focuses[^1].HaversineDistanceMetersTo(poly[^1]) > step * 0.5)
+        {
+            focuses.Add(poly[^1]);
+        }
+
+        routeFilmSuppress = false;
+        routeFilmAccumulate = true;
+        retainedFilmDetail.Clear();
+        float exaggeration = (float)Math.Clamp(VerticalExaggeration, 1.0, 5.0);
+
+        for (int i = 0; i < focuses.Count; i++)
+        {
+            GeoPoint f = focuses[i];
+            double elev = TerrainRaster.SampleBilinear(f.Longitude, f.Latitude);
+            if (double.IsNaN(elev) || elev < 200 || elev > 4000)
+            {
+                elev = 2000;
+            }
+
+            System.Numerics.Vector3 ground = LocalTangentProjection.GeoToWorld(f, (float)elev, lodAnchor, exaggeration);
+            var cam = new MapaTur.Application.Terrain.Camera3D
+            {
+                Target = ground,
+                Distance = RouteFilmPreCacheCamDistance, // close ⇒ z16 (1 m)
+                AzimuthRadians = 0f,
+                PitchRadians = 1.3f, // looking down at the route point
+                FieldOfViewYRadians = 0.6f,
+                NearPlane = 1f,
+                FarPlane = 60000f,
+            };
+
+            StatusMessage = Fmt("Buduję detal trasy do filmu… {0}/{1}", i + 1, focuses.Count);
+
+            // Defeat OnDetailFocusAsync's reload/cooldown gates so EVERY pre-cache focus actually builds.
+            lodDetailCentre = new GeoPoint(0, 0);
+            lastLodDetailReloadUtc = DateTime.MinValue;
+            await OnDetailFocusAsync(cam).ConfigureAwait(true);
+        }
+
+        routeFilmSuppress = true; // film about to fly: keep the pre-built 1 m, stop lagging rebuilds
+        StatusMessage = string.Empty;
+    }
+
+    /// <summary>Called when the route film ends: drop the retained pre-cached detail + resume normal streaming.</summary>
+    public void EndRouteFilm()
+    {
+        if (!routeFilmSuppress && !routeFilmAccumulate)
+        {
+            return; // not a pre-cached route film (e.g. the built-in demo) — nothing to undo
+        }
+
+        routeFilmSuppress = false;
+        routeFilmAccumulate = false;
+        retainedFilmDetail.Clear();
+        if (lodBaseTiles is not null)
+        {
+            DetailElevation = null;
+            TerrainTiles = new List<TerrainMesh3D>(lodBaseTiles); // next camera move re-streams normally
+            OnPropertyChanged(nameof(TerrainFrame));
+            lodDetailCentre = new GeoPoint(0, 0); // force the next move to rebuild
+        }
     }
 
     /// <summary>Removes a stop from the chain and re-plans the shorter route.</summary>
@@ -2371,8 +2535,12 @@ public sealed partial class MapPageViewModel : ObservableObject
             StatusMessage = Localization.AppStrings.StatusPlanningRoute;
 
             List<GeoPoint> stops = RouteStops.Select(s => s.Location).ToList();
+            // Shortest distance, NOT fastest time: in the mountains the marked descent you want (e.g. the Żleb
+            // Kulczyńskiego) is the short, STEEP one, and a Tobler "fastest time" cost penalises steepness so
+            // hard it detours AROUND the żleb (2 km instead of 0.9 m) — turning a stop on it into a spur. The
+            // direct on-trail route is what a walker following the markings actually wants.
             MultiStopRouteResult result = await Task.Run(
-                () => multiStopPlanner.PlanAsync(stops, RouteProfile.FastestTime)).ConfigureAwait(true);
+                () => multiStopPlanner.PlanAsync(stops, RouteProfile.ShortestDistance)).ConfigureAwait(true);
 
             if (result.Route is null)
             {
@@ -3045,6 +3213,8 @@ public sealed partial class MapPageViewModel : ObservableObject
             lodBaseTiles = baseTiles;
             lodAnchor = baseCentre;
             lodDetailCentre = baseCentre;
+            detailMeshCache.Clear(); // new scene: anchor + ortho coverage changed ⇒ cached block keys are no longer valid
+            detailRepairCache.Clear(); // new scene ⇒ raw tile inputs differ ⇒ cached repairs invalid
             lastValidLookAtWorld = null; // new scene frame — drop any look-at from a previous LOD session
             TerrainTiles = combined;
             OnPropertyChanged(nameof(TerrainFrame));
@@ -3123,6 +3293,35 @@ public sealed partial class MapPageViewModel : ObservableObject
     private IReadOnlyList<TerrainMesh3D>? lodBaseTiles;
     private MapaTur.Application.Terrain.OrthoCoverage? lodOrthoCoverage; // ortho coverage for the current LOD scene (null = hypsometric)
 
+    // Route-film 1 m PRE-CACHE (desktop only). Building one detail patch takes seconds, so a moving film outran
+    // it (most of the film on the coarse base). Instead, before the film we step a build-camera ALONG the route
+    // and RETAIN every patch (routeFilmAccumulate ⇒ OnDetailFocusAsync appends instead of replacing); during the
+    // film itself routeFilmSuppress stops any further (lagging) rebuild so the camera flies over the pre-built
+    // 1 m. Cleared when the film ends.
+    private bool routeFilmAccumulate;
+    private bool routeFilmSuppress;
+    private readonly List<TerrainMesh3D> retainedFilmDetail = new();
+    private const int MaxRouteFilmPatches = 8; // desktop memory cap on retained 1 m patches
+
+    // Persistent per-tile detail mesh cache. The window-based rebuild produced 340 FRESH block objects on every
+    // camera move → the renderer (SyncTiles, keyed by object) re-uploaded all of them = the flythrough stutter.
+    // With the cache + absolute-grid tiling, unchanged ground returns the SAME object across moves → only NEW
+    // tiles upload, exactly like the base already does. Kill-switch: false ⇒ legacy (no origins passed, no cache).
+    private const bool EnablePerTileDetailCache = true;
+    // Plan-tile size in cells, snapped to the absolute grid. MUST equal TerrainMesh3D.maxTileSide (250): a larger
+    // quantum makes BuildAdaptiveTiles sub-cut every plan tile into a full block + a tiny sliver (256→250+6), ~4×-ing
+    // the block count → 4× the mesh upload (swap hitch) and meshing. 250 ⇒ one block per plan tile, no slivers.
+    private const int PerTileDetailQuantum = 250;
+    private const int PerTileRepairMargin = 40;   // neighbour cells around each tile when repairing (> the repairs' reach)
+    private readonly MapaTur.Application.Terrain.PerTileMeshCache detailMeshCache = new();
+    // Repaired-raster cache: FillNarrowZeroStrips + FillPits dominate each build (~23 s over the whole window per
+    // the log). Cached per-tile, a sliding window only repairs new tiles ⇒ kills the per-build repair + its GC churn.
+    private readonly MapaTur.Application.Terrain.PerTileRepairCache detailRepairCache = new();
+    // The detail raster (~90 MB) is rented from the pool (PerTileRepair) and shared with the render thread (overlay
+    // seating reads it async). Return it only after 2 newer ones exist — the render is then provably off it — so a
+    // moving window recycles ~3 buffers instead of churning a fresh 90 MB each reload.
+    private readonly Queue<float[]> detailRasterRecycle = new();
+
     /// <summary>Geographic extent the LOD ortho actually covers (null = none). The 3D view hands this to the
     /// renderer so a base wider than the ortho fades to hypsometric beyond it instead of stretching edge texels.</summary>
     [ObservableProperty]
@@ -3147,7 +3346,13 @@ public sealed partial class MapPageViewModel : ObservableObject
     private int lastPerTileFinestStep;
     private string lastPerTileNote = string.Empty; // why the per-tile detail did/didn't render: "ok" | "no-raster" | "no-terrain"
     private const double LodDetailReloadThresholdMeters = 1000;           // re-centre after ~1000 m drift (was 700). Looser gate = fewer expensive per-tile rebuilds while panning → less stutter; the detail patch re-centres slightly later on a fast pan. Pure timing — no effect on glue/budget/geometry.
-    private static readonly TimeSpan LodDetailReloadCooldown = TimeSpan.FromMilliseconds(2500); // min spacing between rebuilds (was 1200): spaces out the costly builds during continuous camera motion.
+    // Min spacing between rebuilds, measured from the build START. Each build re-loads + re-processes the whole
+    // ~90 MB window (mosaic + repairs + ~400 meshes) ⇒ ~360 MB of Large Object Heap garbage; back-to-back during a
+    // flight that outran the background GC ⇒ a ~1.4 s blocking Gen2 stall. The per-tile cache RETAINS detail between
+    // builds and the 3.5 km window keeps covering the gaze for ~50 s of flight, so re-centring more than ~every 35 s
+    // is redundant work — spacing it there keeps the gaze covered while dropping the allocation rate below the rate
+    // the concurrent GC sustains (no blocking collection). NOT masking — removing rebuilds the cache made needless.
+    private static readonly TimeSpan LodDetailReloadCooldown = TimeSpan.FromMilliseconds(35000);
 
     // Wider-coverage P0 (shared world origin). STEP 1 = NO-OP: this threshold is deliberately enormous so
     // WorldOriginPolicy NEVER re-anchors and nothing moves — we only log the camera↔origin drift to confirm
@@ -3215,7 +3420,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     private const int PerTileRoughnessNeighborDistance = 8;              // measure curvature over ±8 cells (~10 m) so ridge roughness registers (±1 reads ~0)
     private const int PerTileNormalSmoothingRadius = 3;                  // normal low-pass radius (1 = sharp; >1 softens 1 m facets, heights untouched) — A/B knob
 #if WINDOWS
-    private const double PerTileWindowRadiusMeters = 3500.0;            // desktop: ~2.3× the phone window — "1 m everywhere you look", budget scaled to match
+    private const double PerTileWindowRadiusMeters = 3500.0;            // desktop: ~2.3× the phone window — "1 m everywhere you look", budget scaled to match (2500 shrank GC garbage but the detail reached too close — user preferred 3500)
 #else
     private const double PerTileWindowRadiusMeters = 2200.0;             // raised from 1500: the 1 m ring was too small, so the deforming 15 m base showed on the very peaks you look at
 #endif
@@ -3352,6 +3557,41 @@ public sealed partial class MapPageViewModel : ObservableObject
             NormalSmoothingRadius = PerTileNormalSmoothingRadius,
         };
 
+        // Absolute z16-pixel origin of the window's NW corner. The mosaic is whole-tile aligned (OnlineRegionDemLoader),
+        // so origin = minTile × tilePixels — a STABLE coordinate for the same ground across window moves, which is what
+        // lets the per-tile mesh cache reuse blocks while flying. Disabled / non-uniform tiling ⇒ origin -1 ⇒ legacy.
+        int detailAbsCol = -1, detailAbsRow = -1;
+        int detailMinTileX = 0, detailMinTileY = 0, detailTilePxX = 0, detailTilePxY = 0;
+        MapaTur.Application.Terrain.PerTileMeshCache? activeCache = null;
+        MapaTur.Application.Terrain.PerTileRepairCache? activeRepairCache = null;
+        if (EnablePerTileDetailCache && planned.Count > 0)
+        {
+            int minTileX = int.MaxValue, minTileY = int.MaxValue, maxTileX = int.MinValue, maxTileY = int.MinValue;
+            foreach (MapaTur.Application.Terrain.DemTileKey k in planned)
+            {
+                minTileX = Math.Min(minTileX, k.X);
+                minTileY = Math.Min(minTileY, k.Y);
+                maxTileX = Math.Max(maxTileX, k.X);
+                maxTileY = Math.Max(maxTileY, k.Y);
+            }
+
+            int tilesX = maxTileX - minTileX + 1;
+            int tilesY = maxTileY - minTileY + 1;
+            if (tilesX > 0 && tilesY > 0 && full.Columns % tilesX == 0 && full.Rows % tilesY == 0)
+            {
+                detailTilePxX = full.Columns / tilesX;
+                detailTilePxY = full.Rows / tilesY;
+                detailMinTileX = minTileX;
+                detailMinTileY = minTileY;
+                detailAbsCol = minTileX * detailTilePxX;
+                detailAbsRow = minTileY * detailTilePxY;
+                activeCache = detailMeshCache;
+                activeRepairCache = detailRepairCache;
+                detailMeshCache.BeginRound();
+                detailRepairCache.BeginRound();
+            }
+        }
+
         DemRaster? perTileBase = TerrainRaster; // captured on the UI thread for the worker below
         // The finished detail raster (1 m + base-filled voids) is carried back out of the worker so trails /
         // roads / route can seat on the SAME surface the tiles render. The await below is the memory barrier.
@@ -3365,14 +3605,25 @@ public sealed partial class MapPageViewModel : ObservableObject
             // (<=24-cell ~ 58 m) interior strips bracketed by valid data are interpolated; WIDE 0-voids (whole
             // GUGiK holes, e.g. over a tarn) are left for the base-backfill below, so we never fabricate a
             // smooth patch ("square") across a real coverage gap.
-            DemRaster bridged = DemRasterRepair.FillNarrowZeroStrips(loaded, maxWidthCells: 24);
-            // Despike the 1 m detail too. The base is FillPits'd at load (line ~2356), but GUGiK NMT 1 m
-            // carries the SAME one-cell trench-dashes along watercourses; a moderate pit that stays ABOVE
-            // the coverage floor slips past HoleBelow and renders as a dark-walled trench. Same proven
-            // median-of-4 repair as the base; runs inside the worker, BEFORE the per-tile subsample so a pit
-            // can't be sampled with its true neighbours stride-away.
-            DemRaster despiked = DemRasterRepair.FillPits(bridged, depthThresholdMeters: 20.0);
-            DemRaster holed = DemRasterRepair.HoleBelow(despiked, DetailCoverageFloorMeters);
+            // FillNarrowZeroStrips (bridge GUGiK z16 tile-edge "fault" dropouts) + FillPits (despike the 1 m
+            // trench-dashes along watercourses) are the heavy, neighbour-aware passes the log proved dominate each
+            // build (~23 s over the whole 8 M-cell window). They are CACHED PER TILE here — identical result
+            // (a margin gives edge context; proven cell-for-cell by PerTileRepairTests), but a sliding window only
+            // repairs the NEW tiles instead of re-scanning everything every move. Legacy chain when the cache is off.
+            var repairTimer = System.Diagnostics.Stopwatch.StartNew();
+            DemRaster repaired = activeRepairCache is not null
+                ? MapaTur.Application.Terrain.PerTileRepair.RepairWindowCached(
+                    loaded, planned, detailMinTileX, detailMinTileY, detailTilePxX, detailTilePxY,
+                    activeRepairCache, PerTileRepairMargin, pitDepthMeters: 20.0, zeroStripMaxCells: 24)
+                : DemRasterRepair.FillPits(DemRasterRepair.FillNarrowZeroStrips(loaded, maxWidthCells: 24), depthThresholdMeters: 20.0);
+
+            // The stitched window mosaic is fully consumed now (`repaired` is a SEPARATE buffer) — recycle its
+            // ~90 MB array to the pool so the next reload reuses it instead of churning the LOH. `loaded` is dead
+            // past this point (only `repaired`/`holed` are used below), so nothing reads the returned buffer.
+            MeshBufferPool.Shared.Return(loaded.Samples);
+            DemRasterRepair.HoleBelowInPlace(repaired, DetailCoverageFloorMeters); // mutate (worker owns it) — no 90 MB clone
+            DemRaster holed = repaired;
+            repairTimer.Stop();
             if (!DemRasterCoverage.HasTerrain(holed, minTopMeters: 100))
             {
                 double holedMax = holed.GetElevationRange().Max;
@@ -3391,7 +3642,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             // terrain in the voids keeps the base's visual; a fully-empty patch already returned null above.
             if (perTileBase is { } baseRaster)
             {
-                holed = DemRasterRepair.FillNoDataFrom(holed, baseRaster);
+                DemRasterRepair.FillNoDataFromInPlace(holed, baseRaster); // mutate in place — no 90 MB clone
             }
 
             builtDetailRaster = holed; // surface the seated-surface raster for overlay elevation sampling
@@ -3400,7 +3651,8 @@ public sealed partial class MapPageViewModel : ObservableObject
                 holed, cameraPosition, anchor, exaggeration, PerTileGridN, PerTileSubsampleSteps,
                 fovY, viewportHeight, DetailMaxErrorPixels, preset, PerTileVertexBudget,
                 PerTileRoughnessStride, PerTileRoughnessNeighborDistance,
-                PerTileCameraBubbleRadiusMeters, PerTileCameraBubbleStep);
+                PerTileCameraBubbleRadiusMeters, PerTileCameraBubbleStep,
+                absColOrigin: detailAbsCol, absRowOrigin: detailAbsRow, tileQuantum: PerTileDetailQuantum);
             IReadOnlyList<PerTileLodDecision> plan = planResult.Tiles;
             builtPlan = plan; // carried out so DetailElevation reconstructs the rendered (subsampled) surface, not raw 1 m
 
@@ -3440,7 +3692,8 @@ public sealed partial class MapPageViewModel : ObservableObject
             // boundary, worse than the un-morphed step (verified on device). The boundary mismatch is instead
             // minimized by a finer base (vertex budget) — silhouettes then nearly coincide.
             var meshes = new List<TerrainMesh3D>(TerrainMesh3D.BuildAdaptiveTiles(
-                holed, plan, detailOptions, projectionAnchor: anchor, orthoCoverage: lodOrthoCoverage));
+                holed, plan, detailOptions, projectionAnchor: anchor, orthoCoverage: lodOrthoCoverage,
+                cache: activeCache, absColOrigin: detailAbsCol < 0 ? 0 : detailAbsCol, absRowOrigin: detailAbsRow < 0 ? 0 : detailAbsRow));
 
             meshTimer.Stop();
             totalTimer.Stop();
@@ -3452,20 +3705,45 @@ public sealed partial class MapPageViewModel : ObservableObject
                 "LOD per-tile [{Preset}]: tiles={Tiles} finestStep={Finest} avgStep={Avg:F1} hist(1/2/4/8)={S1}/{S2}/{S4}/{S8} " +
                 "boosted={Boosted} demoted={Demoted} maxRough={MaxR:F1}m maxFactor={MaxF:F2} vertices={Verts}/{Budget}; " +
                 "step1Dist={NearS1:F0}-{FarS1:F0}m; " +
-                "roughnessMs={RoughnessMs:F0} planningMs={PlanningMs:F0} meshBuildMs={MeshMs} totalDetailMs={TotalMs} (stride {Stride})",
+                "meshHit={MeshHit} meshMiss={MeshMiss}(new={MissNew} churn={MissChurn}) win={WinCols}x{WinRows} tilePx={TilePx} repairMs={RepairMs} roughnessMs={RoughnessMs:F0} planningMs={PlanningMs:F0} meshBuildMs={MeshMs} totalDetailMs={TotalMs} (stride {Stride})",
                 preset.Name, plan.Count, finestStep, avgStep, s1, s2, s4, s8,
                 boostedTiles, demotedTiles, maxRoughness, maxFactor, totalVertices, PerTileVertexBudget,
                 nearStep1, farStep1,
-                planResult.RoughnessMs, planResult.PlanningMs, meshTimer.ElapsedMilliseconds, totalTimer.ElapsedMilliseconds, PerTileRoughnessStride);
+                activeCache?.Hits ?? 0, activeCache?.Misses ?? 0, activeCache?.MissNewGround ?? 0, activeCache?.MissSameGround ?? 0,
+                holed.Columns, holed.Rows, detailTilePxX,
+                repairTimer.ElapsedMilliseconds, planResult.RoughnessMs, planResult.PlanningMs, meshTimer.ElapsedMilliseconds, totalTimer.ElapsedMilliseconds, PerTileRoughnessStride);
 
             lastPerTileNote = "ok";
             return (IReadOnlyList<TerrainMesh3D>?)meshes;
         }).ConfigureAwait(true);
 
+        // Drop cached blocks no longer in the live window (bounds memory). Safe here: one build runs at a time
+        // (lodDetailLoading gate) and the await above is the memory barrier after the worker's GetOrBuild calls.
+        if (activeCache is not null)
+        {
+            detailMeshCache.EvictUnused();
+        }
+
+        if (activeRepairCache is not null)
+        {
+            detailRepairCache.EvictUnused();
+        }
+
         if (perTileResult is not null)
         {
             LodDetailBounds = window; // fine detail covers this area → lake water keeps its legacy seating here
             DetailElevation = builtDetailRaster is not null ? new DetailElevationField(builtDetailRaster, builtPlan) : null;
+
+            // Recycle the detail raster buffer: hold the last 3, return the oldest. By the time a buffer is returned,
+            // two newer detail rasters have replaced it on screen ⇒ no render frame still reads it ⇒ safe to reuse.
+            if (builtDetailRaster is not null)
+            {
+                detailRasterRecycle.Enqueue(builtDetailRaster.Samples);
+                while (detailRasterRecycle.Count > 3)
+                {
+                    MeshBufferPool.Shared.Return(detailRasterRecycle.Dequeue());
+                }
+            }
         }
 
         return perTileResult;
@@ -3481,6 +3759,13 @@ public sealed partial class MapPageViewModel : ObservableObject
     public async Task OnDetailFocusAsync(MapaTur.Application.Terrain.Camera3D camera, int viewportHeightPixels = 0)
     {
         ArgumentNullException.ThrowIfNull(camera);
+        // During a route film the detail is PRE-CACHED and retained; a per-move rebuild here would only swap in a
+        // lagging single patch (the very bug we're fixing), so suppress it and keep the pre-built 1 m on screen.
+        if (routeFilmSuppress)
+        {
+            return;
+        }
+
         // NOTE: lodDetailLoading is checked LOWER DOWN (before the rebuild), not here — so the diagnostic badge
         // still refreshes the tier/distance on every camera move even while a detail build (15–26 s) is in flight.
         if (!IsLodStreaming || lodBaseTiles is null || regionDemLoader is null)
@@ -3666,11 +3951,36 @@ public sealed partial class MapPageViewModel : ObservableObject
             }
             if (detailTiles is null)
             {
+                // Pre-cache: a patch with no detail (off coverage) just contributes nothing — keep what we have.
+                if (routeFilmAccumulate)
+                {
+                    lodDetailCentre = focus;
+                    return;
+                }
+
                 // Off coverage (rule #12): show the base ALONE — drop the stale detail patch rather than
                 // leaving it hanging where the camera no longer is. Clear the detail field too so trails /
                 // roads / route fall back to the base everywhere instead of seating on the gone window.
                 DetailElevation = null;
                 TerrainTiles = new List<TerrainMesh3D>(lodBaseTiles);
+                OnPropertyChanged(nameof(TerrainFrame));
+                lodDetailCentre = focus;
+                return;
+            }
+
+            // Route-film pre-cache: ACCUMULATE patches (base + every patch built along the route) so the whole
+            // corridor stays at 1 m as the camera flies; cap retained patches for memory. Normal use replaces.
+            if (routeFilmAccumulate)
+            {
+                retainedFilmDetail.AddRange(detailTiles);
+                while (retainedFilmDetail.Count > MaxRouteFilmPatches)
+                {
+                    retainedFilmDetail.RemoveAt(0); // evict oldest
+                }
+
+                var film = new List<TerrainMesh3D>(lodBaseTiles);
+                film.AddRange(retainedFilmDetail);
+                TerrainTiles = film;
                 OnPropertyChanged(nameof(TerrainFrame));
                 lodDetailCentre = focus;
                 return;
@@ -3727,7 +4037,7 @@ public sealed partial class MapPageViewModel : ObservableObject
                 return;
             }
 
-            await exportRouteToGpxUseCase.HandleAsync(LastPlannedRoute, destinationPath, fileName).ConfigureAwait(true);
+            await exportRouteToGpxUseCase.HandleAsync(LastPlannedRoute, destinationPath, fileName, RouteStops.ToList()).ConfigureAwait(true);
             StatusMessage = Fmt(Localization.AppStrings.StatusGpxExportedFormat, destinationPath);
             logger.LogInformation("Exported route to {Path}", destinationPath);
         }

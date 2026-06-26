@@ -47,6 +47,7 @@ public partial class MapPage : ContentPage
         TerrainView.TerrainTapped += OnTerrainTapped;
         viewModel.RouteFocusRequested += OnRouteFocusRequested;
         TerrainView.RecordingSaved += OnRecordingSaved;
+        TerrainView.FlightEnded += (_, _) => viewModel.EndRouteFilm();
         TerrainView.CameraFocusMoved += OnCameraFocusMoved;
         viewModel.PropertyChanged += OnViewModelPropertyChanged;
         viewModel.TerrainReframeRequested += OnTerrainReframeRequested;
@@ -309,10 +310,12 @@ public partial class MapPage : ContentPage
         Dispatcher.Dispatch(() => TerrainView.FollowTo(req.Position, req.BearingDegrees));
     }
 
-    // "Film z trasy": start the cinematic fly-through along the planned route (records to MP4).
+    // "Film z trasy": start the cinematic fly-through along the planned route (records to MP4), pausing 3 s at
+    // each stop the user entered.
     private void OnRouteFilmRequested(object? sender, EventArgs e)
     {
-        Dispatcher.Dispatch(() => TerrainView.StartRouteFlight());
+        var stops = viewModel.RouteStops.Select(s => s.Location).ToList();
+        Dispatcher.Dispatch(() => TerrainView.StartRouteFlight(stops));
     }
 
     // LOD Krok 4: the 3D view reports a snapshot of the camera pose as it roams the static base; forward it

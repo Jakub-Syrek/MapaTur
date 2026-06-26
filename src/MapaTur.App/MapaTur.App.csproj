@@ -1,5 +1,13 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+	<!-- Desktop only: Server + concurrent GC. With the big live heap (pooled mesh/raster buffers) Server GC's
+	     PARALLEL collection across cores is markedly faster per Gen2 than single-threaded workstation GC
+	     (device-tested: workstation stuttered more). The phone keeps its default low-RAM workstation GC. -->
+	<PropertyGroup Condition="$(TargetFramework.Contains('-windows'))">
+		<ServerGarbageCollection>true</ServerGarbageCollection>
+		<ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+	</PropertyGroup>
+
 	<PropertyGroup>
 		<TargetFrameworks>net10.0-android</TargetFrameworks>
 		<!-- iOS + MacCatalyst TFMs are only usable when the Apple SDK is present, so

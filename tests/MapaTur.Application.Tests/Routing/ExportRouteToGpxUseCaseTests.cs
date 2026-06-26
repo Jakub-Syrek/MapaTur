@@ -56,7 +56,7 @@ public sealed class ExportRouteToGpxUseCaseTests
         {
             await sut.HandleAsync(route, path, "trip");
 
-            await writer.Received(1).WriteAsync(route, Arg.Any<Stream>(), "trip", Arg.Any<CancellationToken>());
+            await writer.Received(1).WriteAsync(route, Arg.Any<Stream>(), "trip", Arg.Any<IReadOnlyList<RouteWaypoint>?>(), Arg.Any<CancellationToken>());
         }
         finally
         {
