@@ -44,17 +44,29 @@ public static class Trail3DWorldProjection
     /// <param name="detail">Optional 1 m LOD detail field: inside its window the vertex seats on the detail
     /// elevation (matching the rendered near-field mesh) instead of the coarse base, so trails don't float
     /// over the deeper-carved detail surface. Outside the window / on NoData it falls back to the base.</param>
+    /// <param name="bakedIndex">Optional baked-tile index (z13-z16 pyramid). While baked-tile STREAMING is
+    /// active, <paramref name="detail"/> is always null (the legacy per-tile system that populates it never
+    /// runs — see MapPageViewModel.OnDetailFocusAsync's early return), so <paramref name="raster"/> — the
+    /// static whole-region BASE loaded once at scene start — was the ONLY elevation source, completely
+    /// disconnected from whatever baked z13-z16 tile is ACTUALLY rendered under the line. On real steep terrain
+    /// the base can differ from the true baked surface by several metres, so the line was seated "independently
+    /// of the terrain" (confirmed regression report) — sometimes floating, sometimes buried, depending on which
+    /// way that tile's real relief diverges from the smoothed base. When set, a vertex tries the FINEST baked
+    /// tile actually covering it first (matching the real rendered surface); only falls through to
+    /// <paramref name="detail"/>/<paramref name="raster"/> where no baked tile is loaded there.</param>
     public static IReadOnlyList<TrailWorldLine> ToWorld(
         IReadOnlyList<Trail> trails,
         DemRaster raster,
         TerrainMesh3D mesh,
         float trailLiftMeters = 5f,
-        DetailElevationField? detail = null)
+        DetailElevationField? detail = null,
+        BakedTileAvailabilityIndex? bakedIndex = null)
     {
         ArgumentNullException.ThrowIfNull(trails);
         ArgumentNullException.ThrowIfNull(raster);
         ArgumentNullException.ThrowIfNull(mesh);
 
+        var bakedTileCache = new Dictionary<(int Zoom, int X, int Y), DemRaster?>();
         double demWest = raster.West;
         double demEast = raster.East;
         double demSouth = raster.South;
@@ -93,9 +105,20 @@ public static class Trail3DWorldProjection
                     continue;
                 }
 
-                double detailElevation = 0.0;
-                bool gotDetail = detail is not null && detail.TryGetElevation(geo.Longitude, geo.Latitude, out detailElevation);
-                double ground = gotDetail ? detailElevation : raster.SampleBilinear(geo.Longitude, geo.Latitude);
+                double ground;
+                if (bakedIndex is not null && TryGetBakedElevation(bakedIndex, bakedTileCache, geo, out double bakedElevation))
+                {
+                    ground = bakedElevation;
+                }
+                else if (detail is not null && detail.TryGetElevation(geo.Longitude, geo.Latitude, out double detailElevation))
+                {
+                    ground = detailElevation;
+                }
+                else
+                {
+                    ground = raster.SampleBilinear(geo.Longitude, geo.Latitude);
+                }
+
                 world[i] = mesh.GeoToWorld(geo, (float)ground + liftElevation);
             }
 
@@ -103,6 +126,50 @@ public static class Trail3DWorldProjection
         }
 
         return result;
+    }
+
+    // Finest baked zoom worth trying for line seating — matches the finest baked pyramid level (native 1 m).
+    private const int FinestBakedZoomForSeating = 16;
+
+    /// <summary>
+    /// Samples elevation from the finest ACTUALLY-BAKED tile covering <paramref name="geo"/>, if any is loaded.
+    /// This is the same real height data the baked-streaming renderer draws (unlike the static coarse base
+    /// raster) — reuses <see cref="BakedTileMeshBuilder.AsRaster"/> + <see cref="DemRaster.SampleBilinear"/>,
+    /// the SAME sampling primitive the base already uses, just pointed at a real tile instead of a smoothed one.
+    /// <paramref name="cache"/> avoids re-reading the same tile from disk for every densified vertex within it
+    /// (consecutive 1 m-spaced vertices mostly share a tile).
+    /// </summary>
+    public static bool TryGetBakedElevation(
+        BakedTileAvailabilityIndex bakedIndex,
+        Dictionary<(int Zoom, int X, int Y), DemRaster?> cache,
+        GeoPoint geo,
+        out double elevation)
+    {
+        (int x, int y) = SlippyTileMath.LonLatToTile(geo.Longitude, geo.Latitude, FinestBakedZoomForSeating);
+        var cacheKey = (FinestBakedZoomForSeating, x, y);
+        if (!cache.TryGetValue(cacheKey, out DemRaster? tileRaster))
+        {
+            var key = new DemTileKey(FinestBakedZoomForSeating, x, y);
+            BakedDemTile? tile = bakedIndex.IsBaked(key) ? bakedIndex.Load(key) : null;
+            tileRaster = tile is not null ? BakedTileMeshBuilder.AsRaster(tile) : null;
+            cache[cacheKey] = tileRaster;
+        }
+
+        if (tileRaster is null)
+        {
+            elevation = 0.0;
+            return false;
+        }
+
+        double sample = tileRaster.SampleBilinear(geo.Longitude, geo.Latitude);
+        if (sample.Equals(tileRaster.NoDataValue))
+        {
+            elevation = 0.0;
+            return false;
+        }
+
+        elevation = sample;
+        return true;
     }
 
     /// <summary>

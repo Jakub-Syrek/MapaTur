@@ -315,7 +315,10 @@ public partial class MapPage : ContentPage
     private void OnRouteFilmRequested(object? sender, EventArgs e)
     {
         var stops = viewModel.RouteStops.Select(s => s.Location).ToList();
-        Dispatcher.Dispatch(() => TerrainView.StartRouteFlight(stops));
+        // Detail streams LIVE during the film (it follows the route) and the flight gates its forward progress on
+        // detail readiness — so run the normal flow: keep the start-build gate (wait for the first patch before the
+        // first move) and let OnFlightTick hold the camera while a build is in progress.
+        Dispatcher.Dispatch(() => TerrainView.StartRouteFlight(stops, detailPrebuilt: false));
     }
 
     // LOD Krok 4: the 3D view reports a snapshot of the camera pose as it roams the static base; forward it
@@ -323,7 +326,7 @@ public partial class MapPage : ContentPage
     // on drift + cooldown). The base and camera framing don't change, so this never yanks the camera.
     private async void OnCameraFocusMoved(object? sender, Camera3D camera)
     {
-        await viewModel.OnDetailFocusAsync(camera, TerrainView.SurfacePixelHeight);
+        await viewModel.OnDetailFocusAsync(camera, TerrainView.SurfacePixelHeight, TerrainView.SurfacePixelWidth);
     }
 
     // The user dragged a route stop to a new position (CollectionView CanReorderItems) — the stops collection

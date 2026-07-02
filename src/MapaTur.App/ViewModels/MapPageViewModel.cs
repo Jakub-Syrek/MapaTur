@@ -78,6 +78,15 @@ public sealed partial class MapPageViewModel : ObservableObject
     private readonly OfflinePackageService? packageService;
     private readonly DemElevationSource? elevationSource;
 
+    // Stage 2c: the scanned baked-pyramid availability index (null when none was wired / none on disk). Backs the
+    // baked-tile streaming path (UseBakedTileStreaming) — its IsBaked/Roots drive the quadtree selector and its
+    // Load reads .bdt tiles off-thread for the streaming manager built in BuildLodSceneAsync.
+    private readonly MapaTur.Application.Terrain.BakedTileAvailabilityIndex? bakedTileIndex;
+
+    /// <summary>Bound to Terrain3DView.BakedElevationIndex so trail/route/road line seating can sample the same
+    /// real baked-tile elevation the renderer actually draws. Set once at construction, never reassigned.</summary>
+    public MapaTur.Application.Terrain.BakedTileAvailabilityIndex? BakedElevationIndex => bakedTileIndex;
+
     // Cache-presence gate for the LOD render loop (Krok 4b): only already-cached 1 m tiles are loaded while
     // flying, so detail streaming never triggers a WCS download. Null when no GUGiK source is wired.
     private readonly Func<DemTileKey, bool>? detailTileCached;
@@ -1553,6 +1562,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <param name="gugikDemSource">Optional GUGiK 1 m tile source; supplies the cache-only availability check used by LOD detail streaming; null disables it.</param>
     /// <param name="packageService">Optional region-package service (download DEM/ortho packages from the server); null disables the "download data packages" button.</param>
     /// <param name="elevationSource">Optional routing elevation source; the base DEM is handed to it on load so "fastest time" routing sees real slopes; null disables elevation-aware routing.</param>
+    /// <param name="bakedTileIndex">Optional scanned baked-DEM-pyramid index (Stage 2c); backs the baked-tile streaming path. Null/empty falls back to the runtime-build detail path.</param>
     public MapPageViewModel(
         IFilePickerService filePicker,
         IFileSaverService fileSaver,
@@ -1585,7 +1595,8 @@ public sealed partial class MapPageViewModel : ObservableObject
         OfflineRegionDownloader? offlineDownloader = null,
         GugikNmtDemTileSource? gugikDemSource = null,
         OfflinePackageService? packageService = null,
-        DemElevationSource? elevationSource = null)
+        DemElevationSource? elevationSource = null,
+        MapaTur.Application.Terrain.BakedTileAvailabilityIndex? bakedTileIndex = null)
     {
         ArgumentNullException.ThrowIfNull(filePicker);
         ArgumentNullException.ThrowIfNull(fileSaver);
@@ -1625,6 +1636,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         this.packageService = packageService;
         this.elevationSource = elevationSource;
         this.detailTileCached = gugikDemSource is null ? null : gugikDemSource.IsCached;
+        this.bakedTileIndex = bakedTileIndex;
 
         // Subscribe to the location feed once at construction. The service stays silent until the
         // user opts in via ToggleLocationTracking; we just need to be listening so the first fix
@@ -2349,106 +2361,41 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <summary>Raised when the user asks to film the planned route — the page starts the route fly-through.</summary>
     public event EventHandler? RouteFilmRequested;
 
-    /// <summary>Films the planned tourist route: a cinematic fly-through ALONG it, recorded to MP4. The 1 m
-    /// detail stays smooth via the persistent per-tile mesh cache (no upfront pre-build / "game with a 30 s
-    /// precache" — unchanged ground is reused, only new tiles build as the camera advances).</summary>
+    /// <summary>Films the planned tourist route: a cinematic fly-through ALONG it, recorded to MP4. Detail
+    /// streaming STAYS ON during the film so the 1 m detail LIVE-STREAMS along the route as the camera advances
+    /// steadily (a short start gate waits for the first patch so the opening isn't over bare base; after that the
+    /// flight just keeps moving). The film honours the normal ~35 s detail-reload cooldown — re-centring churns
+    /// tiles + triggers GC, so the wide window covers the gaze between rare cooldown-paced re-centres.</summary>
     [RelayCommand]
     private void MakeRouteFilm()
     {
-        if (!HasPlannedRoute)
+        if (!HasPlannedRoute || LastPlannedRoute is null)
         {
-            return;
+            return; // the flight reads the route polyline itself from the bound Route overlay
         }
 
         ActiveSection = 0; // clear the panel for a clean cinematic shot
+
+        // Detail MUST stream during the film so it follows the route; do NOT pre-build/suppress. Mark the film
+        // active so EndRouteFilm knows this teardown is a real route film (vs the built-in demo) and resets the
+        // detail state. Detail re-centres still honour the normal ~35 s cooldown. Cleared in EndRouteFilm.
+        routeFilmActive = true;
+        routeFilmSuppress = false; // belt-and-braces: detail streams normally during the film
+
         RouteFilmRequested?.Invoke(this, EventArgs.Empty);
     }
 
-    // Patches are ~7 km windows (PerTileWindowRadiusMeters 3.5 km radius). Step ~5 km so 2-3 overlapping patches
-    // cover a typical 10 km route — NOT 8 small ones (that re-meshed the same ground and ate memory for nothing).
-    private const double RouteFilmPatchStepMeters = 5000.0;     // focus spacing along the route for pre-cache patches
-    private const float RouteFilmPreCacheCamDistance = 950f;    // a close build camera so each patch comes back at 1 m
-
-    // DESKTOP-ONLY route-film pre-cache: step a build-camera along the route and build+RETAIN a 1 m patch at each
-    // step, so the whole corridor is ready before the camera moves. Suppresses per-move rebuilds for the film.
-    private async Task PreCacheRouteFilmDetailAsync(IReadOnlyList<GeoPoint> poly)
-    {
-        if (!OperatingSystem.IsWindows() || lodBaseTiles is null || TerrainRaster is null || poly.Count < 2)
-        {
-            return; // desktop only; needs a live LOD scene to overlay onto
-        }
-
-        // Focuses every ~RouteFilmPatchStepMeters along the route, capped to MaxRouteFilmPatches.
-        double total = 0;
-        for (int i = 0; i < poly.Count - 1; i++)
-        {
-            total += poly[i].HaversineDistanceMetersTo(poly[i + 1]);
-        }
-
-        double step = Math.Max(RouteFilmPatchStepMeters, total / MaxRouteFilmPatches);
-        var focuses = new List<GeoPoint> { poly[0] };
-        double acc = 0;
-        for (int i = 0; i < poly.Count - 1; i++)
-        {
-            acc += poly[i].HaversineDistanceMetersTo(poly[i + 1]);
-            if (acc >= step)
-            {
-                focuses.Add(poly[i + 1]);
-                acc = 0;
-            }
-        }
-
-        if (focuses.Count == 0 || focuses[^1].HaversineDistanceMetersTo(poly[^1]) > step * 0.5)
-        {
-            focuses.Add(poly[^1]);
-        }
-
-        routeFilmSuppress = false;
-        routeFilmAccumulate = true;
-        retainedFilmDetail.Clear();
-        float exaggeration = (float)Math.Clamp(VerticalExaggeration, 1.0, 5.0);
-
-        for (int i = 0; i < focuses.Count; i++)
-        {
-            GeoPoint f = focuses[i];
-            double elev = TerrainRaster.SampleBilinear(f.Longitude, f.Latitude);
-            if (double.IsNaN(elev) || elev < 200 || elev > 4000)
-            {
-                elev = 2000;
-            }
-
-            System.Numerics.Vector3 ground = LocalTangentProjection.GeoToWorld(f, (float)elev, lodAnchor, exaggeration);
-            var cam = new MapaTur.Application.Terrain.Camera3D
-            {
-                Target = ground,
-                Distance = RouteFilmPreCacheCamDistance, // close ⇒ z16 (1 m)
-                AzimuthRadians = 0f,
-                PitchRadians = 1.3f, // looking down at the route point
-                FieldOfViewYRadians = 0.6f,
-                NearPlane = 1f,
-                FarPlane = 60000f,
-            };
-
-            StatusMessage = Fmt("Buduję detal trasy do filmu… {0}/{1}", i + 1, focuses.Count);
-
-            // Defeat OnDetailFocusAsync's reload/cooldown gates so EVERY pre-cache focus actually builds.
-            lodDetailCentre = new GeoPoint(0, 0);
-            lastLodDetailReloadUtc = DateTime.MinValue;
-            await OnDetailFocusAsync(cam).ConfigureAwait(true);
-        }
-
-        routeFilmSuppress = true; // film about to fly: keep the pre-built 1 m, stop lagging rebuilds
-        StatusMessage = string.Empty;
-    }
-
-    /// <summary>Called when the route film ends: drop the retained pre-cached detail + resume normal streaming.</summary>
+    /// <summary>Called when the route film ends: clear the film-active flag and resume normal streaming. The film
+    /// no longer pre-caches/suppresses detail — it streams live and gates the camera on readiness — so there is no
+    /// retained pre-cache to drop, only the active flag to reset.</summary>
     public void EndRouteFilm()
     {
-        if (!routeFilmSuppress && !routeFilmAccumulate)
+        if (!routeFilmActive && !routeFilmSuppress && !routeFilmAccumulate)
         {
-            return; // not a pre-cached route film (e.g. the built-in demo) — nothing to undo
+            return; // not a route film (e.g. the built-in demo) — nothing to undo
         }
 
+        routeFilmActive = false;
         routeFilmSuppress = false;
         routeFilmAccumulate = false;
         retainedFilmDetail.Clear();
@@ -3192,11 +3139,20 @@ public sealed partial class MapPageViewModel : ObservableObject
             // none on watercourses/the Slovak side) AND edge-matches from TerrainRaster — both need the base.
             TerrainRaster = baseRaster;
 
-            // Initial detail ring centred on the base centre, anchored to the same scene origin (finest z16).
-            IReadOnlyList<TerrainMesh3D>? detailTiles = await BuildDetailTilesAsync(baseCentre, baseCentre, NearDetailZoom).ConfigureAwait(true);
-            if (detailTiles is not null)
+            // Stage 2c: when baked streaming will run this scene, SKIP the one-shot runtime detail build — the
+            // baked stream fills the near field on the first camera tick, so building (and uploading) a redundant
+            // mosaic/repair detail here would only re-introduce the very multi-second startup stall the bake
+            // removes. The base alone is shown until the first stream update. The runtime build still runs for the
+            // fallback path (streaming off / no baked pyramid).
+            bool willStreamBaked = UseBakedTileStreaming && bakedTileIndex is { Count: > 0 };
+            if (!willStreamBaked)
             {
-                combined.AddRange(detailTiles);
+                // Initial detail ring centred on the base centre, anchored to the same scene origin (finest z16).
+                IReadOnlyList<TerrainMesh3D>? detailTiles = await BuildDetailTilesAsync(baseCentre, baseCentre, NearDetailZoom).ConfigureAwait(true);
+                if (detailTiles is not null)
+                {
+                    combined.AddRange(detailTiles);
+                }
             }
             // Landmarks: name + seat the known Tatra summits on the LOD base so peaks (Rysy, Mięguszowiecki,
             // Mnich, Kozi Wierch, …) are labelled in the demo too. Detect on a coarse copy (the dominance scan
@@ -3211,11 +3167,17 @@ public sealed partial class MapPageViewModel : ObservableObject
                 PeakNamer.MergeWithGazetteer(PeakDetector.Detect(lodPeakRaster, lodPeakOptions), lodGazetteer, baseRaster)).ConfigureAwait(true);
             RebuildPlaceGazetteer();
             lodBaseTiles = baseTiles;
+            lodBaseTileFootprints = ComputeBaseTileFootprints(baseTiles);
             lodAnchor = baseCentre;
             lodDetailCentre = baseCentre;
             detailMeshCache.Clear(); // new scene: anchor + ortho coverage changed ⇒ cached block keys are no longer valid
             detailRepairCache.Clear(); // new scene ⇒ raw tile inputs differ ⇒ cached repairs invalid
+            detailRoughnessCache.Clear(); // new scene ⇒ terrain differs ⇒ cached roughness invalid
             lastValidLookAtWorld = null; // new scene frame — drop any look-at from a previous LOD session
+
+            // Stage 2c: wire (or reset) the baked-tile streaming manager for THIS scene's anchor + ortho coverage.
+            // No-op when streaming is off / no baked pyramid is on disk → OnDetailFocusAsync uses the runtime path.
+            SetUpBakedStreaming((float)Math.Clamp(VerticalExaggeration, 1.0, 5.0));
             TerrainTiles = combined;
             OnPropertyChanged(nameof(TerrainFrame));
             Is3DMode = true;
@@ -3240,6 +3202,196 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             IsBusy = false;
         }
+    }
+
+    // Stage 2c: (re)build the baked-tile streaming manager for the current LOD scene, or leave streaming inactive
+    // when it's switched off or no baked pyramid is on disk (then OnDetailFocusAsync stays on the runtime-build
+    // path). The manager streams the pre-baked z13–z16 pyramid against the scene's anchor + ortho coverage, so
+    // baked tiles land in the same world frame and drape the same ortho as the base/detail the rest of the scene
+    // already uses. exaggeration must match the live terrain so a baked tile shades + seats identically.
+    private void SetUpBakedStreaming(float exaggeration)
+    {
+        bakedStreamManager = null;
+        bakedStreamActive = false;
+
+        if (!UseBakedTileStreaming || bakedTileIndex is null || bakedTileIndex.Count == 0)
+        {
+            logger.LogInformation(
+                "[BakedStream] inactive (enabled={Enabled}, bakedTiles={Count}) — using runtime-build detail",
+                UseBakedTileStreaming, bakedTileIndex?.Count ?? 0);
+            return;
+        }
+
+        var meshOptions = new MapaTur.Application.Terrain.TerrainMeshOptions
+        {
+            VerticalExaggeration = exaggeration,
+        };
+
+        MapaTur.Application.Terrain.BakedTileAvailabilityIndex index = bakedTileIndex;
+        bakedStreamManager = new MapaTur.Application.Terrain.BakedTileStreamingManager(
+            index.Roots,
+            index.IsBaked,
+            index.Load,
+            lodAnchor,
+            index.MinZoom,
+            Math.Max(index.MinZoom, BakedStreamMaxZoom),
+            BakedStreamMaxResidentTiles,
+            BakedStreamMaxConcurrentLoads,
+            BakedStreamMaxErrorPixels,
+            BakedTileSkirtDepthMeters,
+            meshOptions,
+            lodOrthoCoverage,
+            orthoTileIndexOffset: 0, // baked tiles share the base scene's ortho coverage grid → same cell indices
+            maxResidentBytes: BakedStreamMaxResidentBytes);
+        bakedStreamActive = true;
+        logger.LogInformation(
+            "[BakedStream] active: {Count} baked tiles, roots={Roots} z{MinZoom}-{MaxZoom}, cap={Cap}, ortho={Ortho}",
+            index.Count, index.Roots.Count, index.MinZoom, Math.Max(index.MinZoom, BakedStreamMaxZoom),
+            BakedStreamMaxResidentTiles, lodOrthoCoverage is not null ? "textured" : "hypsometric");
+    }
+
+    // Per-tile downward skirt depth: a coarser tile (lower zoom) spans more ground and meets finer neighbours
+    // with a bigger vertical step, so it hangs a proportionally deeper apron to hide the LOD-seam crack. ~6 m at
+    // the finest z16, doubling per coarser level — the visible top surface is untouched (the skirt only appends).
+    private static float BakedTileSkirtDepthMeters(DemTileKey key)
+    {
+        int stepsCoarserThanFinest = Math.Max(0, BakedStreamMaxZoom - key.Zoom);
+        return 6f * (1 << Math.Min(stepsCoarserThanFinest, 4)); // cap the multiplier so a far root skirt stays sane
+    }
+
+    // Re-entrancy + light debounce for the baked stream. The manager update (select + diff + capped off-thread
+    // load) is far cheaper than the old mosaic/repair rebuild, so this is a small guard against piling updates,
+    // not the heavy ~35 s cooldown the runtime path needs.
+    private bool bakedStreamUpdating;
+    private DateTime lastBakedStreamUtc = DateTime.MinValue;
+    private static readonly TimeSpan BakedStreamMinInterval = TimeSpan.FromMilliseconds(120);
+
+    // Stage 2c: advance the baked-tile stream for the current camera and swap the drawable set to
+    // base + resident-baked. The selector/residency/load all live in BakedTileStreamingManager; here we just
+    // feed it the camera + viewport, publish the result, and log the per-move delta on the always-visible badge.
+    private async Task StreamBakedDetailAsync(
+        MapaTur.Application.Terrain.Camera3D camera, int viewportHeightPixels, int viewportWidthPixels)
+    {
+        if (bakedStreamManager is null || lodBaseTiles is null)
+        {
+            return;
+        }
+
+        // Coalesce: one update in flight at a time, and skip micro-moves within the debounce window. A move that
+        // arrives mid-update is simply dropped — the next move re-selects from the latest pose, so nothing is lost.
+        if (bakedStreamUpdating || DateTime.UtcNow - lastBakedStreamUtc < BakedStreamMinInterval)
+        {
+            return;
+        }
+
+        bakedStreamUpdating = true;
+        lastBakedStreamUtc = DateTime.UtcNow;
+        try
+        {
+            double viewportHeight = viewportHeightPixels > 0 ? viewportHeightPixels : 1000.0;
+            float aspect = viewportWidthPixels > 0 && viewportHeightPixels > 0
+                ? (float)viewportWidthPixels / viewportHeightPixels
+                : 16f / 9f; // first frame before a real backbuffer size is known — a sane default for the cull
+
+            MapaTur.Application.Terrain.BakedStreamingUpdate update =
+                await bakedStreamManager.UpdateAsync(camera, aspect, viewportHeight).ConfigureAwait(true);
+
+            // The resident/occlusion set only changes when a tile loads or evicts, so only then do we rebuild the
+            // drawable list (otherwise the renderer diffs by identity and rebuilding the List allocates + re-runs
+            // OnTilesChanged needlessly). Skip the base tiles fully hidden behind resident, hole-free baked detail
+            // — that base is otherwise shaded then depth-rejected under every baked tile (the terrain shader's
+            // reflection-clip discard disables early-Z), pure overdraw. A streaming hole leaves its base drawn.
+            if (update.Loaded > 0 || update.Evicted > 0 || TerrainTiles is null)
+            {
+                // Base-under-baked overdraw culling (B) is OFF: the per-pass GPU profiler showed the frame is
+                // GPU-cheap (~8–16 ms), so the overdraw win is negligible — while culling the base out from under
+                // COARSE (z13/z14) baked tiles removed the smooth underlay that hid LOD seams, exposing
+                // mis-stitched "rectangular tile" walls / LOD mismatches. So the base is ALWAYS drawn under the
+                // baked detail (known-good). The flag keeps the machinery for a future z16-only variant.
+                bool[] occludedBase = Array.Empty<bool>();
+                int occluderCount = 0;
+                if (BakedStreamCullOccludedBase && lodBaseTileFootprints is { Count: > 0 })
+                {
+                    IReadOnlyList<MapaTur.Application.Terrain.DemTileKey> occluders = bakedStreamManager.OccludingKeys;
+                    occluderCount = occluders.Count;
+                    if (occluderCount > 0)
+                    {
+                        occludedBase = MapaTur.Application.Terrain.BaseTileOcclusionPlanner.OccludedBaseTiles(
+                            lodBaseTileFootprints, occluders, BakedStreamMaxZoom);
+                    }
+                }
+
+                bool cull = occludedBase.Length == lodBaseTiles.Count;
+
+                var combined = new List<TerrainMesh3D>(lodBaseTiles.Count + update.ResidentTiles.Count);
+                int culled = 0;
+                for (int i = 0; i < lodBaseTiles.Count; i++)
+                {
+                    if (cull && occludedBase[i])
+                    {
+                        culled++;
+                        continue;
+                    }
+
+                    combined.Add(lodBaseTiles[i]);
+                }
+
+                combined.AddRange(update.ResidentTiles);
+                TerrainTiles = combined; // OnTilesChanged: DetailStreamingEnabled ⇒ repaint only, no reframe
+                OnPropertyChanged(nameof(TerrainFrame));
+
+                if ((update.Loaded > 0 || update.Evicted > 0) && BakedStreamCullOccludedBase)
+                {
+                    logger.LogInformation(
+                        "[BakedStream] base occlusion: culled {Culled}/{Total} base tiles behind {Occluders} hole-free baked",
+                        culled, lodBaseTiles.Count, occluderCount);
+                }
+            }
+
+            // The baked stream owns the whole detail surface now, so overlays fall back to the coarse base (the
+            // trail decal is re-integrated in Stage 3). Clearing the fine detail field keeps trails/route from
+            // seating against a window the streamer no longer maintains.
+            DetailElevation = null;
+
+            if (update.Loaded > 0 || update.Evicted > 0)
+            {
+                logger.LogInformation(
+                    "[BakedStream] resident={Resident} loaded={Loaded} evicted={Evicted} desired={Desired} clamped={Clamped}",
+                    bakedStreamManager.ResidentCount, update.Loaded, update.Evicted, update.Desired, update.WasClampedByBudget);
+            }
+
+            if (ShowLodDiagnostics)
+            {
+                string badge = $"BAKED z{bakedTileIndex?.MinZoom ?? 0}-{BakedStreamMaxZoom} "
+                    + $"res {bakedStreamManager.ResidentCount}/{update.Desired}"
+                    + (update.WasClampedByBudget ? " (cap)" : string.Empty);
+                MainThread.BeginInvokeOnMainThread(() => LodBadgeText = badge);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "[BakedStream] update failed");
+        }
+        finally
+        {
+            bakedStreamUpdating = false;
+        }
+    }
+
+    // Geographic footprint of each base tile from its world AABB (X east, Y north): the SW-most ground corner maps
+    // from (WorldMin.X, WorldMin.Y) and the NE-most from (WorldMax.X, WorldMax.Y), via the tile's own anchor. Built
+    // once per scene; consumed by BaseTileOcclusionPlanner to skip base tiles hidden under resident baked detail.
+    private static IReadOnlyList<MapBounds> ComputeBaseTileFootprints(IReadOnlyList<TerrainMesh3D> baseTiles)
+    {
+        var footprints = new List<MapBounds>(baseTiles.Count);
+        foreach (TerrainMesh3D tile in baseTiles)
+        {
+            GeoPoint sw = tile.WorldToGeo(new System.Numerics.Vector3(tile.WorldMin.X, tile.WorldMin.Y, 0f));
+            GeoPoint ne = tile.WorldToGeo(new System.Numerics.Vector3(tile.WorldMax.X, tile.WorldMax.Y, 0f));
+            footprints.Add(new MapBounds(sw, ne));
+        }
+
+        return footprints;
     }
 
     /// <summary>
@@ -3291,13 +3443,56 @@ public sealed partial class MapPageViewModel : ObservableObject
     private bool isLodStreaming;
 
     private IReadOnlyList<TerrainMesh3D>? lodBaseTiles;
+
+    // Geographic footprint of each base tile (parallel to lodBaseTiles), computed once per scene from each tile's
+    // world AABB. Used by BaseTileOcclusionPlanner to skip drawing base tiles fully hidden behind resident baked
+    // detail (overdraw kill — the base is otherwise shaded then depth-rejected under every baked tile).
+    private IReadOnlyList<MapBounds>? lodBaseTileFootprints;
     private MapaTur.Application.Terrain.OrthoCoverage? lodOrthoCoverage; // ortho coverage for the current LOD scene (null = hypsometric)
 
-    // Route-film 1 m PRE-CACHE (desktop only). Building one detail patch takes seconds, so a moving film outran
-    // it (most of the film on the coarse base). Instead, before the film we step a build-camera ALONG the route
-    // and RETAIN every patch (routeFilmAccumulate ⇒ OnDetailFocusAsync appends instead of replacing); during the
-    // film itself routeFilmSuppress stops any further (lagging) rebuild so the camera flies over the pre-built
-    // 1 m. Cleared when the film ends.
+    // ── Stage 2c: baked-tile streaming ──────────────────────────────────────────────────────────────────────
+    // The detail path: instead of mosaicking + repairing + per-window re-meshing the z16 raster on every camera
+    // move (the runtime-build path, kept as the fallback below), STREAM the pre-baked, pre-repaired tile pyramid.
+    // A quadtree screen-space-error selector picks the desired tiles (finest near the eye), a residency planner
+    // diffs them against what's resident, and each new tile is read + meshed OFF-thread — no multi-second freeze.
+    // Default ON for this dev build; toggle OFF (UseBakedTileStreaming=false) to fall back to the proven runtime
+    // build. Inactive when no baked pyramid is on disk (bakedTileIndex null/empty) — the old path then runs.
+    private const bool UseBakedTileStreaming = true;
+    private const int BakedStreamMaxResidentTiles = 256;   // desktop residency cap by tile COUNT (far field coarsens to fit)
+    // Cull base tiles fully hidden behind resident hole-free baked tiles (overdraw saver). OFF: GPU is cheap
+    // (profiler ~8–16 ms/frame) so the saving is moot, and culling under COARSE baked tiles exposed LOD seams the
+    // base was hiding. Leave off until/unless restricted to z16-only occluders. See StreamBakedDetailAsync.
+    private const bool BakedStreamCullOccludedBase = false;
+    // Residency cap by total resident tile GEOMETRY bytes. The broad 1 m ring streamed many tiles whose geometry
+    // alone (on top of the resident ortho) tipped the process into OOM at the route film's lowest point. Capping
+    // resident geometry bounds memory while the RING SELECTION stays broad (this only bounds what's kept resident
+    // — eviction is still farthest-first).
+    // 2026-06-30: raised 512 MB → 1280 MB. At 512 MB the desired finest ring (res 255) clamped to ~127 resident
+    // (badge "res 127/255 (cap)"), so HALF the already-baked, available 1 m tiles in view were evicted → the big
+    // smooth "dead zones". A 256² tile + skirt + 32-bit indices is ~4 MB, so the full ~255-tile desired set needs
+    // ~1 GB; 1280 MB holds it with headroom. GPU is cheap (~8 ms/frame measured) so coverage, not FPS, is the
+    // limit. Trade-off: more resident geometry = more RAM/VRAM — watch [Mem] heap for OOM; base-occlusion culling
+    // (BaseTileOcclusionPlanner) frees the covered base VBOs, reclaiming some of it.
+    private const long BakedStreamMaxResidentBytes = 1280L * 1024 * 1024;
+    private const int BakedStreamMaxConcurrentLoads = 8;   // tiles read+meshed per camera update (a jump streams over several)
+    private const double BakedStreamMaxErrorPixels = 2.5;  // screen-space pixel-error budget driving refinement
+    private const int BakedStreamMaxZoom = NearDetailZoom; // finest baked zoom = the native 1 m level (z16)
+    // The streaming manager for the current LOD scene (rebuilt per BuildLodSceneAsync; null when streaming is
+    // inactive). Driven from OnDetailFocusAsync on every camera move.
+    private MapaTur.Application.Terrain.BakedTileStreamingManager? bakedStreamManager;
+    // True once BuildLodSceneAsync has wired a streaming manager for this scene — gates OnDetailFocusAsync onto
+    // the baked path. Cleared with the manager when a new scene loads or streaming is unavailable.
+    private bool bakedStreamActive;
+
+    // Route-film state. The CURRENT approach keeps detail streaming ON during the film and gates the camera's
+    // forward progress on detail readiness (OnFlightTick holds while IsLodStreaming), so the 1 m detail follows
+    // the route with no mid-motion stutter. routeFilmActive is true while the film runs and is used by EndRouteFilm
+    // to tell a real route-film teardown apart from the built-in demo. Detail re-centres honour the normal ~35 s
+    // reload cooldown (re-centring churns tiles + GC). Set in MakeRouteFilm, cleared in EndRouteFilm.
+    private bool routeFilmActive;
+    // Legacy pre-cache flags (no longer driven — the pre-cache path was removed): routeFilmAccumulate had
+    // OnDetailFocusAsync APPEND retained patches, routeFilmSuppress stopped per-move rebuilds. Kept so the
+    // accumulate/suppress branches still compile and EndRouteFilm can defensively reset them.
     private bool routeFilmAccumulate;
     private bool routeFilmSuppress;
     private readonly List<TerrainMesh3D> retainedFilmDetail = new();
@@ -3317,6 +3512,10 @@ public sealed partial class MapPageViewModel : ObservableObject
     // Repaired-raster cache: FillNarrowZeroStrips + FillPits dominate each build (~23 s over the whole window per
     // the log). Cached per-tile, a sliding window only repairs new tiles ⇒ kills the per-build repair + its GC churn.
     private readonly MapaTur.Application.Terrain.PerTileRepairCache detailRepairCache = new();
+    // Roughness cache: the per-tile roughness scan is camera-INDEPENDENT (a pure function of the repaired terrain)
+    // yet re-ran over the whole window on every re-center. Cached per absolute tile, a sliding window only scans
+    // the new tiles ⇒ the camera-dependent distance→step decision stays per-call (cheap) but the scan does not.
+    private readonly MapaTur.Application.Terrain.PerTileRoughnessCache detailRoughnessCache = new();
     // The detail raster (~90 MB) is rented from the pool (PerTileRepair) and shared with the render thread (overlay
     // seating reads it async). Return it only after 2 newer ones exist — the render is then provably off it — so a
     // moving window recycles ~3 buffers instead of churning a fresh 90 MB each reload.
@@ -3427,6 +3626,37 @@ public sealed partial class MapPageViewModel : ObservableObject
     private const double PerTileCameraBubbleRadiusMeters = 250.0;        // near-camera tiles forced fine regardless of look-at (no blocky foreground under a low camera)
     private const int PerTileCameraBubbleStep = 2;                       // coarsest step allowed inside the camera bubble
 
+    // ───────────────────────────────────────────────────────────────────────────────────────────────────
+    // STAGE 0 — MAXIMUM-FIDELITY QUALITY PROOF (reversible). Flip this ONE flag to false to fully revert.
+    // Goal: render a close peak at full native 1 m with NO budget/SSE demotion, so the user can judge whether
+    // baking full-resolution 1 m tiles is worth it. Performance is intentionally NOT a concern here (a one-time
+    // close look may stutter). When ON, the per-tile detail planner is fed a single candidate step (1) and an
+    // effectively-infinite vertex budget, so EVERY near-window tile renders at true 1 m (finestStep=1,
+    // avgStep=1.0, hist all in bucket 1) — VertexBudget can never demote a tile that has no coarser level.
+    // The detail window is also tightened so the near peak is genuinely all step-1 without an absurd vertex
+    // count. Texture sampling (ortho mipmaps + max anisotropy) is already on in the GL renderer's ortho path;
+    // Stage 0 only forces the GEOMETRY step/budget here. Toggle OFF ⇒ the proven adaptive {1,2,4,8}+budget path.
+    // Stage 2c: the baked-tile STREAMING path (UseBakedTileStreaming) replaces the Stage-0 desktop proof — the
+    // near field is full native 1 m from the baked z16 pyramid, the far field uses coarser baked LODs, all
+    // pre-repaired so a camera move never triggers the per-window mosaic/repair/rebuild. Stage-0's "force every
+    // tile to step 1 with no budget" is therefore off; the baked path is the proof now.
+    private static readonly bool Stage0MaxFidelity = false;
+
+    // Stage-0 effective knobs (used only when Stage0MaxFidelity). Single step ⇒ no demotion is possible;
+    // long.MaxValue budget ⇒ ConstrainToBudget never steps anything down. SSE error budget irrelevant with one
+    // candidate, but tightened anyway so the intent reads clearly. Window kept generous but bounded so the near
+    // peak is full 1 m (a 2500 m z16 window ≈ 25 M cells @1 m — heavy but a one-time look, fine on a desktop GPU).
+    private static readonly int[] Stage0SubsampleSteps = { 1 };          // ONLY step 1 ⇒ every tile is native 1 m, budget cannot demote
+    private const long Stage0VertexBudget = long.MaxValue;              // no budget cap ⇒ no plasticine demotion (perf intentionally ignored)
+    private const double Stage0WindowRadiusMeters = 2500.0;            // tightened from 3500 so the full step-1 window stays a sane vertex count for a one-time close look
+    private const double Stage0MaxErrorPixels = 0.5;                   // (moot with one candidate) signals "ask for the finest" to SelectLod
+
+    // Effective per-tile knobs: Stage-0 overrides when the proof flag is on, else the proven adaptive values.
+    private static int[] EffectivePerTileSubsampleSteps => Stage0MaxFidelity ? Stage0SubsampleSteps : PerTileSubsampleSteps;
+    private static long EffectivePerTileVertexBudget => Stage0MaxFidelity ? Stage0VertexBudget : PerTileVertexBudget;
+    private static double EffectivePerTileWindowRadiusMeters => Stage0MaxFidelity ? Stage0WindowRadiusMeters : PerTileWindowRadiusMeters;
+    private static double EffectiveDetailMaxErrorPixels => Stage0MaxFidelity ? Stage0MaxErrorPixels : DetailMaxErrorPixels;
+
     // Last look-at world point with a real terrain hit. On a transient raycast miss (sky / off-DEM) the
     // detail holds here instead of teleporting to the camera target — avoids micro-jumps of the patch.
     // Kept in the scene frame of the current lodAnchor, so it is reset whenever a new LOD session loads.
@@ -3527,7 +3757,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             return null;
         }
 
-        MapBounds window = LodTerrainWindow.Around(focus, PerTileWindowRadiusMeters);
+        MapBounds window = LodTerrainWindow.Around(focus, EffectivePerTileWindowRadiusMeters);
         IReadOnlyList<DemTileKey> planned = DemTilePlanner.TilesForBounds(window, NearDetailZoom);
         int cachedCount = detailTileCached is null ? planned.Count : planned.Count(detailTileCached);
         lastPerTileRequested = planned.Count;   // surfaced in the on-screen LOD diagnostic (LodDetailDiagnostics)
@@ -3536,7 +3766,15 @@ public sealed partial class MapPageViewModel : ObservableObject
             "LOD per-tile cache-only z{Zoom}: requested={Requested}, cached={Cached}, skipped={Skipped}",
             NearDetailZoom, planned.Count, cachedCount, planned.Count - cachedCount);
 
+        // Time the mosaic (fetch+decode+stitch). With the loader's decoded-tile cache, a re-center decodes only the
+        // newly-entered z16 tiles and reuses the overlap, so mosaicMs should drop sharply once the window is warm —
+        // surfaced in the timing log below alongside repair/roughness/mesh so the breakdown is visible on device.
+        var mosaicTimer = System.Diagnostics.Stopwatch.StartNew();
         DemRaster? full = await regionDemLoader.LoadRegionAsync(window, NearDetailZoom, tileAvailable: DetailTileGate, fillNoData: false).ConfigureAwait(true);
+        mosaicTimer.Stop();
+        long mosaicMs = mosaicTimer.ElapsedMilliseconds;
+        int mosaicTileHits = regionDemLoader.LastDecodedTileHits;
+        int mosaicTileMisses = regionDemLoader.LastDecodedTileMisses;
         if (full is null)
         {
             lastPerTileNote = "no-raster";
@@ -3564,6 +3802,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         int detailMinTileX = 0, detailMinTileY = 0, detailTilePxX = 0, detailTilePxY = 0;
         MapaTur.Application.Terrain.PerTileMeshCache? activeCache = null;
         MapaTur.Application.Terrain.PerTileRepairCache? activeRepairCache = null;
+        MapaTur.Application.Terrain.PerTileRoughnessCache? activeRoughnessCache = null;
         if (EnablePerTileDetailCache && planned.Count > 0)
         {
             int minTileX = int.MaxValue, minTileY = int.MaxValue, maxTileX = int.MinValue, maxTileY = int.MinValue;
@@ -3587,8 +3826,10 @@ public sealed partial class MapPageViewModel : ObservableObject
                 detailAbsRow = minTileY * detailTilePxY;
                 activeCache = detailMeshCache;
                 activeRepairCache = detailRepairCache;
+                activeRoughnessCache = detailRoughnessCache;
                 detailMeshCache.BeginRound();
                 detailRepairCache.BeginRound();
+                detailRoughnessCache.BeginRound();
             }
         }
 
@@ -3648,11 +3889,12 @@ public sealed partial class MapPageViewModel : ObservableObject
             builtDetailRaster = holed; // surface the seated-surface raster for overlay elevation sampling
 
             PerTilePlanResult planResult = PerTileDetailPlanner.PlanDetailed(
-                holed, cameraPosition, anchor, exaggeration, PerTileGridN, PerTileSubsampleSteps,
-                fovY, viewportHeight, DetailMaxErrorPixels, preset, PerTileVertexBudget,
+                holed, cameraPosition, anchor, exaggeration, PerTileGridN, EffectivePerTileSubsampleSteps,
+                fovY, viewportHeight, EffectiveDetailMaxErrorPixels, preset, EffectivePerTileVertexBudget,
                 PerTileRoughnessStride, PerTileRoughnessNeighborDistance,
                 PerTileCameraBubbleRadiusMeters, PerTileCameraBubbleStep,
-                absColOrigin: detailAbsCol, absRowOrigin: detailAbsRow, tileQuantum: PerTileDetailQuantum);
+                absColOrigin: detailAbsCol, absRowOrigin: detailAbsRow, tileQuantum: PerTileDetailQuantum,
+                roughnessCache: activeRoughnessCache);
             IReadOnlyList<PerTileLodDecision> plan = planResult.Tiles;
             builtPlan = plan; // carried out so DetailElevation reconstructs the rendered (subsampled) surface, not raw 1 m
 
@@ -3705,13 +3947,16 @@ public sealed partial class MapPageViewModel : ObservableObject
                 "LOD per-tile [{Preset}]: tiles={Tiles} finestStep={Finest} avgStep={Avg:F1} hist(1/2/4/8)={S1}/{S2}/{S4}/{S8} " +
                 "boosted={Boosted} demoted={Demoted} maxRough={MaxR:F1}m maxFactor={MaxF:F2} vertices={Verts}/{Budget}; " +
                 "step1Dist={NearS1:F0}-{FarS1:F0}m; " +
-                "meshHit={MeshHit} meshMiss={MeshMiss}(new={MissNew} churn={MissChurn}) win={WinCols}x{WinRows} tilePx={TilePx} repairMs={RepairMs} roughnessMs={RoughnessMs:F0} planningMs={PlanningMs:F0} meshBuildMs={MeshMs} totalDetailMs={TotalMs} (stride {Stride})",
+                "meshHit={MeshHit} meshMiss={MeshMiss}(new={MissNew} churn={MissChurn}) roughHit={RoughHit} roughMiss={RoughMiss} " +
+                "tileHit={TileHit} tileMiss={TileMiss} win={WinCols}x{WinRows} tilePx={TilePx} mosaicMs={MosaicMs} repairMs={RepairMs} roughnessMs={RoughnessMs:F0} planningMs={PlanningMs:F0} meshBuildMs={MeshMs} totalDetailMs={TotalMs} (stride {Stride})",
                 preset.Name, plan.Count, finestStep, avgStep, s1, s2, s4, s8,
-                boostedTiles, demotedTiles, maxRoughness, maxFactor, totalVertices, PerTileVertexBudget,
+                boostedTiles, demotedTiles, maxRoughness, maxFactor, totalVertices, EffectivePerTileVertexBudget,
                 nearStep1, farStep1,
                 activeCache?.Hits ?? 0, activeCache?.Misses ?? 0, activeCache?.MissNewGround ?? 0, activeCache?.MissSameGround ?? 0,
+                activeRoughnessCache?.Hits ?? 0, activeRoughnessCache?.Misses ?? 0,
+                mosaicTileHits, mosaicTileMisses,
                 holed.Columns, holed.Rows, detailTilePxX,
-                repairTimer.ElapsedMilliseconds, planResult.RoughnessMs, planResult.PlanningMs, meshTimer.ElapsedMilliseconds, totalTimer.ElapsedMilliseconds, PerTileRoughnessStride);
+                mosaicMs, repairTimer.ElapsedMilliseconds, planResult.RoughnessMs, planResult.PlanningMs, meshTimer.ElapsedMilliseconds, totalTimer.ElapsedMilliseconds, PerTileRoughnessStride);
 
             lastPerTileNote = "ok";
             return (IReadOnlyList<TerrainMesh3D>?)meshes;
@@ -3727,6 +3972,11 @@ public sealed partial class MapPageViewModel : ObservableObject
         if (activeRepairCache is not null)
         {
             detailRepairCache.EvictUnused();
+        }
+
+        if (activeRoughnessCache is not null)
+        {
+            detailRoughnessCache.EvictUnused();
         }
 
         if (perTileResult is not null)
@@ -3756,7 +4006,8 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// Swaps ONLY the detail layer; the base (and camera framing) stays put. Debounced + cooldown so a fast
     /// pan doesn't thrash rebuilds.
     /// </summary>
-    public async Task OnDetailFocusAsync(MapaTur.Application.Terrain.Camera3D camera, int viewportHeightPixels = 0)
+    public async Task OnDetailFocusAsync(
+        MapaTur.Application.Terrain.Camera3D camera, int viewportHeightPixels = 0, int viewportWidthPixels = 0)
     {
         ArgumentNullException.ThrowIfNull(camera);
         // During a route film the detail is PRE-CACHED and retained; a per-move rebuild here would only swap in a
@@ -3768,7 +4019,22 @@ public sealed partial class MapPageViewModel : ObservableObject
 
         // NOTE: lodDetailLoading is checked LOWER DOWN (before the rebuild), not here — so the diagnostic badge
         // still refreshes the tier/distance on every camera move even while a detail build (15–26 s) is in flight.
-        if (!IsLodStreaming || lodBaseTiles is null || regionDemLoader is null)
+        if (!IsLodStreaming || lodBaseTiles is null)
+        {
+            return;
+        }
+
+        // Stage 2c: when baked-tile streaming is active for this scene, stream the pre-baked pyramid instead of
+        // the runtime mosaic/repair/rebuild below. Returns straight after — the baked path is self-contained (its
+        // own selector + residency + off-thread load), so none of the runtime-build gating applies.
+        if (bakedStreamActive && bakedStreamManager is not null)
+        {
+            await StreamBakedDetailAsync(camera, viewportHeightPixels, viewportWidthPixels).ConfigureAwait(true);
+            return;
+        }
+
+        // The runtime-build detail path (the fallback when streaming is off / unavailable) needs the region loader.
+        if (regionDemLoader is null)
         {
             return;
         }
@@ -3866,6 +4132,11 @@ public sealed partial class MapPageViewModel : ObservableObject
             return;
         }
 
+        // The ~35 s reload cooldown ALWAYS applies — including during the route film. Re-centring re-meshes every
+        // tile whose LOD step flips near the new window boundary (churn + Gen2 GC); doing that on every small drift
+        // during the film produced many small lag spikes. The 3.5 km window keeps the gaze covered for ~50 s of
+        // flight, so the rare large-jump re-centre on the cooldown cadence is enough. The drift threshold above
+        // still applies, so a stationary gaze still loads exactly one patch.
         if (DateTime.UtcNow - lastLodDetailReloadUtc < LodDetailReloadCooldown)
         {
             return;

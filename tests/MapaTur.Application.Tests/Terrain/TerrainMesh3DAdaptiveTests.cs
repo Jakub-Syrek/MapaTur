@@ -122,9 +122,9 @@ public sealed class TerrainMesh3DAdaptiveTests
             full, plan, new TerrainMeshOptions { VerticalExaggeration = 1f })[0];
 
         // East-edge odd-row vertices (col 4, rows 1 and 3) → flat indices 9 and 19 — welded, so unreferenced.
-        mesh.Indices.Should().NotContain((ushort)9, "in-between east-edge vertex welds to an anchor");
-        mesh.Indices.Should().NotContain((ushort)19, "in-between east-edge vertex welds to an anchor");
-        mesh.Indices.Should().Contain((ushort)4).And.Contain((ushort)14).And.Contain((ushort)24,
+        mesh.Indices.Should().NotContain((uint)9, "in-between east-edge vertex welds to an anchor");
+        mesh.Indices.Should().NotContain((uint)19, "in-between east-edge vertex welds to an anchor");
+        mesh.Indices.Should().Contain((uint)4).And.Contain((uint)14).And.Contain((uint)24,
             "the east-edge anchors (shared with the coarse neighbour) stay referenced");
     }
 }

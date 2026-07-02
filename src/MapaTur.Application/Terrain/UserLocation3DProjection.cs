@@ -25,11 +25,15 @@ public static class UserLocation3DProjection
     /// <param name="raster">DEM used to look up ground elevation when the fix has no GNSS altitude.</param>
     /// <param name="mesh">Mesh whose world-space convention defines the coordinate system.</param>
     /// <param name="markerLiftMeters">Vertical offset above the ground so the marker sits clear of the surface.</param>
+    /// <param name="bakedIndex">Optional baked z13-z16 tile index — when the fix has no GNSS altitude, seats the
+    /// dot on the SAME real baked tile the route/trail lines use, so the dot stays glued to the route on steep
+    /// ground instead of diverging from it. See <see cref="Trail3DWorldProjection.ToWorld"/>.</param>
     public static IReadOnlyList<MarkerWorldPoint<UserLocation>> ToWorld(
         IReadOnlyList<UserLocation> locations,
         DemRaster? raster,
         TerrainMesh3D mesh,
-        float markerLiftMeters = 20f)
+        float markerLiftMeters = 20f,
+        BakedTileAvailabilityIndex? bakedIndex = null)
     {
         ArgumentNullException.ThrowIfNull(locations);
         ArgumentNullException.ThrowIfNull(mesh);
@@ -39,6 +43,7 @@ public static class UserLocation3DProjection
             return Array.Empty<MarkerWorldPoint<UserLocation>>();
         }
 
+        var bakedTileCache = new Dictionary<(int Zoom, int X, int Y), DemRaster?>();
         var result = new List<MarkerWorldPoint<UserLocation>>(locations.Count);
         foreach (UserLocation fix in locations)
         {
@@ -46,16 +51,25 @@ public static class UserLocation3DProjection
             double lat = fix.Position.Latitude;
 
             // GNSS-reported altitude wins when available — it's the truth on the ground for the user's
-            // device. Fall back to the DEM only when the fix has no altitude (network/IP-based fixes,
-            // older hardware, indoor positioning).
-            // GNSS altitude wins when present; otherwise seat the dot on the DEM. We CLAMP the lookup to the
-            // loaded raster and fall back to a flat default rather than dropping the marker — a fix just
-            // outside the mesh or over a NoData hole used to vanish, which read in the field as "raz punkt
-            // jest, raz nie". The dot is drawn occlusion-free, so an approximate height only nudges its screen
-            // position; losing it entirely is far worse than a slightly-off elevation.
-            float groundElevation = fix.Position.ElevationMeters is { } gnssElevation
-                ? (float)gnssElevation
-                : SampleGroundOrFallback(raster, lon, lat);
+            // device. Fall back to the terrain only when the fix has no altitude (network/IP-based fixes,
+            // older hardware, indoor positioning, or a synthetic route-preview position).
+            // When falling back to terrain, seat on the SAME real baked tile the route/trail lines now use
+            // (bakedIndex) so the dot stays glued to the route instead of diverging from it on steep ground —
+            // the coarse base raster differs from the real baked surface by several metres there. Only where no
+            // baked tile is loaded does it clamp to the base raster + flat fallback (never drop the marker).
+            float groundElevation;
+            if (fix.Position.ElevationMeters is { } gnssElevation)
+            {
+                groundElevation = (float)gnssElevation;
+            }
+            else if (bakedIndex is not null && Trail3DWorldProjection.TryGetBakedElevation(bakedIndex, bakedTileCache, fix.Position, out double bakedElevation))
+            {
+                groundElevation = (float)bakedElevation;
+            }
+            else
+            {
+                groundElevation = SampleGroundOrFallback(raster, lon, lat);
+            }
 
             Vector3 world = mesh.GeoToWorld(fix.Position, groundElevation + markerLiftMeters);
             result.Add(new MarkerWorldPoint<UserLocation>(fix, world));

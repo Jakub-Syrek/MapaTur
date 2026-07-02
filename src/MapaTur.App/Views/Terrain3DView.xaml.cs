@@ -325,6 +325,19 @@ public partial class Terrain3DView : ContentView
         set => SetValue(LodDetailBoundsProperty, value);
     }
 
+    // Baked z13-z16 tile index, when a baked pyramid is loaded — passed straight through to the GL renderer's
+    // BakedElevationIndex so trail/route/road line seating can sample the SAME real elevation data actually
+    // rendered, instead of the static coarse base (see Terrain3DGlRenderer.BakedElevationIndex's doc comment).
+    public static readonly BindableProperty BakedElevationIndexProperty = BindableProperty.Create(
+        nameof(BakedElevationIndex), typeof(MapaTur.Application.Terrain.BakedTileAvailabilityIndex), typeof(Terrain3DView), null,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
+
+    public MapaTur.Application.Terrain.BakedTileAvailabilityIndex? BakedElevationIndex
+    {
+        get => (MapaTur.Application.Terrain.BakedTileAvailabilityIndex?)GetValue(BakedElevationIndexProperty);
+        set => SetValue(BakedElevationIndexProperty, value);
+    }
+
     /// <summary>
     /// Whether the rock material is blended onto steep faces (premium menu "Skały"). When false the steep
     /// walls keep the raw orthophoto (which smears) — useful for an A/B of the blend.
@@ -643,10 +656,11 @@ public partial class Terrain3DView : ContentView
     // of that), otherwise fall back to a DEM lookup. Lift higher than POI/climbing so the dot
     // visibly hovers above the ground on flat sections instead of merging with the mesh.
     private const float UserLocationMarkerLiftMeters = 20f;
-    private readonly Marker3DOverlayProjector<UserLocation, ProjectedUserLocation> userLocationProjector =
-        new(
-            (fixes, raster, mesh, lift, _) => UserLocation3DProjection.ToWorld(fixes, raster, mesh, lift),
-            (source, screen) => new ProjectedUserLocation(source, screen));
+    // Initialized in the constructor (not inline) so the worldBuilder lambda can capture `this` and read
+    // BakedElevationIndex — the dot must seat on the SAME real baked tile the route/trail lines now use, or it
+    // diverges from the route on steep ground ("kropka i trasa rozjeżdżają się"). BakedElevationIndex is set once
+    // and stable, so capturing it once is correct (the projector's cache never needs to see it change).
+    private readonly Marker3DOverlayProjector<UserLocation, ProjectedUserLocation> userLocationProjector;
     // Reused one-element buffer so a fix update doesn't allocate a fresh list per frame; the
     // projector compares by reference so we only swap the contained UserLocation when it changes.
     private readonly UserLocation[] userLocationBuffer = new UserLocation[1];
@@ -662,6 +676,11 @@ public partial class Terrain3DView : ContentView
     /// The 2D Mapsui viewport is never laid out in 3D mode, so this is the only valid height source on mobile.
     /// 0 until the first frame is drawn.</summary>
     public int SurfacePixelHeight => lastSurfacePixelHeight;
+
+    /// <summary>Real backbuffer width (px) of the last 3D paint — paired with <see cref="SurfacePixelHeight"/> to
+    /// give the true viewport aspect ratio for the baked-tile quadtree selector's frustum cull. 0 until the first
+    /// frame is drawn.</summary>
+    public int SurfacePixelWidth => lastSurfacePixelWidth;
 
     // Touch target radius in device-independent units; scaled to surface pixels at hit-test time so a
     // finger tap near a small marker glyph still selects it.
@@ -701,6 +720,9 @@ public partial class Terrain3DView : ContentView
     public Terrain3DView()
     {
         InitializeComponent();
+        userLocationProjector = new Marker3DOverlayProjector<UserLocation, ProjectedUserLocation>(
+            (fixes, raster, mesh, lift, _) => UserLocation3DProjection.ToWorld(fixes, raster, mesh, lift, BakedElevationIndex),
+            (source, screen) => new ProjectedUserLocation(source, screen));
         controller = new Terrain3DController(Camera);
         // 100 ns Stopwatch ticks → microseconds for frame presentation timestamps.
         videoRecorder = new FlythroughRecorder(VideoRecorderFactory.Create(), () => recordClock.Elapsed.Ticks / 10L);
@@ -1097,6 +1119,14 @@ public partial class Terrain3DView : ContentView
     private float flightSmoothDescend; // 0 = climbing/flat (camera behind), 1 = descending (camera in front)
     private bool flightSmoothInit;
     private Vector3? flightMarkerWorld; // current point on the route during a film — drawn as a moving dot
+    // Route-film start gate: instead of a FIXED start pause, the dot holds at the route start until the 1 m
+    // detail covering that start point has actually built (a new DetailElevation that covers it arrives), then
+    // starts moving. A safety cap opens the gate anyway so the film can never hang (e.g. streaming off / offline).
+    private bool flightBuildGated;       // this flight waits for the start-area build before the dot moves
+    private bool flightGateOpen;         // gate satisfied — the moving clock has started
+    private GeoPoint flightStartGeo;     // flight start lon/lat the build must cover before the dot moves
+    private readonly System.Diagnostics.Stopwatch flightMovingClock = new(); // moving-time; starts when the gate opens, then runs steadily (detail streams live during the film)
+    private const double RouteFilmMaxBuildWaitSeconds = 30.0; // safety cap: open the gate regardless after this long
     private float flightSavedFov; // camera FOV before the flight narrowed it (restored on stop)
     private float flightSavedNear; // camera near/far before the flight tightened them for depth precision (restored on stop)
     private float flightSavedFar;
@@ -1156,6 +1186,8 @@ public partial class Terrain3DView : ContentView
 
         flightProgressKeys = null; // built-in demo: plain linear progress, no stop holds
         flightTotalMovingSeconds = (float)FlightDurationSeconds;
+        flightBuildGated = false; // demo keeps its fixed FlightStartPauseSeconds eye-hold
+        flightGateOpen = true;
         BeginFlight(pts);
     }
 
@@ -1163,23 +1195,50 @@ public partial class Terrain3DView : ContentView
     /// user can film their route. Holds 3 s at each <paramref name="stops"/> the user entered. No-op until a DEM
     /// + raster + a planned route exist.</summary>
     /// <param name="stops">The user's ordered route stops; the film pauses at each. Null = no holds.</param>
-    public void StartRouteFlight(IReadOnlyList<GeoPoint>? stops = null)
+    /// <param name="detailPrebuilt">True when the host has already built + retained the whole route corridor's
+    /// 1 m detail (and suppressed per-move rebuilds): skip the start-build gate and start moving immediately.</param>
+    public void StartRouteFlight(IReadOnlyList<GeoPoint>? stops = null, bool detailPrebuilt = false)
     {
         if (WorldFrame is not { } frame || Raster is null || Route is null)
         {
             return;
         }
 
-        IReadOnlyList<GeoPoint> poly = Route.ToPolyline();
+        // The dot/camera track must be the SAME line the route renderer draws — conflated onto the trail
+        // geometry it follows and densified — NOT the planner's raw polyline. The raw polyline runs beside
+        // the drawn (conflated) line, so the dot visibly travelled "its own track next to the route".
+        // Densify also equalises vertex spacing, which SampleFlightPath's index-based interpolation reads
+        // as constant ground speed. Heights: real baked z16 first (what's actually rendered), base fallback.
+        IReadOnlyList<GeoPoint> rawPoly = Route.ToPolyline();
+        if (rawPoly.Count < 2)
+        {
+            return;
+        }
+
+        IReadOnlyList<GeoPoint> source = Trails is { Count: > 0 } trailsForConflation
+            ? MapaTur.Application.Terrain.RouteTrailConflation.Conflate(rawPoly, trailsForConflation)
+            : rawPoly;
+        IReadOnlyList<GeoPoint> poly = MapaTur.Application.Terrain.GeoPolylineDensifier.Densify(source, 5.0);
         if (poly.Count < 2)
         {
             return;
         }
 
+        var bakedCache = new Dictionary<(int Zoom, int X, int Y), MapaTur.Domain.Terrain.DemRaster?>();
         var pts = new Vector3[poly.Count];
         for (int i = 0; i < poly.Count; i++)
         {
-            double elev = Raster.SampleBilinear(poly[i].Longitude, poly[i].Latitude);
+            double elev;
+            if (BakedElevationIndex is { } bakedIdx
+                && MapaTur.Application.Terrain.Trail3DWorldProjection.TryGetBakedElevation(bakedIdx, bakedCache, poly[i], out double bakedElev))
+            {
+                elev = bakedElev;
+            }
+            else
+            {
+                elev = Raster.SampleBilinear(poly[i].Longitude, poly[i].Latitude);
+            }
+
             if (double.IsNaN(elev) || elev < 200 || elev > 4000)
             {
                 elev = 2000;
@@ -1188,25 +1247,40 @@ public partial class Terrain3DView : ContentView
             pts[i] = frame.GeoToWorld(poly[i], (float)elev);
         }
 
-        BuildRouteFilmTimeline(poly, stops);
+        // Gate the dot on the START-area 1 m build (not a fixed time) when streaming can actually deliver it.
+        // When the host has already PRE-BUILT the whole route corridor (route film), there is nothing left to
+        // wait for — open immediately so the camera flies straight over the pre-built detail (no spurious hold).
+        flightStartGeo = poly[0];
+        flightBuildGated = DetailStreamingEnabled && !detailPrebuilt;
+        flightGateOpen = !flightBuildGated;
+        // The gate replaces the fixed start hold, so drop the leading hold from the timeline when gating.
+        BuildRouteFilmTimeline(poly, stops, flightBuildGated ? 0f : RouteFilmInitialHoldSeconds);
         BeginFlight(pts);
+
+        // If the start is ALREADY covered by the current detail (a recent build), open the gate now rather than
+        // waiting for a fresh field — the VM's reload cooldown could otherwise suppress one until the safety cap.
+        if (flightBuildGated && DetailElevation is { } current)
+        {
+            OnFlightDetailArrived(current);
+        }
     }
 
     // Builds the progress timeline that inserts a 3 s hold at each user stop. Each stop maps to its nearest
     // route-polyline vertex (the legs join there) → a progress fraction; between stops the film advances at
     // constant speed (the whole route over FlightDurationSeconds), then lingers FlightStopHoldSeconds.
-    private void BuildRouteFilmTimeline(IReadOnlyList<GeoPoint> poly, IReadOnlyList<GeoPoint>? stops)
+    private void BuildRouteFilmTimeline(IReadOnlyList<GeoPoint> poly, IReadOnlyList<GeoPoint>? stops, float initialHoldSeconds)
     {
         if (stops is null || stops.Count == 0 || poly.Count < 2)
         {
-            // No intermediate stops: still hold at the start so the opening detail builds, then run the route.
+            // No intermediate stops: hold at the start for initialHoldSeconds (0 when the build gate handles it),
+            // then run the route.
             flightProgressKeys = new[]
             {
                 (0f, 0f),
-                (RouteFilmInitialHoldSeconds, 0f),
-                (RouteFilmInitialHoldSeconds + RouteFilmDurationSeconds, 1f),
+                (initialHoldSeconds, 0f),
+                (initialHoldSeconds + RouteFilmDurationSeconds, 1f),
             };
-            flightTotalMovingSeconds = RouteFilmInitialHoldSeconds + RouteFilmDurationSeconds;
+            flightTotalMovingSeconds = initialHoldSeconds + RouteFilmDurationSeconds;
             return;
         }
 
@@ -1234,9 +1308,9 @@ public partial class Terrain3DView : ContentView
 
         pauses.Sort();
 
-        // Hold at the start (progress 0) so the opening 1 m detail finishes building before the camera moves.
-        var keys = new List<(float Time, float Progress)> { (0f, 0f), (RouteFilmInitialHoldSeconds, 0f) };
-        float t = RouteFilmInitialHoldSeconds, prevP = 0f;
+        // Hold at the start for initialHoldSeconds (0 when the build gate replaces it) before the camera moves.
+        var keys = new List<(float Time, float Progress)> { (0f, 0f), (initialHoldSeconds, 0f) };
+        float t = initialHoldSeconds, prevP = 0f;
         foreach (float q in pauses)
         {
             if (q <= prevP + 0.0005f)
@@ -1294,6 +1368,7 @@ public partial class Terrain3DView : ContentView
         flightPath = pts;
         flightElapsedSeconds = 0;
         flightClock.Restart();
+        flightMovingClock.Reset(); // starts only when the build gate opens (route film); demo ignores it
         flightDetailTick = 0;
         flightActive = true;
         flightSmoothInit = false; // snap the low-pass to the first frame
@@ -1365,6 +1440,35 @@ public partial class Terrain3DView : ContentView
         PanTiltPad.IsVisible = visible;
     }
 
+    // Opens the route-film start gate: the start-area detail has built (or the safety cap elapsed), so start the
+    // moving clock and let the dot ride the route from the start.
+    private void OpenFlightGate()
+    {
+        if (flightGateOpen)
+        {
+            return;
+        }
+
+        flightGateOpen = true;
+        flightMovingClock.Restart();
+    }
+
+    // Called when a new 1 m detail field arrives. If a route film is holding at the start, open the gate as soon
+    // as the new field covers the start point — that is the "build finished" signal the dot waits on (instead of
+    // a fixed timer).
+    private void OnFlightDetailArrived(DetailElevationField field)
+    {
+        if (!flightActive || !flightBuildGated || flightGateOpen)
+        {
+            return;
+        }
+
+        if (field.TryGetElevation(flightStartGeo.Longitude, flightStartGeo.Latitude, out _))
+        {
+            OpenFlightGate();
+        }
+    }
+
     private void OnFlightTick(object? sender, EventArgs e)
     {
         if (!flightActive || flightPath is null || flightPath.Length < 2)
@@ -1374,9 +1478,31 @@ public partial class Terrain3DView : ContentView
         }
 
         flightElapsedSeconds = flightClock.Elapsed.TotalSeconds; // real wall-clock time so the flight lasts exactly FlightDurationSeconds
-        // Hold at the start for FlightStartPauseSeconds so the 1 m detail streams in, then advance the path.
-        double moving = flightElapsedSeconds - FlightStartPauseSeconds;
-        bool finished = moving >= flightTotalMovingSeconds;
+
+        double moving;
+        bool finished;
+        if (flightBuildGated)
+        {
+            // Route film: hold the dot at the start until the start-area 1 m detail has built (the gate is opened
+            // by OnFlightDetailArrived) or the safety cap elapses; only then does the moving clock advance. After
+            // that the film LIVE-STREAMS detail and advances STEADILY — we no longer pause the camera per build.
+            // The old "hold while IsLodDetailBuilding" gate made the film stand still more than it moved; with
+            // re-centers now cheap (decoded-tile + roughness caches), the flight aims the build ahead of the camera
+            // and the detail streams in as we go, so a steady advance reads as a continuous fly-through.
+            if (!flightGateOpen && flightElapsedSeconds >= RouteFilmMaxBuildWaitSeconds)
+            {
+                OpenFlightGate();
+            }
+
+            moving = flightGateOpen ? flightMovingClock.Elapsed.TotalSeconds : 0.0;
+            finished = flightGateOpen && moving >= flightTotalMovingSeconds;
+        }
+        else
+        {
+            // Demo / non-gated: fixed start pause so the 1 m detail streams in, then advance the path.
+            moving = flightElapsedSeconds - FlightStartPauseSeconds;
+            finished = moving >= flightTotalMovingSeconds;
+        }
 
         // Constant ground speed, with a 3 s HOLD at each user stop (the route-film timeline). The path point
         // freezes during a hold, so the camera lingers on the stop; the built-in demo has no timeline → plain
@@ -1461,7 +1587,11 @@ public partial class Terrain3DView : ContentView
             Vector3 streamEye = flightSmoothPos;
             // Aim the 1 m detail build well AHEAD of the camera — a patch takes seconds to mesh, so by the time
             // it's ready the camera must be arriving at it, not have flown past (which left the film on the base).
-            Vector3 streamFocus = SampleFlightPath(MathF.Min(1f, p + 0.14f));
+            // While the gate holds at the start, aim the build AT the start so its detail arrives and opens the
+            // gate; once moving, aim well ahead (a patch takes seconds to mesh) so it's ready as the camera arrives.
+            Vector3 streamFocus = (flightBuildGated && !flightGateOpen)
+                ? here
+                : SampleFlightPath(MathF.Min(1f, p + 0.14f));
             Vector3 streamOffset = streamEye - streamFocus;
             float streamDist = MathF.Max(1f, streamOffset.Length());
             CameraFocusMoved?.Invoke(this, new Camera3D
@@ -1685,6 +1815,12 @@ public partial class Terrain3DView : ContentView
     {
         if (bindable is Terrain3DView view)
         {
+            // A fresh 1 m detail field can release a route film's start gate (only DetailElevation carries this type).
+            if (newValue is DetailElevationField field)
+            {
+                view.OnFlightDetailArrived(field);
+            }
+
             view.Canvas.InvalidateSurface();
         }
     }
@@ -2978,6 +3114,7 @@ public partial class Terrain3DView : ContentView
             // base wider than the ortho doesn't stretch clamped edge texels into "strata" bands. Null → no cull.
             glRenderer.SetOrthoCoverageGeoBounds(LodOrthoCoverageBounds, 300f);
             glRenderer.LakeFineBounds = LodDetailBounds; // lakes inside the 1 m detail keep legacy seating
+            glRenderer.BakedElevationIndex = BakedElevationIndex; // trail/route/road lines seat on the REAL baked tile, not the static base
             glRenderer.ShowCableCar = ShowCableCar; // "🚠 Kolejka" layer toggle
             glRenderer.CableCar = MapaTur.Application.Terrain.CableCarData.Kasprowy; // Kasprowy Wierch aerialway
             glRenderer.ShowContours = ShowContours; // "Warstwice" layer toggle — thin iso-elevation lines on the relief

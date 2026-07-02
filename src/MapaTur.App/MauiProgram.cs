@@ -244,12 +244,29 @@ public static class MauiProgram
                 Path.Combine(cacheRoot, "terrarium"));
             return new CompositeDemTileSource(sp.GetRequiredService<GugikNmtDemTileSource>(), terrarium);
         });
+        // cacheDecodedTiles: the 1 m detail re-center re-loads the SAME z16 window on every camera move, so the
+        // per-tile fetch+decode dominated each re-center. The decoded-tile cache makes a sliding window decode only
+        // the newly-entered tiles and reuse the overlap (zoom-scoped eviction keeps the rare z13 base load separate).
         services.AddSingleton<OnlineRegionDemLoader>(sp =>
-            new OnlineRegionDemLoader(sp.GetRequiredService<IDemTileSource>()));
+            new OnlineRegionDemLoader(sp.GetRequiredService<IDemTileSource>(), cacheDecodedTiles: true));
         services.AddSingleton<OfflineRegionDownloader>(sp =>
         {
             var gugik = sp.GetRequiredService<GugikNmtDemTileSource>();
             return new OfflineRegionDownloader(gugik, gugik.IsCached);
+        });
+
+        // Stage 2c: scan the pre-baked DEM pyramid (dem-cache/baked/{z}/{x}/{y}.bdt) ONCE at startup into an
+        // availability index. It backs the baked-tile streaming path (MapPageViewModel.UseBakedTileStreaming):
+        // its roots/IsBaked drive the quadtree selector and its Load reads tiles off-thread. An absent/empty
+        // baked root yields an empty index, so the VM cleanly falls back to the runtime-build detail path.
+        services.AddSingleton<MapaTur.Application.Terrain.BakedTileAvailabilityIndex>(_ =>
+        {
+            string bakedRoot = Path.Combine(FileSystem.AppDataDirectory, "dem-cache", "baked");
+            var index = MapaTur.Application.Terrain.BakedTileAvailabilityIndex.Scan(bakedRoot);
+            Log.Information(
+                "Baked DEM pyramid: {Count} tiles under {Root} (roots={Roots} z{MinZoom})",
+                index.Count, bakedRoot, index.Roots.Count, index.Count == 0 ? 0 : index.MinZoom);
+            return index;
         });
 
         // Region-package download: pull pre-baked DEM/ortho packages from our server and unpack them into the

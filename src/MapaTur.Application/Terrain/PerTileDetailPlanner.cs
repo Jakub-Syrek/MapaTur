@@ -115,7 +115,8 @@ public static class PerTileDetailPlanner
         int cameraBubbleStep = 1,
         int absColOrigin = -1,
         int absRowOrigin = -1,
-        int tileQuantum = 256)
+        int tileQuantum = 256,
+        PerTileRoughnessCache? roughnessCache = null)
     {
         ArgumentNullException.ThrowIfNull(full);
         ArgumentNullException.ThrowIfNull(subsampleStepsFinestFirst);
@@ -175,7 +176,22 @@ public static class PerTileDetailPlanner
 
                 DemRaster crop = full.Crop(c0, r0, cW, rH);
                 var roughTimer = Stopwatch.StartNew();
-                double roughness = DemRasterRoughness.Roughness(crop, stride: roughnessStride, neighborDistance: roughnessNeighborDistance);
+                // Roughness is camera-INDEPENDENT and a pure function of the crop pixels + the two knobs; the
+                // repaired pixels for a given absolute tile are byte-identical across re-centers, so when the
+                // tiles sit on the stable absolute grid we cache it by absolute identity and a sliding window
+                // only scans the NEWLY-entered tiles (overlap tiles reuse the value). Same result, less work.
+                double roughness;
+                if (roughnessCache is not null && absColOrigin >= 0 && absRowOrigin >= 0)
+                {
+                    roughness = roughnessCache.GetOrCompute(
+                        absColOrigin + c0, absRowOrigin + r0, cW, rH, roughnessStride, roughnessNeighborDistance,
+                        () => DemRasterRoughness.Roughness(crop, stride: roughnessStride, neighborDistance: roughnessNeighborDistance));
+                }
+                else
+                {
+                    roughness = DemRasterRoughness.Roughness(crop, stride: roughnessStride, neighborDistance: roughnessNeighborDistance);
+                }
+
                 roughnessMs += roughTimer.Elapsed.TotalMilliseconds;
                 double factor = ScreenSpaceLod.RoughnessFactor(roughness, preset.ReferenceRoughnessMeters, preset.MaxBoost);
 

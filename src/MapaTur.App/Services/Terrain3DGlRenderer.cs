@@ -33,6 +33,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "layout(location=1) in vec4 aColor;\n" +
         "layout(location=2) in vec3 aNormal;\n" +
         "layout(location=3) in vec2 aTex;\n" +
+        "layout(location=4) in float aDetail;\n" + // per-vertex mid-freq relief amplitude (m RMS); 0 = none
         "uniform mat4 uMvp;\n" +
         // Wider-coverage TWO-FRAME scheme (so a future re-anchor never disturbs procedural effects):
         //   uModelOffset  → RENDER frame (small, near the camera): drives gl_Position + vWorldPos, which feed the
@@ -49,7 +50,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "out vec2 vTex;\n" +
         "out vec3 vWorldPos;\n" +
         "out vec3 vStableWorldPos;\n" +
-        "void main(){ vColor = aColor; vNormal = aNormal; vTex = aTex; vec3 worldPos = aPos + uModelOffset; vWorldPos = worldPos; vStableWorldPos = aPos + uStableOffset; gl_Position = uMvp * vec4(worldPos, 1.0); }\n";
+        "out float vDetail;\n" +
+        "void main(){ vColor = aColor; vNormal = aNormal; vTex = aTex; vDetail = aDetail; vec3 worldPos = aPos + uModelOffset; vWorldPos = worldPos; vStableWorldPos = aPos + uStableOffset; gl_Position = uMvp * vec4(worldPos, 1.0); }\n";
 
     // Per-pixel Lambert lighting + exponential-fog aerial perspective. shade = ambient + (1-ambient) *
     // max(0, dot(N, L)). When an ortho image is bound (uUseOrtho=1) the surface colour is sampled from it
@@ -65,6 +67,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "in vec2 vTex;\n" +
         "in vec3 vWorldPos;\n" +          // RENDER frame — view-dependent terms only (view dir, camera distance, fog)
         "in vec3 vStableWorldPos;\n" +    // STABLE/global frame — all procedural sampling (noise/ripple/rock/cloud/water shape)
+        "in float vDetail;\n" +           // per-vertex mid-freq relief amplitude (m RMS) discarded by the coarse LOD; 0 = none
         "uniform vec3 uLightDir;\n" +
         "uniform vec3 uSnowSun;\n" + // sun used for the SNOW-line sun-melt; pinned during a film so the cover holds while lighting sweeps
         "uniform float uAmbient;\n" +
@@ -140,8 +143,29 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform float uContourWidthPx;\n" +     // contour half-width in pixels (fwidth-based AA, constant on screen)
         "uniform float uContourMajorSpacingZ;\n" + // world-Z between RED index (major) lines (= 100 m × Pion)
         "uniform vec3 uContourMajorColor;\n" +     // index (major) line tint — red
+                                                   // Trail/route decal: an RGBA8 "painted-distance" mask (RGB = nearest line colour, A = coverage) over a
+                                                   // world-XY window. Sampled by THIS fragment's stable world-XY, so trails are painted INTO the surface on
+                                                   // BOTH the coarse base and the streamed 1 m detail (same shader) — never floating, never occluded. Like the
+                                                   // contours above. uTrailStrength 0 = off.
+        "uniform sampler2D uTrailMask;\n" +
+        "uniform float uTrailStrength;\n" +
+        "uniform vec2 uTrailMaskMinXY;\n" +   // world-XY of the mask window's min corner (= uv 0,0)
+        "uniform vec2 uTrailMaskSizeXY;\n" +  // world-XY extent of the mask window (metres)
+        "uniform float uTrailMaxDist;\n" +    // distance-field reach (m): metric dist = (1 - A) * uTrailMaxDist
+        "uniform float uTrailHalfWidth;\n" +  // on-surface half-width (m) the line is drawn at from the distance
         "out vec4 fragColor;\n" +
-        "float hashT(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n" +
+        // p is always an INTEGER lattice point (noiseT calls this only at floor(p) + a {0,1} offset). For terrain
+        // far from the scene's fixed anchor (uStableOffset is always 0 — see CameraRelativeTerrainOrigin — so
+        // vStableWorldPos is METRES FROM ANCHOR, unbounded, easily thousands of metres for a Tatra-wide view),
+        // dot(p, c) blows straight past the GLSL ES sin()/cos() spec's guaranteed-precision window of
+        // [-8192, 8192] radians — at just ~75-184 m from the anchor with these hash constants. Past that, sin()'s
+        // ULP-quantised phase jitters by several degrees per representable float, which reads as visible
+        // aliasing/regular banding, not smooth pseudo-random noise — exactly the "ratrak"/grid look on far
+        // terrain. Wrapping the lattice coordinate into [0,16) BEFORE the dot product keeps every hash lookup's
+        // sin() argument comfortably inside the guaranteed-precision range (16*(127.1+311.7) ≈ 7021 rad < 8192),
+        // at the cost of the noise field repeating every 16 lattice cells — for the finest caller (sc=0.35, the
+        // rock/detail-normal blocks) that is a ~46 m world-space tile, large next to their ~2.9 m wavelength.
+        "float hashT(vec2 p){ vec2 pw = mod(p, 16.0); return fract(sin(dot(pw, vec2(127.1, 311.7))) * 43758.5453); }\n" +
         "float noiseT(vec2 p){\n" +
         "  vec2 i = floor(p); vec2 f = fract(p);\n" +
         "  f = f * f * (3.0 - 2.0 * f);\n" +
@@ -265,6 +289,30 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    vec3 bvec = vec3(-gx, -gy, 0.0);\n" +
         "    bvec = bvec - shN * dot(bvec, shN);\n" +
         "    shN = normalize(shN + (0.6 * rockW) * bvec);\n" +
+        "  }\n" +
+        // Mid-frequency DETAIL (fix B): a coarse LOD tile box-averaged away the sub-cell bumps; vDetail carries the
+        // REAL z16 residual RMS (metres) per vertex — it is 0 on flat ground, on the finest z16 (relief already in
+        // geometry) and on old tiles, so this is a strict no-op there. Where vDetail>0 we shade the tile AS IF it
+        // still had those bumps: central-difference a stable-world noise field, project the tilt into the surface
+        // tangent (same trick as the rock block), and bend the SHADING normal by the REAL amplitude. Look-only —
+        // it never touches geometry, biome/snow bands (those read vNormal directly), depth or the reflection clip.
+        // Triplanar-style plane pick (mirrors the rock block's `dp`): sampling noise ALWAYS on world XY stretches
+        // it 1/cos(slope) along the fall line on anything but near-flat ground — on real Tatra bowls/slopes that
+        // reads as regular parallel grooves ("jak ślady ratraka"), not organic texture. Picking whichever plane
+        // the shading normal is LEAST perpendicular to keeps the noise's true scale on any slope.
+        "  if (vDetail > 0.01 && uReflectionPass < 0.5) {\n" +
+        "    float dsc = 0.13;\n" +   // bigger "stones" (~7.7 m wavelength) than the rock block's fine granite blotches
+        "    float de = 1.5;\n" +
+        "    vec3 anD = abs(shN);\n" +
+        "    vec2 dpD = (anD.z >= anD.x && anD.z >= anD.y) ? vStableWorldPos.xy : ((anD.x >= anD.y) ? vStableWorldPos.yz : vStableWorldPos.zx);\n" +
+        "    float gxD = (noiseT((dpD + vec2(de, 0.0)) * dsc) + 0.5 * noiseT((dpD + vec2(de, 0.0)) * dsc * 2.7))\n" +
+        "              - (noiseT((dpD - vec2(de, 0.0)) * dsc) + 0.5 * noiseT((dpD - vec2(de, 0.0)) * dsc * 2.7));\n" +
+        "    float gyD = (noiseT((dpD + vec2(0.0, de)) * dsc) + 0.5 * noiseT((dpD + vec2(0.0, de)) * dsc * 2.7))\n" +
+        "              - (noiseT((dpD - vec2(0.0, de)) * dsc) + 0.5 * noiseT((dpD - vec2(0.0, de)) * dsc * 2.7));\n" +
+        "    vec3 bvecD = vec3(-gxD, -gyD, 0.0);\n" +
+        "    bvecD = bvecD - shN * dot(bvecD, shN);\n" +
+        "    float dStr = clamp(vDetail * 0.35, 0.0, 0.85);\n" + // TEST: gain/cap raised ~7x to match the rock block's visible strength for measured 0.5-2 m RMS
+        "    shN = normalize(shN + dStr * bvecD);\n" +
         "  }\n" +
         "  float lambert = max(0.0, dot(shN, uLightDir));\n" +
         "  float sunlit = lambert * (1.0 - uAmbient) * (1.0 - (sunShadow * uCloudShadow));\n" +
@@ -411,6 +459,26 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    float majorL = (1.0 - smoothstep(0.0, wM * uContourWidthPx * 1.6, dM)) * (1.0 - smoothstep(0.3, 0.6, wM));\n" +
         "    lit = mix(lit, uContourMajorColor, majorL * uContourStrength);\n" +
         "  }\n" +
+        // Trail decal (DISTANCE FIELD): the mask stores, per texel, the distance to the nearest painted line
+        // (A=255 on the line → 0 at uTrailMaxDist) in RGB=line colour. Addressed by the STABLE world-XY so it stays
+        // glued under any LOD. Reconstruct the metric distance and draw a THIN line analytically. The AA BAND
+        // (fwidth) was already screen-constant, but the line's CORE width (uTrailHalfWidth) was a fixed 1.6 m in
+        // WORLD space — at typical viewing distance that shrinks below a screen pixel and the line reads as faint/
+        // gone, even though it's technically still "crisp". fwidth(distM) is exactly this fragment's local
+        // metres-per-pixel (the same quantity a screen-constant line needs), so floor the half-width at
+        // DecalMinHalfWidthPx pixels' worth of that scale — true-scale 1.6 m up close (where it's already several
+        // px), growing only once distance would shrink it thinner than that floor. No new uniform needed.
+        "  if (uTrailStrength > 0.001 && uReflectionPass < 0.5) {\n" +
+        "    vec2 tuv = (vStableWorldPos.xy - uTrailMaskMinXY) / uTrailMaskSizeXY;\n" +
+        "    if (tuv.x >= 0.0 && tuv.x <= 1.0 && tuv.y >= 0.0 && tuv.y <= 1.0) {\n" +
+        "      vec4 tc = texture(uTrailMask, tuv);\n" +
+        "      float distM = (1.0 - tc.a) * uTrailMaxDist;\n" +    // metres to the nearest line (= uTrailMaxDist when A=0)
+        "      float aa = max(fwidth(distM), 0.001);\n" +          // one pixel of distance change → screen-constant AA
+        "      float halfWidthM = max(uTrailHalfWidth, aa * 1.1);\n" + // 1.1 px floor: true 1.6 m scale near, constant-px legible far
+        "      float coverage = 1.0 - smoothstep(halfWidthM - aa, halfWidthM + aa, distM);\n" +
+        "      lit = mix(lit, tc.rgb, coverage * uTrailStrength);\n" +
+        "    }\n" +
+        "  }\n" +
         "  fragColor = vec4(mix(lit, uFogColor, fogAmount), 1.0);\n" +
         // DIAGNOSTIC overlay: render the raw ortho UV as colour (R=U, G=V). A clean smooth gradient per cell = UV
         // is fine → flat bands are texture sampling (mip/aniso/content). A striped/sawtooth pattern = UV is broken.
@@ -502,8 +570,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    float clouds = fbm(cloudUv * 1.25);\n" + // 5-octave fBm: soft WISPY cirrus, no value-noise grid (kills the angular/pixelated bands)
         "    float threshold = 0.48 - (uCloudCoverage * 0.34);\n" + // lower base + stronger coverage pull = much more cloud
         "    cloudDensity = smoothstep(threshold, threshold + 0.30, clouds) * 0.8;\n" + // wide band = feathered (pierzaste) edges, not hard angular ones
-        // Fade clouds out near the horizon (h -> 0) where the overhead-plane projection
-        // stretches to infinity and would smear into a hard band.
+                                                                                        // Fade clouds out near the horizon (h -> 0) where the overhead-plane projection
+                                                                                        // stretches to infinity and would smear into a hard band.
         "    cloudDensity *= smoothstep(0.015, 0.18, h);\n" +
         "  }\n" +
         // Cloud colour: noon -> bright lit-from-above white; sunset -> warm pink-orange built
@@ -524,10 +592,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // wider Mie halo (pow 80 → 55, 0.55 → 0.72) so the sun reads as a real, radiant sun rather than a dot.
         "  float sunCore = smoothstep(0.99993, 0.99997, sunDot);\n" + // small, natural disc (~0.7° — was a huge 0.9992 blob)
         "  float sunHalo = pow(max(sunDot, 0.0), 400.0) * 0.72;\n" + // much tighter halo (was 55) so it doesn't saturate a big blob; brightness unchanged
-        // Forward-scatter glow ("poświata pod słońcem"): a broad warm bloom around the sun that swells as
-        // it nears the horizon. uSunGlowWidth lowers the exponent (broader spread); the bloom pools BELOW
-        // the sun (forward scatter sinks toward the horizon) and is scaled by uSunGlowIntensity — which the
-        // Atmosphere model drives strong at golden hour and to nil at noon / night.
+                                                                     // Forward-scatter glow ("poświata pod słońcem"): a broad warm bloom around the sun that swells as
+                                                                     // it nears the horizon. uSunGlowWidth lowers the exponent (broader spread); the bloom pools BELOW
+                                                                     // the sun (forward scatter sinks toward the horizon) and is scaled by uSunGlowIntensity — which the
+                                                                     // Atmosphere model drives strong at golden hour and to nil at noon / night.
         "  float glowExp = mix(170.0, 100.0, clamp(uSunGlowWidth, 0.0, 1.0));\n" + // very tight forward-scatter glow so the Sun reads natural-sized
         "  float belowSun = clamp((uSunDir.z - viewDir.z) * 2.0 + 0.5, 0.0, 1.0);\n" +
         "  float glow = pow(max(sunDot, 0.0), glowExp) * uSunGlowIntensity * (0.7 + 0.6 * belowSun);\n" +
@@ -795,8 +863,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // edge out toward the horizon.
         "  float edge = smoothstep(1.0, 0.65, max(abs(vLocal.x), abs(vLocal.y)));\n" +
         "  a *= edge * (0.45 + (uCoverage * 0.5));\n" + // opacity tracks coverage: a light veil when scattered, a near-solid deck at 100%
-                                  // Billow shading from the surface height: crests catch the light (brighter, a touch denser),
-                                  // troughs fall into shade — turns the flat veil into a rolling 3D sea of clouds.
+                                                        // Billow shading from the surface height: crests catch the light (brighter, a touch denser),
+                                                        // troughs fall into shade — turns the flat veil into a rolling 3D sea of clouds.
         "  a = clamp(a * (0.88 + (0.34 * max(vCrest, 0.0))), 0.0, 1.0);\n" +
         "  vec3 lit = uCloudColor * (0.80 + (0.28 * clamp(vCrest, -1.0, 1.0)));\n" +
         "  fragColor = vec4(lit, a);\n" +
@@ -1061,7 +1129,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  if (dist > uMaxDist) { discard; }\n" +
         "  float edge = smoothstep(uMaxDist * 0.75, uMaxDist, dist);\n" +
         "  float fog = max(1.0 - exp(-dist * uFogDensity), edge);\n" +
-        "  fragColor = vec4(mix(vColor.rgb, uFogColor, fog), 1.0);\n" +
+        // Carry the per-vertex alpha through (opaque trails/roads upload a=255 → 1.0). The translucent dashed
+        // route uploads a<255 so the trail it lies on shows through it; blending is enabled only for that draw.
+        "  fragColor = vec4(mix(vColor.rgb, uFogColor, fog), vColor.a);\n" +
         "}\n";
 
     // Line ribbon shader: expands each segment to a quad of constant SCREEN-pixel width (ANGLE/D3D11
@@ -1099,9 +1169,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // same bias that wins a near z-fight ALSO punched trails THROUGH faraway ridges ("szlaki widać przez
         // skały"). Subtracting a constant in CLIP space (NO `* w`) makes the NDC bias = C/w — strong up close
         // where the 1 m detail actually z-fights, ~0 far away where ridges must occlude. Plus 10 m TrailLift seating.
-        // 0.09 (was 0.04): the 1 m detail still poked over trails here and there. Because this is a CLIP-space
-        // subtract (NDC bias = C/w), a bigger C only strengthens the NEAR field where the detail z-fights —
-        // far ridges (large w) still get ~0 bias and keep occluding, so no return of "szlaki przez skały".
+        // DEAD END — documented, do not keep tuning this constant (docs/HANDOFF-2026-06-27-trails-decal-plan.md):
+        // "clip-space z -= 0.09 -> 0.14 = 'szlaki przez skały' regression... local rise only ~2 m within 3 m —
+        // no tall local folds to clear, yet the line is still buried. A bias big enough to help also punches real
+        // ridges. Single global value can't separate the two. STOP." The real fix is the uTrailMask DECAL
+        // (painted into the terrain shader, like contour lines — never floats, never z-fights, because it IS the
+        // surface fragment), not this line-overlay's depth bias. Left at the last-known value; do not raise it
+        // further chasing occlusion — that is the decal's job.
         "  gl_Position.z -= 0.09;\n" +
         "}\n";
 
@@ -1109,6 +1183,36 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private const float TrailBlackHalfWidthPx = 1.15f; // black trails are drawn a touch thicker: a thin black thread on the dark terrain is nearly invisible, so widen it for legibility
     private const float RouteHalfWidthPx = 2.6f;
     private const float RoadHalfWidthPx = 1.8f;
+
+    // The planned route is a DASHED, SEMI-TRANSPARENT violet line lying ON its trail (conflated onto the trail's
+    // polyline): the dashes + ~60% alpha let the trail show through, so the route reads as a highlight over the
+    // trail rather than painting it out. Drawn with alpha blending.
+    private const byte RouteAlpha = 0x99; // ~60% opacity
+
+    // Applying DrawRouteLine's proven pattern to trails too (docs/HANDOFF-2026-06-27-trails-decal-plan.md step 3,
+    // never actually done for DrawTrailLines — only the route got it): the trail is now primarily carried by the
+    // uTrailMask DECAL (painted into the terrain surface, immune to z-fighting). This line overlay stays as a
+    // crisp on-top accent, but where it loses the near-field z-fight against real terrain relief (the documented
+    // dead end this session re-confirmed — see the LineVertexShaderSource comment), it must not punch a hole:
+    // alpha + depth-write-off lets the decal's own trail colour, already drawn as part of the terrain underneath,
+    // show through instead of bare rock. 0xE0 (~88%) stays much more solid than the route's 60% "highlight" look
+    // — trails are the primary navigation aid, not an accent — this only softens the failure mode, it doesn't
+    // hide the line.
+    private const byte TrailOverlayAlpha = 0xE0;
+    private const int RouteDashSegments = 3; // ~15 m mark …
+    private const int RouteGapSegments = 2;  // … then ~10 m gap over the ~5 m densified route segments
+
+    // The route is ALSO painted INTO the surface decal (so it adheres + stays visible up close, where the floating
+    // line is occluded by the streamed detail). It is conflated onto the trail, so it shares the trail's geometry;
+    // the decal recolours the trail's distance-field texels toward violet along ~12 m dashes (≈60% blend, so the
+    // trail shows through ⇒ translucent), leaving ~8 m gaps as the trail colour ⇒ dashed. Off-trail stretches are
+    // written straight into the field so the dash is visible on bare terrain too.
+    private const float RouteDecalDashMeters = 12f;
+    private const float RouteDecalGapMeters = 8f;
+    private const float RouteDecalBlend = 0.6f; // mix the trail texel 60% toward violet (translucent over the trail)
+    // How far (world m) each dash recolours around the line — TIGHT (just the drawn half-width + ~1 texel) so the
+    // dashes don't bleed across the 8 m gaps (a dash recolours ≈ dash + 2×radius; keep 2×radius well under the gap).
+    private const float RouteDecalPaintRadiusMeters = TrailDecalHalfWidthMeters + 0.8f; // ≈2.4 m → ~3 m visible gap
 
     // Road ribbon colour: light grey, matching the 2D road layer and distinct from the PTTK trail palette.
     private const byte RoadR = 0xE5;
@@ -1131,6 +1235,20 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private const float RouteLiftMeters = 0.8f;
     private const float RoadLiftMeters = 0.3f;
     private const float ExposedRouteLiftMeters = 1.0f;    // a touch above trails so the dots sit on a coincident trail line (Orla Perć is both a red trail and a demanding route)
+
+    // Trail/route decal mask: a fine DISTANCE-FIELD texture over the near-field (detail) window. Square max
+    // dimension. The field stores the metric distance to the nearest line out to TrailMaskMaxDistanceMeters; the
+    // shader narrows it analytically to a thin crisp line, so the texture can be coarse and the line stays sharp.
+    // 4096 over the ~4.6 km detail window ≈ 1.1 m/texel — fine enough for a continuous field; the band (8 m) spans
+    // ~7 texels so there are no dot/gaps. The single RGBA8 4096² scratch is ~67 MB, allocated ONCE (reused).
+    private const int TrailMaskTextureSize = 4096;
+    private const float TrailMaskMaxDistanceMeters = 8.0f;   // distance-field reach (m): band ≥ ~4 texels → continuous
+    // Was 1.0 (fully opaque) — the trail line then reads as a flat, textureless ribbon, which now stands out
+    // starkly against the surrounding terrain's real shaded relief (fix B / NativeMicroDetail). 0.8 keeps the
+    // trail clearly legible (it's still ~80% its own colour at full coverage) while letting a hint of the
+    // underlying lit/detailed terrain show through, instead of erasing it outright.
+    private const float TrailDecalStrength = 0.8f;           // blend strength of the decal over the surface colour
+    private const float TrailDecalHalfWidthMeters = 1.6f;    // on-surface half-width of the drawn line (world m)
     private const float ExposedRouteHalfWidthPx = 2.4f;   // fat dots that clearly punctuate over the thin (0.7 px) trail line beneath
     // Bright orange for the exposed / guide routes (sac_scale demanding / via_ferrata) — lighter/yellower than the PTTK red so it pops where it runs along a red trail.
     private const byte ExposedR = 0xFF, ExposedG = 0x8C, ExposedB = 0x00;
@@ -1151,6 +1269,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         public uint ColorVbo;
         public uint NormalVbo;
         public uint TexVbo;
+        public uint DetailVbo;
         public uint Ebo;
         public int IndexCount;
     }
@@ -1170,6 +1289,24 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     }
 
     private GL? gl;
+
+    // ── Per-pass GPU timing (diagnostic) ───────────────────────────────────────────────────────────
+    // GL_TIME_ELAPSED timer queries, one per (pass × frame-in-flight). Results are read back GpuFramesInFlight
+    // frames LATE so the CPU never stalls on the GPU. Desktop/ANGLE only (GL_EXT_disjoint_timer_query); on mobile
+    // GLES the extension is absent so this fails safe to a no-op (matching the cumulus/sauron/msaa "unsupported"
+    // pattern). Emits a throttled "[GL3D] [PassTimes]" line so we can see WHERE a heavy frame's time actually goes.
+    private enum GpuPass { Shadow, Reflection, Terrain, LakesForest, Lines, Clouds, Post, Count }
+    private const int GpuFramesInFlight = 3;
+    private const QueryTarget GlTimeElapsedExt = (QueryTarget)0x88BF; // GL_TIME_ELAPSED_EXT
+    private const GLEnum GlGpuDisjointExt = (GLEnum)0x8FBB;           // GL_GPU_DISJOINT_EXT
+    private uint[]? gpuQueries;                                       // [(int)GpuPass.Count * GpuFramesInFlight]
+    private readonly double[] lastPassMs = new double[(int)GpuPass.Count];
+    private bool gpuTimersSupported;
+    private bool gpuTimersProbed;
+    private int gpuFrameSlot = -1;
+    private long gpuFrameCount;
+    private long lastPassTimesLogTick;
+
     private uint program;
     private int mvpLocation = -1;
     private int modelOffsetLocation = -1;
@@ -1322,6 +1459,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int terrainContourMajorColorLocation = -1;
     private int terrainContourStrengthLocation = -1;
     private int terrainContourWidthPxLocation = -1;
+    private int trailMaskSamplerLocation = -1;
+    private int trailMaskStrengthLocation = -1;
+    private int trailMaskMinXYLocation = -1;
+    private int trailMaskSizeXYLocation = -1;
+    private int trailMaskMaxDistLocation = -1;
+    private int trailMaskHalfWidthLocation = -1;
     private int terrainSnowBandZLocation = -1;
     private int terrainSnowSlopeCosBareLocation = -1;
     private int terrainSnowSlopeCosFullLocation = -1;
@@ -1403,10 +1546,21 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // kept so textures survive a GL context loss. Uploaded lazily on the GL thread.
     private sealed class OrthoTile
     {
-        public required byte[] Rgba;
+        public required byte[] Rgba; // bytes at the CURRENTLY uploaded (or about-to-be-uploaded) resolution
         public int Width;
         public int Height;
         public uint Texture; // 0 until uploaded
+
+        // The cell's retained "master" copy at OrthoDistanceTier.NearCapPx — kept separately from Rgba so a
+        // cell that was downsampled to the far tier can be rebuilt back to near without re-decoding from disk
+        // when the camera approaches it. Never mutated after SetOrthoTextures.
+        public required byte[] MasterRgba;
+        public int MasterWidth;
+        public int MasterHeight;
+
+        // The resolution cap Rgba/Width/Height currently reflect; 0 = never assigned/uploaded yet. Compared
+        // against OrthoDistanceTier.DesiredCapPx every frame to detect a tier change.
+        public int UploadedCapPx;
     }
     private readonly List<OrthoTile> orthoTiles = new();
     // Old tiles whose GL textures still need deleting on the GL thread (set when textures are swapped).
@@ -1429,6 +1583,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private readonly Dictionary<int, (Vector3 Min, Vector3 Max)> orthoCellBounds = new();
     private IReadOnlyList<TerrainMesh3D>? orthoBoundsTiles;
     private readonly List<int> visibleOrthoCells = new();
+    // Throttle for the [Mem] line: emit at most once per this interval (so it tracks the film without spamming).
+    private long lastMemLogTick;
+    private const long MemLogIntervalMs = 3000;
     private uint lineProgram;
     private int lineMvpLocation = -1;
     private int lineViewportLocation = -1;
@@ -1607,8 +1764,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private TerrainMesh3D? lastTrailMesh;
     private DetailElevationField? lastTrailDetail;
 
+    // Near-parallel duplicate trails (OSM relation + underlying way) deduped ONCE per distinct input set and reused
+    // for the decal mask, the trail line overlay AND the route conflation — so only one of a duplicate pair is drawn
+    // and the route lands on it. Keyed on the input ref so it is NOT recomputed every frame (the deduped ref is then
+    // a stable cache key for the mask/line/route caches below — no churn, no per-frame allocation).
+    private IReadOnlyList<Trail>? dedupInputTrails;
+    private IReadOnlyList<Trail>? dedupResultTrails;
+
     private LineBuffers? routeLines;
     private Route? lastRoute;
+    private IReadOnlyList<Trail>? lastRouteTrails;
     private DemRaster? lastRouteRaster;
     private TerrainMesh3D? lastRouteMesh;
     private DetailElevationField? lastRouteDetail;
@@ -1625,6 +1790,32 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private TerrainMesh3D? lastExposedMesh;
     private DetailElevationField? lastExposedDetail;
 
+    // Trail/route decal (Option A): a painted-distance texture sampled by the terrain shader so trails are drawn
+    // INTO the surface (base + detail) instead of as a floating line overlay. The line overlays are still drawn
+    // alongside (far field, outside the decal window).
+    //
+    // The mask is addressed by ABSOLUTE world-XY in the shader, so it stays valid as the 1 m detail streams within
+    // its window — it does NOT need rebuilding when `detail`/`mesh` change (that churned the key on nearly every
+    // detail stream, and each rebuild allocates ~48 MB → GC spiral, multi-GB heap, multi-minute stalls). So the
+    // cache key is ONLY (trails/roads/exposed/route refs) + the QUANTIZED mask window (min-corner + size snapped to
+    // a 500 m grid): rebuild when the lines change or the window jumps a whole grid cell — rare. The rasterisation
+    // scratch buffers are held as fields and reused across rebuilds (reallocated only on a dimension change).
+    private const float TrailMaskWindowQuantMeters = 500f; // snap window min/size to this grid so it rebuilds rarely
+    private uint trailMaskTex;
+    private bool trailMaskValid;
+    private float trailMaskMinX, trailMaskMinY, trailMaskSizeX, trailMaskSizeY;
+    private IReadOnlyList<Trail>? lastMaskTrails;
+    private IReadOnlyList<Trail>? lastMaskRoads;
+    private IReadOnlyList<Trail>? lastMaskExposed;
+    private Route? lastMaskRoute; // route is in the decal too (dashed translucent on the trail) → part of the key
+    private DemRaster? lastMaskRaster;
+    private bool haveMaskWindowKey;
+    private float lastMaskKeyMinX, lastMaskKeyMinY, lastMaskKeySizeX, lastMaskKeySizeY; // quantized window key
+    private byte[]? maskRgbaScratch;
+    private int[]? maskPriorityScratch;
+    private float[]? maskDistanceScratch;
+    private int maskScratchTexels = -1;
+
     private LineBuffers? cableLines;
     private CableCarLine? lastCableCarBuilt;
     private TerrainMesh3D? lastCableMesh;
@@ -1640,6 +1831,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
     /// <summary>Whether the contour-line (warstwice) overlay is drawn this frame.</summary>
     public bool ShowContours { get; set; }
+
+    /// <summary>Whether the trail/route decal (painted into the terrain surface) is built + drawn this frame.
+    /// ON by default. The mask is addressed by absolute world-XY, so it survives detail streaming inside its
+    /// window — the rebuild is keyed only on (trail/route refs + the quantized window) and reuses its scratch
+    /// buffers, so it is rare and allocation-free (no more GC spiral). The line overlays are drawn regardless,
+    /// so the far field outside the decal window still shows trails.</summary>
+    public bool ShowTrailDecal { get; set; } = true;
 
     /// <summary>
     /// Sets (or clears, when <paramref name="rgba"/> is null) the ortho-photo texture draped over the terrain.
@@ -1676,6 +1874,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// proven legacy water seating (their fine basin is real); lakes outside are seated/skipped against the
     /// loaded coarse raster so a water plane can't poke through a coarse-filled basin as dark slivers.</summary>
     public MapaTur.Domain.Geography.MapBounds? LakeFineBounds { get; set; }
+
+    /// <summary>
+    /// Baked z13-z16 tile index, when a baked pyramid is loaded — lets trail/route/road line seating sample the
+    /// SAME real elevation data the baked-streaming renderer actually draws (MapaTur.Application.Terrain.
+    /// Trail3DWorldProjection.ToWorld's bakedIndex parameter), instead of the static coarse base raster that's
+    /// otherwise the only source while baked streaming is active (the legacy per-tile DetailElevationField never
+    /// populates then — confirmed regression: lines seated "independently of the terrain"). Null = old behaviour.
+    /// </summary>
+    public MapaTur.Application.Terrain.BakedTileAvailabilityIndex? BakedElevationIndex { get; set; }
 
     /// <summary>
     /// When <c>true</c>, the terrain is shaded by the avalanche slope-steepness palette (overriding the
@@ -1718,7 +1925,24 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             if (rgba is not null && w > 0 && h > 0)
             {
-                orthoTiles.Add(new OrthoTile { Rgba = rgba, Width = w, Height = h });
+                // Retain a "master" copy at OrthoDistanceTier.NearCapPx (area/box average from the source) —
+                // the highest resolution any cell can reach. Which cells actually GET that resolution vs the
+                // coarser far tier is decided per-frame in StreamOrthoTextures from camera distance (a cell
+                // right under the camera should not be as coarse as one 50 km away); Rgba/Width/Height start
+                // equal to the master and UploadedCapPx=0 so the very first StreamOrthoTextures call picks the
+                // correct tier before anything is ever uploaded to the GPU.
+                (byte[] master, int mw, int mh) =
+                    OrthoCellDownsampler.Downsample(rgba, w, h, OrthoDistanceTier.NearCapPx);
+                orthoTiles.Add(new OrthoTile
+                {
+                    Rgba = master,
+                    Width = mw,
+                    Height = mh,
+                    MasterRgba = master,
+                    MasterWidth = mw,
+                    MasterHeight = mh,
+                    UploadedCapPx = 0,
+                });
             }
         }
         orthoDirty = true;
@@ -1779,8 +2003,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             lastTrailRaster = null;
             lastTrailMesh = null;
             lastTrailDetail = null;
+            dedupInputTrails = null;
+            dedupResultTrails = null;
             routeLines = null;
             lastRoute = null;
+            lastRouteTrails = null;
             lastRouteRaster = null;
             lastRouteMesh = null;
             lastRouteDetail = null;
@@ -2015,7 +2242,26 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             reflectionTexW = 0;
             reflectionTexH = 0;
             reflectionUnsupported = false;
+            // The trail-decal mask texture belonged to the dead context; drop the handle and clear the cache keys
+            // so EnsureTrailMask rebuilds + re-uploads it against the fresh context on the next frame. (The scratch
+            // CPU buffers survive the context loss and are reused — only the GL texture is gone.)
+            trailMaskTex = 0;
+            trailMaskValid = false;
+            lastMaskTrails = null;
+            lastMaskRoads = null;
+            lastMaskExposed = null;
+            lastMaskRoute = null;
+            lastMaskRaster = null;
+            haveMaskWindowKey = false;
+            // GPU timer query names belonged to the dead context — drop them (do NOT delete, like the other stale
+            // IDs above) so EnsureGpuTimers re-Gens against the fresh context.
+            gpuQueries = null;
+            gpuTimersProbed = false;
+            gpuFrameSlot = -1;
+            gpuFrameCount = 0;
         }
+
+        BeginGpuFrame(gl);
 
         EnsureProgram(gl);
 
@@ -2082,17 +2328,19 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         if (dbgTileSwapFrame)
         {
             var swOrtho = System.Diagnostics.Stopwatch.StartNew();
-            StreamOrthoTextures(gl, mvp, tiles);
+            StreamOrthoTextures(gl, mvp, tiles, camera.Position);
             dbgSwapOrthoMs = swOrtho.Elapsed.TotalMilliseconds;
         }
         else
         {
-            StreamOrthoTextures(gl, mvp, tiles);
+            StreamOrthoTextures(gl, mvp, tiles, camera.Position);
         }
 
         // Cascaded Shadow Maps depth pass (Krok 5): render terrain depth from the sun's POV into the cascade
         // shadow maps before the sky/terrain passes. Self-contained — restores the bound FBO + viewport.
+        GpuBegin(gl, GpuPass.Shadow);
         RenderShadowMaps(gl, camera, atmosphere?.SunDirection ?? Vector3.Zero, (float)width / Math.Max(1, height), vpWidth, vpHeight);
+        GpuEnd(gl);
 
         // ── Live weather ────────────────────────────────────────────────────────────────────────
         // Clouds are not a static dial: the coverage wanders over minutes (sometimes near-clear,
@@ -2435,6 +2683,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform1(terrainContourStrengthLocation, ShowContours ? ContourStrengthOn : 0f);
         gl.Uniform1(terrainContourWidthPxLocation, ContourWidthPx);
 
+        // Trail decal off by default (also keeps the reflection pre-pass below from painting it); the real
+        // strength + bound mask texture are set after the shadow block, just before the main terrain draw.
+        gl.Uniform1(trailMaskSamplerLocation, 5);
+        gl.Uniform1(trailMaskStrengthLocation, 0f);
+
         gl.Uniform1(terrainSnowBandZLocation, snow.BandZ);
         gl.Uniform1(terrainSnowSlopeCosBareLocation, snow.SlopeCosBare);
         gl.Uniform1(terrainSnowSlopeCosFullLocation, snow.SlopeCosFull);
@@ -2483,6 +2736,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform1(reflectionPassLocation, 0f);
         gl.Uniform1(reflectionEnabledLocation, 0f);
         bool reflectionDrawn = false;
+        GpuBegin(gl, GpuPass.Reflection);
         if (ReflectionEnabled && tiles.Count > 0 && EnsureReflectionTarget(gl, vpWidth, vpHeight))
         {
             float reflExaggeration = tiles[0].VerticalExaggeration;
@@ -2539,7 +2793,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     gl.Uniform1(useOrthoLocation, 0);
                 }
                 gl.BindVertexArray(entry.Value.Vao);
-                gl.DrawElements(PrimitiveType.Triangles, (uint)entry.Value.IndexCount, DrawElementsType.UnsignedShort, (void*)0);
+                gl.DrawElements(PrimitiveType.Triangles, (uint)entry.Value.IndexCount, DrawElementsType.UnsignedInt, (void*)0);
             }
 
             // Restore the scene framebuffer + viewport + the main MVP, and reset the reflection-pass flag.
@@ -2553,6 +2807,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.UniformMatrix4(mvpLocation, 1, false, m);
             reflectionDrawn = true;
         }
+        GpuEnd(gl); // Reflection
+
         if (reflectionDrawn)
         {
             gl.ActiveTexture(TextureUnit.Texture1);
@@ -2613,12 +2869,42 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             }
         }
 
+        // Trail/route decal (Option A): build/refresh the painted-distance mask and bind it on unit 5 so the
+        // terrain shader paints trails INTO the surface (base AND streamed detail — one shader). Main pass only
+        // (the reflection pre-pass kept strength 0). tiles[0] is the representative mesh frame for the projection.
+        // Only build/bind the mask when the decal is enabled — the build is expensive (large allocations) and
+        // would otherwise run every frame the streaming cache key churns. Off ⇒ uTrailStrength stays 0 (set above).
+        // Dedup near-parallel duplicate trails ONCE here; the same deduped reference feeds the decal mask, the
+        // trail line overlay and the route conflation, so only one of a duplicate pair is drawn and the route
+        // lands on it. Cached by input ref → not recomputed per frame.
+        IReadOnlyList<Trail>? dedupedTrails = EnsureDedupedTrails(trails);
+
+        if (ShowTrailDecal && tiles.Count > 0)
+        {
+            // camera.Target (the look-at point), NOT camera.Position: an elevated/oblique scenic view can have the
+            // camera itself far from what's actually on screen — centring on Position would leave the visible
+            // ground outside the window while the camera floats miles away looking down at it.
+            EnsureTrailMask(gl, dedupedTrails, roads, exposedRoutes, route, raster, tiles[0], detail, camera.Target);
+            if (trailMaskValid && trailMaskTex != 0)
+            {
+                gl.ActiveTexture(TextureUnit.Texture5);
+                gl.BindTexture(TextureTarget.Texture2D, trailMaskTex);
+                gl.ActiveTexture(TextureUnit.Texture0);
+                gl.Uniform2(trailMaskMinXYLocation, trailMaskMinX, trailMaskMinY);
+                gl.Uniform2(trailMaskSizeXYLocation, trailMaskSizeX, trailMaskSizeY);
+                gl.Uniform1(trailMaskMaxDistLocation, TrailMaskMaxDistanceMeters);
+                gl.Uniform1(trailMaskHalfWidthLocation, TrailDecalHalfWidthMeters);
+                gl.Uniform1(trailMaskStrengthLocation, TrailDecalStrength);
+            }
+        }
+
         // Drape the ortho: bind each mesh tile's own cell texture (OrthoTileIndex) so a multi-cell ortho
         // stays sharp. Without textures the shader uses the hypsometric tint.
         bool anyOrtho = orthoTiles.Count > 0 && OrthoEnabled;
         gl.ActiveTexture(TextureUnit.Texture0);
         gl.Uniform1(orthoSamplerLocation, 0);
         uint boundTexture = 0;
+        GpuBegin(gl, GpuPass.Terrain);
         foreach (KeyValuePair<TerrainMesh3D, TileBuffers> entry in tileBuffers)
         {
             TileBuffers tile = entry.Value;
@@ -2650,9 +2936,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             }
 
             gl.BindVertexArray(tile.Vao);
-            gl.DrawElements(PrimitiveType.Triangles, (uint)tile.IndexCount, DrawElementsType.UnsignedShort, (void*)0);
+            gl.DrawElements(PrimitiveType.Triangles, (uint)tile.IndexCount, DrawElementsType.UnsignedInt, (void*)0);
         }
+        GpuEnd(gl); // Terrain
 
+        GpuBegin(gl, GpuPass.LakesForest);
         // Lake water: real OSM outlines (MountainLakeData) for every tarn within the loaded terrain, each at its
         // own elevation, drawn over the terrain. Blended, depth-test ON so the basin clips it where the bed rises
         // above the water plane. Depth-write is ON (not off): a lake's triangles are all coplanar at one plane Z,
@@ -2712,6 +3000,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             DrawForest(gl, m, camera, atmosphere, windVec, weatherT);
             DrawForestImpostors(gl, m, camera, atmosphere);
         }
+        GpuEnd(gl); // LakesForest
 
         // Trails + route as depth-tested screen-space ribbons (occluded by the terrain). Switch to the line
         // program; it shares the depth state and the same MVP, plus the viewport for the pixel expansion.
@@ -2724,6 +3013,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         m[4] = mvp.M21; m[5] = mvp.M22; m[6] = mvp.M23; m[7] = mvp.M24;
         m[8] = mvp.M31; m[9] = mvp.M32; m[10] = mvp.M33; m[11] = mvp.M34;
         m[12] = mvp.M41; m[13] = mvp.M42; m[14] = mvp.M43; m[15] = mvp.M44;
+        GpuBegin(gl, GpuPass.Lines);
         gl.UseProgram(lineProgram);
         gl.UniformMatrix4(lineMvpLocation, 1, false, m);
         gl.Uniform2(lineViewportLocation, (float)Math.Max(1, width), (float)Math.Max(1, height));
@@ -2736,14 +3026,24 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // the whole 27×42 km network, which is what floated + parallaxed at the horizon.
         gl.Uniform1(lineMaxDistLocation, (camera.Distance * 1.6f) + 4000f);
         TerrainMesh3D frame = tiles[0];
+        // REVERTED: disabling depth-test entirely also killed REAL occlusion (a trail on the far side of an
+        // actual intervening ridge became visible "through" the mountain — confirmed regression). The correct
+        // fix is a small CLIP-SPACE depth bias in the line vertex shader (see uDepthBiasClip below / the +Z bias
+        // in the trail/route vertex shader), which only wins the depth-test tie against the surface the line is
+        // directly seated on, while still losing to genuinely different, more-in-front geometry. Depth test stays
+        // enabled here.
         DrawRoadLines(gl, roads, raster, frame, detail);
-        DrawTrailLines(gl, trails, raster, frame, detail);
+        // Use the DEDUPED trails for both the overlay and the route conflation: one of a duplicate pair is drawn,
+        // and the route is re-laid onto that single remaining trail (so it can't snap to the dropped copy beside it).
+        DrawTrailLines(gl, dedupedTrails, raster, frame, detail);
         DrawExposedRoutes(gl, exposedRoutes, raster, frame, detail);
-        DrawRouteLine(gl, route, raster, frame, detail);
+        DrawRouteLine(gl, route, dedupedTrails, raster, frame, detail);
         DrawCableCar(gl, frame, raster, detail);
 
         gl.BindVertexArray(0);
+        GpuEnd(gl); // Lines
 
+        GpuBegin(gl, GpuPass.Clouds);
         // "Sea of clouds" layer: a horizontal translucent sheet at the shared cloud altitude, drawn
         // after the terrain so the depth test lets peaks poke through and veils the valleys. Geometry
         // + field params come from the precomputed cloud locals so the layer matches the shadows the
@@ -2818,6 +3118,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             }
         }
 
+        GpuEnd(gl); // Clouds
+
         // Sauron's tower easter egg on Świnica — drawn into the scene BEFORE the post-process so the bloom pass
         // turns its eye into a small glowing sun. Depth-tested, so ridges in front occlude the lower tower.
         if (showSauronTower && atmosphere is not null && raster is not null && !sauronUnsupported)
@@ -2886,15 +3188,135 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         float godrayIntensity = (animateAtmosphere && sunVisible && atmosphere is not null) ? atmosphere.SunGlowIntensity * 1.3f : 0f;
         float bloomIntensity = animateAtmosphere ? (atmosphere?.BloomIntensity ?? 0f) : 0f;
 
+        GpuBegin(gl, GpuPass.Post);
         uint finalTex = RunPostProcess(
             gl, presentColorTex, vpWidth, vpHeight,
             atmosphere?.BloomThreshold ?? 1f, bloomIntensity,
             sunUv.X, sunUv.Y, godrayIntensity);
+        GpuEnd(gl);
 
         // Unbind everything before returning. The caller will re-establish whatever framebuffer Skia
         // expects (via GRContext.ResetContext) before sampling the texture we just produced.
         gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
         return finalTex;
+    }
+
+    // Probes once for the desktop GL_EXT_disjoint_timer_query extension and allocates the query ring. Fails safe
+    // (timing off) on mobile GLES where the extension is absent — same detect-once/latch pattern as the cumulus/
+    // sauron/msaa "unsupported" flags, so the build + render loop are unaffected on devices without it.
+    private unsafe void EnsureGpuTimers(GL g)
+    {
+        if (gpuTimersProbed)
+        {
+            return;
+        }
+
+        gpuTimersProbed = true;
+        try
+        {
+            gpuTimersSupported = g.IsExtensionPresent("GL_EXT_disjoint_timer_query");
+            if (!gpuTimersSupported)
+            {
+                Log.Information("[GL3D] per-pass GPU timers off (no GL_EXT_disjoint_timer_query)");
+                return;
+            }
+
+            gpuQueries = new uint[(int)GpuPass.Count * GpuFramesInFlight];
+            fixed (uint* p = gpuQueries)
+            {
+                g.GenQueries((uint)gpuQueries.Length, p);
+            }
+        }
+        catch (Exception ex)
+        {
+            gpuTimersSupported = false;
+            gpuQueries = null;
+            Log.Warning(ex, "[GL3D] per-pass GPU timers disabled (query setup failed)");
+        }
+    }
+
+    // Top of each frame: read back the ring slot we are ABOUT to overwrite (it holds results from GpuFramesInFlight
+    // frames ago, so they are ready without a stall), store the per-pass ms, then advance the slot. Throttled
+    // ~every 3 s, emits the breakdown to the [GL3D] Serilog channel. The 32-bit nanosecond result wraps only at
+    // ~4.3 s — far above any single pass — so the core (non-EXT) GetQueryObject read is exact here.
+    private unsafe void BeginGpuFrame(GL g)
+    {
+        EnsureGpuTimers(g);
+        if (!gpuTimersSupported || gpuQueries is null)
+        {
+            return;
+        }
+
+        gpuFrameSlot = (gpuFrameSlot + 1) % GpuFramesInFlight;
+
+        // Only read once every query name has been ended at least once (after the first full ring lap) — reading
+        // an as-yet-unused query is an error.
+        if (gpuFrameCount >= GpuFramesInFlight)
+        {
+            int disjoint = 0;
+            g.GetInteger(GlGpuDisjointExt, &disjoint);
+            bool bogus = disjoint != 0; // GPU clock changed / preempted ⇒ this lap's counts are unreliable
+
+            for (int p = 0; p < (int)GpuPass.Count; p++)
+            {
+                uint q = gpuQueries[(p * GpuFramesInFlight) + gpuFrameSlot];
+                if (q == 0)
+                {
+                    continue;
+                }
+
+                uint avail = 0;
+                g.GetQueryObject(q, QueryObjectParameterName.ResultAvailable, &avail);
+                if (avail == 0)
+                {
+                    continue; // not ready ⇒ keep the previous value, never stall
+                }
+
+                uint ns = 0;
+                g.GetQueryObject(q, QueryObjectParameterName.Result, &ns);
+                if (!bogus)
+                {
+                    lastPassMs[p] = ns / 1_000_000.0;
+                }
+            }
+
+            long now = Environment.TickCount64;
+            if (now - lastPassTimesLogTick >= MemLogIntervalMs)
+            {
+                lastPassTimesLogTick = now;
+                double sum = 0;
+                for (int p = 0; p < (int)GpuPass.Count; p++)
+                {
+                    sum += lastPassMs[p];
+                }
+
+                Log.Information(
+                    "[GL3D] [PassTimes] shadow={Shadow:F2} refl={Refl:F2} terrain={Terrain:F2} lakeforest={Lake:F2} lines={Lines:F2} clouds={Clouds:F2} post={Post:F2} sumGpu={Sum:F2}ms",
+                    lastPassMs[(int)GpuPass.Shadow], lastPassMs[(int)GpuPass.Reflection], lastPassMs[(int)GpuPass.Terrain],
+                    lastPassMs[(int)GpuPass.LakesForest], lastPassMs[(int)GpuPass.Lines], lastPassMs[(int)GpuPass.Clouds],
+                    lastPassMs[(int)GpuPass.Post], sum);
+            }
+        }
+
+        gpuFrameCount++;
+    }
+
+    // Begin a pass's GPU timer (into this frame's ring slot). Only ONE GL_TIME_ELAPSED query may be active at a
+    // time, so GpuBegin/GpuEnd must bracket SEQUENTIAL, non-nesting passes — which every pass below is.
+    private void GpuBegin(GL g, GpuPass pass)
+    {
+        if (gpuTimersSupported && gpuQueries is not null)
+        {
+            g.BeginQuery(GlTimeElapsedExt, gpuQueries[((int)pass * GpuFramesInFlight) + gpuFrameSlot]);
+        }
+    }
+
+    private void GpuEnd(GL g)
+    {
+        if (gpuTimersSupported && gpuQueries is not null)
+        {
+            g.EndQuery(GlTimeElapsedExt);
+        }
     }
 
     /// <summary>Width of the last rendered frame (the present colour texture); 0 before the first render.</summary>
@@ -3510,7 +3932,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             foreach (KeyValuePair<TerrainMesh3D, TileBuffers> entry in tileBuffers)
             {
                 g.BindVertexArray(entry.Value.Vao);
-                g.DrawElements(PrimitiveType.Triangles, (uint)entry.Value.IndexCount, DrawElementsType.UnsignedShort, (void*)0);
+                g.DrawElements(PrimitiveType.Triangles, (uint)entry.Value.IndexCount, DrawElementsType.UnsignedInt, (void*)0);
             }
             sliceNear = sliceFar;
         }
@@ -3617,7 +4039,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
     // Viewport-aware ortho streaming + LRU eviction. Computes which cells are in-frustum this frame,
     // asks the residency planner what to upload/evict within the VRAM budget, and applies the plan.
-    private void StreamOrthoTextures(GL g, Matrix4x4 viewProjection, IReadOnlyList<TerrainMesh3D> tiles)
+    // cameraWorldPos additionally drives the per-cell near/far resolution tier (OrthoDistanceTier).
+    private void StreamOrthoTextures(GL g, Matrix4x4 viewProjection, IReadOnlyList<TerrainMesh3D> tiles, Vector3 cameraWorldPos)
     {
         if (orthoTiles.Count == 0)
         {
@@ -3634,6 +4057,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         EnsureOrthoCellBounds(tiles);
+
+        LogMemoryUsage(tiles);
 
         int budgetCells = ComputeOrthoBudgetCells();
         orthoPlanner ??= new OrthoResidencyPlanner(budgetCells);
@@ -3661,7 +4086,43 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         OrthoResidencyPlan plan = orthoPlanner.Plan(visibleOrthoCells);
-        if (plan.ToUpload.Count == 0 && plan.ToEvict.Count == 0)
+
+        // Ortho cells are ~16 km across — the camera can be standing right on top of one and 60 km from
+        // another, yet both got the same flat resolution cap. Re-evaluate every VISIBLE cell's tier from its
+        // CURRENT distance to the camera every frame (cheap: one clamp + one distance per cell); force a
+        // re-download-from-master + re-upload only for the cells whose tier actually changed (rare — the
+        // hysteresis band in OrthoDistanceTier keeps this from flapping at the boundary).
+        var tierChanged = new List<int>();
+        foreach (int idx in visibleOrthoCells)
+        {
+            if (!orthoCellBounds.TryGetValue(idx, out var aabb))
+            {
+                continue;
+            }
+
+            OrthoTile t = orthoTiles[idx];
+            Vector3 nearest = Vector3.Clamp(cameraWorldPos, aabb.Min, aabb.Max);
+            float distance = Vector3.Distance(cameraWorldPos, nearest);
+            int desiredCap = OrthoDistanceTier.DesiredCapPx(t.UploadedCapPx, distance);
+            if (desiredCap == t.UploadedCapPx)
+            {
+                continue;
+            }
+
+            (t.Rgba, t.Width, t.Height) = desiredCap >= t.MasterWidth && desiredCap >= t.MasterHeight
+                ? (t.MasterRgba, t.MasterWidth, t.MasterHeight)
+                : OrthoCellDownsampler.Downsample(t.MasterRgba, t.MasterWidth, t.MasterHeight, desiredCap);
+            t.UploadedCapPx = desiredCap;
+            if (t.Texture != 0)
+            {
+                g.DeleteTexture(t.Texture);
+                t.Texture = 0;
+            }
+
+            tierChanged.Add(idx);
+        }
+
+        if (plan.ToUpload.Count == 0 && plan.ToEvict.Count == 0 && tierChanged.Count == 0)
         {
             return;
         }
@@ -3676,7 +4137,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             }
         }
 
-        if (plan.ToUpload.Count > 0)
+        if (plan.ToUpload.Count > 0 || tierChanged.Count > 0)
         {
             // Upload beyond GL_MAX_TEXTURE_SIZE yields a garbage/black texture, so guard the size once.
             Span<int> maxTexSize = stackalloc int[1] { 2048 };
@@ -3684,19 +4145,72 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             int maxSize = maxTexSize[0];
 
             // Query the driver's max anisotropy once, outside the upload loop (a per-iteration stackalloc
-            // would risk a stack overflow — CA2014).
+            // would risk a stack overflow — CA2014). STAGE-0 max-fidelity: request the driver's ACTUAL max
+            // anisotropy (not a fixed 16) so the ortho drape is as sharp as the GPU allows at grazing angles.
             const GLEnum maxAnisotropyPName = (GLEnum)0x84FF; // GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
             Span<float> maxAniso = stackalloc float[1] { 1f };
             g.GetFloat(maxAnisotropyPName, maxAniso);
-            float aniso = Math.Clamp(16f, 1f, maxAniso[0] < 1f ? 1f : maxAniso[0]);
+            float aniso = maxAniso[0] < 1f ? 1f : maxAniso[0];
 
-            foreach (int idx in plan.ToUpload)
+            // Union, not concatenation: a cell freshly promoted from ToUpload (first-ever appearance,
+            // UploadedCapPx starts 0) is ALSO caught by the tier check above, so it lands in both lists —
+            // UploadOrthoCell is idempotent (skips once Texture != 0) either way, but dedupe to avoid a
+            // pointless second log line.
+            var toUploadNow = new HashSet<int>(plan.ToUpload);
+            toUploadNow.UnionWith(tierChanged);
+            foreach (int idx in toUploadNow)
             {
-                UploadOrthoCell(g, orthoTiles[idx], maxSize, aniso);
+                OrthoTile cell = orthoTiles[idx];
+                // Report the bound ortho cell's source pixel size + the anisotropy actually applied, so the
+                // near-peak texture resolution is readable from the log (Stage-0 quality proof).
+                Log.Information(
+                    "[GL3D] ortho cell uploaded: {W}x{H}px, mipmapped + anisotropy x{Aniso} (driver max x{MaxAniso})",
+                    cell.Width, cell.Height, aniso, maxAniso[0]);
+                UploadOrthoCell(g, cell, maxSize, aniso);
             }
 
             g.BindTexture(TextureTarget.Texture2D, 0);
         }
+    }
+
+    // Throttled one-line memory snapshot: resident ortho cells + estimated ortho MB (CPU bytes + GPU texture
+    // incl. ~33% mips), the resident drawable tile count + its estimated geometry MB, and the managed heap MB.
+    // The route film OOMs at its lowest point; this makes the run-up readable from the log so a regression in
+    // the ortho/baked budgets is visible without a debugger.
+    private void LogMemoryUsage(IReadOnlyList<TerrainMesh3D> tiles)
+    {
+        long now = Environment.TickCount64;
+        if (now - lastMemLogTick < MemLogIntervalMs)
+        {
+            return;
+        }
+
+        lastMemLogTick = now;
+
+        long orthoCpuBytes = 0;
+        long orthoGpuBytes = 0;
+        foreach (OrthoTile tile in orthoTiles)
+        {
+            orthoCpuBytes += tile.Rgba.LongLength;
+            orthoGpuBytes += OrthoVramBudget.CellResidentBytes(tile.Width, tile.Height);
+        }
+
+        long tileGeometryBytes = 0;
+        for (int i = 0; i < tiles.Count; i++)
+        {
+            tileGeometryBytes += tiles[i].EstimatedGpuBytes;
+        }
+
+        const double Mb = 1024.0 * 1024.0;
+        Log.Information(
+            "[Mem] ortho {Cells} cells ~{OrthoMb:F0}MB (cpu {CpuMb:F0}+gpu {GpuMb:F0}) | tiles {Tiles} ~{TileMb:F0}MB | heap {HeapMb:F0}MB",
+            orthoTiles.Count,
+            (orthoCpuBytes + orthoGpuBytes) / Mb,
+            orthoCpuBytes / Mb,
+            orthoGpuBytes / Mb,
+            tiles.Count,
+            tileGeometryBytes / Mb,
+            GC.GetTotalMemory(forceFullCollection: false) / Mb);
     }
 
     private static void UploadOrthoCell(GL g, OrthoTile tile, int maxSize, float aniso)
@@ -4143,6 +4657,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         terrainContourMajorColorLocation = g.GetUniformLocation(program, "uContourMajorColor");
         terrainContourStrengthLocation = g.GetUniformLocation(program, "uContourStrength");
         terrainContourWidthPxLocation = g.GetUniformLocation(program, "uContourWidthPx");
+        trailMaskSamplerLocation = g.GetUniformLocation(program, "uTrailMask");
+        trailMaskStrengthLocation = g.GetUniformLocation(program, "uTrailStrength");
+        trailMaskMinXYLocation = g.GetUniformLocation(program, "uTrailMaskMinXY");
+        trailMaskSizeXYLocation = g.GetUniformLocation(program, "uTrailMaskSizeXY");
+        trailMaskMaxDistLocation = g.GetUniformLocation(program, "uTrailMaxDist");
+        trailMaskHalfWidthLocation = g.GetUniformLocation(program, "uTrailHalfWidth");
         terrainSnowBandZLocation = g.GetUniformLocation(program, "uSnowBandZ");
         terrainSnowSlopeCosBareLocation = g.GetUniformLocation(program, "uSnowSlopeCosBare");
         terrainSnowSlopeCosFullLocation = g.GetUniformLocation(program, "uSnowSlopeCosFull");
@@ -4468,7 +4988,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             normals[(i * 3) + 2] = n.Z;
         }
 
-        ushort[] indices = tile.Indices;
+        uint[] indices = tile.Indices;
 
         var buffers = new TileBuffers { IndexCount = indices.Length };
         buffers.Vao = g.GenVertexArray();
@@ -4499,9 +5019,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.EnableVertexAttribArray(3);
         g.VertexAttribPointer(3, 2, VertexAttribPointerType.Float, false, 2 * sizeof(float), (void*)0);
 
+        // Per-vertex mid-frequency detail amplitude (m RMS): one float at attribute location 4, baked into the
+        // VAO so the main terrain draw carries it with no per-tile bind. 0 on the finest/live tiles (no-op shading).
+        float[] detail = tile.Detail;
+        buffers.DetailVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.DetailVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(detail.Length * sizeof(float)), detail, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(4);
+        g.VertexAttribPointer(4, 1, VertexAttribPointerType.Float, false, sizeof(float), (void*)0);
+
         buffers.Ebo = g.GenBuffer();
         g.BindBuffer(BufferTargetARB.ElementArrayBuffer, buffers.Ebo);
-        g.BufferData<ushort>(BufferTargetARB.ElementArrayBuffer, (nuint)(indices.Length * sizeof(ushort)), indices, BufferUsageARB.StaticDraw);
+        g.BufferData<uint>(BufferTargetARB.ElementArrayBuffer, (nuint)(indices.Length * sizeof(uint)), indices, BufferUsageARB.StaticDraw);
 
         g.BindVertexArray(0);
         tileBuffers[tile] = buffers;
@@ -4526,6 +5055,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.DeleteBuffer(b.ColorVbo);
         g.DeleteBuffer(b.NormalVbo);
         g.DeleteBuffer(b.TexVbo);
+        g.DeleteBuffer(b.DetailVbo);
         g.DeleteBuffer(b.Ebo);
         g.DeleteVertexArray(b.Vao);
     }
@@ -4589,6 +5119,253 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
     }
 
+    // De-duplicates near-parallel duplicate trails ONCE per distinct input set (OSM relation + underlying way),
+    // caching the result keyed on the input reference. Returns the same cached instance until `trails` changes, so
+    // the deduped reference is stable — safe to use as the ReferenceEquals cache key for the mask / line / route
+    // caches without churning a rebuild every frame. The dedup itself is O(total samples) (spatial-hashed), so even
+    // the rare recompute on a new trail set stays off the per-frame hot path.
+    private IReadOnlyList<Trail>? EnsureDedupedTrails(IReadOnlyList<Trail>? trails)
+    {
+        if (trails is null || trails.Count == 0)
+        {
+            dedupInputTrails = trails;
+            dedupResultTrails = trails;
+            return trails;
+        }
+
+        if (ReferenceEquals(dedupInputTrails, trails) && dedupResultTrails is not null)
+        {
+            return dedupResultTrails;
+        }
+
+        dedupInputTrails = trails;
+        dedupResultTrails = TrailDeduplicator.Deduplicate(trails);
+        return dedupResultTrails;
+    }
+
+    // Builds (when needed) the painted-distance trail mask and uploads it to a GL texture. The mask is addressed
+    // by ABSOLUTE world-XY in the shader, so it survives detail streaming inside its window — so it is rebuilt ONLY
+    // when the trail/road/exposed inputs change OR the (quantized) window moves a whole grid cell, NOT on every
+    // detail/mesh swap (that churned a ~48 MB rebuild per stream → GC spiral). Projects the densified world lines
+    // (lift = 0, detail = null — the mask ignores Z, so seating it on the detail is wasted work), maps every layer
+    // to a colour+priority via TrailMaskInput, rasterises into reused scratch buffers, and uploads RGBA8 (linear,
+    // clamped, no mips — trails are thin, mipmapping would dissolve them). The route is NOT in the mask.
+    private void EnsureTrailMask(
+        GL g,
+        IReadOnlyList<Trail>? trails,
+        IReadOnlyList<Trail>? roads,
+        IReadOnlyList<Trail>? exposed,
+        Route? route,
+        DemRaster? raster,
+        TerrainMesh3D mesh,
+        DetailElevationField? detail,
+        Vector3 cameraWorldPos)
+    {
+        // Window first (cheap — pure geometry off detail/mesh). The seated/Z work and the 48 MB raster only run
+        // when the key below actually changes, so this early stage is what runs on a churning detail stream.
+        bool windowOk = TryComputeMaskWindow(detail, mesh, cameraWorldPos, out float rawMinX, out float rawMinY, out float rawSizeX, out float rawSizeY);
+
+        // The route IS in the decal (dashed translucent violet ON the trail), so a route change must rebuild — but
+        // the route reference is stable across detail streams, so this still does NOT churn while streaming. Keyed
+        // on the deduped trails / roads / exposed / route refs + raster + the quantized window.
+        bool linesUnchanged = ReferenceEquals(lastMaskTrails, trails)
+            && ReferenceEquals(lastMaskRoads, roads)
+            && ReferenceEquals(lastMaskExposed, exposed)
+            && ReferenceEquals(lastMaskRoute, route)
+            && ReferenceEquals(lastMaskRaster, raster);
+
+        // Quantize the window to a coarse grid so detail streaming (which nudges the window every tile) does NOT
+        // move the key. Only a whole-cell jump (or a line-set change) triggers a rebuild. min floors, max ceils →
+        // the quantized window always contains the raw window, so no decal edge is cropped.
+        float keyMinX = Quantize(rawMinX);
+        float keyMinY = Quantize(rawMinY);
+        float keySizeX = QuantizeUp(rawMinX + rawSizeX) - keyMinX;
+        float keySizeY = QuantizeUp(rawMinY + rawSizeY) - keyMinY;
+        bool windowUnchanged = haveMaskWindowKey
+            && keyMinX == lastMaskKeyMinX && keyMinY == lastMaskKeyMinY
+            && keySizeX == lastMaskKeySizeX && keySizeY == lastMaskKeySizeY;
+
+        if (windowOk && linesUnchanged && windowUnchanged && trailMaskValid)
+        {
+            return; // nothing relevant changed — keep the cached texture (detail may have streamed; mask is absolute)
+        }
+
+        lastMaskTrails = trails;
+        lastMaskRoads = roads;
+        lastMaskExposed = exposed;
+        lastMaskRoute = route;
+        lastMaskRaster = raster;
+
+        trailMaskValid = false;
+        if (raster is null || !windowOk)
+        {
+            return;
+        }
+
+        // Build the painted lines from the QUANTIZED window so the texture aligns with the cache key (and the
+        // window covers the snapped grid cell). detail = null: seating only changes Z, which the mask drops.
+        // Trails/roads/exposed are the distance-field layers; the route is then painted ON TOP as a dashed
+        // translucent highlight (the route pass below), conflated onto the SAME deduped trails so it lies on its trail.
+        IReadOnlyList<TrailWorldLine>? trailsWorld =
+            trails is { Count: > 0 } ? Trail3DWorldProjection.ToWorld(trails, raster, mesh, 0f, detail: null) : null;
+        IReadOnlyList<TrailWorldLine>? roadsWorld =
+            roads is { Count: > 0 } ? Trail3DWorldProjection.ToWorld(roads, raster, mesh, 0f, detail: null) : null;
+        IReadOnlyList<TrailWorldLine>? exposedWorld =
+            exposed is { Count: > 0 } ? Trail3DWorldProjection.ToWorld(exposed, raster, mesh, 0f, detail: null) : null;
+
+        IReadOnlyList<MaskPolyline> lines = TrailMaskInput.Build(trailsWorld, roadsWorld, exposedWorld);
+
+        // Route → a MaskRoute the builder paints as the dashed translucent violet ON the trail. Conflate it onto the
+        // SAME deduped trails the decal/overlay use (so it shares the trail geometry), Z ignored (lift 0, no detail).
+        MaskRoute? maskRoute = null;
+        if (route is not null)
+        {
+            RouteWorldLine routeWorld = Route3DWorldProjection.ToWorld(route, raster, mesh, 0f, detail: null, followTrails: trails);
+            if (routeWorld.World.Count >= 2)
+            {
+                (byte rr, byte rg, byte rb) = TrailMaskInput.RouteColor;
+                maskRoute = new MaskRoute(
+                    routeWorld.World, rr, rg, rb,
+                    RouteDecalDashMeters, RouteDecalGapMeters, RouteDecalBlend, RouteDecalPaintRadiusMeters);
+            }
+        }
+
+        if (lines.Count == 0 && maskRoute is null)
+        {
+            return;
+        }
+
+        float minX = keyMinX, minY = keyMinY, sizeX = keySizeX, sizeY = keySizeY;
+        if (sizeX <= 1f || sizeY <= 1f)
+        {
+            return;
+        }
+
+        // Texture sized to the window aspect (max side = TrailMaskTextureSize) so metres-per-texel match in X/Y.
+        int texW, texH;
+        if (sizeX >= sizeY)
+        {
+            texW = TrailMaskTextureSize;
+            texH = Math.Max(1, (int)MathF.Round(TrailMaskTextureSize * sizeY / sizeX));
+        }
+        else
+        {
+            texH = TrailMaskTextureSize;
+            texW = Math.Max(1, (int)MathF.Round(TrailMaskTextureSize * sizeX / sizeY));
+        }
+
+        var request = new TrailMaskRequest
+        {
+            WorldMinX = minX,
+            WorldMinY = minY,
+            WorldSizeX = sizeX,
+            WorldSizeY = sizeY,
+            Width = texW,
+            Height = texH,
+            MaxDistanceMeters = TrailMaskMaxDistanceMeters,
+            Lines = lines,
+            Route = maskRoute,
+        };
+
+        // Reuse the scratch buffers across rebuilds — reallocate only when the texel count changes (no per-rebuild
+        // multi-MB churn). At 4096² this is one ~67 MB rgba + ~33 MB priority + ~33 MB distance, allocated ONCE.
+        int texels = texW * texH;
+        if (maskRgbaScratch is null || maskScratchTexels != texels)
+        {
+            maskRgbaScratch = new byte[texels * 4];
+            maskPriorityScratch = new int[texels];
+            maskDistanceScratch = new float[texels];
+            maskScratchTexels = texels;
+        }
+
+        TrailMask mask = TrailMaskBuilder.Build(request, maskRgbaScratch, maskPriorityScratch!, maskDistanceScratch!);
+
+        lastMaskKeyMinX = keyMinX;
+        lastMaskKeyMinY = keyMinY;
+        lastMaskKeySizeX = keySizeX;
+        lastMaskKeySizeY = keySizeY;
+        haveMaskWindowKey = true;
+
+        if (trailMaskTex == 0)
+        {
+            trailMaskTex = g.GenTexture();
+        }
+
+        g.ActiveTexture(TextureUnit.Texture5);
+        g.BindTexture(TextureTarget.Texture2D, trailMaskTex);
+        g.TexImage2D<byte>(
+            TextureTarget.Texture2D, 0, (int)InternalFormat.Rgba8,
+            (uint)mask.Width, (uint)mask.Height, 0,
+            PixelFormat.Rgba, PixelType.UnsignedByte, mask.Rgba);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+        g.ActiveTexture(TextureUnit.Texture0);
+
+        trailMaskMinX = minX;
+        trailMaskMinY = minY;
+        trailMaskSizeX = sizeX;
+        trailMaskSizeY = sizeY;
+        trailMaskValid = true;
+    }
+
+    // The mask window in absolute world-XY: the near-field detail window when streaming (fine resolution where
+    // occlusion bit hardest), else the whole mesh world extent (so a base-only view still shows the decal). Derived
+    // purely from detail/mesh geometry (no lines) so it can be computed BEFORE the cache check decides to rebuild.
+    // Half-extent of the camera-centred mask window used whenever DetailElevationField is unavailable (i.e.
+    // ALWAYS under baked-tile streaming — the legacy per-tile detail system that populates DetailElevationField
+    // never runs while it's active, so `detail` is permanently null there; see MapPageViewModel.OnDetailFocusAsync
+    // early-return). Before this fix TryComputeMaskWindow's null-detail branch fell back to the MESH'S WHOLE
+    // extent (tens of km for a Tatra-wide load) — stretching the fixed TrailMaskTextureSize (4096 px) SDF over
+    // that gives metres-per-texel far too coarse to resolve a trail crisply, which is a real (if different)
+    // contributor to "szlak znika/jest kanciasty" alongside the 3D-line elevation-seating bug. A window this size
+    // matches the finest baked-detail ring radius (QuadtreeTileSelectorOptions.DefaultFinestRingRadiusMeters =
+    // 2500 m) with headroom, giving ≈1.95 m/texel (8000/4096) instead of tens of metres/texel.
+    private const float TrailMaskCameraWindowHalfExtentMeters = 4000f;
+
+    private static bool TryComputeMaskWindow(
+        DetailElevationField? detail,
+        TerrainMesh3D mesh,
+        Vector3 cameraWorldPos,
+        out float minX, out float minY, out float sizeX, out float sizeY)
+    {
+        minX = minY = sizeX = sizeY = 0f;
+
+        if (detail is not null)
+        {
+            DemRaster r = detail.Raster;
+            Vector3 sw = mesh.GeoToWorld(new GeoPoint(r.South, r.West), 0f);
+            Vector3 ne = mesh.GeoToWorld(new GeoPoint(r.North, r.East), 0f);
+            minX = MathF.Min(sw.X, ne.X);
+            minY = MathF.Min(sw.Y, ne.Y);
+            sizeX = MathF.Abs(ne.X - sw.X);
+            sizeY = MathF.Abs(ne.Y - sw.Y);
+            return sizeX > 1f && sizeY > 1f;
+        }
+
+        // No legacy detail field (the baked-streaming case — see the constant's comment above): a small window
+        // CENTRED ON THE CAMERA, not the whole mesh, so the fixed-resolution SDF stays sharp where it's actually
+        // being looked at. Clamped to the mesh's own extent so it never reaches past real geometry.
+        float half = TrailMaskCameraWindowHalfExtentMeters;
+        minX = MathF.Max(mesh.WorldMin.X, cameraWorldPos.X - half);
+        minY = MathF.Max(mesh.WorldMin.Y, cameraWorldPos.Y - half);
+        float maxX = MathF.Min(mesh.WorldMax.X, cameraWorldPos.X + half);
+        float maxY = MathF.Min(mesh.WorldMax.Y, cameraWorldPos.Y + half);
+        sizeX = maxX - minX;
+        sizeY = maxY - minY;
+        return sizeX > 1f && sizeY > 1f;
+    }
+
+    // Snap helpers for the coarse mask-window grid so detail streaming (which nudges the window every tile) does
+    // not churn the rebuild cache key — only a whole-cell jump does. The min-corner floors and the size ceils, so
+    // the quantized window always CONTAINS the raw window (max-corner = min + size never crops the detail it covers).
+    private static float Quantize(float meters) =>
+        MathF.Floor(meters / TrailMaskWindowQuantMeters) * TrailMaskWindowQuantMeters;
+
+    private static float QuantizeUp(float meters) =>
+        MathF.Ceiling(meters / TrailMaskWindowQuantMeters) * TrailMaskWindowQuantMeters;
+
     private void DrawTrailLines(GL g, IReadOnlyList<Trail>? trails, DemRaster? raster, TerrainMesh3D mesh, DetailElevationField? detail)
     {
         if (trails is null || trails.Count == 0 || raster is null)
@@ -4607,7 +5384,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             DeleteLine(g, ref trailLines);
             DeleteLine(g, ref trailLinesBlack);
-            IReadOnlyList<TrailWorldLine> world = Trail3DWorldProjection.ToWorld(trails, raster, mesh, TrailLiftMeters, detail);
+            IReadOnlyList<TrailWorldLine> world = Trail3DWorldProjection.ToWorld(trails, raster, mesh, TrailLiftMeters, detail, BakedElevationIndex);
 
             // Black trails go in their own ribbon so they can be drawn thicker (a thin black line is nearly
             // invisible on the dark terrain); every other colour stays on the delicate-thread width.
@@ -4618,11 +5395,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 (byte r, byte gg, byte b) = PttkRgb(line.Source.PrimaryColor);
                 if (line.Source.PrimaryColor == PttkColor.Black)
                 {
-                    ribbonBlack.Append(line.World, r, gg, b);
+                    ribbonBlack.Append(line.World, r, gg, b, TrailOverlayAlpha);
                 }
                 else
                 {
-                    ribbon.Append(line.World, r, gg, b);
+                    ribbon.Append(line.World, r, gg, b, TrailOverlayAlpha);
                 }
             }
 
@@ -4634,8 +5411,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             lastTrailDetail = detail;
         }
 
+        // Alpha-blend so a fragment that loses the near-field z-fight (see TrailOverlayAlpha) reveals the
+        // decal's own trail colour underneath instead of bare terrain. Depth-test stays ON (real ridges must
+        // still occlude); depth-write off so the translucent ribbon doesn't block cable car / later overlays.
+        g.Enable(EnableCap.Blend);
+        g.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+        g.DepthMask(false);
         DrawLine(g, trailLines, TrailHalfWidthPx);
         DrawLine(g, trailLinesBlack, TrailBlackHalfWidthPx);
+        g.DepthMask(true);
     }
 
     private void DrawRoadLines(GL g, IReadOnlyList<Trail>? roads, DemRaster? raster, TerrainMesh3D mesh, DetailElevationField? detail)
@@ -4653,7 +5437,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             DeleteLine(g, ref roadLines);
             // Roads are unmarked Trail polylines; reuse the trail world projection, draw them all one grey.
-            IReadOnlyList<TrailWorldLine> world = Trail3DWorldProjection.ToWorld(roads, raster, mesh, RoadLiftMeters, detail);
+            IReadOnlyList<TrailWorldLine> world = Trail3DWorldProjection.ToWorld(roads, raster, mesh, RoadLiftMeters, detail, BakedElevationIndex);
 
             var ribbon = new RibbonBuilder();
             foreach (TrailWorldLine line in world)
@@ -4671,7 +5455,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         DrawLine(g, roadLines, RoadHalfWidthPx);
     }
 
-    private void DrawRouteLine(GL g, Route? route, DemRaster? raster, TerrainMesh3D mesh, DetailElevationField? detail)
+    // FAR-FIELD FALLBACK for the route. The route is primarily painted INTO the surface decal now (dashed translucent
+    // violet ON the trail — see EnsureTrailMask's route pass), which adheres to the base AND the streamed detail and
+    // can't be occluded. That decal covers the whole mesh when base-only, and the near-field detail window while
+    // streaming. This dashed translucent line fills the route in BEYOND that window (far field), where it lies on the
+    // smooth base and is not occluded; up close it may be hidden by the detail terrain, but there the decal already
+    // shows the route — so near and far stay consistent. Same conflation + violet/dash/alpha as before.
+    private void DrawRouteLine(GL g, Route? route, IReadOnlyList<Trail>? trails, DemRaster? raster, TerrainMesh3D mesh, DetailElevationField? detail)
     {
         if (route is null || raster is null)
         {
@@ -4680,27 +5470,39 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         if (routeLines is null
             || !ReferenceEquals(lastRoute, route)
+            || !ReferenceEquals(lastRouteTrails, trails)
             || !ReferenceEquals(lastRouteRaster, raster)
             || !ReferenceEquals(lastRouteMesh, mesh)
             || !ReferenceEquals(lastRouteDetail, detail))
         {
             DeleteLine(g, ref routeLines);
-            RouteWorldLine world = Route3DWorldProjection.ToWorld(route, raster, mesh, RouteLiftMeters, detail);
+            // followTrails: re-lay the route onto the SAME polyline as the trail it traverses (conflation), so the
+            // line lies ON the trail instead of beside it — matching the decal. Seated/densified on the detail.
+            RouteWorldLine world = Route3DWorldProjection.ToWorld(route, raster, mesh, RouteLiftMeters, detail, followTrails: trails, bakedIndex: BakedElevationIndex);
 
             var ribbon = new RibbonBuilder();
-            // DASHED, not solid: ~10 m dash / ~10 m gap over the 5 m densified route, so the trail underneath
-            // shows through the gaps — you can SEE whether the planned route actually follows a marked trail
-            // (e.g. that it really descends the żleb). Violet matches the 2D planner.
-            ribbon.AppendDashed(world.World, 0x7C, 0x3A, 0xED, dashSegments: 2, gapSegments: 2);
+            // DASHED + SEMI-TRANSPARENT: the route is a violet highlight lying ON its trail (conflated onto the
+            // trail's polyline), with the trail showing through the dashes and the ~60% alpha. Violet matches the
+            // 2D planner. The route is NOT painted into the surface decal — it's only this translucent overlay.
+            ribbon.AppendDashed(world.World, 0x7C, 0x3A, 0xED, RouteDashSegments, RouteGapSegments, RouteAlpha);
 
             routeLines = UploadLine(g, ribbon);
             lastRoute = route;
+            lastRouteTrails = trails;
             lastRouteRaster = raster;
             lastRouteMesh = mesh;
             lastRouteDetail = detail;
         }
 
+        // Alpha-blend just the route so the trail beneath shows through (other overlays stay opaque). Depth-test
+        // stays on (the terrain still occludes it); depth-write off so the translucent dashes don't block the
+        // cable car / later overlays. Restore the opaque state afterwards.
+        g.Enable(EnableCap.Blend);
+        g.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+        g.DepthMask(false);
         DrawLine(g, routeLines, RouteHalfWidthPx);
+        g.DepthMask(true);
+        g.Disable(EnableCap.Blend);
     }
 
     private void DrawExposedRoutes(GL g, IReadOnlyList<Trail>? exposed, DemRaster? raster, TerrainMesh3D mesh, DetailElevationField? detail)
@@ -4719,7 +5521,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             DeleteLine(g, ref exposedLines);
             // Exposed routes are Trail polylines (sac_scale / via_ferrata); reuse the trail world projection
             // (which densifies + seats them on the 1 m detail), then draw DASHED so they read as dotted lines.
-            IReadOnlyList<TrailWorldLine> world = Trail3DWorldProjection.ToWorld(exposed, raster, mesh, ExposedRouteLiftMeters, detail);
+            IReadOnlyList<TrailWorldLine> world = Trail3DWorldProjection.ToWorld(exposed, raster, mesh, ExposedRouteLiftMeters, detail, BakedElevationIndex);
 
             var ribbon = new RibbonBuilder();
             foreach (TrailWorldLine line in world)
@@ -4878,22 +5680,22 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         public readonly List<float> Sides = new();
         public readonly List<uint> Indices = new();
 
-        public void Append(IReadOnlyList<Vector3> world, byte r, byte g, byte b)
+        public void Append(IReadOnlyList<Vector3> world, byte r, byte g, byte b, byte a = 255)
         {
             for (int i = 0; i < world.Count - 1; i++)
             {
-                Vector3 a = world[i];
+                Vector3 p0 = world[i];
                 Vector3 c = world[i + 1];
-                if (float.IsNaN(a.X) || float.IsNaN(c.X))
+                if (float.IsNaN(p0.X) || float.IsNaN(c.X))
                 {
                     continue;
                 }
 
                 uint v = (uint)(Positions.Count / 3);
-                AddVertex(a, c, +1f, r, g, b);
-                AddVertex(a, c, -1f, r, g, b);
-                AddVertex(c, a, -1f, r, g, b);
-                AddVertex(c, a, +1f, r, g, b);
+                AddVertex(p0, c, +1f, r, g, b, a);
+                AddVertex(p0, c, -1f, r, g, b, a);
+                AddVertex(c, p0, -1f, r, g, b, a);
+                AddVertex(c, p0, +1f, r, g, b, a);
                 Indices.Add(v + 0);
                 Indices.Add(v + 1);
                 Indices.Add(v + 2);
@@ -4908,7 +5710,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         /// <paramref name="gapSegments"/>, repeating along the (densified) polyline — so the line reads as a
         /// row of dots/dashes. With ~5 m densification, dash=1/gap=2 gives ~5 m marks every ~15 m.
         /// </summary>
-        public void AppendDashed(IReadOnlyList<Vector3> world, byte r, byte g, byte b, int dashSegments, int gapSegments)
+        public void AppendDashed(IReadOnlyList<Vector3> world, byte r, byte g, byte b, int dashSegments, int gapSegments, byte a = 255)
         {
             int period = Math.Max(1, dashSegments + gapSegments);
             for (int i = 0; i < world.Count - 1; i++)
@@ -4918,18 +5720,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     continue; // gap
                 }
 
-                Vector3 a = world[i];
+                Vector3 p0 = world[i];
                 Vector3 c = world[i + 1];
-                if (float.IsNaN(a.X) || float.IsNaN(c.X))
+                if (float.IsNaN(p0.X) || float.IsNaN(c.X))
                 {
                     continue;
                 }
 
                 uint v = (uint)(Positions.Count / 3);
-                AddVertex(a, c, +1f, r, g, b);
-                AddVertex(a, c, -1f, r, g, b);
-                AddVertex(c, a, -1f, r, g, b);
-                AddVertex(c, a, +1f, r, g, b);
+                AddVertex(p0, c, +1f, r, g, b, a);
+                AddVertex(p0, c, -1f, r, g, b, a);
+                AddVertex(c, p0, -1f, r, g, b, a);
+                AddVertex(c, p0, +1f, r, g, b, a);
                 Indices.Add(v + 0);
                 Indices.Add(v + 1);
                 Indices.Add(v + 2);
@@ -4939,7 +5741,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             }
         }
 
-        private void AddVertex(Vector3 pos, Vector3 other, float side, byte r, byte g, byte b)
+        private void AddVertex(Vector3 pos, Vector3 other, float side, byte r, byte g, byte b, byte a)
         {
             Positions.Add(pos.X);
             Positions.Add(pos.Y);
@@ -4951,7 +5753,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             Colors.Add(r);
             Colors.Add(g);
             Colors.Add(b);
-            Colors.Add(255);
+            Colors.Add(a);
         }
     }
 
@@ -6269,6 +7071,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             shadowFbos[i] = 0;
             shadowDepthTex[i] = 0;
         }
+
+        if (gpuQueries is not null)
+        {
+            fixed (uint* p = gpuQueries)
+            {
+                gl.DeleteQueries((uint)gpuQueries.Length, p);
+            }
+
+            gpuQueries = null;
+        }
         shadowMapsAllocated = false;
         gl.DeleteFramebuffer(reflectionFbo);
         gl.DeleteTexture(reflectionColorTex);
@@ -6278,6 +7090,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         reflectionDepthRb = 0;
         reflectionTexW = 0;
         reflectionTexH = 0;
+        gl.DeleteTexture(trailMaskTex);
+        trailMaskTex = 0;
+        trailMaskValid = false;
         foreach (OrthoTile t in orthoTiles)
         {
             if (t.Texture != 0)

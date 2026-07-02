@@ -34,7 +34,7 @@ public sealed class OnlineRegionDemLoaderTests
         public FakeSource(Func<DemTileKey, DemRaster?> factory) => this.factory = factory;
 
         // Snapshot — fetches run concurrently, so the backing list is guarded.
-        public IReadOnlyList<DemTileKey> Requested
+        public List<DemTileKey> Requested
         {
             get { lock (this.sync) { return this.requested.ToList(); } }
         }
@@ -229,5 +229,128 @@ public sealed class OnlineRegionDemLoaderTests
 
         mosaic.Should().BeNull("nothing cached ⇒ no layer; the caller leaves the base showing");
         source.Requested.Should().BeEmpty("the render loop never reaches out to the network");
+    }
+
+    // Step B (decoded-tile cache). A per-key fill so a wrong reused tile would change the stitched samples — the
+    // identical-output assertions below would catch a cache that handed back the wrong tile.
+    private static DemRaster KeyedTileRaster(DemTileKey key)
+        => TileRaster(key, fill: (key.X * 1000) + key.Y);
+
+    // Two regions one tile apart, so the second overlaps the first by all-but-one column of tiles.
+    private static readonly MapBounds RegionA = new(new GeoPoint(49.10, 19.90), new GeoPoint(49.30, 20.10));
+    private static readonly MapBounds RegionB = new(new GeoPoint(49.10, 20.05), new GeoPoint(49.30, 20.25));
+
+    private static void AssertSameSamples(DemRaster a, DemRaster b)
+    {
+        a.Columns.Should().Be(b.Columns);
+        a.Rows.Should().Be(b.Rows);
+        a.Samples.Should().Equal(b.Samples, "the cached mosaic must be byte-for-byte identical to a fresh stitch");
+    }
+
+    [Fact]
+    public async Task LoadRegionAsync_WithDecodedTileCache_OnSecondLoad_OnlyDecodesNewlyEnteredTiles()
+    {
+        var planA = DemTilePlanner.TilesForBounds(RegionA, Zoom).ToHashSet();
+        var planB = DemTilePlanner.TilesForBounds(RegionB, Zoom).ToHashSet();
+        int overlap = planA.Count(planB.Contains);
+        overlap.Should().BeGreaterThan(0, "the two regions must share tiles for the test to mean anything");
+        int newInB = planB.Count(k => !planA.Contains(k));
+
+        var source = new FakeSource(KeyedTileRaster);
+        var loader = new OnlineRegionDemLoader(source, cacheDecodedTiles: true);
+
+        await loader.LoadRegionAsync(RegionA, Zoom); // warm the cache
+        int afterA = source.Requested.Count;
+        afterA.Should().Be(planA.Count, "the first load decodes every planned tile");
+
+        await loader.LoadRegionAsync(RegionB, Zoom);
+        int decodedForB = source.Requested.Count - afterA;
+
+        decodedForB.Should().Be(newInB, "only the newly-entered tiles are decoded; the overlap is reused");
+        loader.LastDecodedTileHits.Should().Be(overlap, "the overlapping tiles are cache hits");
+        loader.LastDecodedTileMisses.Should().Be(newInB);
+    }
+
+    [Fact]
+    public async Task LoadRegionAsync_WithDecodedTileCache_ShiftedWindow_YieldsIdenticalRasterToFreshStitch()
+    {
+        // The cached loader (after a warm A→B) must produce the SAME B raster as a brand-new loader stitching B
+        // from scratch — proving the decoded-tile cache is a pure speed optimization, identical pixels out.
+        var cachedLoader = new OnlineRegionDemLoader(new FakeSource(KeyedTileRaster), cacheDecodedTiles: true);
+        await cachedLoader.LoadRegionAsync(RegionA, Zoom);
+        DemRaster? cachedB = await cachedLoader.LoadRegionAsync(RegionB, Zoom);
+
+        var freshLoader = new OnlineRegionDemLoader(new FakeSource(KeyedTileRaster), cacheDecodedTiles: false);
+        DemRaster? freshB = await freshLoader.LoadRegionAsync(RegionB, Zoom);
+
+        cachedB.Should().NotBeNull();
+        freshB.Should().NotBeNull();
+        AssertSameSamples(cachedB!, freshB!);
+    }
+
+    [Fact]
+    public async Task LoadRegionAsync_WithDecodedTileCache_WarmReload_ReusesEverything_AndMatchesColdRaster()
+    {
+        var source = new FakeSource(KeyedTileRaster);
+        var loader = new OnlineRegionDemLoader(source, cacheDecodedTiles: true);
+
+        DemRaster? cold = await loader.LoadRegionAsync(RegionA, Zoom);
+        int afterCold = source.Requested.Count;
+
+        DemRaster? warm = await loader.LoadRegionAsync(RegionA, Zoom); // identical window again
+        source.Requested.Count.Should().Be(afterCold, "a reload of the same window decodes nothing new");
+        loader.LastDecodedTileMisses.Should().Be(0, "every tile is already cached");
+        loader.LastDecodedTileHits.Should().Be(DemTilePlanner.TilesForBounds(RegionA, Zoom).Count);
+
+        AssertSameSamples(warm!, cold!);
+    }
+
+    [Fact]
+    public async Task LoadRegionAsync_WithDecodedTileCache_EvictsTilesNotInTheCurrentWindow()
+    {
+        // Roam from A to a disjoint far region: the cache must not keep A's tiles forever (zoom-scoped eviction
+        // drops the unused same-zoom tiles), so memory stays bounded to roughly one window.
+        var farRegion = new MapBounds(new GeoPoint(50.10, 21.00), new GeoPoint(50.30, 21.20));
+        var planA = DemTilePlanner.TilesForBounds(RegionA, Zoom);
+        var planFar = DemTilePlanner.TilesForBounds(farRegion, Zoom);
+        planA.Any(planFar.Contains).Should().BeFalse("the regions must be disjoint for this test");
+
+        var loader = new OnlineRegionDemLoader(new FakeSource(KeyedTileRaster), cacheDecodedTiles: true);
+        await loader.LoadRegionAsync(RegionA, Zoom);
+        await loader.LoadRegionAsync(farRegion, Zoom);
+
+        loader.DecodedTileCount.Should().Be(planFar.Count, "A's tiles are evicted once the window no longer covers them");
+    }
+
+    [Fact]
+    public async Task LoadRegionAsync_WithDecodedTileCache_DoesNotEvictTilesAtADifferentZoom()
+    {
+        // The one singleton loader serves both the z16 detail re-center and the rarer base/legacy loads at other
+        // zooms. A load at one zoom must NOT evict cached tiles at another zoom, or the two would thrash each other.
+        var loader = new OnlineRegionDemLoader(new FakeSource(KeyedTileRaster), cacheDecodedTiles: true);
+        await loader.LoadRegionAsync(RegionA, 13); // base-ish zoom
+        int baseTiles = DemTilePlanner.TilesForBounds(RegionA, 13).Count;
+        loader.DecodedTileCount.Should().Be(baseTiles);
+
+        await loader.LoadRegionAsync(RegionA, 16); // detail zoom — different tiles, different zoom
+        int detailTiles = DemTilePlanner.TilesForBounds(RegionA, 16).Count;
+
+        loader.DecodedTileCount.Should().Be(baseTiles + detailTiles,
+            "tiles at the other zoom survive a load that doesn't request that zoom");
+    }
+
+    [Fact]
+    public async Task LoadRegionAsync_WithoutDecodedTileCache_DecodesEveryTileEveryLoad()
+    {
+        // Default (cache off): behaviour is unchanged — every load re-fetches every tile (no retained state).
+        var source = new FakeSource(KeyedTileRaster);
+        var loader = new OnlineRegionDemLoader(source);
+
+        await loader.LoadRegionAsync(RegionA, Zoom);
+        int afterFirst = source.Requested.Count;
+        await loader.LoadRegionAsync(RegionA, Zoom);
+
+        (source.Requested.Count - afterFirst).Should().Be(afterFirst, "with caching off, the same window re-fetches fully");
+        loader.DecodedTileCount.Should().Be(0, "caching off ⇒ nothing retained");
     }
 }

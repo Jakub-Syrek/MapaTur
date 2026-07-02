@@ -31,11 +31,17 @@ public sealed class TerrainMesh3D
     /// full raster (0,0)=NW..(1,1)=SE; with a finer grid they are LOCAL to this tile's ortho cell.</summary>
     public float[] TexCoords { get; }
 
+    /// <summary>Per-vertex mid-frequency detail amplitude (metres RMS) — the sub-cell relief a coarsening
+    /// downsample discarded for this vertex's cell. 0 on the finest level (relief is in the geometry) and on the
+    /// live path. The GPU uses it to shade a coarse tile as if it still had those bumps (look-only; never geometry).</summary>
+    public float[] Detail { get; }
+
     /// <summary>Index (row-major) of the ortho texture cell this mesh tile samples; 0 for a single full-extent ortho.</summary>
     public int OrthoTileIndex { get; }
 
-    /// <summary>Triangle index buffer (3 ushorts per triangle).</summary>
-    public ushort[] Indices { get; }
+    /// <summary>Triangle index buffer (3 uints per triangle). 32-bit indices so a single mesh can address
+    /// more than 65 536 vertices (a full 256² baked tile plus its skirt) without splitting into sub-blocks.</summary>
+    public uint[] Indices { get; }
 
     /// <summary>Centre of the source raster's bounding box in world metres (typically Vector3.Zero by construction).</summary>
     public Vector3 Center { get; }
@@ -70,13 +76,23 @@ public sealed class TerrainMesh3D
     /// <summary>World-space axis-aligned bounding box (max corner). See <see cref="WorldMin"/>.</summary>
     public Vector3 WorldMax { get; }
 
+    /// <summary>
+    /// Approximate bytes this mesh's vertex + index data occupies once uploaded (positions + normals as
+    /// <see cref="Vector3"/>, per-vertex shaded + base ARGB, UVs, and the <see cref="uint"/> index buffer).
+    /// Used by the baked-tile streamer to cap RESIDENT geometry by total bytes, not just tile count — a broad
+    /// ring of many small tiles and a deep ring of a few large ones cost very differently. The same layout is
+    /// uploaded to the GPU, so this also tracks the resident VRAM geometry footprint closely enough to budget.
+    /// </summary>
+    public long EstimatedGpuBytes { get; }
+
     private TerrainMesh3D(
         Vector3[] vertices,
         Vector3[] normals,
         uint[] colors,
         uint[] baseColors,
         float[] texCoords,
-        ushort[] indices,
+        float[] detail,
+        uint[] indices,
         Vector3 center,
         float horizontalExtent,
         float verticalExaggeration,
@@ -92,6 +108,7 @@ public sealed class TerrainMesh3D
         Colors = colors;
         BaseColors = baseColors;
         TexCoords = texCoords;
+        Detail = detail;
         OrthoTileIndex = orthoTileIndex;
         Indices = indices;
         Center = center;
@@ -121,6 +138,10 @@ public sealed class TerrainMesh3D
         MaxElevationZ = float.IsNegativeInfinity(maxZ) ? 0f : maxZ;
         WorldMin = vertices.Length > 0 ? new Vector3(minX, minY, minZ) : center;
         WorldMax = vertices.Length > 0 ? new Vector3(maxX, maxY, maxZ) : center;
+
+        // Per-vertex: position (12) + normal (12) + colour (4) + base colour (4) + UV (8) + detail (4) = 44 bytes;
+        // per index: 4 bytes (32-bit). Skirt vertices are already included in the arrays by this point.
+        EstimatedGpuBytes = ((long)vertices.Length * 44L) + ((long)indices.Length * 4L);
     }
 
     /// <summary>
@@ -135,6 +156,7 @@ public sealed class TerrainMesh3D
         MeshBufferPool.Shared.Return(Colors);
         MeshBufferPool.Shared.Return(BaseColors);
         MeshBufferPool.Shared.Return(TexCoords);
+        MeshBufferPool.Shared.Return(Detail);
     }
 
     /// <summary>
@@ -161,8 +183,11 @@ public sealed class TerrainMesh3D
     /// </summary>
     public GeoPoint ProjectionAnchor { get; }
 
-    /// <summary>Largest vertex count addressable by 16-bit (ushort) triangle indices.</summary>
-    private const int MaxVerticesPerMesh = ushort.MaxValue + 1;
+    /// <summary>Upper bound on vertices in a single mesh. Indices are 32-bit (uint), so the real ceiling is
+    /// the array limit; this generous cap (2048²) just guards the single-block <c>Build</c> against a runaway
+    /// full-raster mesh and steers huge rasters to <see cref="BuildTiles"/>. A 256² baked tile + skirt (~66 556 verts) fits
+    /// far under it — the old 65 536 (16-bit) limit is gone, so a baked tile no longer needs splitting.</summary>
+    private const int MaxVerticesPerMesh = 2048 * 2048;
 
     /// <summary>
     /// The ortho texture cell a mesh tile samples: its span in raster-grid indices (so per-vertex UV is
@@ -256,7 +281,7 @@ public sealed class TerrainMesh3D
     /// rN/rS/rW/rE) so a finer tile's shared edge uses only the vertices the coarser neighbour also has — the
     /// chunked-LOD T-junction fix. ratio ≤ 1 = no change; corners (index 0 / last) are always anchors.
     /// </summary>
-    private static ushort WeldEdgeVertex(int lr, int lc, int tileCols, int tileRows, int rN, int rS, int rW, int rE)
+    private static uint WeldEdgeVertex(int lr, int lc, int tileCols, int tileRows, int rN, int rS, int rW, int rE)
     {
         static int Anchor(int idx, int ratio, int count)
         {
@@ -288,37 +313,89 @@ public sealed class TerrainMesh3D
             lr = Anchor(lr, rE, tileRows);
         }
 
-        return (ushort)((lr * tileCols) + lc);
+        return (uint)((lr * tileCols) + lc);
     }
 
     /// <summary>
-    /// Builds a single terrain mesh from a DEM raster. The raster must fit within the 16-bit index
-    /// limit (≤ 65 536 vertices); larger rasters must use <see cref="BuildTiles"/>.
+    /// Builds a single terrain mesh from a DEM raster. Indices are 32-bit, so a single mesh can hold a
+    /// full-resolution baked tile; only an absurdly large raster (the guard cap) must use <see cref="BuildTiles"/>.
     /// </summary>
     /// <param name="raster">Source DEM.</param>
     /// <param name="options">Optional tuning; default options use NW sun at 2× vertical exaggeration.</param>
     public static TerrainMesh3D Build(DemRaster raster, TerrainMeshOptions? options = null)
+        => Build(raster, options, projectionAnchor: null);
+
+    /// <summary>
+    /// Builds a single terrain mesh from a DEM raster, optionally about a SHARED world-frame origin so the
+    /// result lines up with other independently-built meshes (the LOD scene). Indices are 32-bit, so only an
+    /// absurdly large raster (the guard cap) must use <see cref="BuildTiles"/>.
+    /// </summary>
+    /// <param name="raster">Source DEM.</param>
+    /// <param name="options">Optional tuning; default options use NW sun at 2× vertical exaggeration.</param>
+    /// <param name="projectionAnchor">Optional fixed world-frame origin. Null (default) anchors on the raster's
+    /// own bounds centre (vertices centred on ~0, legacy <see cref="Build(DemRaster, TerrainMeshOptions)"/>
+    /// behaviour). A shared anchor across independently-built single-tile meshes gives them one world frame, so
+    /// each tile lands exactly where <see cref="LocalTangentProjection.GeoToWorld"/> would put the same ground
+    /// point — used to mesh baked tiles into the streaming LOD frame.</param>
+    public static TerrainMesh3D Build(DemRaster raster, TerrainMeshOptions? options, GeoPoint? projectionAnchor)
+        => Build(raster, options, projectionAnchor, orthoCoverage: null, orthoTileIndexOffset: 0);
+
+    /// <summary>
+    /// Builds a single terrain mesh about a shared anchor, optionally TEXTURED through a larger ortho this raster
+    /// is a sub-region of. Identical to <see cref="Build(DemRaster, TerrainMeshOptions, GeoPoint?)"/> except that
+    /// when <paramref name="orthoCoverage"/> is set the vertices get geo-referenced ortho UVs and the mesh's
+    /// <see cref="OrthoTileIndex"/> is resolved from its centre's position in the coverage — so a single baked
+    /// tile drapes the same ortho as the rest of the LOD scene (Stage 2c) instead of falling back to hypsometric.
+    /// </summary>
+    /// <param name="raster">Source DEM (≤ 65 536 cells).</param>
+    /// <param name="options">Optional tuning; null uses defaults.</param>
+    /// <param name="projectionAnchor">Optional shared world-frame origin (see the sibling overload).</param>
+    /// <param name="orthoCoverage">Optional ortho placement for geo-referenced UV + per-tile cell selection. Null
+    /// (default) keeps the legacy local UV and the full-extent ortho cell index.</param>
+    /// <param name="orthoTileIndexOffset">Added to the resolved ortho cell index so this mesh's cell lines up with
+    /// the renderer's ortho list. Ignored for an out-of-coverage tile (which stays hypsometric). 0 = no shift.</param>
+    /// <param name="detailGrid">Optional per-cell mid-frequency detail amplitude (metres RMS), row-major and the
+    /// SAME dimensions/indexing as <paramref name="raster"/>. Copied into each vertex's <see cref="Detail"/>; null
+    /// (default) leaves all detail 0. Used only for look-only coarse-tile shading, never geometry.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="raster"/> is null.</exception>
+    /// <exception cref="ArgumentException">The raster exceeds the single-mesh vertex cap (use <see cref="BuildTiles"/>).</exception>
+    public static TerrainMesh3D Build(
+        DemRaster raster,
+        TerrainMeshOptions? options,
+        GeoPoint? projectionAnchor,
+        OrthoCoverage? orthoCoverage,
+        int orthoTileIndexOffset,
+        float[]? detailGrid = null)
     {
         ArgumentNullException.ThrowIfNull(raster);
         options ??= new TerrainMeshOptions();
 
-        // Indices are ushort, so the *largest index value* must fit, i.e. vertexCount ≤ 65536.
+        // Indices are 32-bit, so a single mesh can address far more than 65 536 vertices; this only rejects an
+        // absurdly large single Build (guard cap) and steers it to the tiled path.
         if ((long)raster.Columns * raster.Rows > MaxVerticesPerMesh)
         {
             throw new ArgumentException(
-                "DEM raster is too large for 16-bit triangle indices; use BuildTiles for high-resolution rasters.",
+                "DEM raster is too large for a single mesh; use BuildTiles for high-resolution rasters.",
                 nameof(raster));
         }
 
+        // World-frame origin: the raster's own bounds centre by default (vertices centred on ~0), or a shared
+        // anchor. anchorOffset is where this raster's centre sits in the anchored frame (Zero when anchor == own
+        // centre), added to every vertex; the frame's lon scale uses the anchor latitude so vertices and
+        // GeoToWorld agree exactly — identical to the BuildTiles anchoring path.
         var rasterCentre = new GeoPoint(
             (raster.North + raster.South) / 2.0, (raster.East + raster.West) / 2.0);
-        MeshFrame frame = ComputeFrame(raster, rasterCentre.Latitude);
-        return BuildBlock(raster, options, frame, 0, raster.Columns - 1, 0, raster.Rows - 1, rasterCentre, Vector3.Zero);
+        GeoPoint anchor = projectionAnchor ?? rasterCentre;
+        Vector3 anchorOffset = LocalTangentProjection.GeoToWorld(rasterCentre, 0f, anchor, 1f);
+        MeshFrame frame = ComputeFrame(raster, anchor.Latitude);
+        return BuildBlock(
+            raster, options, frame, 0, raster.Columns - 1, 0, raster.Rows - 1, anchor, anchorOffset,
+            orthoCoverage: orthoCoverage, orthoTileIndexOffset: orthoTileIndexOffset, detailGrid: detailGrid);
     }
 
     /// <summary>
-    /// Builds a high-resolution terrain as a set of mesh tiles, each within the 16-bit index limit, so a
-    /// DEM far larger than 65 536 cells can be rendered at full detail (one <c>SKVertices</c> per tile).
+    /// Builds a high-resolution terrain as a set of mesh tiles, each bounded by <paramref name="maxTileSide"/>, so a
+    /// DEM far larger than a single tile can be rendered at full detail (one <c>SKVertices</c> per tile).
     /// Every tile is expressed in the SAME world frame (origin = full-raster centre) and carries the full
     /// raster's <see cref="Bounds"/> / <see cref="HorizontalExtent"/>, so overlays projecting against any
     /// tile share one consistent coordinate system. Adjacent tiles share their seam row/column of
@@ -346,6 +423,9 @@ public sealed class TerrainMesh3D
     /// <param name="orthoTileIndexOffset">Added to every tile's ortho cell index so this mesh's cells sit
     /// AFTER another set in the renderer's flat ortho list (e.g. a high-zoom near-field patch appended past
     /// the base scene's cells). 0 (default) = no shift.</param>
+    /// <param name="detailGrid">Optional per-cell mid-frequency detail amplitude (metres RMS), row-major and the
+    /// SAME dimensions/indexing as <paramref name="raster"/>; copied into each vertex's <see cref="Detail"/>. Null
+    /// (default) leaves detail 0.</param>
     public static IReadOnlyList<TerrainMesh3D> BuildTiles(
         DemRaster raster,
         TerrainMeshOptions? options = null,
@@ -356,7 +436,8 @@ public sealed class TerrainMesh3D
         DemRaster? edgeHeightSource = null,
         int edgeMatchRows = 1,
         OrthoCoverage? orthoCoverage = null,
-        int orthoTileIndexOffset = 0)
+        int orthoTileIndexOffset = 0,
+        float[]? detailGrid = null)
     {
         ArgumentNullException.ThrowIfNull(raster);
         if (maxTileSide < 1)
@@ -367,7 +448,7 @@ public sealed class TerrainMesh3D
         if ((maxTileSide + 1L) * (maxTileSide + 1L) > MaxVerticesPerMesh)
         {
             throw new ArgumentOutOfRangeException(
-                nameof(maxTileSide), maxTileSide, "A tile of this side would exceed the 16-bit vertex limit.");
+                nameof(maxTileSide), maxTileSide, "A tile of this side would exceed the single-mesh vertex cap.");
         }
 
         ArgumentOutOfRangeException.ThrowIfLessThan(orthoGridCols, 1);
@@ -438,7 +519,8 @@ public sealed class TerrainMesh3D
                 {
                     tiles.Add(BuildBlock(
                         raster, options, frame, colCuts[ci], colCuts[ci + 1], r0, r1, anchor, anchorOffset,
-                        OrthoCell.Full(cols, rows), edgeHeightSource, edgeMatchRows, orthoCoverage, orthoTileIndexOffset));
+                        OrthoCell.Full(cols, rows), edgeHeightSource, edgeMatchRows, orthoCoverage, orthoTileIndexOffset,
+                        detailGrid: detailGrid));
                 }
             }
 
@@ -468,7 +550,7 @@ public sealed class TerrainMesh3D
                     for (int c0 = cellC0; c0 < cellC1; c0 += maxTileSide)
                     {
                         int c1 = Math.Min(c0 + maxTileSide, cellC1);
-                        tiles.Add(BuildBlock(raster, options, frame, c0, c1, r0, r1, anchor, anchorOffset, cell, edgeHeightSource, edgeMatchRows, orthoTileIndexOffset: orthoTileIndexOffset));
+                        tiles.Add(BuildBlock(raster, options, frame, c0, c1, r0, r1, anchor, anchorOffset, cell, edgeHeightSource, edgeMatchRows, orthoTileIndexOffset: orthoTileIndexOffset, detailGrid: detailGrid));
                     }
                 }
             }
@@ -549,7 +631,7 @@ public sealed class TerrainMesh3D
         Vector3 anchorOffset = LocalTangentProjection.GeoToWorld(rasterCentre, 0f, anchor, 1f);
         MeshFrame frame = ComputeFrame(raster, anchor.Latitude);
 
-        const int maxTileSide = 250; // ≤ 250 sampled verts/side keeps each block under the 16-bit index limit
+        const int maxTileSide = 250; // ≤ 250 sampled verts/side keeps each live-detail block a manageable size
 
         // Ortho cell boundaries (absolute raster cols/rows). A block that STRADDLES a cell boundary picks one
         // cell by its centre and clamps the far-side UV → that cell's edge texels stretch into relief-independent
@@ -699,7 +781,8 @@ public sealed class TerrainMesh3D
         int edgeRatioSouth = 1,
         int edgeRatioWest = 1,
         int edgeRatioEast = 1,
-        int step = 1)
+        int step = 1,
+        float[]? detailGrid = null)
     {
         int cols = raster.Columns;
         int rows = raster.Rows;
@@ -724,7 +807,12 @@ public sealed class TerrainMesh3D
         uint[] colors = MeshBufferPool.Shared.RentUInt32(vertexCount);
         uint[] baseColors = MeshBufferPool.Shared.RentUInt32(vertexCount);
         float[] texCoords = MeshBufferPool.Shared.RentSingle(vertexCount * 2);
-        var indexList = new List<ushort>((tileCols - 1) * (tileRows - 1) * 6);
+        // Per-vertex mid-frequency detail amplitude (metres RMS) — the sub-cell relief discarded by a coarsening
+        // downsample, sampled from the tile's detail grid (null on the finest/live path ⇒ all 0). The detail grid
+        // is row-major cols×rows, identical indexing to the height raster, so a vertex at absolute cell (c,r)
+        // reads detailGrid[r*cols + c].
+        float[] detail = MeshBufferPool.Shared.RentSingle(vertexCount);
+        var indexList = new List<uint>((tileCols - 1) * (tileRows - 1) * 6);
         float noDataValue = raster.NoDataValue;
 
         // UV maps each vertex to [0,1] within its ORTHO CELL (the texture this tile samples). The default
@@ -833,6 +921,21 @@ public sealed class TerrainMesh3D
                 Vector3 normal = Vector3.Normalize(new Vector3(-dzdx, -dzdy, 1f));
                 int li = (localRow * tileCols) + localCol;
                 normals[li] = normal;
+                // No pre-baked detail grid (the ring-LOD base / live per-tile paths, unlike the baked pyramid,
+                // mesh straight off the native raster): at step>1 this vertex is a single POINT sample, so
+                // everything in its step-sized window is real relief the mesh never shows — recover it ON THE
+                // FLY from the same raster this loop already reads, faded by step (StepDetailFadeHalfLife) so
+                // far/coarse ground doesn't out-bump near/fine ground. Step 1 (native resolution, incl. every
+                // baked z16 tile — BakedTileMeshBuilder always calls Build/BuildTiles at step 1) discards
+                // NOTHING, but the 1 m LiDAR itself cannot resolve sub-metre rock/scree microtexture — that is
+                // below the sensor's own resolution, no fix on this data could ever recover it. NativeMicroDetail
+                // adds a modest, capped synthetic bump extrapolated from the ground's own small-scale roughness
+                // (near-zero on genuinely smooth ground — a lake, graded scree/snow — non-zero elsewhere).
+                detail[li] = detailGrid is not null
+                    ? detailGrid[(r * cols) + c]
+                    : step > 1
+                        ? StepResidualRms(raster, c, r, step, cols, rows) * DistanceFade(step, StepDetailFadeHalfLife)
+                        : NativeMicroDetail(raster, c, r, cols, rows);
                 if (orthoCoverage is { } cov)
                 {
                     double vlon = cols > 1 ? raster.West + ((double)c / (cols - 1) * (raster.East - raster.West)) : raster.West;
@@ -877,10 +980,10 @@ public sealed class TerrainMesh3D
 
                 // Weld in-between edge vertices to the coarser neighbour's anchors (ratio > 1) so a different-step
                 // seam meets 1:1 (no T-junction crack). A triangle that collapses after welding is dropped.
-                ushort i00 = WeldEdgeVertex(lr, lc, tileCols, tileRows, edgeRatioNorth, edgeRatioSouth, edgeRatioWest, edgeRatioEast);
-                ushort i10 = WeldEdgeVertex(lr, lc + 1, tileCols, tileRows, edgeRatioNorth, edgeRatioSouth, edgeRatioWest, edgeRatioEast);
-                ushort i01 = WeldEdgeVertex(lr + 1, lc, tileCols, tileRows, edgeRatioNorth, edgeRatioSouth, edgeRatioWest, edgeRatioEast);
-                ushort i11 = WeldEdgeVertex(lr + 1, lc + 1, tileCols, tileRows, edgeRatioNorth, edgeRatioSouth, edgeRatioWest, edgeRatioEast);
+                uint i00 = WeldEdgeVertex(lr, lc, tileCols, tileRows, edgeRatioNorth, edgeRatioSouth, edgeRatioWest, edgeRatioEast);
+                uint i10 = WeldEdgeVertex(lr, lc + 1, tileCols, tileRows, edgeRatioNorth, edgeRatioSouth, edgeRatioWest, edgeRatioEast);
+                uint i01 = WeldEdgeVertex(lr + 1, lc, tileCols, tileRows, edgeRatioNorth, edgeRatioSouth, edgeRatioWest, edgeRatioEast);
+                uint i11 = WeldEdgeVertex(lr + 1, lc + 1, tileCols, tileRows, edgeRatioNorth, edgeRatioSouth, edgeRatioWest, edgeRatioEast);
 
                 // Triangle 1: NW, NE, SW
                 if (!nw && !ne && !sw && i00 != i10 && i10 != i01 && i00 != i01)
@@ -902,7 +1005,8 @@ public sealed class TerrainMesh3D
 
         // Skirt (Model 1): hang a vertical apron from the tile perimeter so the crack to a different-resolution
         // neighbour is filled with real terrain-coloured geometry, not a see-through gap. Appends a lowered
-        // copy of the boundary ring + wall triangles. Keep maxTileSide ≤ ~250 so this stays under the 16-bit limit.
+        // copy of the boundary ring + wall triangles. 32-bit indices, so the skirt ring can push the vertex
+        // count past 65 536 (e.g. a 256² baked tile + skirt) without overflowing.
         if (options.SkirtDepthMeters > 0f)
         {
             float drop = options.SkirtDepthMeters * exaggeration;
@@ -920,6 +1024,7 @@ public sealed class TerrainMesh3D
             Array.Resize(ref colors, newCount);
             Array.Resize(ref baseColors, newCount);
             Array.Resize(ref texCoords, newCount * 2);
+            Array.Resize(ref detail, newCount);
 
             for (int j = 0; j < skirtCount; j++)
             {
@@ -932,15 +1037,16 @@ public sealed class TerrainMesh3D
                 baseColors[dst] = baseColors[src];
                 texCoords[dst * 2] = texCoords[src * 2];
                 texCoords[(dst * 2) + 1] = texCoords[(src * 2) + 1];
+                detail[dst] = detail[src]; // skirts are hidden seams — copy the ring vertex's detail
             }
 
             for (int j = 0; j < skirtCount; j++)
             {
                 int jn = (j + 1) % skirtCount;
-                ushort topA = (ushort)ring[j];
-                ushort topB = (ushort)ring[jn];
-                ushort botA = (ushort)(skirtBase + j);
-                ushort botB = (ushort)(skirtBase + jn);
+                uint topA = (uint)ring[j];
+                uint topB = (uint)ring[jn];
+                uint botA = (uint)(skirtBase + j);
+                uint botB = (uint)(skirtBase + jn);
                 indexList.Add(topA);
                 indexList.Add(topB);
                 indexList.Add(botB);
@@ -950,7 +1056,7 @@ public sealed class TerrainMesh3D
             }
         }
 
-        ushort[] indices = indexList.ToArray();
+        uint[] indices = indexList.ToArray();
 
         return new TerrainMesh3D(
             vertices,
@@ -958,6 +1064,7 @@ public sealed class TerrainMesh3D
             colors,
             baseColors,
             texCoords,
+            detail,
             indices,
             anchorOffset,
             frame.HorizontalExtent,
@@ -968,6 +1075,103 @@ public sealed class TerrainMesh3D
             geoTileIndex,
             projectionAnchor);
     }
+
+    // A window wider than this (per axis) is strided down to ~this many samples instead of scanned exhaustively.
+    // Near/mid-field steps (≤~12) stay exhaustive — that is exactly the visually-resolvable range. Far-field ring-
+    // LOD base tiles can carry step 32-64+ (a whole-Tatra-visible tile); scanning every one of those step² cells
+    // per vertex measured as multi-SECOND frame stalls (10.7 s observed at step≈64) — a strided subset keeps the
+    // cost O(1) per vertex regardless of step, while every sampled value is still a real raster cell (not
+    // fabricated), so the residual stays a genuine, if sparser, measurement of local relief.
+    private const int MaxResidualSamplesPerAxis = 7;
+
+    // step≈2 (barely coarsened, near-camera) keeps ~94% strength; step≈32 (a far ring-LOD-base tile) fades to
+    // ~34%; step≈64 to ~20%. Tuned so the on-the-fly path's existing near-field behaviour is essentially
+    // unchanged while distant, heavily-decimated ground tapers off instead of being shown at full bump strength.
+    private const float StepDetailFadeHalfLife = 16f;
+
+    /// <summary>
+    /// Distance/coarseness fade in (0, 1], applied to a detail amplitude before it reaches the shader: 1 at
+    /// <paramref name="coarseness"/> 1 (native resolution), decaying toward 0 as <paramref name="coarseness"/>
+    /// grows. The LOD selector only ever gives a large step (or a coarse baked zoom) to ground FAR from the
+    /// camera, so without this a distant, heavily-decimated tile's naturally larger window/box-average residual
+    /// would show MORE synthetic bump than nearby fine terrain — backwards from what the eye expects. Shaped as
+    /// 1 / (1 + (coarseness-1)/halfLife) rather than a hard cutoff so LOD-tier changes fade smoothly (no pop).
+    /// Internal (not private) so <see cref="BakedTileMeshBuilder"/> can apply the SAME shape to its own
+    /// zoom-derived coarseness before handing a tile's DetailRms in as this class's detailGrid.
+    /// </summary>
+    internal static float DistanceFade(float coarseness, float halfLife)
+        => 1f / (1f + ((coarseness - 1f) / halfLife));
+
+    /// <summary>
+    /// RMS (metres) of a step-sampled vertex's discarded neighbourhood about its own mean — the same "fix B"
+    /// residual maths as <see cref="BakedDemDownsampler"/>, computed ON THE FLY from the native raster instead
+    /// of pre-baked, because a step&gt;1 tile here is POINT-sampled (one raw cell per vertex), not box-averaged:
+    /// the whole window around (<paramref name="c"/>, <paramref name="r"/>) is real relief the mesh never shows.
+    /// NoData cells are excluded; fewer than 2 valid cells (a NoData-heavy edge) returns 0 rather than fabricate
+    /// a value from a single sample.
+    /// </summary>
+    private static float StepResidualRms(DemRaster raster, int c, int r, int step, int cols, int rows)
+    {
+        int half = step / 2;
+        int colFrom = Math.Max(0, c - half);
+        int colTo = Math.Min(cols - 1, c + half);
+        int rowFrom = Math.Max(0, r - half);
+        int rowTo = Math.Min(rows - 1, r + half);
+        float noData = raster.NoDataValue;
+
+        int colStride = Math.Max(1, (colTo - colFrom + 1) / MaxResidualSamplesPerAxis);
+        int rowStride = Math.Max(1, (rowTo - rowFrom + 1) / MaxResidualSamplesPerAxis);
+
+        double sum = 0.0;
+        double sumSq = 0.0;
+        int valid = 0;
+        for (int rr = rowFrom; rr <= rowTo; rr += rowStride)
+        {
+            for (int cc = colFrom; cc <= colTo; cc += colStride)
+            {
+                float v = raster[cc, rr];
+                if (v.Equals(noData) || float.IsNaN(v))
+                {
+                    continue;
+                }
+
+                sum += v;
+                sumSq += (double)v * v;
+                valid++;
+            }
+        }
+
+        if (valid < 2)
+        {
+            return 0f;
+        }
+
+        double mean = sum / valid;
+        double variance = Math.Max(0.0, (sumSq / valid) - (mean * mean));
+        return (float)Math.Sqrt(variance);
+    }
+
+    // ±2 native cells (~5-8 m at 1-1.6 m/px) — a small, local window; NativeDetailGain/Cap deliberately keep the
+    // result FAR below what the same window's raw RMS would read as real relief (see StepResidualRms) — this is
+    // extrapolation below the source data's own resolution, not a measurement, so it must never be mistaken for
+    // (or overpower) genuine large-scale shape.
+    private const int NativeDetailWindowStep = 4;
+    private const float NativeDetailGain = 0.75f;
+    private const float NativeDetailCap = 0.9f;
+
+    /// <summary>
+    /// Modest, capped synthetic micro-bump amplitude (metres) for a NATIVE-resolution vertex (step 1 — every
+    /// baked z16 tile, and any ring-LOD-base/live-detail vertex close enough to sample every raster cell). A
+    /// native vertex discards nothing (<see cref="StepResidualRms"/> is for step&gt;1 tiles that skip cells), but
+    /// 1 m LiDAR itself cannot resolve sub-metre rock/scree microtexture — that is below the SENSOR's own
+    /// resolution, so no downsample/re-bake fix on this data could ever recover it. This extrapolates a plausible
+    /// amount from the ground's own small-scale roughness (<see cref="StepResidualRms"/> over a small fixed
+    /// window): genuinely smooth ground (a lake, a graded scree/snow floor) has near-zero local variation and
+    /// gets near-zero synthetic detail; locally-varied ground gets a capped FRACTION of that variation, never the
+    /// full measured amplitude — it is a guess dressed as texture, not a fact, and must read as modest.
+    /// </summary>
+    private static float NativeMicroDetail(DemRaster raster, int c, int r, int cols, int rows)
+        => Math.Min(StepResidualRms(raster, c, r, NativeDetailWindowStep, cols, rows) * NativeDetailGain, NativeDetailCap);
 
     /// <summary>
     /// Hypsometric (elevation-based) base colour, opaque ARGB.

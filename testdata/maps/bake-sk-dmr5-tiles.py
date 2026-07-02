@@ -43,7 +43,10 @@ ZOOM = 16
 TILE_PX = 256
 
 # Slovak-Tatra bake window (WGS84), inside the tatry.dem extent; north of it is Poland (GUGiK).
-W, S, E, N = 19.70, 49.05, 20.40, 49.30
+# W widened 19.70 -> 19.50 to cover the whole Slovak side of OUR map (Roháče / Západné Tatry lon 19.5-19.7 that
+# the original 19.70 window clipped, leaving void tiles). poland_fraction still skips PL-covered tiles, so this
+# only fills genuine SK-only tiles -> full 100% coverage of the map's terrain (GUGiK north + DMR5 south).
+W, S, E, N = 19.50, 49.05, 20.40, 49.30
 
 MIN_COVERAGE = 0.995
 

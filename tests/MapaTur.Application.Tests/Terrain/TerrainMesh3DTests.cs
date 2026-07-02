@@ -168,9 +168,9 @@ public sealed class TerrainMesh3DTests
 
         TerrainMesh3D mesh = TerrainMesh3D.Build(raster);
 
-        foreach (ushort index in mesh.Indices)
+        foreach (uint index in mesh.Indices)
         {
-            index.Should().BeLessThan((ushort)mesh.Vertices.Length);
+            index.Should().BeLessThan((uint)mesh.Vertices.Length);
         }
     }
 
@@ -318,14 +318,16 @@ public sealed class TerrainMesh3DTests
     }
 
     [Fact]
-    public void Build_WhenVertexCountExceedsUshort_Throws()
+    public void Build_WhenVertexCountExceeds16BitLimit_StillSucceedsWith32BitIndices()
     {
-        // 257×256 = 65 792 vertices — exceeds ushort.MaxValue + 1.
+        // 257×256 = 65 792 vertices — past the OLD 16-bit (ushort.MaxValue + 1 = 65 536) single-mesh cap. Indices
+        // are now 32-bit, so a single mesh addresses far more — this no longer throws. (P1: a full 256² baked tile
+        // plus its skirt is one mesh / one draw call instead of being split into four.)
         var raster = BuildFlatRaster(257, 256);
 
         Action act = () => TerrainMesh3D.Build(raster);
 
-        act.Should().Throw<ArgumentException>();
+        act.Should().NotThrow();
     }
 
     [Fact]
@@ -354,9 +356,8 @@ public sealed class TerrainMesh3DTests
         foreach (var tile in tiles)
         {
             tile.Vertices.Length.Should().BeLessThanOrEqualTo(ushort.MaxValue + 1);
-            foreach (ushort index in tile.Indices)
+            foreach (uint index in tile.Indices)
             {
-                // int compare — a full 65 536-vertex tile uses indices 0..65535, and (ushort)65536 wraps to 0.
                 ((int)index).Should().BeLessThan(tile.Vertices.Length);
             }
         }

@@ -42,6 +42,7 @@
                              ShowOrtho="{Binding ShowOrtho}"
                              LodOrthoCoverageBounds="{Binding LodOrthoCoverageBounds}"
                              LodDetailBounds="{Binding LodDetailBounds}"
+                             BakedElevationIndex="{Binding BakedElevationIndex}"
                              ShowPeakNames="{Binding ShowPeakNames}"
                              ShowNightSky="{Binding ShowNightSky}"
                              ShowSauronTower="{Binding ShowSauronTower}"

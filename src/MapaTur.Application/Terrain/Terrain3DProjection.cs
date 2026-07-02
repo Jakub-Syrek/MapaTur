@@ -138,7 +138,10 @@ public static class Terrain3DProjection
             }
         }
 
-        ushort[] sourceIndices = mesh.Indices;
+        // The mesh's index buffer is 32-bit (uint). This Skia fallback emits ushort SKVertices indices, which can
+        // only address ≤ 65 536 verts — fine here because the live tiles this path renders stay small (≤ 250²).
+        // The baked-streaming tiles (which can exceed that) go through the GL renderer, not this CPU fallback.
+        uint[] sourceIndices = mesh.Indices;
         int triangleCount = sourceIndices.Length / 3;
         scratch.EnsureTriangleCapacity(triangleCount);
         float[] depths = scratch.Depths;
@@ -150,9 +153,9 @@ public static class Terrain3DProjection
         for (int t = 0; t < triangleCount; t++)
         {
             int baseIdx = t * 3;
-            ushort i0 = sourceIndices[baseIdx];
-            ushort i1 = sourceIndices[baseIdx + 1];
-            ushort i2 = sourceIndices[baseIdx + 2];
+            int i0 = (int)sourceIndices[baseIdx];
+            int i1 = (int)sourceIndices[baseIdx + 1];
+            int i2 = (int)sourceIndices[baseIdx + 2];
 
             Vector3 v0 = screen[i0];
             Vector3 v1 = screen[i1];
@@ -222,9 +225,9 @@ public static class Terrain3DProjection
             int t = triangleIndices[k];
             int baseSrc = t * 3;
             int baseDst = slot * 3;
-            visibleIndices[baseDst] = sourceIndices[baseSrc];
-            visibleIndices[baseDst + 1] = sourceIndices[baseSrc + 1];
-            visibleIndices[baseDst + 2] = sourceIndices[baseSrc + 2];
+            visibleIndices[baseDst] = (ushort)sourceIndices[baseSrc];
+            visibleIndices[baseDst + 1] = (ushort)sourceIndices[baseSrc + 1];
+            visibleIndices[baseDst + 2] = (ushort)sourceIndices[baseSrc + 2];
         }
 
         return new ProjectedTerrainFrame(screen, visibleIndices, vertexCount, visibleCount * 3);
