@@ -88,7 +88,16 @@
       ewentualnie glBufferSubData w plastrach / mniejsze porcje. Mechanizm deferred-upload już istnieje
       (32d987f) — brakuje mu limitu na klatkę. Robić RAZEM z systemem ładowania (jedno „doświadczenie
       startu": progres + brak freezów).
-- [ ] **NOWE (user 2026-07-02 wieczór): „skały na Orlej wyglądają źle, na słowackiej części dobrze"** —
+- [ ] **NOWE (user 2026-07-02 ~21:30, screenshot + fotka referencyjna): OŚWIETLENIE — „jak jest słońce,
+      powinno być DUŻO jaśniej" + „przepatrz cienie ponownie, żeby były zgodne ze słońcem”.** Scena w apce
+      (Kościelec/Świnica) jest mroczna-szarozielona nawet w dzień; referencja (fot. Nienartowicz, Hala
+      Gąsienicowa w słońcu): jasna, świetlista, żywa zieleń, wyraźne kierunkowe światło. Do przejrzenia:
+      (a) ekspozycja przy słońcu — intensywność słońca / floor ambientu `lightSum` / `uCloudDark`
+      (czy zachmurzenie nie dusi sceny nawet przy niskim suwaku?) / brak tone-mapu;
+      (b) zgodność cieni ze słońcem — CSM vs `uLightDir` ORAZ **ZNANY LATENTNY BUG**: cloud-shadow liczy
+      się w układzie render-frame zamiast absolutnym (ta sama klasa co bug śniegu, fix wzorcowy =
+      `vStableWorldPos`; pamięć `snow-angle-camera-relative-frame` — cloud-shadow świadomie NIE ruszony).
+      Kolejność wg usera: „potem” — po systemie ładowania/anty-freeze.
       czeka na screenshot usera (geometria czy tekstura?). Podejrzany #1: łatka §3.6 (z16 overwrite
       ciemnych nalotów, ~1.6× miększa niż z17) mogła objąć pas nad Orlą Percią (r1-c2), SK nietknięte →
       utrata mikrokontrastu skał. Weryfikacja: sonda ostrości (wariancja Laplace'a) PNG vs
@@ -96,8 +105,18 @@
       wysokogórskich (maska wysokości/nachylenia) albo ortho opcja 2 (pełny re-bake z z16, wtedy
       jednolita miękkość). UWAGA: PNG ma już wypieczoną WODĘ — restore z `.pre-z16patch.bak` cofnąłby
       wodę i gainy; do prób używać kopii roboczych, nie produkcji.
-- [ ] Propozycja nowego układu menu → AskUserQuestion → przebudowa XAML.
+- [ ] **Szwy LOD przy grazing light („obcięcie nożem", Buczynowe 2026-07-02 ~22:30)**: przy `res 256/256
+      (cap)` gruby kafel z13/14 sąsiaduje z z16 w kadrze; box-averaged makro-normalna grubego celuje w cień
+      przy nisko wiszącym słońcu → prosty świetlny nóż na granicy kafla. MITYGACJA wdrożona: budżet
+      desktop 256→448 kafli / 1280→2048 MB (platform-split `DeviceInfo`, telefon bez zmian). FIX DOCELOWY:
+      (a) selektor quadtree powinien ważyć błąd NORMALNYCH × kierunek światła (grazing → wymuś finer LOD),
+      (b) ew. blend detail-normali w pas graniczny grubego kafla. Powiązane: anty-freeze uploadów (większy
+      budżet = dłuższa fala wypełnienia).
 - [ ] Sprzątanie paczek (po decyzji usera którego znaczenia dotyczy / obu).
+- [x] WODA DOMKNIĘTA I WYPCHNIĘTA (91cfe97, 2026-07-02 ~21:15): 8/8 komórek ortho z ciekami wariant B
+      + maska jezior (user: „poblask jezior zajebisty, strumyczki też"; jeziora czyste po masce);
+      async trail-mask (płynność potwierdzona), fix okna decali, rock 55→75° („jest ok, pushuj").
+      Bramki przeszły: format (po auto-fixie FINALNEWLINE w 6 nowych plikach) + 1590 testów green.
 - [ ] Bramki + commit + push (osobno per domknięty etap, nie jeden wór).
 
 ## Wyniki rekonesansu (wklejać streszczenia z file:line)

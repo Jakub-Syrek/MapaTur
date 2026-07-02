@@ -3667,7 +3667,13 @@ public sealed partial class MapPageViewModel : ObservableObject
     // Default ON for this dev build; toggle OFF (UseBakedTileStreaming=false) to fall back to the proven runtime
     // build. Inactive when no baked pyramid is on disk (bakedTileIndex null/empty) — the old path then runs.
     private const bool UseBakedTileStreaming = true;
-    private const int BakedStreamMaxResidentTiles = 256;   // desktop residency cap by tile COUNT (far field coarsens to fit)
+    // 2026-07-02: platform-split and raised on DESKTOP 256 → 448. At cam ~0.5 km over a big face the selector
+    // wants >256 finest tiles ("res 256/256 (cap)"); the clamp keeps coarse z13/14 in frame right next to z16,
+    // and under grazing golden-hour light the coarse tile's box-averaged macro-normal points into shadow →
+    // razor-straight lit/black seams along tile borders ("obcięcie nożem", Buczynowe). The phone keeps the old
+    // caps (256 / 1280 MB) — its RAM cannot take a 448×~4 MB resident set.
+    private static readonly int BakedStreamMaxResidentTiles =
+        DeviceInfo.Platform == DevicePlatform.WinUI ? 448 : 256;
     // Cull base tiles fully hidden behind resident hole-free baked tiles (overdraw saver). OFF: GPU is cheap
     // (profiler ~8–16 ms/frame) so the saving is moot, and culling under COARSE baked tiles exposed LOD seams the
     // base was hiding. Leave off until/unless restricted to z16-only occluders. See StreamBakedDetailAsync.
@@ -3682,7 +3688,8 @@ public sealed partial class MapPageViewModel : ObservableObject
     // ~1 GB; 1280 MB holds it with headroom. GPU is cheap (~8 ms/frame measured) so coverage, not FPS, is the
     // limit. Trade-off: more resident geometry = more RAM/VRAM — watch [Mem] heap for OOM; base-occlusion culling
     // (BaseTileOcclusionPlanner) frees the covered base VBOs, reclaiming some of it.
-    private const long BakedStreamMaxResidentBytes = 1280L * 1024 * 1024;
+    private static readonly long BakedStreamMaxResidentBytes =
+        DeviceInfo.Platform == DevicePlatform.WinUI ? 2048L * 1024 * 1024 : 1280L * 1024 * 1024; // 448 tiles × ~4 MB ≈ 1.8 GB needs the 2 GB desktop budget
     private const int BakedStreamMaxConcurrentLoads = 8;   // tiles read+meshed per camera update (a jump streams over several)
     private const double BakedStreamMaxErrorPixels = 2.5;  // screen-space pixel-error budget driving refinement
     private const int BakedStreamMaxZoom = NearDetailZoom; // finest baked zoom = the native 1 m level (z16)

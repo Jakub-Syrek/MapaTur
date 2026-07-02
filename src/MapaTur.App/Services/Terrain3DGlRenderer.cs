@@ -315,23 +315,43 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // the imagery (Orla Perć read worse WITH the material than with plain ortho — user 2026-07-02);
         // the Slovak big north faces are 65°+ so they keep their granite rescue.
         "  float rockW = (uSlopeMode < 0.5) ? smoothstep(55.0, 75.0, rockSlopeDeg) * uRockStrength : 0.0;\n" +
+        // PLATE-JOINTED granite (v2, 2026-07-02): Tatra granite is not a granular blob — it breaks into big
+        // parallel SLABS along steep master joints, with sparser cross joints chopping the slabs into blocks
+        // (user reference: Kozi Wierch slabs). Two world-space joint sets → per-plate id; each plate gets its
+        // own tone and a slight FACET tilt of the shading normal (slabs catch the sun differently — that is
+        // what sells the look), with dark AA'd crack seams at the joint lines and a little intra-plate grain.
         "  float rk = 0.0;\n" +
         "  if (rockW > 0.001) {\n" +
-        "    vec3 an = abs(shN); float bw = an.x + an.y + an.z + 0.0001;\n" +
-        "    float sc = 0.35;\n" + // cycles per metre (~3 m granite blotches); 2nd octave at 2.7x
-        "    float nA = noiseT(vStableWorldPos.yz * sc) + 0.5 * noiseT(vStableWorldPos.yz * sc * 2.7);\n" +
-        "    float nB = noiseT(vStableWorldPos.zx * sc) + 0.5 * noiseT(vStableWorldPos.zx * sc * 2.7);\n" +
-        "    float nC = noiseT(vStableWorldPos.xy * sc) + 0.5 * noiseT(vStableWorldPos.xy * sc * 2.7);\n" +
-        "    rk = clamp((((((nA * an.x) + (nB * an.y) + (nC * an.z)) / bw) / 1.5) - 0.5) * 1.55 + 0.5, 0.0, 1.0);\n" +
-        // Detail normal: central-difference the noise on the dominant world plane, project the tilt into the
-        // surface tangent (subtract the normal component), and bend the shading normal by it. Bounded by rockW.
-        "    vec2 dp = (an.z >= an.x && an.z >= an.y) ? vStableWorldPos.xy : ((an.x >= an.y) ? vStableWorldPos.yz : vStableWorldPos.zx);\n" +
-        "    float e = 0.8;\n" +
-        "    float gx = noiseT((dp + vec2(e, 0.0)) * sc) - noiseT((dp - vec2(e, 0.0)) * sc);\n" +
-        "    float gy = noiseT((dp + vec2(0.0, e)) * sc) - noiseT((dp - vec2(0.0, e)) * sc);\n" +
-        "    vec3 bvec = vec3(-gx, -gy, 0.0);\n" +
-        "    bvec = bvec - shN * dot(bvec, shN);\n" +
-        "    shN = normalize(shN + (0.6 * rockW) * bvec);\n" +
+        // Regional joint orientation: the strike ROTATES ±~37° over ~150 m ("zbyt równoległe" — one global
+        // direction read as ruler hatching across every face). Same rotation applied to both joint sets.
+        "    float th = (noiseT(vStableWorldPos.xy * 0.007) - 0.5) * 1.3;\n" +
+        "    float cs = cos(th); float si = sin(th);\n" +
+        "    vec3 j1 = normalize(vec3(0.74 * cs - 0.51 * si, 0.74 * si + 0.51 * cs, 0.44));\n" + // master joints (dip ~64°)
+        "    vec3 j2 = normalize(vec3(-0.38 * cs - 0.77 * si, -0.38 * si + 0.77 * cs, 0.52));\n" + // cross joints
+        "    float warp = noiseT(vStableWorldPos.xy * 0.021) * 2.6\n" +
+        "               + (noiseT(vStableWorldPos.xy * 0.09) - 0.5) * 2.2;\n" + // mid-freq wander: seams merge/split
+        "    float pw1 = 4.5 + 4.5 * noiseT(vStableWorldPos.xy * 0.013);\n" +   // slab width 4.5–9 m by region (2.4–5.2 read as dense crosshatch)
+        "    float pw2 = pw1 * 2.3;\n" +
+        "    float u1 = (dot(vStableWorldPos, j1) + warp) / pw1;\n" +
+        "    float u2 = (dot(vStableWorldPos, j2) + warp * 0.6) / pw2;\n" +
+        "    float p1 = floor(u1); float f1 = fract(u1);\n" +
+        "    float p2 = floor(u2); float f2 = fract(u2);\n" +
+        "    float tone = noiseT(vec2(p1 * 2.63 + p2 * 1.37, p2 * 2.91 - p1 * 0.83));\n" + // per-plate tone (stable hash via the noise lattice)
+        "    float micro = 0.5 * noiseT(vStableWorldPos.xy * 1.1) + 0.5 * noiseT(vStableWorldPos.yz * 1.1);\n" +
+        "    float e1 = min(f1, 1.0 - f1) * pw1;\n" + // metres to the nearest master joint
+        "    float e2 = min(f2, 1.0 - f2) * pw2;\n" +
+        "    float aa1 = max(fwidth(u1) * pw1, 0.06);\n" +
+        "    float aa2 = max(fwidth(u2) * pw2, 0.06);\n" +
+        "    float crack = 1.0 - smoothstep(0.14, 0.14 + aa1 * 2.2, e1);\n" +
+        "    crack = max(crack, (1.0 - smoothstep(0.20, 0.20 + aa2 * 2.2, e2)) * 0.35);\n" +
+        // Seams show in sparse PATCHES and stay shallow — the SLAB FACETS carry the look, the lines only
+        // hint at it (with strong dense lines the face read as crosshatch/wireframe, not rock).
+        "    crack *= mix(0.12, 0.85, smoothstep(0.42, 0.68, noiseT(vStableWorldPos.xy * 0.05)));\n" +
+        "    rk = clamp(0.55 + (tone - 0.5) * 0.45 + (micro - 0.5) * 0.20 - crack * 0.42, 0.0, 1.0);\n" +
+        // Facet normal: tilt the shading normal per plate along the joint direction projected into the surface
+        // tangent — neighbouring slabs face the sun slightly differently, exactly like the reference photo.
+        "    vec3 tilt = j1 - shN * dot(j1, shN);\n" +
+        "    shN = normalize(shN + tilt * ((tone - 0.5) * 0.45 * rockW));\n" +
         "  }\n" +
         // Mid-frequency DETAIL (fix B): a coarse LOD tile box-averaged away the sub-cell bumps; vDetail carries the
         // REAL z16 residual RMS (metres) per vertex — it is 0 on flat ground, on the finest z16 (relief already in
@@ -528,14 +548,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    if (tuv.x >= 0.0 && tuv.x <= 1.0 && tuv.y >= 0.0 && tuv.y <= 1.0) {\n" +
         "      vec4 tc = texture(uTrailMask, tuv);\n" +
         "      float distM = (1.0 - tc.a) * uTrailMaxDist;\n" +    // metres to the nearest line (= uTrailMaxDist when A=0)
-        "      float aa = max(fwidth(distM), 0.001);\n" +          // one pixel of distance change → screen-constant AA
+                                                                   // one pixel of distance change → screen-constant AA. CLAMPED: under heavy minification (the decal
+                                                                   // window now spans 8.5 km, so its far parts are many texels per screen pixel) fwidth explodes and
+                                                                   // the AA band + the px width floor ballooned trails into ~30 m ribbons ("super grube"). The cap
+                                                                   // bounds halfWidth at ~2.6× base; past that the mipmapped mask just fades the line out with distance.
+        "      float aa = clamp(fwidth(distM), 0.001, uTrailHalfWidth * 1.6);\n" +
         "      float halfWidthM = max(uTrailHalfWidth, aa * 1.1);\n" + // 1.1 px floor: true 1.6 m scale near, constant-px legible far
         "      float coverage = 1.0 - smoothstep(halfWidthM - aa, halfWidthM + aa, distM);\n" +
         // Cartographic CASING: a light rim around the colour core, from the same distance field. Without it a
         // BLACK trail painted onto dark shadowed rock is invisible (czarny szlak w żlebie Kulczyńskiego "hidden
         // under the relief" — it was drawn, just black-on-black; the 3D line overlay z-fights away exactly
         // there, so the decal must carry it alone). The rim also crisps every other colour on busy ortho.
-        "      float rimW = halfWidthM * 2.3;\n" +
+        "      float rimW = halfWidthM * 2.0;\n" + // tighter casing (was 2.3) — with the halved core the wide rim read as sloppy halo
         "      float rim = clamp((1.0 - smoothstep(rimW - aa, rimW + aa, distM)) - coverage, 0.0, 1.0);\n" +
         // WATER decal v2: streams/rivers painted into the surface (same window, own R8 distance field).
         // v1 was near-invisible in practice: the dark tint vanished on dark forest ortho, and a pow-96 Blinn
@@ -578,7 +602,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "          }\n" +
         "        }\n" +
         "      }\n" +
-        "      lit = mix(lit, vec3(0.94, 0.94, 0.90), rim * 0.55 * uTrailStrength);\n" +
+        // Casing ONLY under DARK lines: it exists so a BLACK trail stays readable on dark shadowed rock (żleb
+        // Kulczyńskiego); under yellow/green/red it read as a sloppy grey halo ("obwódki są chujowe").
+        "      float lineLum = dot(tc.rgb, vec3(0.299, 0.587, 0.114));\n" +
+        "      float rimNeed = 1.0 - smoothstep(0.16, 0.40, lineLum);\n" +
+        "      lit = mix(lit, vec3(0.94, 0.94, 0.90), rim * 0.55 * uTrailStrength * rimNeed);\n" +
         "      lit = mix(lit, tc.rgb, coverage * uTrailStrength);\n" +
         "    }\n" +
         "  }\n" +
@@ -1354,7 +1382,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // trail clearly legible (it's still ~80% its own colour at full coverage) while letting a hint of the
     // underlying lit/detailed terrain show through, instead of erasing it outright.
     private const float TrailDecalStrength = 0.8f;           // blend strength of the decal over the surface colour
-    private const float TrailDecalHalfWidthMeters = 1.6f;    // on-surface half-width of the drawn line (world m)
+    private const float TrailDecalHalfWidthMeters = 0.8f;    // on-surface half-width (world m) — halved 2026-07-02 ("muszą być węższe o połowę co najmniej"); 1.6 read as a fat band with its 2.3× rim at close zoom
     private const float ExposedRouteHalfWidthPx = 2.4f;   // fat dots that clearly punctuate over the thin (0.7 px) trail line beneath
     // Bright orange for the exposed / guide routes (sac_scale demanding / via_ferrata) — lighter/yellower than the PTTK red so it pops where it runs along a red trail.
     private const byte ExposedR = 0xFF, ExposedG = 0x8C, ExposedB = 0x00;
@@ -5616,7 +5644,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             TextureTarget.Texture2D, 0, (int)InternalFormat.Rgba8,
             (uint)mask.Width, (uint)mask.Height, 0,
             PixelFormat.Rgba, PixelType.UnsignedByte, mask.Rgba);
-        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+        // Mipmapped MIN filter: the 8.5 km window is heavily minified at its far edge; sampling the raw
+        // level there made the reconstructed distance jump per pixel (fwidth explosion → fat fuzzy ribbons).
+        // Averaged mips fade the distance-alpha smoothly instead, so far trails thin out and dissolve.
+        g.GenerateMipmap(TextureTarget.Texture2D);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
         g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
         g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
         g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
@@ -5639,7 +5671,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 (uint)mask.Width, (uint)mask.Height, 0,
                 PixelFormat.Red, PixelType.UnsignedByte, waterField);
             g.PixelStore(PixelStoreParameter.UnpackAlignment, 4);
-            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+            g.GenerateMipmap(TextureTarget.Texture2D); // same minification story as the RGBA mask above
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
             g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
             g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
             g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
