@@ -520,6 +520,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "      float aa = max(fwidth(distM), 0.001);\n" +          // one pixel of distance change → screen-constant AA
         "      float halfWidthM = max(uTrailHalfWidth, aa * 1.1);\n" + // 1.1 px floor: true 1.6 m scale near, constant-px legible far
         "      float coverage = 1.0 - smoothstep(halfWidthM - aa, halfWidthM + aa, distM);\n" +
+        // Cartographic CASING: a light rim around the colour core, from the same distance field. Without it a
+        // BLACK trail painted onto dark shadowed rock is invisible (czarny szlak w żlebie Kulczyńskiego "hidden
+        // under the relief" — it was drawn, just black-on-black; the 3D line overlay z-fights away exactly
+        // there, so the decal must carry it alone). The rim also crisps every other colour on busy ortho.
+        "      float rimW = halfWidthM * 2.3;\n" +
+        "      float rim = clamp((1.0 - smoothstep(rimW - aa, rimW + aa, distM)) - coverage, 0.0, 1.0);\n" +
+        "      lit = mix(lit, vec3(0.94, 0.94, 0.90), rim * 0.55 * uTrailStrength);\n" +
         "      lit = mix(lit, tc.rgb, coverage * uTrailStrength);\n" +
         "    }\n" +
         "  }\n" +
@@ -1165,6 +1172,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform vec3 uFogColor;\n" +
         "uniform float uFogDensity;\n" +
         "uniform float uMaxDist;\n" + // hard cull radius (m) so the far trail network isn't drawn at the horizon
+        "uniform float uGhostFade;\n" + // 1 = normal pass; <1 = the X-RAY pass (DepthFunc GREATER: only occluded fragments)
         "out vec4 fragColor;\n" +
         "void main(){\n" +
         "  float dist = length(vWorldPos - uCameraPos);\n" +
@@ -1175,7 +1183,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  float fog = max(1.0 - exp(-dist * uFogDensity), edge);\n" +
         // Carry the per-vertex alpha through (opaque trails/roads upload a=255 → 1.0). The translucent dashed
         // route uploads a<255 so the trail it lies on shows through it; blending is enabled only for that draw.
-        "  fragColor = vec4(mix(vColor.rgb, uFogColor, fog), vColor.a);\n" +
+        // uGhostFade dims the whole ribbon on the X-ray pass, so a trail buried inside a gully/behind a
+        // buttress still reads as a faint "behind rock" ghost instead of vanishing.
+        "  fragColor = vec4(mix(vColor.rgb, uFogColor, fog), vColor.a * uGhostFade);\n" +
         "}\n";
 
     // Line ribbon shader: expands each segment to a quad of constant SCREEN-pixel width (ANGLE/D3D11
@@ -1638,6 +1648,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int lineFogDensityLocation = -1;
     private int lineCameraPosLocation = -1;
     private int lineMaxDistLocation = -1;
+    private int lineGhostFadeLocation = -1;
 
     // Cumulus puffs (Tier 2 clouds): one instanced billboard program + a static per-puff buffer generated once.
     private uint cumulusProgram;
@@ -3076,6 +3087,29 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // in the trail/route vertex shader), which only wins the depth-test tie against the surface the line is
         // directly seated on, while still losing to genuinely different, more-in-front geometry. Depth test stays
         // enabled here.
+        // X-RAY (ghost) pass FIRST: reversed depth test draws ONLY the fragments the terrain occludes, heavily
+        // faded — a trail inside a gully (żleb Kulczyńskiego) or briefly behind a ridge reads as a faint
+        // "behind rock" ghost instead of vanishing. Clearly dimmer than the solid pass, so this cannot recreate
+        // the old full-brightness "szlaki przez skały" regression. Depth writes off (ghosts must not pollute
+        // the depth buffer); blending on for the fade.
+        gl.Uniform1(lineGhostFadeLocation, 0.30f);
+        gl.DepthFunc(DepthFunction.Greater);
+        gl.DepthMask(false);
+        gl.Enable(EnableCap.Blend);
+        gl.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+        // Re-assert DepthMask(false) after each call: DrawTrailLines/DrawRouteLine restore it to true
+        // internally, and a ghost fragment writing its (farther) depth would corrupt later passes.
+        DrawTrailLines(gl, dedupedTrails, raster, frame, detail);
+        gl.DepthMask(false);
+        DrawExposedRoutes(gl, exposedRoutes, raster, frame, detail);
+        gl.DepthMask(false);
+        DrawRouteLine(gl, route, dedupedTrails, raster, frame, detail);
+        gl.DepthMask(true);
+        gl.DepthFunc(DepthFunction.Less);
+
+        // Solid pass: normal depth test (real ridges still occlude into the ghost above, near z-fights handled
+        // by the clip-space bias in the vertex shader).
+        gl.Uniform1(lineGhostFadeLocation, 1f);
         DrawRoadLines(gl, roads, raster, frame, detail);
         // Use the DEDUPED trails for both the overlay and the route conflation: one of a duplicate pair is drawn,
         // and the route is re-laid onto that single remaining trail (so it can't snap to the dropped copy beside it).
@@ -4972,6 +5006,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         lineFogDensityLocation = g.GetUniformLocation(lineProgram, "uFogDensity");
         lineCameraPosLocation = g.GetUniformLocation(lineProgram, "uCameraPos");
         lineMaxDistLocation = g.GetUniformLocation(lineProgram, "uMaxDist");
+        lineGhostFadeLocation = g.GetUniformLocation(lineProgram, "uGhostFade");
 
         g.DeleteShader(vs);
         g.DeleteShader(fs);
