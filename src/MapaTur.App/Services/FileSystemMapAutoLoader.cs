@@ -126,11 +126,20 @@ public sealed class FileSystemMapAutoLoader : IMapAutoLoader
 
     // Scans the search roots for a tiled ortho set named *ortho*-r{R}-c{C}.(png|jpg). Returns the tiles in
     // row-major order plus grid dimensions, or an empty list when no complete rectangular set exists.
+    // When SEVERAL roots each hold a complete set, the SHARPEST one wins (largest sample-tile pixel area,
+    // PNG header sniff; JPEG/unreadable falls back to file size) — NOT the first root probed. The offline
+    // package flow extracts a mobile-resolution copy of the same set into maps/ (probed before dem/), which
+    // used to silently shadow the full-resolution set and pixelate the 3D drape on desktop.
     private (IReadOnlyList<string> Paths, int Cols, int Rows) DiscoverOrthoTiles()
     {
         var pattern = new System.Text.RegularExpressions.Regex(
             @"ortho.*-r(\d+)-c(\d+)\.(png|jpg)$",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+        IReadOnlyList<string>? bestPaths = null;
+        int bestCols = 1;
+        int bestRows = 1;
+        long bestSharpness = -1;
 
         foreach (string root in searchRoots)
         {
@@ -169,6 +178,12 @@ public sealed class FileSystemMapAutoLoader : IMapAutoLoader
                 continue;
             }
 
+            long sharpness = SampleTileSharpness(byCell[(0, 0)]);
+            if (sharpness <= bestSharpness)
+            {
+                continue; // an earlier root's set is at least as sharp — keep it (ties keep probe order)
+            }
+
             var ordered = new List<string>(rows * cols);
             for (int r = 0; r < rows; r++)
             {
@@ -177,10 +192,44 @@ public sealed class FileSystemMapAutoLoader : IMapAutoLoader
                     ordered.Add(byCell[(r, c)]);
                 }
             }
-            return (ordered, cols, rows);
+
+            bestPaths = ordered;
+            bestCols = cols;
+            bestRows = rows;
+            bestSharpness = sharpness;
         }
 
-        return (Array.Empty<string>(), 1, 1);
+        return bestPaths is not null ? (bestPaths, bestCols, bestRows) : (Array.Empty<string>(), 1, 1);
+    }
+
+    // Resolution proxy for one candidate set, from its (0,0) tile: PNG → true pixel area from the IHDR
+    // header (24 bytes read, no decode); JPEG/unreadable → the file length (compressed size still ranks a
+    // 16k master far above an 8k mobile bake of the same imagery). Never throws — a broken tile ranks 0
+    // and simply loses to any readable set.
+    private static long SampleTileSharpness(string path)
+    {
+        try
+        {
+            Span<byte> header = stackalloc byte[24];
+            using (FileStream fs = File.OpenRead(path))
+            {
+                int got = fs.ReadAtLeast(header, 24, throwOnEndOfStream: false);
+                if (got == 24 && MapaTur.Application.Imaging.PngHeader.TryReadDimensions(header, out int w, out int h))
+                {
+                    return (long)w * h;
+                }
+            }
+
+            return new FileInfo(path).Length;
+        }
+        catch (IOException)
+        {
+            return 0;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return 0;
+        }
     }
 
     private static IEnumerable<string> EnumerateFilesSafe(string root, string pattern)

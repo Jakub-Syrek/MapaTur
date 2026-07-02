@@ -1,0 +1,140 @@
+# Produkcja kafli — DEM i ORTHO, krok po kroku (odtwarzalne "po sznurku")
+
+> KAŻDY proces graficzny na danych kaflowych dokumentujemy TUTAJ, w kolejności wykonywania, z komendą,
+> wejściem/wyjściem i weryfikacją liczbową. Jeśli robisz nowy krok na grafice — dopisz go tu od razu.
+> Stan na 2026-07-02; wykonane i zweryfikowane na desktopie dev (user potwierdził wizualnie).
+
+## 0. Mapa katalogów i formatów
+
+| Co | Gdzie | Format |
+|---|---|---|
+| Surowe kafle 1 m (PL+SK) | `%LOCALAPPDATA%\User Name\com.companyname.mapatur.app\Data\dem-cache\gugik\16\{x}\{y}.tif` | float32, strip, BEZ kompresji (jedyny format, który czyta `Float32GeoTiffDecoder`); NoData = NaN/−999/−32768 **oraz literalne 0.0** (patrz 2.3!) |
+| Upieczona piramida | `...\Data\dem-cache\baked\{13..16}\{x}\{y}.bdt` | BDT2: magic + z/x/y/cols/rows (int32) + 4×double bounds + double NoData + heights float32 + trailer detail (kind 1 = per-cell RMS); czyta też BDT1 |
+| Ortho desktop (8 komórek 4×2) | `...\Data\dem\tatry-ortho-r{R}-c{C}.png` | 16384×10923 px ≈ **1.0 m/px** (komórka ≈16.4×16.4 km) |
+| Ortho mobile | `...\Data\maps\tatry-ortho-r{R}-c{C}.png` (z paczki offline) | 8192×4096 ≈ 2×4 m/px |
+| Cache kafli Esri | `testdata/maps/.dem-cache/esri-tiles/{z}/{x}/{y}.jpg` | gitignored; współdzielony przez skrypty |
+| Arkusz SK DMR5 | `C:\Repos\MapaTur\.tmp-offset\lot26\R_26_18_s.tif` (+ .tfw) | 1.0 m, S-JTSK03/Bpv (EPSG:8353) |
+| Backupy ortho | obok PNG: `*.pre-colorfix.bak` (oryginał z bake) → `*.pre-z16patch.bak` (po 3.3+3.4, przed 3.6) | pełny łańcuch powrotu |
+
+Okno robocze (wszystkie skrypty): **W,S,E,N = 19.50, 49.05(49.10 dla ortho), 20.40, 49.30(49.40 dla ortho)**.
+
+**Wybór zestawu ortho w aplikacji:** loader skanuje rooty (`maps` przed `dem`) i od 2026-07-02 wybiera
+**komplet o NAJWIĘKSZEJ rozdzielczości** (nagłówek PNG przez `MapaTur.Application.Imaging.PngHeader`), nie
+pierwszy znaleziony — paczka mobilna w `maps/` nie przesłoni już pełnych masterów w `dem/`
+(`FileSystemMapAutoLoader.DiscoverOrthoTiles`).
+
+---
+
+## 1. DEM — źródła 1 m
+
+### 1.1 GUGiK (PL)
+Pobierane w locie przez aplikację (WCS) i cachowane w `gugik\16`. **Uwaga:** kafle graniczne mają
+słowacką połowę wypełnioną **ZERAMI** (nie NaN!) — patrz 2.3.
+
+### 1.2 SK DMR5 (LOT26 „Tatry")
+1. Źródło: `https://opendata.skgeodesy.sk/static/LLS/1_cyklus/LOT26/LOT26_DMR5_sjtsk03_bpv.zip` (~3 GB;
+   geoportal.sk ma zepsuty cert — używać opendata). Rozpakować do `.tmp-offset\lot26\`.
+   ⚠️ Wariant „INSPIRE" ma wysokości ELIPSOIDALNE (+43 m) — brać sjtsk03_bpv.
+2. `python testdata/maps/bake-sk-dmr5-tiles.py` → kafle do `.tmp-offset/sk-tiles/16/`.
+   Deps: `numpy pyproj tifffile requests pillow imagecodecs` (arkusz jest LZW).
+   Skrypt POMIJA kafle, które maska WMS GUGiK uznaje za polskie (`poland_fraction > 0.005`) ORAZ kafle
+   z pokryciem <99.5% — **dlatego kafle graniczne wymagają kroków 2.2–2.3**.
+3. Kopiowanie do cache gugik: historycznie one-off (tylko sloty w 100% void, ≥50% real).
+
+## 2. DEM — naprawy dziur (kolejność!)
+
+### 2.1 Diagnoza pokrycia
+Po każdej zmianie danych policz i porównaj: kafle `gugik\16` (*.tif) vs `baked\16` (*.bdt). Dziura
+w baked przy istniejącym tif = tif jest void. Reguła quadtree `AllChildrenBaked`
+(`QuadtreeTileSelector.cs`) wymaga **4/4 dzieci** — jeden brakujący kafel z16 degraduje CAŁY kwadrat z15
+do grubego renderu („skała przecięta w połowie").
+
+### 2.2 Pojedynczy void kafel graniczny
+`python testdata/maps/sk-force-bake-tile.py [tileX tileY]` — sampluje arkusz LOT26 z pominięciem masek,
+weryfikuje zakres wysokości (1200–2700 m), backupuje starego tifa (`.void.bak`), podmienia.
+Przykład wykonany: 36419/22455 (grań Mięguszowieckich) → 100% pokrycia, 1952–2313 m.
+
+### 2.3 Merge per-piksel wszystkich częściowych kafli (WYKONANE 2026-07-02)
+`python testdata/maps/merge-sk-into-partial-tiles.py` — dla KAŻDEGO kafla w oknie z frakcją void >0.3%
+sampluje arkusz DMR5 w void-pikselach i wypełnia realnymi wysokościami; realne piksele GUGiK nietykane.
+**KRYTYCZNA lekcja:** definicja void MUSI być `~isfinite | <= −900 | <= 0.5` — GUGiK-owe połówki
+graniczne to literalne **0.0**, pierwsza wersja (tylko NaN/−999) pominęła CAŁĄ opaskę graniczną.
+Wynik wykonania: 1746 kafli, ~105 mln px wypełnionych. Bpv vs Kronstadt różnią się o cm–dm (ta sama
+rodzina bałtycka) — skok na łączeniu pomijalny.
+
+### 2.4 Re-bake piramidy (po KAŻDEJ zmianie w gugik\16)
+```powershell
+$env:MAPATUR_BAKE_TATRA="1"
+$env:MAPATUR_BAKE_BOUNDS="49.05,19.45,49.40,20.45"
+dotnet test tests/MapaTur.Infrastructure.Tests --filter FullyQualifiedName~TatraBakeRunner --nologo
+```
+~3 min, przepisuje wszystkie .bdt. Weryfikacja: (a) licznik .bdt w `baked\16` (2026-07-02: **6469**;
+całość 8741), (b) nowe mtime, (c) magic BDT2, (d) rozmiar kafla z16 = 262 209 B (header+heights+DetailNone),
+gruby z detail = 524 353 B. Aplikację ZRESTARTOWAĆ (indeks dostępności skanowany na starcie).
+⚠️ Weryfikuj, że zmiana w tif faktycznie weszła do .bdt (porównanie próbki wysokości tif vs .bdt) —
+patrz sesyjny `verify-merge-in-bdt.py` (wzór w scratchpadzie sesji 2026-07-02).
+
+---
+
+## 3. ORTHO — produkcja i korekcje (kolejność wykonywania = kolejność sekcji)
+
+### 3.1 Bake bazowy (desktop)
+`python testdata/maps/generate-tatry-ortho.py` — Esri World Imagery **z17** (~0.78 m/px na tej szer.),
+8 komórek 4×2 po 16384 px szer. (=1.0 m/px), equirectangular per komórka. Kafle źródłowe cachowane
+w `.dem-cache/esri-tiles/17`. Wariant mobilny: `generate-tatry-ortho-mobile.py` (8192 szer.).
+
+### 3.2 Problem: patchwork nalotów Esri w z17
+z17 to mozaika RÓŻNYCH nalotów lotniczych (inny sezon/kąt słońca) — szwy tonalne zarówno MIĘDZY
+komórkami, jak i WEWNĄTRZ nich (skośne linie nie pokrywające się z siatką!). Zmierzone sondami
+(`probe-esri-zoom-consistency.py`): te same 2 punkty terenu — z17 skok [−16.8,−13.0,−3.8],
+**z16 skok [0.5,0.8,7.1] → z16 to jednolita mozaika satelitarna**, tonalnie zgodna z JASNYM nalotem z17.
+
+### 3.3 Korekcja szwów MIĘDZY komórkami (gainy per komórka)
+`python testdata/maps/ortho-seam-gains.py` — paski 64 px po obu stronach 10 wewnętrznych krawędzi,
+least-squares log-gainów per kanał (kotwica: średni log-gain = 0), zapis + weryfikacja.
+Wynik wykonania: skoki krawędziowe z ±20–33 → **±0.4–3.4**. Tworzy backup `*.pre-colorfix.bak` (oryginały!).
+
+### 3.4 Wyrównanie niskoczęstotliwościowej ekspozycji (łagodzi łaty w obrębie komórek)
+`python testdata/maps/ortho-flatten-exposure.py` — per kanał: gain = target/blur(~1.5 km), klamra ±20%.
+Wynik: szew wewnętrzny r1c2 z [23.5,20.9,15.2] → [17.4,14.8,9.0] (klamra się nasyca — dlatego 3.6).
+
+### 3.5 Pobranie referencji z16
+`python testdata/maps/fetch-esri-z16-tiles.py` — 13 860 kafli z16 dla okna ortho do wspólnego cache
+(wątki, pomija istniejące). Jednorazowe; cache służy też ewentualnemu pełnemu re-bake z z16.
+
+### 3.6 „Nadpisanie" ciemnych nalotów mozaiką z16 (WYKONANE 2026-07-02, wersja v2)
+`python testdata/maps/ortho-patch-dark-acquisitions.py`:
+1. Overview 1/16: referencja z16 (bilinear z mozaiki) vs obecny PNG; maska = `ref_lum − cur_lum > 14`
+   (naturalnie ciemny las jest ciemny w OBU źródłach → nie łapie się).
+2. Despeckle + feather (~160 m).
+3. **Lokalne POLE tonu** (nie skalar!): ratio cur/ref na jasnych pikselach, dyfuzja do wnętrza maski,
+   wygładzenie — brzeg łatki zgadza się z otoczeniem z konstrukcji. (Skalar per komórka zostawiał
+   niebieski skok ~−15 — nie wracać do niego.)
+4. Full-res w paskach 512 wierszy; backup `*.pre-z16patch.bak`.
+Wynik wykonania: ciemne naloty = 8–39% powierzchni komórek; sondy przez główny szew
+[23.5,20.9,15.2] → **[6.2,4.1,0.5]**. Koszt: podmienione pasy są ~1.6× miększe (z16=1.56 m/px vs komórka 1.0).
+
+### 3.7 Diagnostyka
+- `ortho-analyze-seams.py` — skoki na 10 krawędziach siatki (uruchamiać po każdej operacji na PNG).
+- `probe-esri-zoom-consistency.py` — spójność mozaiki Esri wg zoomu w zadanym punkcie.
+- Sondy wewnątrzkomórkowe: wzór w `ortho-patch-dark-acquisitions.py` (sekcja verify).
+
+### 3.8 Restore
+Pełny powrót: `*.pre-colorfix.bak` → PNG (stan z bake 3.1). Powrót tylko z łatki 3.6:
+`*.pre-z16patch.bak` → PNG (stan po 3.3+3.4). Po każdej podmianie plików: restart aplikacji.
+
+---
+
+## 4. Render (kontekst, nie produkcja): co konsumuje te dane
+- Rozdzielczość rezydentna ortho zależna od odległości kamery: `OrthoDistanceTier` (near 8192 / far 2048,
+  histereza 10↔14 km); ostrzenie per-komórka z `textureSize` (NIE globalny texel!); powiększenie =
+  bikubik w shaderze. Zmiany render-side → `docs/TERRAIN-GRAPHICS-CHECKLIST.md`.
+- Detal geometrii: BDT2 `DetailRms` + on-the-fly residual — patrz `docs/SMOOTH-SURFACE-BUG.md`.
+
+## 5. Znane ograniczenia / TODO
+- 282 kafle z16 na skrajnym zachodzie (lon 19.50–19.58) = NoData rogu LOT26; 100% wymaga sąsiedniego LOT.
+- Zestaw mobilny (`Data\maps`, 8192×4096) NIE przeszedł korekcji 3.3–3.6 — przy najbliższej paczce
+  przegenerować z poprawionych masterów (`generate-tatry-ortho-mobile.py` czyta desktopowe PNG).
+- Esri z17 poza podmienionymi pasami nadal zawiera drobniejsze łaty nalotów (poniżej progu detekcji).
+- RAM desktopu ~16–17 GB przy pełnych masterach (duplikacja zdekodowanego zestawu w cache widoku) —
+  do przycięcia (cache widoku w rozdzielczości master, nie źródła).

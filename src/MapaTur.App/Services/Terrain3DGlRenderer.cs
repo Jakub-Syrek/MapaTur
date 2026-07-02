@@ -173,6 +173,38 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "             mix(hashT(i + vec2(0.0,1.0)), hashT(i + vec2(1.0,1.0)), f.x), f.y);\n" +
         "}\n" +
         "float fbmT(vec2 p){ float v=0.0,a=0.5; for(int i=0;i<5;i++){ v+=a*noiseT(p); p*=2.0; a*=0.5;} return v; }\n" +
+        // B-spline bicubic via 4 bilinear fetches — used ONLY when the ortho is MAGNIFIED (camera close enough
+        // that one texel covers >1 screen px). Plain bilinear magnification renders each ~1-4 m ortho texel as a
+        // hard-edged square ("pixeloza z bliska"); the cubic kernel replaces those edges with a smooth ramp for
+        // 3 extra fetches. textureLod(0) keeps the taps defined inside the magnification branch (magnified ⇒
+        // mip 0 anyway; implicit-derivative texture() there would be undefined in non-uniform flow).
+        "vec4 cubicW(float v){\n" +
+        "  vec4 n = vec4(1.0, 2.0, 3.0, 4.0) - v;\n" +
+        "  vec4 s = n * n * n;\n" +
+        "  float x = s.x;\n" +
+        "  float y = s.y - 4.0 * x;\n" +
+        "  float z = s.z - 4.0 * y - 6.0 * x;\n" +
+        "  float w = 6.0 - x - y - z;\n" +
+        "  return vec4(x, y, z, w) * (1.0 / 6.0);\n" +
+        "}\n" +
+        "vec3 texBicubic(sampler2D t, vec2 uv, vec2 ts){\n" +
+        "  vec2 coord = uv * ts - 0.5;\n" +
+        "  vec2 fxy = fract(coord);\n" +
+        "  coord -= fxy;\n" +
+        "  vec4 xc = cubicW(fxy.x);\n" +
+        "  vec4 yc = cubicW(fxy.y);\n" +
+        "  vec4 cx = coord.xxyy + vec2(-0.5, 1.5).xyxy;\n" +
+        "  vec4 s = vec4(xc.xz + xc.yw, yc.xz + yc.yw);\n" +
+        "  vec4 off = cx + vec4(xc.yw, yc.yw) / s;\n" +
+        "  off *= vec4(1.0 / ts.x, 1.0 / ts.x, 1.0 / ts.y, 1.0 / ts.y);\n" +
+        "  vec3 s00 = textureLod(t, vec2(off.x, off.z), 0.0).rgb;\n" +
+        "  vec3 s10 = textureLod(t, vec2(off.y, off.z), 0.0).rgb;\n" +
+        "  vec3 s01 = textureLod(t, vec2(off.x, off.w), 0.0).rgb;\n" +
+        "  vec3 s11 = textureLod(t, vec2(off.y, off.w), 0.0).rgb;\n" +
+        "  float sx = s.x / (s.x + s.y);\n" +
+        "  float sy = s.z / (s.z + s.w);\n" +
+        "  return mix(mix(s11, s01, sx), mix(s10, s00, sx), sy);\n" +
+        "}\n" +
         // Cascaded Shadow Maps (Krok 5 part 4): 3x3 PCF of one cascade (hardware depth compare), then pick the
         // cascade by camera-space view distance, project the ABSOLUTE world position into its light space, and
         // compare with a slope-scaled bias. Returns 1 = fully lit, →0 = shadowed (scaled by uShadowStrength).
@@ -327,12 +359,24 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  vec3 base;\n" +
         "  if (uUseOrtho == 1) {\n" +
         "    vec3 c = texture(uOrtho, vTex).rgb;\n" +
+        // MAGNIFICATION smoothing: when one ortho texel spans more than a screen pixel (close camera), swap
+        // the bilinear fetch for bicubic so texels stop reading as hard squares. Minified ground (footprint
+        // >= 1 texel) keeps the plain fetch — mips + anisotropy already handle it, and bicubic of mip 0
+        // would shimmer there. The unconditional fetch above keeps implicit derivatives defined.
+        "    vec2 otsF = vec2(textureSize(uOrtho, 0));\n" +
+        "    vec2 ofp = fwidth(vTex) * otsF;\n" +
+        "    if (max(ofp.x, ofp.y) < 1.0) { c = texBicubic(uOrtho, vTex, otsF); }\n" +
         "    if (uSharpen > 0.0) {\n" +
         // 4-tap unsharp mask: crisp up edges that mip/aniso minification softens. Clamped to [0,1].
-        "      vec3 blur = (texture(uOrtho, vTex + vec2(uOrthoTexel.x, 0.0)).rgb\n" +
-        "                 + texture(uOrtho, vTex - vec2(uOrthoTexel.x, 0.0)).rgb\n" +
-        "                 + texture(uOrtho, vTex + vec2(0.0, uOrthoTexel.y)).rgb\n" +
-        "                 + texture(uOrtho, vTex - vec2(0.0, uOrthoTexel.y)).rgb) * 0.25;\n" +
+        // Texel size comes from THIS cell's textureSize (otsF), NOT a global uniform: with per-cell
+        // resolution tiers (OrthoDistanceTier) neighbouring cells differ 4x in texel size, and one shared
+        // texel value sharpened some cells and no-opped others — a visible contrast/colour step exactly on
+        // the cell seam ("szycie kafli — inna kolorystyka").
+        "      vec2 oTexel = 1.0 / otsF;\n" +
+        "      vec3 blur = (texture(uOrtho, vTex + vec2(oTexel.x, 0.0)).rgb\n" +
+        "                 + texture(uOrtho, vTex - vec2(oTexel.x, 0.0)).rgb\n" +
+        "                 + texture(uOrtho, vTex + vec2(0.0, oTexel.y)).rgb\n" +
+        "                 + texture(uOrtho, vTex - vec2(0.0, oTexel.y)).rgb) * 0.25;\n" +
         "      c = clamp(c + (uSharpen * (c - blur)), 0.0, 1.0);\n" +
         "    }\n" +
         // Coverage blend: beyond the ortho's geographic coverage, fade ortho -> hypsometric (vColor) over

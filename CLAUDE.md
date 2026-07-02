@@ -6,6 +6,11 @@ relevant item — comprehensively, across ALL render paths at once.** Do not fix
 the siblings; that is the recurring failure that makes us re-bake in circles. After any change, run the
 checklist's verification (cache audit + visual sweep at multiple spots), not just the one location you were on.
 
+DATA-side tile work (bake / merge / colour correction on DEM or ortho files) follows
+[`docs/TILE-PRODUCTION.md`](docs/TILE-PRODUCTION.md) — the reproducible step-by-step pipeline. **Every new
+graphics process you run on tile data MUST be documented there immediately** (command, input/output,
+numeric verification), so the whole production can be replayed end-to-end.
+
 ## Mobile (re)install — MANDATORY: verify the 1 m tile cache is COMPLETE
 
 After EVERY mobile install / reinstall / data restore (anything that could touch the phone's z16 cache),
