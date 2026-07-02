@@ -65,6 +65,22 @@
   <data name="StatusNoRoadsFound" xml:space="preserve">
     <value>W tym obszarze nie znaleziono dróg.</value>
   </data>
+  <data name="DownloadWaterways" xml:space="preserve">
+    <value>Pobierz cieki (widok)</value>
+  </data>
+  <data name="StatusDownloadingWaterways" xml:space="preserve">
+    <value>Pobieranie strumieni i wodospadów z OSM Overpass…</value>
+  </data>
+  <data name="StatusWaterwaysLoadedFormat" xml:space="preserve">
+    <value>Pobrano {0} cieków i {1} wodospadów.</value>
+    <comment>{0} = liczba cieków, {1} = liczba wodospadów.</comment>
+  </data>
+  <data name="StatusNoWaterwaysFound" xml:space="preserve">
+    <value>W tym obszarze nie znaleziono cieków.</value>
+  </data>
+  <data name="LayerWaterways" xml:space="preserve">
+    <value>Strumienie i wodospady</value>
+  </data>
   <data name="ClearRoute" xml:space="preserve">
     <value>Wyczyść trasę</value>
   </data>

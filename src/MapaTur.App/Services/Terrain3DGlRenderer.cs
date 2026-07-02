@@ -149,6 +149,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                                                    // contours above. uTrailStrength 0 = off.
         "uniform sampler2D uTrailMask;\n" +
         "uniform float uTrailStrength;\n" +
+        "uniform sampler2D uWaterMask;\n" +   // parallel R8 watercourse distance field (same window as uTrailMask)
+        "uniform float uWaterStrength;\n" +   // 0 = no water layer this frame
         "uniform vec2 uTrailMaskMinXY;\n" +   // world-XY of the mask window's min corner (= uv 0,0)
         "uniform vec2 uTrailMaskSizeXY;\n" +  // world-XY extent of the mask window (metres)
         "uniform float uTrailMaxDist;\n" +    // distance-field reach (m): metric dist = (1 - A) * uTrailMaxDist
@@ -268,8 +270,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // kills it at night; high power keeps each sparkle small; modest intensity avoids a blown-out blob.
         "    vec3 sd = normalize(uLightDir);\n" +
         "    float sunUp = smoothstep(0.0, 0.12, sd.z);\n" +
-        "    float glint = pow(max(dot(wn, normalize(viewW + sd)), 0.0), 160.0);\n" +
-        "    wcol += vec3(1.0, 0.96, 0.86) * (glint * 0.40 * sunUp);\n" +
+        // Sun glint doubled in strength + a broader soft sheen underneath, so lake water visibly SHINES
+        // ("błyszczenie wody w jeziorach") instead of reading as a matte tinted plate. Both driven by the sun
+        // (not the camera azimuth) and gated by sunUp, so night water stays calm.
+        "    float glint = pow(max(dot(wn, normalize(viewW + sd)), 0.0), 200.0);\n" +
+        "    float sheen = pow(max(dot(wn, normalize(viewW + sd)), 0.0), 24.0);\n" +
+        "    wcol += vec3(1.0, 0.96, 0.86) * (glint * 0.85 * sunUp);\n" +
+        "    wcol += vec3(0.55, 0.62, 0.66) * (sheen * 0.22 * sunUp);\n" +
         "    wcol = clamp(wcol, 0.0, 1.0);\n" +
         "    float waterAlpha = mix(0.15, 0.60, smoothstep(0.0, 0.5, depthF));\n" + // shore kept glassy (0.15, unchanged); deep ~27% less opaque
 
@@ -303,7 +310,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // the albedo blend below. Gentle ground keeps rockW=0 (shN = vNormal), so its lighting is unchanged.
         "  vec3 shN = normalize(vNormal);\n" +
         "  float rockSlopeDeg = degrees(acos(clamp(shN.z, 0.0, 1.0)));\n" +
-        "  float rockW = (uSlopeMode < 0.5) ? smoothstep(40.0, 65.0, rockSlopeDeg) * uRockStrength : 0.0;\n" +
+        // 55→75°: granite claims only NEAR-VERTICAL faces, where the top-down ortho drape is genuinely
+        // smeared. The old 40→65° band also swallowed 40–60° slopes that have crisp, real rock texture in
+        // the imagery (Orla Perć read worse WITH the material than with plain ortho — user 2026-07-02);
+        // the Slovak big north faces are 65°+ so they keep their granite rescue.
+        "  float rockW = (uSlopeMode < 0.5) ? smoothstep(55.0, 75.0, rockSlopeDeg) * uRockStrength : 0.0;\n" +
         "  float rk = 0.0;\n" +
         "  if (rockW > 0.001) {\n" +
         "    vec3 an = abs(shN); float bw = an.x + an.y + an.z + 0.0001;\n" +
@@ -512,7 +523,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // metres-per-pixel (the same quantity a screen-constant line needs), so floor the half-width at
         // DecalMinHalfWidthPx pixels' worth of that scale — true-scale 1.6 m up close (where it's already several
         // px), growing only once distance would shrink it thinner than that floor. No new uniform needed.
-        "  if (uTrailStrength > 0.001 && uReflectionPass < 0.5) {\n" +
+        "  if ((uTrailStrength > 0.001 || uWaterStrength > 0.001) && uReflectionPass < 0.5) {\n" +
         "    vec2 tuv = (vStableWorldPos.xy - uTrailMaskMinXY) / uTrailMaskSizeXY;\n" +
         "    if (tuv.x >= 0.0 && tuv.x <= 1.0 && tuv.y >= 0.0 && tuv.y <= 1.0) {\n" +
         "      vec4 tc = texture(uTrailMask, tuv);\n" +
@@ -526,6 +537,47 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // there, so the decal must carry it alone). The rim also crisps every other colour on busy ortho.
         "      float rimW = halfWidthM * 2.3;\n" +
         "      float rim = clamp((1.0 - smoothstep(rimW - aa, rimW + aa, distM)) - coverage, 0.0, 1.0);\n" +
+        // WATER decal v2: streams/rivers painted into the surface (same window, own R8 distance field).
+        // v1 was near-invisible in practice: the dark tint vanished on dark forest ortho, and a pow-96 Blinn
+        // on the ROCK normal only fired where the slope happened to face the half-vector ("wodospady suche").
+        // v2: (a) LIGHTER cold tint with an ambient floor so canopy crossings still read as water,
+        // (b) the specular normal is the terrain normal pulled hard toward +Z — water lies FLAT in its bed,
+        // so the ribbon catches the sun reliably, (c) two-term specular: a broad sheen (always glossy) plus
+        // a tight sparkle modulated by a two-sine ripple drifting on the cloud clock, so the stream glitters
+        // even from a resting camera; the ripple fades out once its ~3 m wavelength drops under a pixel
+        // (otherwise it aliases into fizz at distance). Runs BEFORE the trail line/rim so a trail crossing
+        // a stream stays readable on top.
+        "      if (uWaterStrength > 0.001) {\n" +
+        "        float wA = texture(uWaterMask, tuv).r;\n" +
+        "        if (wA > 0.003) {\n" +
+        "          float wDist = (1.0 - wA) * uTrailMaxDist;\n" +
+        "          float wHalf = max(3.2, aa * 1.8);\n" +
+        "          float wCov = 1.0 - smoothstep(wHalf - aa, wHalf + aa, wDist);\n" +
+        "          if (wCov > 0.001) {\n" +
+        "            vec3 waterTint = vec3(0.24, 0.46, 0.60) * max(lightSum, vec3(0.40));\n" +
+        "            lit = mix(lit, waterTint, wCov * 0.85 * uWaterStrength);\n" +
+        "            vec3 wN = normalize(mix(shN, vec3(0.0, 0.0, 1.0), 0.6));\n" +
+        "            vec3 wV = normalize(uCameraPos - vWorldPos);\n" +
+        "            vec3 wH = normalize(uLightDir + wV);\n" +
+        "            float wNdH = max(dot(wN, wH), 0.0);\n" +
+        // Water reflects the SKY even with no direct sun — that is why a stream in a shaded cirque still
+        // reads silver-bright. Without this floor the whole effect was scaled by sun elevation, so at golden
+        // hour every NW-facing fall was a matte dark stripe ("siklawa sucha"). Fresnel-ish: brighter at
+        // grazing view angles, like a real water sheet.
+        "            float fres = pow(1.0 - max(dot(wN, wV), 0.0), 2.0);\n" +
+        "            lit += vec3(0.58, 0.68, 0.78) * ((0.10 + 0.40 * fres) * wCov * uWaterStrength);\n" +
+        // ×3 so the sun glint stays usable down to golden hour (elevation ~20° → full strength).
+        "            float wSunUp = clamp(uLightDir.z * 3.0, 0.0, 1.0);\n" +
+        "            float rippleFade = clamp(3.0 / max(aa, 0.001), 0.0, 1.0);\n" +
+        "            float ripple = 0.6 + 0.4 * rippleFade\n" +
+        "                * sin(dot(vStableWorldPos.xy, vec2(0.55, 0.83)) * 2.1 - uCloudTime * 2.6)\n" +
+        "                * sin(dot(vStableWorldPos.xy, vec2(-0.71, 0.40)) * 1.7 + uCloudTime * 1.9);\n" +
+        "            float wSheen = pow(wNdH, 18.0) * 0.4;\n" +
+        "            float wSpark = pow(wNdH, 130.0) * 1.5 * ripple;\n" +
+        "            lit += vec3(1.0, 0.98, 0.92) * ((wSheen + wSpark) * wCov * wSunUp * uWaterStrength);\n" +
+        "          }\n" +
+        "        }\n" +
+        "      }\n" +
         "      lit = mix(lit, vec3(0.94, 0.94, 0.90), rim * 0.55 * uTrailStrength);\n" +
         "      lit = mix(lit, tc.rgb, coverage * uTrailStrength);\n" +
         "    }\n" +
@@ -1862,8 +1914,35 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private IReadOnlyList<Trail>? lastMaskTrails;
     private IReadOnlyList<Trail>? lastMaskRoads;
     private IReadOnlyList<Trail>? lastMaskExposed;
+    private IReadOnlyList<Trail>? lastMaskWaterways;
+    private IReadOnlyList<MapaTur.Application.Waterways.Waterfall>? lastMaskWaterfalls;
     private Route? lastMaskRoute; // route is in the decal too (dashed translucent on the trail) → part of the key
     private DemRaster? lastMaskRaster;
+
+    /// <summary>Watercourse polylines (waterway=river|stream), painted into the terrain as a shiny water decal.</summary>
+    public IReadOnlyList<Trail>? Waterways { get; set; }
+
+    /// <summary>Waterfall points rendered as bright foam accents on their streams.</summary>
+    public IReadOnlyList<MapaTur.Application.Waterways.Waterfall>? Waterfalls { get; set; }
+
+    // Parallel single-channel water distance field (unit 6) — drives the wet tint + specular glint.
+    private uint waterMaskTex;
+    private bool waterMaskValid;
+    private long lastMaskSkipLogTick;
+
+    // The mask builder has three SILENT early-outs (no raster / no lines / degenerate window) that all present
+    // identically on screen: "decal po prostu nie ma". One throttled line names the exit instead.
+    private void LogMaskSkipThrottled(string reason)
+    {
+        long now = Environment.TickCount64;
+        if (now - lastMaskSkipLogTick >= 5000)
+        {
+            lastMaskSkipLogTick = now;
+            Log.Information("[GL3D] [TrailMask] skip: {Reason}", reason);
+        }
+    }
+    private int waterMaskSamplerLocation = -1;
+    private int waterMaskStrengthLocation = -1;
     private bool haveMaskWindowKey;
     private float lastMaskKeyMinX, lastMaskKeyMinY, lastMaskKeySizeX, lastMaskKeySizeY; // quantized window key
     private byte[]? maskRgbaScratch;
@@ -2302,9 +2381,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             // CPU buffers survive the context loss and are reused — only the GL texture is gone.)
             trailMaskTex = 0;
             trailMaskValid = false;
+            waterMaskTex = 0;
+            waterMaskValid = false;
             lastMaskTrails = null;
             lastMaskRoads = null;
             lastMaskExposed = null;
+            lastMaskWaterways = null;
+            lastMaskWaterfalls = null;
             lastMaskRoute = null;
             lastMaskRaster = null;
             haveMaskWindowKey = false;
@@ -2742,6 +2825,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // strength + bound mask texture are set after the shadow block, just before the main terrain draw.
         gl.Uniform1(trailMaskSamplerLocation, 5);
         gl.Uniform1(trailMaskStrengthLocation, 0f);
+        gl.Uniform1(waterMaskSamplerLocation, 6);
+        gl.Uniform1(waterMaskStrengthLocation, 0f);
 
         gl.Uniform1(terrainSnowBandZLocation, snow.BandZ);
         gl.Uniform1(terrainSnowSlopeCosBareLocation, snow.SlopeCosBare);
@@ -2950,6 +3035,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 gl.Uniform1(trailMaskMaxDistLocation, TrailMaskMaxDistanceMeters);
                 gl.Uniform1(trailMaskHalfWidthLocation, TrailDecalHalfWidthMeters);
                 gl.Uniform1(trailMaskStrengthLocation, TrailDecalStrength);
+            }
+
+            if (waterMaskValid && waterMaskTex != 0)
+            {
+                gl.ActiveTexture(TextureUnit.Texture6);
+                gl.BindTexture(TextureTarget.Texture2D, waterMaskTex);
+                gl.ActiveTexture(TextureUnit.Texture0);
+                gl.Uniform1(waterMaskStrengthLocation, 1f);
             }
         }
 
@@ -4736,6 +4829,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         terrainContourStrengthLocation = g.GetUniformLocation(program, "uContourStrength");
         terrainContourWidthPxLocation = g.GetUniformLocation(program, "uContourWidthPx");
         trailMaskSamplerLocation = g.GetUniformLocation(program, "uTrailMask");
+        waterMaskSamplerLocation = g.GetUniformLocation(program, "uWaterMask");
+        waterMaskStrengthLocation = g.GetUniformLocation(program, "uWaterStrength");
         trailMaskStrengthLocation = g.GetUniformLocation(program, "uTrailStrength");
         trailMaskMinXYLocation = g.GetUniformLocation(program, "uTrailMaskMinXY");
         trailMaskSizeXYLocation = g.GetUniformLocation(program, "uTrailMaskSizeXY");
@@ -5244,12 +5339,54 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // when the key below actually changes, so this early stage is what runs on a churning detail stream.
         bool windowOk = TryComputeMaskWindow(detail, mesh, cameraWorldPos, out float rawMinX, out float rawMinY, out float rawSizeX, out float rawSizeY);
 
+        // Land a finished BACKGROUND build first — the GL thread only pays the two TexImage2D uploads.
+        // The projection + SDF paint used to run right here, synchronously: every window jump during a
+        // flight was a ~3 s frame stall (measured 20:12–20:23: 37 rebuilds ≙ 43 frame gaps ~3000 ms,
+        // "straszliwie zarywa"). The old texture stays live (and correctly positioned — its window
+        // uniforms are the old ones) while the replacement builds.
+        if (trailMaskBuildTask is { IsCompleted: true } doneTask)
+        {
+            trailMaskBuildTask = null;
+            TrailMaskBuildResult? built = trailMaskBuildResult;
+            trailMaskBuildResult = null;
+            if (doneTask.IsFaulted)
+            {
+                Log.Warning(doneTask.Exception?.GetBaseException(), "[GL3D] [TrailMask] background build failed");
+            }
+            else if (built is not null)
+            {
+                if (built.Mask is null)
+                {
+                    // Snapshot had nothing to paint — decal off (same semantics as the old sync early-out).
+                    trailMaskValid = false;
+                    waterMaskValid = false;
+                }
+                else
+                {
+                    UploadTrailMask(g, built);
+                    Log.Information(
+                        "[GL3D] [TrailMask] rebuilt {W}x{H} lines={Lines} water={WaterLines} falls={Falls} waterTexels={WaterTexels} window=({MinX:F0},{MinY:F0} {SizeX:F0}x{SizeY:F0}m)",
+                        built.Mask.Width, built.Mask.Height, built.LineCount, built.WaterLineCount, built.FallCount,
+                        built.WaterTexels, built.MinX, built.MinY, built.SizeX, built.SizeY);
+                }
+
+                // Commit the window key either way so an empty window does not re-kick every frame.
+                lastMaskKeyMinX = built.KeyMinX;
+                lastMaskKeyMinY = built.KeyMinY;
+                lastMaskKeySizeX = built.KeySizeX;
+                lastMaskKeySizeY = built.KeySizeY;
+                haveMaskWindowKey = true;
+            }
+        }
+
         // The route IS in the decal (dashed translucent violet ON the trail), so a route change must rebuild — but
         // the route reference is stable across detail streams, so this still does NOT churn while streaming. Keyed
-        // on the deduped trails / roads / exposed / route refs + raster + the quantized window.
+        // on the deduped trails / roads / exposed / waterways / route refs + raster + the quantized window.
         bool linesUnchanged = ReferenceEquals(lastMaskTrails, trails)
             && ReferenceEquals(lastMaskRoads, roads)
             && ReferenceEquals(lastMaskExposed, exposed)
+            && ReferenceEquals(lastMaskWaterways, Waterways)
+            && ReferenceEquals(lastMaskWaterfalls, Waterfalls)
             && ReferenceEquals(lastMaskRoute, route)
             && ReferenceEquals(lastMaskRaster, raster);
 
@@ -5269,30 +5406,123 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             return; // nothing relevant changed — keep the cached texture (detail may have streamed; mask is absolute)
         }
 
+        if (trailMaskBuildTask is not null)
+        {
+            return; // one build in flight; if inputs changed again, the key mismatch re-kicks after it lands
+        }
+
+        // These refs define what the build ABOUT TO START represents (not what is on screen) — the early-out
+        // above compares against them so the same inputs never kick twice.
         lastMaskTrails = trails;
         lastMaskRoads = roads;
         lastMaskExposed = exposed;
+        lastMaskWaterways = Waterways;
+        lastMaskWaterfalls = Waterfalls;
         lastMaskRoute = route;
         lastMaskRaster = raster;
 
-        trailMaskValid = false;
         if (raster is null || !windowOk)
         {
+            trailMaskValid = false; // data truly gone — decal off (NOT the "still building" case)
+            waterMaskValid = false;
+            LogMaskSkipThrottled($"raster={(raster is null ? "null" : "ok")} windowOk={windowOk}");
             return;
         }
 
+        if (keySizeX <= 1f || keySizeY <= 1f)
+        {
+            LogMaskSkipThrottled($"degenerate window {keySizeX:F0}x{keySizeY:F0}m");
+            return;
+        }
+
+        // Snapshot EVERYTHING the worker needs — it must not read renderer properties (GL-thread state).
+        // The snapshots are immutable lists/records; mesh/raster are read-only data.
+        var trailsSnap = trails;
+        var roadsSnap = roads;
+        var exposedSnap = exposed;
+        var routeSnap = route;
+        var waterSnap = Waterways;
+        var fallsSnap = Waterfalls;
+        var rasterSnap = raster;
+        var meshSnap = mesh;
+        float kMinX = keyMinX, kMinY = keyMinY, kSizeX = keySizeX, kSizeY = keySizeY;
+        trailMaskBuildTask = Task.Run(() =>
+        {
+            trailMaskBuildResult = BuildTrailMaskCpu(
+                trailsSnap, roadsSnap, exposedSnap, routeSnap, waterSnap, fallsSnap,
+                rasterSnap, meshSnap, kMinX, kMinY, kSizeX, kSizeY);
+        });
+    }
+
+    /// <summary>Everything a landed background mask build hands to the GL thread. Mask null = nothing to paint.</summary>
+    private sealed record TrailMaskBuildResult(
+        TrailMask? Mask, int LineCount, int WaterLineCount, int FallCount, int WaterTexels,
+        float MinX, float MinY, float SizeX, float SizeY,
+        float KeyMinX, float KeyMinY, float KeySizeX, float KeySizeY);
+
+    private Task? trailMaskBuildTask;
+    private TrailMaskBuildResult? trailMaskBuildResult; // written by the task, read by the GL thread after IsCompleted
+
+    // CPU part of the mask rebuild (projection + rasterisation), safe off the GL thread. The scratch buffers
+    // are reused across builds; exclusive use is guaranteed by the single-flight task + the upload happening
+    // on the GL thread BEFORE the next task can start (both sequenced through EnsureTrailMask).
+    private TrailMaskBuildResult? BuildTrailMaskCpu(
+        IReadOnlyList<Trail>? trails,
+        IReadOnlyList<Trail>? roads,
+        IReadOnlyList<Trail>? exposed,
+        Route? route,
+        IReadOnlyList<Trail>? waterways,
+        IReadOnlyList<MapaTur.Application.Waterways.Waterfall>? waterfalls,
+        DemRaster raster,
+        TerrainMesh3D mesh,
+        float keyMinX, float keyMinY, float keySizeX, float keySizeY)
+    {
         // Build the painted lines from the QUANTIZED window so the texture aligns with the cache key (and the
         // window covers the snapped grid cell). detail = null: seating only changes Z, which the mask drops.
-        // Trails/roads/exposed are the distance-field layers; the route is then painted ON TOP as a dashed
-        // translucent highlight (the route pass below), conflated onto the SAME deduped trails so it lies on its trail.
         IReadOnlyList<TrailWorldLine>? trailsWorld =
             trails is { Count: > 0 } ? Trail3DWorldProjection.ToWorld(trails, raster, mesh, 0f, detail: null) : null;
         IReadOnlyList<TrailWorldLine>? roadsWorld =
             roads is { Count: > 0 } ? Trail3DWorldProjection.ToWorld(roads, raster, mesh, 0f, detail: null) : null;
         IReadOnlyList<TrailWorldLine>? exposedWorld =
             exposed is { Count: > 0 } ? Trail3DWorldProjection.ToWorld(exposed, raster, mesh, 0f, detail: null) : null;
+        IReadOnlyList<TrailWorldLine>? waterWorld =
+            waterways is { Count: > 0 } w ? Trail3DWorldProjection.ToWorld(w, raster, mesh, 0f, detail: null) : null;
 
-        IReadOnlyList<MaskPolyline> lines = TrailMaskInput.Build(trailsWorld, roadsWorld, exposedWorld);
+        IReadOnlyList<MaskPolyline> lines = TrailMaskInput.Build(trailsWorld, roadsWorld, exposedWorld, waterWorld);
+
+        // Water field input: the same watercourse polylines, plus waterfall FOAM accents — a small X of two
+        // crossing segments at each waterfall node, painted near-white into the RGBA decal (high priority) and
+        // into the water field (so the foam glints hardest). Built in world space off the same mesh frame.
+        List<MaskPolyline>? waterFieldLines = null;
+        if (waterWorld is { Count: > 0 })
+        {
+            waterFieldLines = new List<MaskPolyline>(waterWorld.Count);
+            foreach (var line in waterWorld)
+            {
+                (byte wr, byte wg, byte wb) = TrailMaskInput.WaterColor;
+                waterFieldLines.Add(new MaskPolyline(line.World, wr, wg, wb, TrailMaskInput.WaterPriority));
+            }
+        }
+
+        if (waterfalls is { Count: > 0 } falls)
+        {
+            waterFieldLines ??= new List<MaskPolyline>();
+            var allLines = new List<MaskPolyline>(lines);
+            (byte fr, byte fg, byte fb) = TrailMaskInput.FoamColor;
+            const float foamHalf = 10f; // ~20 m foam splash across the fall — smaller was invisible on bright rock
+            foreach (var fall in falls)
+            {
+                Vector3 c = mesh.GeoToWorld(fall.Position, 0f);
+                var segA = new[] { new Vector3(c.X - foamHalf, c.Y - foamHalf, 0f), new Vector3(c.X + foamHalf, c.Y + foamHalf, 0f) };
+                var segB = new[] { new Vector3(c.X - foamHalf, c.Y + foamHalf, 0f), new Vector3(c.X + foamHalf, c.Y - foamHalf, 0f) };
+                allLines.Add(new MaskPolyline(segA, fr, fg, fb, TrailMaskInput.FoamPriority));
+                allLines.Add(new MaskPolyline(segB, fr, fg, fb, TrailMaskInput.FoamPriority));
+                waterFieldLines.Add(new MaskPolyline(segA, fr, fg, fb, TrailMaskInput.FoamPriority));
+                waterFieldLines.Add(new MaskPolyline(segB, fr, fg, fb, TrailMaskInput.FoamPriority));
+            }
+
+            lines = allLines;
+        }
 
         // Route → a MaskRoute the builder paints as the dashed translucent violet ON the trail. Conflate it onto the
         // SAME deduped trails the decal/overlay use (so it shares the trail geometry), Z ignored (lift 0, no detail).
@@ -5311,38 +5541,33 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         if (lines.Count == 0 && maskRoute is null)
         {
-            return;
-        }
-
-        float minX = keyMinX, minY = keyMinY, sizeX = keySizeX, sizeY = keySizeY;
-        if (sizeX <= 1f || sizeY <= 1f)
-        {
-            return;
+            return new TrailMaskBuildResult(null, 0, 0, 0, 0, keyMinX, keyMinY, keySizeX, keySizeY, keyMinX, keyMinY, keySizeX, keySizeY);
         }
 
         // Texture sized to the window aspect (max side = TrailMaskTextureSize) so metres-per-texel match in X/Y.
         int texW, texH;
-        if (sizeX >= sizeY)
+        if (keySizeX >= keySizeY)
         {
             texW = TrailMaskTextureSize;
-            texH = Math.Max(1, (int)MathF.Round(TrailMaskTextureSize * sizeY / sizeX));
+            texH = Math.Max(1, (int)MathF.Round(TrailMaskTextureSize * keySizeY / keySizeX));
         }
         else
         {
             texH = TrailMaskTextureSize;
-            texW = Math.Max(1, (int)MathF.Round(TrailMaskTextureSize * sizeX / sizeY));
+            texW = Math.Max(1, (int)MathF.Round(TrailMaskTextureSize * keySizeX / keySizeY));
         }
 
         var request = new TrailMaskRequest
         {
-            WorldMinX = minX,
-            WorldMinY = minY,
-            WorldSizeX = sizeX,
-            WorldSizeY = sizeY,
+            WorldMinX = keyMinX,
+            WorldMinY = keyMinY,
+            WorldSizeX = keySizeX,
+            WorldSizeY = keySizeY,
             Width = texW,
             Height = texH,
             MaxDistanceMeters = TrailMaskMaxDistanceMeters,
             Lines = lines,
+            WaterLines = (IReadOnlyList<MaskPolyline>?)waterFieldLines ?? Array.Empty<MaskPolyline>(),
             Route = maskRoute,
         };
 
@@ -5359,12 +5584,27 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         TrailMask mask = TrailMaskBuilder.Build(request, maskRgbaScratch, maskPriorityScratch!, maskDistanceScratch!);
 
-        lastMaskKeyMinX = keyMinX;
-        lastMaskKeyMinY = keyMinY;
-        lastMaskKeySizeX = keySizeX;
-        lastMaskKeySizeY = keySizeY;
-        haveMaskWindowKey = true;
+        int waterTexels = 0;
+        if (mask.Water is { } wf)
+        {
+            for (int i = 0; i < wf.Length; i++)
+            {
+                if (wf[i] > 0)
+                {
+                    waterTexels++;
+                }
+            }
+        }
 
+        return new TrailMaskBuildResult(
+            mask, lines.Count, waterFieldLines?.Count ?? 0, waterfalls?.Count ?? 0, waterTexels,
+            keyMinX, keyMinY, keySizeX, keySizeY, keyMinX, keyMinY, keySizeX, keySizeY);
+    }
+
+    // GL-thread half of a landed build: two TexImage2D uploads + window uniforms state. Cheap (~10 ms at 4096²).
+    private void UploadTrailMask(GL g, TrailMaskBuildResult built)
+    {
+        TrailMask mask = built.Mask!;
         if (trailMaskTex == 0)
         {
             trailMaskTex = g.GenTexture();
@@ -5380,12 +5620,38 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
         g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
         g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+
+        // Water distance field — a parallel R8 texture on unit 6 (units 0-5 are taken: ortho/refl/CSM×3/trail
+        // mask). Drives the shader's wet tint + specular glint independently of the RGBA colour winner.
+        waterMaskValid = false;
+        if (mask.Water is { } waterField)
+        {
+            if (waterMaskTex == 0)
+            {
+                waterMaskTex = g.GenTexture();
+            }
+
+            g.ActiveTexture(TextureUnit.Texture6);
+            g.BindTexture(TextureTarget.Texture2D, waterMaskTex);
+            g.PixelStore(PixelStoreParameter.UnpackAlignment, 1); // tightly-packed single-channel rows
+            g.TexImage2D<byte>(
+                TextureTarget.Texture2D, 0, (int)InternalFormat.R8,
+                (uint)mask.Width, (uint)mask.Height, 0,
+                PixelFormat.Red, PixelType.UnsignedByte, waterField);
+            g.PixelStore(PixelStoreParameter.UnpackAlignment, 4);
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+            waterMaskValid = true;
+        }
+
         g.ActiveTexture(TextureUnit.Texture0);
 
-        trailMaskMinX = minX;
-        trailMaskMinY = minY;
-        trailMaskSizeX = sizeX;
-        trailMaskSizeY = sizeY;
+        trailMaskMinX = built.MinX;
+        trailMaskMinY = built.MinY;
+        trailMaskSizeX = built.SizeX;
+        trailMaskSizeY = built.SizeY;
         trailMaskValid = true;
     }
 
@@ -5425,15 +5691,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         // No legacy detail field (the baked-streaming case — see the constant's comment above): a small window
         // CENTRED ON THE CAMERA, not the whole mesh, so the fixed-resolution SDF stays sharp where it's actually
-        // being looked at. Clamped to the mesh's own extent so it never reaches past real geometry.
+        // being looked at. NO clamp to the mesh extent: under baked streaming `mesh` is tiles[0] — an arbitrary
+        // member of a churning tile list, NOT the scene — and clamping to it emptied the window whenever that
+        // tile drifted >4 km from the camera, silently killing the whole decal (trails AND water) mid-flight.
+        // A window hanging past real geometry is harmless: texels over nothing are simply never sampled.
         float half = TrailMaskCameraWindowHalfExtentMeters;
-        minX = MathF.Max(mesh.WorldMin.X, cameraWorldPos.X - half);
-        minY = MathF.Max(mesh.WorldMin.Y, cameraWorldPos.Y - half);
-        float maxX = MathF.Min(mesh.WorldMax.X, cameraWorldPos.X + half);
-        float maxY = MathF.Min(mesh.WorldMax.Y, cameraWorldPos.Y + half);
-        sizeX = maxX - minX;
-        sizeY = maxY - minY;
-        return sizeX > 1f && sizeY > 1f;
+        minX = cameraWorldPos.X - half;
+        minY = cameraWorldPos.Y - half;
+        sizeX = half * 2f;
+        sizeY = half * 2f;
+        return true;
     }
 
     // Snap helpers for the coarse mask-window grid so detail streaming (which nudges the window every tile) does
@@ -7172,6 +7439,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.DeleteTexture(trailMaskTex);
         trailMaskTex = 0;
         trailMaskValid = false;
+        gl.DeleteTexture(waterMaskTex);
+        waterMaskTex = 0;
+        waterMaskValid = false;
         foreach (OrthoTile t in orthoTiles)
         {
             if (t.Texture != 0)

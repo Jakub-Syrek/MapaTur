@@ -114,6 +114,34 @@ Wynik: szew wewnętrzny r1c2 z [23.5,20.9,15.2] → [17.4,14.8,9.0] (klamra się
 Wynik wykonania: ciemne naloty = 8–39% powierzchni komórek; sondy przez główny szew
 [23.5,20.9,15.2] → **[6.2,4.1,0.5]**. Koszt: podmienione pasy są ~1.6× miększe (z16=1.56 m/px vs komórka 1.0).
 
+### 3.9 Wypiekanie cieków wodnych do ortho (PILOT r1-c2 2026-07-02, wariant B)
+**PROCES (twarda lekcja):** wygląd NAJPIERW uzgadniamy na PRÓBKACH (arkusz wariantów na wycinkach
+prawdziwego ortho — wzór: `water-look-samples.py` w scratchpadzie sesji 2026-07-02; kadry centrowane na
+realnych wierzchołkach cieków, nie zgadywanych współrzędnych), user wybiera wariant → JEDNA komórka →
+werdykt w apce → dopiero rollout. Pierwsze podejście (masowy bake bez uzgodnienia) słusznie oprotestowane.
+
+`python testdata/maps/bake-waterways-into-ortho.py [r1-c2 ...]` (bez argumentów = wszystkie 8 komórek):
+1. Overpass `waterway~^(river|stream)$` + nody `waterway=waterfall`, bbox = komórki docelowe +300 m
+   (cache per-bbox `.dem-cache/waterways-*.json`; przy throttlingu działa mirror lz4).
+2. Geometria w METRACH lokalnych (komórka jest anizotropowa: x ~1.00, y ~1.53 m/px!): densyfikacja 4 m,
+   meander 2 sinusy (amp 1.6 m, λ 70/29 m, fazy z id waya — deterministyczne), modulacja szerokości ±~35%.
+   Szerokość: river hw 2.6 m / stream 1.0 m / tag `width` (clamp hw 0.8–5.0) / intermittent ×0.7 i alpha ×0.55.
+3. Malowanie per segment (dystans do odcinka, feather 1.6 m) → bufory alpha (max) + t=d/hw (min);
+   kompozycja w paskach 512: **wariant B teal** — gradient (24,72,96)→(96,140,150) po t, jitter hash ±7,
+   opacity **0.85**; wodospady = plamka piany r 4.5 m (234,244,248) α 0.85.
+   **Maska jezior:** zamknięte way'e `natural=water` (osobne zapytanie, cache `lakes-*.json`) rasteryzowane
+   PIL-em → alpha/foam zerowane WEWNĄTRZ poligonów — OSM prowadzi potok PRZEZ taflę (Roztoka przez Wielki
+   Staw), bez maski wstążka malowała się po jeziorze (zgłoszone przez usera). Strumień kończy się na
+   linii brzegowej. r1-c2 po masce: painted 1 426 619 → 1 357 780 px (231 poligonów w komórce).
+4. Backup `*.pre-water.bak` (raz; NIE nadpisywany przy re-bake — zawiera stan sprzed wody). Restart apki.
+   ⚠️ Skrypt maluje na BIEŻĄCYM PNG — ponowne uruchomienie na już wypieczonej komórce namaluje wodę
+   DRUGI raz (ciemniej/grubiej). Przed każdym re-bake najpierw restore: `*.pre-water.bak` → PNG.
+Wynik pilota r1-c2 (wariant B): 979 ways + 52 falls, 1 426 619 px (0.80% komórki), mean|ΔRGB| = 24.1
+(wariant A 0.78/(36,62,76) dawał 13.9 — za subtelny na ciemnym lesie).
+KONTEKST: zastępuje runtimowy decal wody (kanał trail-mask) — SDF 4096² przebudowywany na wątku GL przy
+churni klucza = slideshow, a stała szerokość/kolor czytały się „jak niebieski szlak". Decal zostaje w kodzie
+za wyłącznikiem `ShowWaterways` (default OFF) do A/B i obszarów bez ortho.
+
 ### 3.7 Diagnostyka
 - `ortho-analyze-seams.py` — skoki na 10 krawędziach siatki (uruchamiać po każdej operacji na PNG).
 - `probe-esri-zoom-consistency.py` — spójność mozaiki Esri wg zoomu w zadanym punkcie.

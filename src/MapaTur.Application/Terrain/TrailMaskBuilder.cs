@@ -87,6 +87,15 @@ public sealed record TrailMaskRequest
     public required IReadOnlyList<MaskPolyline> Lines { get; init; }
 
     /// <summary>
+    /// Watercourse polylines painted into the PARALLEL single-channel water distance field
+    /// (<see cref="TrailMask.Water"/>) that drives the shader's wet tint + specular glint. These lines should
+    /// ALSO be included in <see cref="Lines"/> (with their water colour) so the RGBA decal draws them; the
+    /// separate field exists because a trail crossing a stream takes the crossing texel's COLOUR but the
+    /// texel must still read as water for the glint. Empty = no water field is produced.
+    /// </summary>
+    public IReadOnlyList<MaskPolyline> WaterLines { get; init; } = Array.Empty<MaskPolyline>();
+
+    /// <summary>
     /// Optional planned route, painted as a dashed translucent highlight ON the trail AFTER <see cref="Lines"/> are
     /// rasterised. Null = no route in the decal. The route is expected to be conflated onto a trail so it shares the
     /// trail's geometry; the pass recolours the trail's distance-field texels along the dashes and writes the field
@@ -106,7 +115,9 @@ public sealed record TrailMaskRequest
 /// </summary>
 public sealed class TrailMask
 {
-    public TrailMask(int width, int height, float worldMinX, float worldMinY, float worldSizeX, float worldSizeY, byte[] rgba)
+    public TrailMask(
+        int width, int height, float worldMinX, float worldMinY, float worldSizeX, float worldSizeY, byte[] rgba,
+        byte[]? water = null)
     {
         Width = width;
         Height = height;
@@ -115,7 +126,15 @@ public sealed class TrailMask
         WorldSizeX = worldSizeX;
         WorldSizeY = worldSizeY;
         Rgba = rgba;
+        Water = water;
     }
+
+    /// <summary>
+    /// Optional single-channel water distance field, <c>Width * Height</c> bytes, same window/encoding as
+    /// <see cref="Rgba"/>'s alpha (255 on a watercourse centre → 0 at the max distance). Null when the build
+    /// had no water lines. Drives the shader's wet tint + glint independently of the RGBA colour winner.
+    /// </summary>
+    public byte[]? Water { get; }
 
     public int Width { get; }
     public int Height { get; }
@@ -240,7 +259,88 @@ public static class TrailMaskBuilder
             PaintRoute(route, request, reach, metersPerTexelX, metersPerTexelY, rgba, bestPriority, bestDistance);
         }
 
-        return new TrailMask(width, height, request.WorldMinX, request.WorldMinY, request.WorldSizeX, request.WorldSizeY, rgba);
+        // WATER pass: a parallel single-channel distance field over the SAME window. Painted independently of
+        // the RGBA priorities, so a trail crossing a stream keeps the trail colour but the texel still reads as
+        // water (the shader glints from THIS field, not the colour).
+        byte[]? water = null;
+        if (request.WaterLines.Count > 0)
+        {
+            water = new byte[texels];
+            foreach (var line in request.WaterLines)
+            {
+                var pts = line.Points;
+                if (pts is null)
+                {
+                    continue;
+                }
+
+                for (var s = 0; s + 1 < pts.Count; s++)
+                {
+                    var a = pts[s];
+                    var b = pts[s + 1];
+                    if (!IsFinite(a) || !IsFinite(b))
+                    {
+                        continue;
+                    }
+
+                    PaintWaterSegment(
+                        new Vector2(a.X, a.Y), new Vector2(b.X, b.Y),
+                        request, reach, metersPerTexelX, metersPerTexelY, water);
+                }
+            }
+        }
+
+        return new TrailMask(width, height, request.WorldMinX, request.WorldMinY, request.WorldSizeX, request.WorldSizeY, rgba, water);
+    }
+
+    // Stamps one watercourse segment into the single-channel water field: max-combine of the linear
+    // distance ramp (255 on the centre → 0 at reach), so overlapping segments never darken each other.
+    private static void PaintWaterSegment(
+        Vector2 a,
+        Vector2 b,
+        TrailMaskRequest request,
+        float reach,
+        float metersPerTexelX,
+        float metersPerTexelY,
+        byte[] water)
+    {
+        if (reach <= 0f)
+        {
+            return;
+        }
+
+        var width = request.Width;
+        var height = request.Height;
+        var minWorldX = MathF.Min(a.X, b.X) - reach;
+        var maxWorldX = MathF.Max(a.X, b.X) + reach;
+        var minWorldY = MathF.Min(a.Y, b.Y) - reach;
+        var maxWorldY = MathF.Max(a.Y, b.Y) + reach;
+
+        var i0 = Math.Clamp((int)MathF.Floor((minWorldX - request.WorldMinX) / request.WorldSizeX * width), 0, width - 1);
+        var i1 = Math.Clamp((int)MathF.Ceiling((maxWorldX - request.WorldMinX) / request.WorldSizeX * width), 0, width - 1);
+        var j0 = Math.Clamp((int)MathF.Floor((minWorldY - request.WorldMinY) / request.WorldSizeY * height), 0, height - 1);
+        var j1 = Math.Clamp((int)MathF.Ceiling((maxWorldY - request.WorldMinY) / request.WorldSizeY * height), 0, height - 1);
+
+        for (var j = j0; j <= j1; j++)
+        {
+            var worldY = request.WorldMinY + ((j + 0.5f) * metersPerTexelY);
+            for (var i = i0; i <= i1; i++)
+            {
+                var worldX = request.WorldMinX + ((i + 0.5f) * metersPerTexelX);
+                var dist = DistanceToSegment(new Vector2(worldX, worldY), a, b);
+                if (dist > reach)
+                {
+                    continue;
+                }
+
+                var idx = (j * width) + i;
+                var alpha = (byte)Math.Clamp((int)MathF.Round((1f - (dist / reach)) * 255f), 0, 255);
+                if (alpha > water[idx])
+                {
+                    water[idx] = alpha;
+                }
+            }
+        }
     }
 
     // Priority sentinel marking a texel the route pass has already claimed, so overlapping route dashes don't

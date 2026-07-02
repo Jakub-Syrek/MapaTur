@@ -102,6 +102,32 @@ public partial class Terrain3DView : ContentView
         set => SetValue(RoadsProperty, value);
     }
 
+    /// <summary>Bindable watercourse polylines (waterway=river|stream), painted into the terrain as a shiny water decal.</summary>
+    public static readonly BindableProperty WaterwaysProperty = BindableProperty.Create(
+        nameof(Waterways),
+        typeof(IReadOnlyList<Trail>),
+        typeof(Terrain3DView),
+        propertyChanged: OnOverlayDataChanged);
+
+    public IReadOnlyList<Trail>? Waterways
+    {
+        get => (IReadOnlyList<Trail>?)GetValue(WaterwaysProperty);
+        set => SetValue(WaterwaysProperty, value);
+    }
+
+    /// <summary>Bindable waterfall points rendered as bright foam accents on their streams.</summary>
+    public static readonly BindableProperty WaterfallsProperty = BindableProperty.Create(
+        nameof(Waterfalls),
+        typeof(IReadOnlyList<MapaTur.Application.Waterways.Waterfall>),
+        typeof(Terrain3DView),
+        propertyChanged: OnOverlayDataChanged);
+
+    public IReadOnlyList<MapaTur.Application.Waterways.Waterfall>? Waterfalls
+    {
+        get => (IReadOnlyList<MapaTur.Application.Waterways.Waterfall>?)GetValue(WaterfallsProperty);
+        set => SetValue(WaterfallsProperty, value);
+    }
+
     /// <summary>Bindable exposed/guide routes (Trail polylines) drawn as dotted lines, distinct from marked trails.</summary>
     public static readonly BindableProperty ExposedRoutesProperty = BindableProperty.Create(
         nameof(ExposedRoutes),
@@ -3115,6 +3141,8 @@ public partial class Terrain3DView : ContentView
             glRenderer.SetOrthoCoverageGeoBounds(LodOrthoCoverageBounds, 300f);
             glRenderer.LakeFineBounds = LodDetailBounds; // lakes inside the 1 m detail keep legacy seating
             glRenderer.BakedElevationIndex = BakedElevationIndex; // trail/route/road lines seat on the REAL baked tile, not the static base
+            glRenderer.Waterways = Waterways;   // stream/river polylines → shiny water decal in the terrain shader
+            glRenderer.Waterfalls = Waterfalls; // waterfall points → bright foam accents on their streams
             glRenderer.ShowCableCar = ShowCableCar; // "🚠 Kolejka" layer toggle
             glRenderer.CableCar = MapaTur.Application.Terrain.CableCarData.Kasprowy; // Kasprowy Wierch aerialway
             glRenderer.ShowContours = ShowContours; // "Warstwice" layer toggle — thin iso-elevation lines on the relief

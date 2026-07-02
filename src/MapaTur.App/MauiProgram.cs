@@ -212,6 +212,12 @@ public static class MauiProgram
             client.Timeout = TimeSpan.FromSeconds(90);
         });
 
+        services.AddHttpClient<MapaTur.Application.Waterways.IWaterwayOverpassClient,
+            MapaTur.Infrastructure.Waterways.OverpassWaterwayHttpClient>(client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(90);
+        });
+
         // Online elevation: GUGiK NMT 1 m (Poland LiDAR) in front of the global Terrarium fallback,
         // composed behind one IDemTileSource. GUGiK short-circuits outside Poland so the composite falls
         // through to Terrarium worldwide. OnlineRegionDemLoader stitches a region's tiles into one mesh.

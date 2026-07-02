@@ -65,6 +65,22 @@
   <data name="StatusNoRoadsFound" xml:space="preserve">
     <value>No roads found in this area.</value>
   </data>
+  <data name="DownloadWaterways" xml:space="preserve">
+    <value>Download Streams (viewport)</value>
+  </data>
+  <data name="StatusDownloadingWaterways" xml:space="preserve">
+    <value>Downloading streams &amp; waterfalls from OSM Overpass…</value>
+  </data>
+  <data name="StatusWaterwaysLoadedFormat" xml:space="preserve">
+    <value>Loaded {0} watercourse(s) and {1} waterfall(s).</value>
+    <comment>{0} = stream/river way count, {1} = waterfall count.</comment>
+  </data>
+  <data name="StatusNoWaterwaysFound" xml:space="preserve">
+    <value>No streams found in this area.</value>
+  </data>
+  <data name="LayerWaterways" xml:space="preserve">
+    <value>Streams &amp; waterfalls</value>
+  </data>
   <data name="ClearRoute" xml:space="preserve">
     <value>Clear Route</value>
   </data>

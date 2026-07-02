@@ -25,14 +25,26 @@ public static class TrailMaskInput
     /// <summary>Exposed-route colour — orange (sac_scale / via_ferrata).</summary>
     public static readonly (byte R, byte G, byte B) ExposedColor = (0xFF, 0x8C, 0x00);
 
-    /// <summary>Lowest priority — roads sit under everything.</summary>
+    /// <summary>Watercourse colour — mountain-stream blue (the shader adds the wet glint on top).</summary>
+    public static readonly (byte R, byte G, byte B) WaterColor = (0x4F, 0x9E, 0xD9);
+
+    /// <summary>Waterfall foam accent — near-white with a cold cast.</summary>
+    public static readonly (byte R, byte G, byte B) FoamColor = (0xEA, 0xF6, 0xFF);
+
+    /// <summary>Watercourses sit under every man-made line (a trail crossing a stream wins the crossing texel).</summary>
+    public const int WaterPriority = -1;
+
+    /// <summary>Roads sit under trails.</summary>
     public const int RoadPriority = 0;
 
     /// <summary>Trails sit over roads.</summary>
     public const int TrailPriority = 1;
 
-    /// <summary>Highest decal priority — exposed routes punctuate the trails they run along.</summary>
+    /// <summary>Exposed routes punctuate the trails they run along.</summary>
     public const int ExposedPriority = 2;
+
+    /// <summary>Waterfall foam accents win even over exposed routes — a tiny, high-salience splash.</summary>
+    public const int FoamPriority = 3;
 
     /// <summary>
     /// Builds the ordered polyline set to rasterise. Any argument may be null/empty; layers are appended
@@ -42,9 +54,18 @@ public static class TrailMaskInput
     public static IReadOnlyList<MaskPolyline> Build(
         IReadOnlyList<TrailWorldLine>? trails = null,
         IReadOnlyList<TrailWorldLine>? roads = null,
-        IReadOnlyList<TrailWorldLine>? exposed = null)
+        IReadOnlyList<TrailWorldLine>? exposed = null,
+        IReadOnlyList<TrailWorldLine>? waterways = null)
     {
         var lines = new List<MaskPolyline>();
+
+        if (waterways is not null)
+        {
+            foreach (var water in waterways)
+            {
+                lines.Add(new MaskPolyline(water.World, WaterColor.R, WaterColor.G, WaterColor.B, WaterPriority));
+            }
+        }
 
         if (roads is not null)
         {

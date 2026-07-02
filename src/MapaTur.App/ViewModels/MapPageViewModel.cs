@@ -924,10 +924,95 @@ public sealed partial class MapPageViewModel : ObservableObject
 
         // Coalesce rapid slider changes into one in-flight rebuild, but always honour the
         // LAST value the user settled on — RequestRebuild returns null while a build is in
-        // flight and stashes the trailing value for StartMeshRebuild's completion to replay.
+        // flight and stashes the trailing value for the completion handler to replay.
         if (meshRebuildCoalescer.RequestRebuild(value) is { } toBuild)
         {
-            StartMeshRebuild(toBuild);
+            // The LOD scene (ring base + baked/runtime detail streaming) MUST rebuild through its own
+            // pipeline: the legacy StartMeshRebuild replaces the scene with a whole-raster BuildTiles mesh
+            // that the very next stream publish overwrites with the OLD lodBaseTiles + resident baked tiles
+            // (all built at the exaggeration captured once at scene setup) — i.e. the slider visibly did
+            // nothing ("pion w widoku nie działa"). Exaggeration is baked into vertex Z at build time, so
+            // the base AND the streaming manager both have to be rebuilt with the new value.
+            if (IsLodStreaming)
+            {
+                StartLodExaggerationRebuild(toBuild);
+            }
+            else
+            {
+                StartMeshRebuild(toBuild);
+            }
+        }
+    }
+
+    // Whether the current LOD scene's base was built as a ring-LOD adaptive plan (local whole-Tatra DEM)
+    // vs the legacy uniform subsample (online fallback window) — needed to rebuild the SAME kind of base
+    // when the vertical exaggeration changes.
+    private bool lodRingBase;
+
+    /// <summary>
+    /// Rebuilds the ACTIVE LOD scene at a new vertical exaggeration: the ring/uniform base via the same
+    /// builder the scene setup used, then a fresh baked-streaming manager (its mesh options — including
+    /// exaggeration — are captured at construction and baked into every resident tile's vertex Z), then a
+    /// stream kick so the near-field detail refills WITHOUT waiting for the next camera move.
+    /// </summary>
+    private void StartLodExaggerationRebuild(double value)
+    {
+        if (TerrainRaster is not { } raster)
+        {
+            return;
+        }
+
+        GeoPoint focus = lodAnchor; // scene anchor — IsLodStreaming guarantees the scene set it
+
+        var options = new MapaTur.Application.Terrain.TerrainMeshOptions
+        {
+            VerticalExaggeration = (float)Math.Clamp(value, 1.0, 5.0),
+        };
+        MapaTur.Application.Terrain.OrthoCoverage? coverage = lodOrthoCoverage;
+        bool ringBase = lodRingBase;
+
+        _ = Task.Run(() => BuildLodBaseTiles(raster, focus, options, coverage, ringBase))
+            .ContinueWith(t =>
+            {
+                if (t.IsFaulted)
+                {
+                    logger.LogError(t.Exception, "LOD exaggeration rebuild failed");
+                    meshRebuildCoalescer.CompleteRebuild();
+                    return;
+                }
+
+                MainThread.BeginInvokeOnMainThread(() =>
+                {
+                    lodBaseTiles = t.Result;
+                    lodBaseTileFootprints = ComputeBaseTileFootprints(t.Result);
+                    detailMeshCache.Clear(); // exaggeration is part of every cached block's identity
+                    // Fresh manager = fresh residents, all rebuilt at the new exaggeration on the next update.
+                    SetUpBakedStreaming(options.VerticalExaggeration);
+                    // Publish the rescaled base immediately (the user is mid-drag — the terrain must move NOW);
+                    // the stream refills the near-field detail on top a beat later.
+                    TerrainTiles = lodBaseTiles;
+                    OnPropertyChanged(nameof(TerrainFrame));
+                    KickBakedStream();
+                    if (meshRebuildCoalescer.CompleteRebuild() is { } trailing)
+                    {
+                        StartLodExaggerationRebuild(trailing);
+                    }
+                });
+            }, TaskScheduler.Default);
+    }
+
+    // Last camera/viewport handed to StreamBakedDetailAsync — lets a NON-camera event (the exaggeration
+    // rebuild) re-run the stream immediately from the current pose instead of waiting for the next move.
+    private MapaTur.Application.Terrain.Camera3D? lastBakedStreamCamera;
+    private int lastBakedStreamViewportH;
+    private int lastBakedStreamViewportW;
+
+    private void KickBakedStream()
+    {
+        if (lastBakedStreamCamera is { } cam)
+        {
+            lastBakedStreamUtc = DateTime.MinValue; // bypass the debounce — this is an explicit refresh
+            _ = StreamBakedDetailAsync(cam, lastBakedStreamViewportH, lastBakedStreamViewportW);
         }
     }
 
@@ -1000,6 +1085,104 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             roadRenderer.Clear(Map);
             Roads3DOverlay = null;
+        }
+    }
+
+    // Watercourses (waterway=river|stream ways + waterfall nodes) — painted INTO the terrain as a shiny
+    // water decal, not drawn as floating lines. Null client = feature unavailable (tests/legacy wiring).
+    private readonly MapaTur.Application.Waterways.IWaterwayOverpassClient? waterwayClient;
+
+    /// <summary>Watercourse polylines for the 3D water decal, or null when hidden/not downloaded.</summary>
+    [ObservableProperty]
+    private IReadOnlyList<Trail>? waterways3DOverlay;
+
+    /// <summary>Waterfall points rendered as bright foam accents on their streams.</summary>
+    [ObservableProperty]
+    private IReadOnlyList<MapaTur.Application.Waterways.Waterfall>? waterfalls3DOverlay;
+
+    // Last-downloaded watercourses (simplified for 3D), kept so the toggle re-applies without a refetch.
+    private IReadOnlyList<Trail>? rawWaterways3D;
+    private IReadOnlyList<MapaTur.Application.Waterways.Waterfall>? rawWaterfalls;
+
+    /// <summary>
+    /// Master show/hide for the RUNTIME watercourse decal (streams/waterfalls painted via the trail mask).
+    /// Default OFF since 2026-07-02: watercourses are baked INTO the ortho cells instead
+    /// (testdata/maps/bake-waterways-into-ortho.py, TILE-PRODUCTION.md 3.9) — zero runtime cost, natural look.
+    /// The decal path stays functional behind this switch for A/B comparison and for areas without ortho.
+    /// </summary>
+    [ObservableProperty]
+    private bool showWaterways;
+
+    partial void OnShowWaterwaysChanged(bool value) => ApplyWaterways();
+
+    private void ApplyWaterways()
+    {
+        if (ShowWaterways)
+        {
+            Waterways3DOverlay = rawWaterways3D;
+            Waterfalls3DOverlay = rawWaterfalls;
+        }
+        else
+        {
+            Waterways3DOverlay = null;
+            Waterfalls3DOverlay = null;
+        }
+    }
+
+    /// <summary>
+    /// Downloads OSM watercourses (stream/river ways + waterfall nodes) for the visible viewport and feeds
+    /// the 3D water decal.
+    /// </summary>
+    [RelayCommand]
+    public async Task DownloadWaterwaysForViewportAsync()
+    {
+        if (IsBusy || waterwayClient is null)
+        {
+            return;
+        }
+
+        var bounds = ComputeDownloadBounds();
+        if (bounds is null)
+        {
+            StatusMessage = Localization.AppStrings.StatusViewportNotReady;
+            return;
+        }
+
+        try
+        {
+            IsBusy = true;
+            StatusMessage = Localization.AppStrings.StatusDownloadingWaterways;
+
+            var result = await waterwayClient.FetchWaterwaysAsync(bounds.Value).ConfigureAwait(true);
+            rawWaterways3D = SimplifyForOverlay3D(result.Streams);
+            rawWaterfalls = result.Waterfalls;
+            ApplyWaterways();
+
+            StatusMessage = result.Streams.Count == 0
+                ? Localization.AppStrings.StatusNoWaterwaysFound
+                : string.Format(System.Globalization.CultureInfo.CurrentUICulture, Localization.AppStrings.StatusWaterwaysLoadedFormat, result.Streams.Count, result.Waterfalls.Count);
+            logger.LogInformation(
+                "Downloaded {Streams} watercourses + {Falls} waterfalls for bounds {Bounds}",
+                result.Streams.Count, result.Waterfalls.Count, bounds);
+        }
+        catch (HttpRequestException ex)
+        {
+            StatusMessage = Fmt(Localization.AppStrings.StatusOverpassRequestFailedFormat, ex.Message);
+            logger.LogError(ex, "Overpass waterway request failed");
+        }
+        catch (InvalidDataException ex)
+        {
+            StatusMessage = Fmt(Localization.AppStrings.StatusOverpassParseFailedFormat, ex.Message);
+            logger.LogError(ex, "Overpass waterway parse failure");
+        }
+        catch (TaskCanceledException ex)
+        {
+            StatusMessage = Localization.AppStrings.StatusOverpassTimeout;
+            logger.LogWarning(ex, "Overpass waterway request timed out");
+        }
+        finally
+        {
+            IsBusy = false;
         }
     }
 
@@ -1563,6 +1746,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <param name="packageService">Optional region-package service (download DEM/ortho packages from the server); null disables the "download data packages" button.</param>
     /// <param name="elevationSource">Optional routing elevation source; the base DEM is handed to it on load so "fastest time" routing sees real slopes; null disables elevation-aware routing.</param>
     /// <param name="bakedTileIndex">Optional scanned baked-DEM-pyramid index (Stage 2c); backs the baked-tile streaming path. Null/empty falls back to the runtime-build detail path.</param>
+    /// <param name="waterwayClient">Optional Overpass client for watercourses (streams/rivers + waterfalls); null disables the water layer download.</param>
     public MapPageViewModel(
         IFilePickerService filePicker,
         IFileSaverService fileSaver,
@@ -1596,7 +1780,8 @@ public sealed partial class MapPageViewModel : ObservableObject
         GugikNmtDemTileSource? gugikDemSource = null,
         OfflinePackageService? packageService = null,
         DemElevationSource? elevationSource = null,
-        MapaTur.Application.Terrain.BakedTileAvailabilityIndex? bakedTileIndex = null)
+        MapaTur.Application.Terrain.BakedTileAvailabilityIndex? bakedTileIndex = null,
+        MapaTur.Application.Waterways.IWaterwayOverpassClient? waterwayClient = null)
     {
         ArgumentNullException.ThrowIfNull(filePicker);
         ArgumentNullException.ThrowIfNull(fileSaver);
@@ -1637,6 +1822,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         this.elevationSource = elevationSource;
         this.detailTileCached = gugikDemSource is null ? null : gugikDemSource.IsCached;
         this.bakedTileIndex = bakedTileIndex;
+        this.waterwayClient = waterwayClient;
 
         // Subscribe to the location feed once at construction. The service stays silent until the
         // user opts in via ToggleLocationTracking; we just need to be listening so the first fix
@@ -3101,38 +3287,8 @@ public sealed partial class MapPageViewModel : ObservableObject
 
             DemRaster preparedBase = baseRaster;
             GeoPoint focus = center;
-            IReadOnlyList<TerrainMesh3D> baseTiles = await Task.Run(() =>
-            {
-                if (!ringBase)
-                {
-                    return TerrainMesh3D.BuildTiles(preparedBase, options, orthoCoverage: orthoCoverage);
-                }
-
-                // Ring-LOD base: native step around the demo focus (where the 1 m detail window lives —
-                // its boundary must meet the finest base grid the source has, or the base's blunted ridge
-                // pokes out past the window edge as a "duplicated ridge"), coarser rings farther out.
-                // Forced cuts keep every plan tile inside ONE ortho cell (the "strata" stripes fix —
-                // BuildTiles does the same via BuildTileCuts).
-                int focusCol = (int)Math.Round((focus.Longitude - preparedBase.West) / (preparedBase.East - preparedBase.West) * (preparedBase.Columns - 1));
-                int focusRow = (int)Math.Round((preparedBase.North - focus.Latitude) / (preparedBase.North - preparedBase.South) * (preparedBase.Rows - 1));
-                double midLat = (preparedBase.North + preparedBase.South) / 2.0;
-                System.Numerics.Vector3 westWorld = MapaTur.Application.Terrain.LocalTangentProjection.GeoToWorld(
-                    new GeoPoint(midLat, preparedBase.West), 0f, focus, 1f);
-                System.Numerics.Vector3 eastWorld = MapaTur.Application.Terrain.LocalTangentProjection.GeoToWorld(
-                    new GeoPoint(midLat, preparedBase.East), 0f, focus, 1f);
-                double cellMeters = Math.Abs(eastWorld.X - westWorld.X) / (preparedBase.Columns - 1);
-
-                IReadOnlyList<MapaTur.Application.Terrain.PerTileLodDecision> plan = MapaTur.Application.Terrain.RingBasePlanner.Plan(
-                    preparedBase.Columns, preparedBase.Rows, focusCol, focusRow, cellMeters,
-                    nearRadiusMeters: LodRingNearRadiusMeters, midRadiusMeters: LodRingMidRadiusMeters,
-                    forcedColumnCuts: OrthoCellCutColumns(preparedBase, orthoCoverage),
-                    forcedRowCuts: OrthoCellCutRows(preparedBase, orthoCoverage));
-                logger.LogInformation(
-                    "LOD ring base: {Tiles} plan tiles (step1={S1} step2={S2} step4={S4}), native {Cols}x{Rows} @ {Cell:F1} m/cell",
-                    plan.Count, plan.Count(t => t.SubsampleStep == 1), plan.Count(t => t.SubsampleStep == 2),
-                    plan.Count(t => t.SubsampleStep == 4), preparedBase.Columns, preparedBase.Rows, cellMeters);
-                return TerrainMesh3D.BuildAdaptiveTiles(preparedBase, plan, options, orthoCoverage: orthoCoverage);
-            }).ConfigureAwait(true);
+            IReadOnlyList<TerrainMesh3D> baseTiles = await Task.Run(
+                () => BuildLodBaseTiles(preparedBase, focus, options, orthoCoverage, ringBase)).ConfigureAwait(true);
             var combined = new List<TerrainMesh3D>(baseTiles);
 
             // Set the LOD base BEFORE building the detail: the detail backfills its NoData voids (GUGiK has
@@ -3169,6 +3325,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             lodBaseTiles = baseTiles;
             lodBaseTileFootprints = ComputeBaseTileFootprints(baseTiles);
             lodAnchor = baseCentre;
+            lodRingBase = ringBase;
             lodDetailCentre = baseCentre;
             detailMeshCache.Clear(); // new scene: anchor + ortho coverage changed ⇒ cached block keys are no longer valid
             detailRepairCache.Clear(); // new scene ⇒ raw tile inputs differ ⇒ cached repairs invalid
@@ -3272,6 +3429,13 @@ public sealed partial class MapPageViewModel : ObservableObject
     private async Task StreamBakedDetailAsync(
         MapaTur.Application.Terrain.Camera3D camera, int viewportHeightPixels, int viewportWidthPixels)
     {
+        // Remember the pose inputs so a non-camera event (exaggeration rebuild) can KickBakedStream() from
+        // the current view instead of waiting for the next camera move. Camera3D is the view's live object,
+        // so a later kick reads its CURRENT pose.
+        lastBakedStreamCamera = camera;
+        lastBakedStreamViewportH = viewportHeightPixels;
+        lastBakedStreamViewportW = viewportWidthPixels;
+
         if (bakedStreamManager is null || lodBaseTiles is null)
         {
             return;
@@ -3416,6 +3580,51 @@ public sealed partial class MapPageViewModel : ObservableObject
         }
 
         return cuts;
+    }
+
+    /// <summary>
+    /// Builds the LOD scene's BASE tile set — ring-LOD adaptive plan around <paramref name="focus"/> for the
+    /// local whole-Tatra DEM, or the legacy uniform tiling for the online fallback window. Extracted from the
+    /// scene build so a vertical-exaggeration change can rebuild the SAME kind of base with new options
+    /// (exaggeration is baked into vertex Z — there is no per-frame scale uniform). Pure compute; call off
+    /// the UI thread.
+    /// </summary>
+    private IReadOnlyList<TerrainMesh3D> BuildLodBaseTiles(
+        DemRaster preparedBase,
+        GeoPoint focus,
+        MapaTur.Application.Terrain.TerrainMeshOptions options,
+        MapaTur.Application.Terrain.OrthoCoverage? orthoCoverage,
+        bool ringBase)
+    {
+        if (!ringBase)
+        {
+            return TerrainMesh3D.BuildTiles(preparedBase, options, orthoCoverage: orthoCoverage);
+        }
+
+        // Ring-LOD base: native step around the demo focus (where the 1 m detail window lives —
+        // its boundary must meet the finest base grid the source has, or the base's blunted ridge
+        // pokes out past the window edge as a "duplicated ridge"), coarser rings farther out.
+        // Forced cuts keep every plan tile inside ONE ortho cell (the "strata" stripes fix —
+        // BuildTiles does the same via BuildTileCuts).
+        int focusCol = (int)Math.Round((focus.Longitude - preparedBase.West) / (preparedBase.East - preparedBase.West) * (preparedBase.Columns - 1));
+        int focusRow = (int)Math.Round((preparedBase.North - focus.Latitude) / (preparedBase.North - preparedBase.South) * (preparedBase.Rows - 1));
+        double midLat = (preparedBase.North + preparedBase.South) / 2.0;
+        System.Numerics.Vector3 westWorld = MapaTur.Application.Terrain.LocalTangentProjection.GeoToWorld(
+            new GeoPoint(midLat, preparedBase.West), 0f, focus, 1f);
+        System.Numerics.Vector3 eastWorld = MapaTur.Application.Terrain.LocalTangentProjection.GeoToWorld(
+            new GeoPoint(midLat, preparedBase.East), 0f, focus, 1f);
+        double cellMeters = Math.Abs(eastWorld.X - westWorld.X) / (preparedBase.Columns - 1);
+
+        IReadOnlyList<MapaTur.Application.Terrain.PerTileLodDecision> plan = MapaTur.Application.Terrain.RingBasePlanner.Plan(
+            preparedBase.Columns, preparedBase.Rows, focusCol, focusRow, cellMeters,
+            nearRadiusMeters: LodRingNearRadiusMeters, midRadiusMeters: LodRingMidRadiusMeters,
+            forcedColumnCuts: OrthoCellCutColumns(preparedBase, orthoCoverage),
+            forcedRowCuts: OrthoCellCutRows(preparedBase, orthoCoverage));
+        logger.LogInformation(
+            "LOD ring base: {Tiles} plan tiles (step1={S1} step2={S2} step4={S4}), native {Cols}x{Rows} @ {Cell:F1} m/cell",
+            plan.Count, plan.Count(t => t.SubsampleStep == 1), plan.Count(t => t.SubsampleStep == 2),
+            plan.Count(t => t.SubsampleStep == 4), preparedBase.Columns, preparedBase.Rows, cellMeters);
+        return TerrainMesh3D.BuildAdaptiveTiles(preparedBase, plan, options, orthoCoverage: orthoCoverage);
     }
 
     /// <summary>As <see cref="OrthoCellCutColumns"/>, for ortho cell rows (lat→row).</summary>

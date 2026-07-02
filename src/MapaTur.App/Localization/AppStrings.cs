@@ -69,6 +69,21 @@ public static class AppStrings
     /// <summary>Status shown when no roads are found in the queried area.</summary>
     public static string StatusNoRoadsFound => Get(nameof(StatusNoRoadsFound));
 
+    /// <summary>"Download Streams (viewport)" button label.</summary>
+    public static string DownloadWaterways => Get(nameof(DownloadWaterways));
+
+    /// <summary>Status shown while the watercourse Overpass query is in flight.</summary>
+    public static string StatusDownloadingWaterways => Get(nameof(StatusDownloadingWaterways));
+
+    /// <summary>Format string for the "loaded N watercourses + M waterfalls" status.</summary>
+    public static string StatusWaterwaysLoadedFormat => Get(nameof(StatusWaterwaysLoadedFormat));
+
+    /// <summary>Status shown when no watercourses are found in the queried area.</summary>
+    public static string StatusNoWaterwaysFound => Get(nameof(StatusNoWaterwaysFound));
+
+    /// <summary>"Streams &amp; waterfalls" layer toggle label.</summary>
+    public static string LayerWaterways => Get(nameof(LayerWaterways));
+
     /// <summary>"Clear Route" button label.</summary>
     public static string ClearRoute => Get(nameof(ClearRoute));
 
