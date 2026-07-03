@@ -11,12 +11,16 @@ namespace MapaTur.Application.Terrain;
 /// <param name="Evicted">Tiles dropped this update (no longer desired).</param>
 /// <param name="Desired">Size of the selector's desired set this update (the streaming target).</param>
 /// <param name="WasClampedByBudget">True when the residency cap coarsened/clamped the selection.</param>
+/// <param name="StalePending">Residents currently OFF the desired set that are still inside their eviction
+/// grace window — the driver must keep updating until this reaches 0, or they would squat until the next
+/// camera move (the "stara grań 5 km dalej nie znika" bug).</param>
 public sealed record BakedStreamingUpdate(
     IReadOnlyList<TerrainMesh3D> ResidentTiles,
     int Loaded,
     int Evicted,
     int Desired,
-    bool WasClampedByBudget);
+    bool WasClampedByBudget,
+    int StalePending = 0);
 
 /// <summary>
 /// Stage 2c of the terrain re-architecture: the streaming driver that turns a moving camera into a resident
@@ -63,6 +67,20 @@ public sealed class BakedTileStreamingManager
     // holes). Only such tiles may OCCLUDE the coarse base (a holey tile relies on the base showing through its
     // gaps). Kept in lock-step with <see cref="resident"/> (set on load, removed on evict / Clear).
     private readonly Dictionary<DemTileKey, bool> holeFreeByKey = new();
+
+    // STALE EVICTION (2026-07-03, pinned by Invariant_FocusJump_EvictsEveryStaleResident): per resident key,
+    // the update tick when it was last in the DESIRED set. Cap-driven eviction alone let off-desired residents
+    // squat FOREVER under the cap — after the user refocused, the old focus's z16 stayed resident (and drawn)
+    // while it no longer served anything ("szczegółowa grań 5 km dalej, a pod kamerą gładko"). A resident that
+    // has been off-desired for more than StaleGraceUpdates ticks is evicted once the CURRENT desired set is
+    // fully resident (never earlier — during a refocus the old tiles keep covering the ground the new loads
+    // haven't reached yet, which is the anti-flicker property the retention existed for).
+    private readonly Dictionary<DemTileKey, long> lastDesiredTick = new();
+    private long updateTick;
+
+    // How many updates an off-desired resident survives before it is stale. Small camera jitter at a ring
+    // boundary flips a tile out of desired for a frame or two — the grace keeps that from thrashing load/evict.
+    private const int StaleGraceUpdates = 3;
 
     // Default geometry-byte cap when a caller doesn't specify one: large enough that the count cap stays the
     // binding limit for normal scenes, so behaviour is unchanged unless geometry actually balloons.
@@ -148,6 +166,34 @@ public sealed class BakedTileStreamingManager
     /// these can be skipped without exposing a gap). A baked tile with NoData (dropped triangles) is excluded
     /// because the base must still backfill its holes. In current near→far resident order.
     /// </summary>
+    /// <summary>
+    /// World-XY AABBs (mesh world frame — the manager's projection anchor) of the resident, HOLE-FREE tiles
+    /// at the FINEST zoom. Input for <see cref="BaseCoverageMaskBuilder"/>: where these rects fully surround
+    /// the ground, the base skin may be discarded — the streamed 1 m surface owns those pixels.
+    /// </summary>
+    public IReadOnlyList<(Vector2 Min, Vector2 Max)> HoleFreeFinestWorldRects()
+    {
+        var rects = new List<(Vector2 Min, Vector2 Max)>();
+        foreach (DemTileKey key in this.residentOrder)
+        {
+            if (key.Zoom != this.maxZoom
+                || !this.holeFreeByKey.TryGetValue(key, out bool holeFree)
+                || !holeFree)
+            {
+                continue;
+            }
+
+            (double west, double south, double east, double north) = SlippyTileMath.TileBounds(key.X, key.Y, key.Zoom);
+            Vector3 sw = LocalTangentProjection.GeoToWorld(new GeoPoint(south, west), 0f, this.projectionAnchor, 1f);
+            Vector3 ne = LocalTangentProjection.GeoToWorld(new GeoPoint(north, east), 0f, this.projectionAnchor, 1f);
+            rects.Add((
+                new Vector2(MathF.Min(sw.X, ne.X), MathF.Min(sw.Y, ne.Y)),
+                new Vector2(MathF.Max(sw.X, ne.X), MathF.Max(sw.Y, ne.Y))));
+        }
+
+        return rects;
+    }
+
     public IReadOnlyList<DemTileKey> OccludingKeys
     {
         get
@@ -224,10 +270,12 @@ public sealed class BakedTileStreamingManager
         };
 
         QuadtreeTileSelection selection = QuadtreeTileSelector.Select(options);
+        this.updateTick++;
         var desired = new List<DemTileKey>(selection.Tiles.Count);
         foreach (SelectedTile t in selection.Tiles)
         {
             desired.Add(t.Key);
+            this.lastDesiredTick[t.Key] = this.updateTick;
         }
 
         TileResidencyDiff diff = TileResidencyPlanner.Plan(this.residentOrder, desired, this.maxConcurrentLoads);
@@ -292,7 +340,45 @@ public sealed class BakedTileStreamingManager
             residentBytes -= KeyBytes(this.resident[far]);
             this.resident.Remove(far);
             this.holeFreeByKey.Remove(far);
+            this.lastDesiredTick.Remove(far);
             evicted++;
+        }
+
+        // STALE eviction: once the CURRENT desired set is fully resident (nothing left to load for this pose),
+        // drop the residents that fell out of desired more than StaleGraceUpdates ago. Under the cap they used
+        // to squat forever; during a refocus they are still kept (desired not yet complete) so the ground never
+        // flickers to base mid-transition. See lastDesiredTick.
+        bool desiredFullyResident = true;
+        foreach (DemTileKey key in desired)
+        {
+            if (!this.resident.ContainsKey(key))
+            {
+                desiredFullyResident = false;
+                break;
+            }
+        }
+
+        int stalePending = 0;
+        if (desiredFullyResident)
+        {
+            for (int i = orderedResident.Count - 1; i >= 0; i--)
+            {
+                DemTileKey key = orderedResident[i];
+                long lastWanted = this.lastDesiredTick.TryGetValue(key, out long tick) ? tick : long.MinValue;
+                long offDesiredFor = this.updateTick - lastWanted;
+                if (offDesiredFor > StaleGraceUpdates)
+                {
+                    orderedResident.RemoveAt(i);
+                    this.resident.Remove(key);
+                    this.holeFreeByKey.Remove(key);
+                    this.lastDesiredTick.Remove(key);
+                    evicted++;
+                }
+                else if (offDesiredFor > 0)
+                {
+                    stalePending++; // inside the grace window — the driver must keep ticking until it drains
+                }
+            }
         }
 
         var drawable = new List<TerrainMesh3D>(orderedResident.Count);
@@ -302,7 +388,7 @@ public sealed class BakedTileStreamingManager
         }
 
         this.residentOrder = orderedResident;
-        return new BakedStreamingUpdate(drawable, loaded, evicted, desired.Count, selection.WasClampedByBudget);
+        return new BakedStreamingUpdate(drawable, loaded, evicted, desired.Count, selection.WasClampedByBudget, stalePending);
     }
 
     /// <summary>Drops every resident tile (e.g. a new scene loads, or the anchor / ortho coverage changed).</summary>
@@ -310,6 +396,7 @@ public sealed class BakedTileStreamingManager
     {
         this.resident.Clear();
         this.holeFreeByKey.Clear();
+        this.lastDesiredTick.Clear();
         this.residentOrder = new List<DemTileKey>();
     }
 

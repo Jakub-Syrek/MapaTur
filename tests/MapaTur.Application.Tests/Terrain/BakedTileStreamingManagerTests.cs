@@ -243,4 +243,95 @@ public sealed class BakedTileStreamingManagerTests
 
         mgr.ResidentCount.Should().Be(0);
     }
+
+    // ── SYSTEM INVARIANTS (2026-07-03) ─────────────────────────────────────────────────────────────────────
+    // The month of "airport slopes" regressions happened at the seams BETWEEN unit-tested components. These
+    // tests pin the engine's core promises at the system level (selector + planner + manager, driven in a
+    // loop like the app drives it), so the next regression is a red test, not a user screenshot.
+
+    // Drives updates with a fixed camera until the stream stops changing — the same condition the app's
+    // self-kick uses: progress made, evictions happened, or stale residents still draining their grace
+    // window. Asserts convergence within the given number of rounds and returns the last update.
+    private static BakedStreamingUpdate DriveToConvergence(
+        BakedTileStreamingManager mgr, Camera3D camera, int maxRounds)
+    {
+        BakedStreamingUpdate last = Update(mgr, camera);
+        for (int round = 0; round < maxRounds; round++)
+        {
+            if (last.Loaded == 0 && last.Evicted == 0 && last.StalePending == 0)
+            {
+                return last;
+            }
+
+            last = Update(mgr, camera);
+        }
+
+        last.Loaded.Should().Be(0, $"the stream must converge within {maxRounds} rounds for a still camera");
+        last.Evicted.Should().Be(0, $"the stream must stop churning within {maxRounds} rounds for a still camera");
+        last.StalePending.Should().Be(0, $"stale residents must drain within {maxRounds} rounds for a still camera");
+        return last;
+    }
+
+    [Fact]
+    public void Invariant_StillCamera_ConvergesToFullDesiredSet()
+    {
+        // INV: standing still, the whole desired set becomes resident — nothing stays "half loaded forever"
+        // ("mogę tam stać tydzień i nic się nie doczyta"). 8 loads per round like the app.
+        var mgr = NewManager(AllBaked, maxResidentTiles: 448, maxConcurrentLoads: 8);
+        Camera3D camera = CameraAbove(RootTile(), 1200f);
+
+        BakedStreamingUpdate last = DriveToConvergence(mgr, camera, maxRounds: 200);
+
+        mgr.ResidentCount.Should().Be(last.Desired,
+            "after convergence every desired tile is resident (the fill reaches 448/448 unattended)");
+    }
+
+    [Fact]
+    public void Invariant_FocusJump_EvictsEveryStaleResident()
+    {
+        // INV: after attention moves elsewhere, the OLD focus's detail is fully replaced — stale residents
+        // must not squat the budget while the new near field waits ("gładkie kafelki 100 m przed kamerą,
+        // a 5 km dalej szczegółowa grań" — the eviction suspicion). Focus A and focus B are far-apart
+        // children of the root, both fully baked, budget deliberately TIGHT so the two desired sets cannot
+        // coexist under the cap.
+        var mgr = NewManager(AllBaked, maxResidentTiles: 200, maxConcurrentLoads: 8);
+
+        // Focus A: converge fully.
+        DemTileKey root = RootTile();
+        var childA = new DemTileKey(MinZoom + 1, root.X * 2, root.Y * 2);             // NW quadrant
+        var childB = new DemTileKey(MinZoom + 1, (root.X * 2) + 1, (root.Y * 2) + 1); // SE quadrant — far from A
+        Camera3D cameraA = CameraAbove(childA, 800f);
+        DriveToConvergence(mgr, cameraA, maxRounds: 300);
+        List<DemTileKey> residentAtA = mgr.OccludingKeys.ToList();
+        residentAtA.Should().NotBeEmpty();
+
+        // Focus B: converge again, then every resident must belong to B's CURRENT desired set.
+        Camera3D cameraB = CameraAbove(childB, 800f);
+        BakedStreamingUpdate last = DriveToConvergence(mgr, cameraB, maxRounds: 300);
+
+        var desiredAtB = new HashSet<DemTileKey>(
+            QuadtreeTileSelector.Select(new QuadtreeTileSelectorOptions
+            {
+                Camera = cameraB,
+                Roots = new[] { root },
+                ProjectionAnchor = Anchor,
+                GroundElevationMeters = cameraB.Target.Z, // mirrors the manager's ground proxy
+                VerticalExaggeration = Exaggeration,
+                MinZoom = MinZoom,
+                MaxZoom = MaxZoom,
+                AspectRatio = 16f / 9f,
+                ViewportHeightPixels = 1080.0,
+                MaxErrorPixels = 2.5,
+                MaxResidentTiles = 200,
+                IsBaked = AllBaked,
+            }).Tiles.Select(t => t.Key));
+
+        List<DemTileKey> stale = mgr.OccludingKeys.Where(k => !desiredAtB.Contains(k)).ToList();
+        string staleList = string.Join(", ", stale.Select(k => $"z{k.Zoom}/{k.X}/{k.Y}"));
+        stale.Should().BeEmpty(
+            "after refocusing and converging, no resident tile may be a leftover from the previous focus " +
+            $"(found {stale.Count} stale of {mgr.ResidentCount} resident [{staleList}]; last update: " +
+            $"loaded={last.Loaded}, evicted={last.Evicted}, desired={last.Desired}, clamped={last.WasClampedByBudget})");
+        mgr.ResidentCount.Should().Be(last.Desired, "the new focus's desired set is fully resident");
+    }
 }
