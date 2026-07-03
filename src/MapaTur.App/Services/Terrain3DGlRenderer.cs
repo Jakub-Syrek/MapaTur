@@ -1281,6 +1281,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform float uFogDensity;\n" +
         "uniform float uMaxDist;\n" + // hard cull radius (m) so the far trail network isn't drawn at the horizon
         "uniform float uGhostFade;\n" + // 1 = normal pass; <1 = the X-RAY pass (DepthFunc GREATER: only occluded fragments)
+        "uniform sampler2D uSceneDepth;\n" + // scene depth blitted just before the ghost pass (see EnsureGhostDepthTarget)
+        "uniform float uSceneDepthOn;\n" +   // 1 = uSceneDepth is valid this frame; 0 = no depth info (ungated ghost)
+        "uniform vec2 uDepthNearFar;\n" +    // ACTIVE projection near/far (metres) — needed to linearize depths
         "out vec4 fragColor;\n" +
         "void main(){\n" +
         "  float dist = length(vWorldPos - uCameraPos);\n" +
@@ -1293,7 +1296,25 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // route uploads a<255 so the trail it lies on shows through it; blending is enabled only for that draw.
         // uGhostFade dims the whole ribbon on the X-ray pass, so a trail buried inside a gully/behind a
         // buttress still reads as a faint "behind rock" ghost instead of vanishing.
-        "  fragColor = vec4(mix(vColor.rgb, uFogColor, fog), vColor.a * uGhostFade);\n" +
+        // ROCK-THICKNESS GATE (2026-07-03): DepthFunc(GREATER) alone cannot tell "3 m behind a rib" from
+        // "behind the whole massif" — every occluded trail bled through distant slopes as dotted twins
+        // ("jakby były dwa szlaki"). With the scene depth available we measure HOW FAR behind the visible
+        // surface the fragment lies, in metres: ghost full when buried < 25 m (żleb Kulczyńskiego: the trail
+        // sits just past the near wall), gone past 60 m (another slope entirely). Depth-buffer values invert
+        // through the ACTUAL projection mapping (System.Numerics D3D-style clip z in [0,1] → window depth in
+        // [0.5,1]): ndc = 2*D - 1, linear = f*n / (f - ndc*(f-n)) — exact for both samples, so the convention
+        // cancels out of neither (verified: D=0.5 → near, D=1 → far).
+        "  float ghostGate = 1.0;\n" +
+        "  if (uGhostFade < 0.999 && uSceneDepthOn > 0.5) {\n" +
+        "    vec2 duv = gl_FragCoord.xy / vec2(textureSize(uSceneDepth, 0));\n" +
+        "    float n = uDepthNearFar.x; float f = uDepthNearFar.y;\n" +
+        "    float ndcS = texture(uSceneDepth, duv).r * 2.0 - 1.0;\n" +
+        "    float ndcF = gl_FragCoord.z * 2.0 - 1.0;\n" +
+        "    float linS = (f * n) / (f - ndcS * (f - n));\n" +
+        "    float linF = (f * n) / (f - ndcF * (f - n));\n" +
+        "    ghostGate = 1.0 - smoothstep(25.0, 60.0, linF - linS);\n" +
+        "  }\n" +
+        "  fragColor = vec4(mix(vColor.rgb, uFogColor, fog), vColor.a * uGhostFade * ghostGate);\n" +
         "}\n";
 
     // Line ribbon shader: expands each segment to a quad of constant SCREEN-pixel width (ANGLE/D3D11
@@ -1342,6 +1363,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "}\n";
 
     private const float TrailHalfWidthPx = 0.7f;   // very thin trails — the line should read as a delicate thread, not a ribbon
+    private const float GhostWidthScale = 0.65f;   // x-ray ghost draws narrower than the solid line ("cieńsze nieco")
     private const float TrailBlackHalfWidthPx = 1.15f; // black trails are drawn a touch thicker: a thin black thread on the dark terrain is nearly invisible, so widen it for legibility
     private const float RouteHalfWidthPx = 2.6f;
     private const float RoadHalfWidthPx = 1.8f;
@@ -1409,7 +1431,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // starkly against the surrounding terrain's real shaded relief (fix B / NativeMicroDetail). 0.8 keeps the
     // trail clearly legible (it's still ~80% its own colour at full coverage) while letting a hint of the
     // underlying lit/detailed terrain show through, instead of erasing it outright.
-    private const float TrailDecalStrength = 0.8f;           // blend strength of the decal over the surface colour
+    // 0 = trail decal DISABLED (2026-07-03, user decision). The surface-painted band self-occludes on the
+    // rough 1 m relief at ANY oblique view — it chopped into fat dashes riding beside the ribbon, reading as
+    // a phantom second trail ("jakby były dwa szlaki"; verified by the magenta bisection + an own-screenshot
+    // A/B with the decal hard-gated off: dashes gone, single clean ribbon). The ribbon (thin line + thicker
+    // black variant) is THE trail representation; the mask build stays alive because the water field ships
+    // in the same texture. Restore a value > 0 only with a fix for oblique self-occlusion.
+    private const float TrailDecalStrength = 0f;             // blend strength of the decal over the surface colour
     private const float TrailDecalHalfWidthMeters = 0.8f;    // on-surface half-width (world m) — halved 2026-07-02 ("muszą być węższe o połowę co najmniej"); 1.6 read as a fat band with its 2.3× rim at close zoom
     private const float ExposedRouteHalfWidthPx = 2.4f;   // fat dots that clearly punctuate over the thin (0.7 px) trail line beneath
     // Bright orange for the exposed / guide routes (sac_scale demanding / via_ferrata) — lighter/yellower than the PTTK red so it pops where it runs along a red trail.
@@ -1757,6 +1785,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int lineCameraPosLocation = -1;
     private int lineMaxDistLocation = -1;
     private int lineGhostFadeLocation = -1;
+    private int lineSceneDepthLocation = -1;
+    private int lineSceneDepthOnLocation = -1;
+    private int lineDepthNearFarLocation = -1;
+
+    // Ghost-depth target: a full-res DEPTH TEXTURE the scene depth is blitted into just before the x-ray
+    // ghost pass, so the line shader can measure how many metres of rock sit between the visible surface
+    // and an occluded trail fragment (the rock-thickness gate). Depth-only FBO; latched off when incomplete.
+    private uint ghostDepthFbo;
+    private uint ghostDepthTex;
+    private int ghostDepthWidth;
+    private int ghostDepthHeight;
+    private bool ghostDepthUnsupported;
 
     // Cumulus puffs (Tier 2 clouds): one instanced billboard program + a static per-puff buffer generated once.
     private uint cumulusProgram;
@@ -2383,6 +2423,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             presentWidth = 0;
             presentHeight = 0;
             presentUnsupported = false;
+            // Ghost-depth FBO / texture (x-ray rock-thickness gate) — same context-loss handling.
+            ghostDepthFbo = 0;
+            ghostDepthTex = 0;
+            ghostDepthWidth = 0;
+            ghostDepthHeight = 0;
+            ghostDepthUnsupported = false;
             // Post-process FBO / colour texture / program — same context-loss handling: drop stale IDs.
             postFbo = 0;
             postColorTex = 0;
@@ -3236,25 +3282,46 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // in the trail/route vertex shader), which only wins the depth-test tie against the surface the line is
         // directly seated on, while still losing to genuinely different, more-in-front geometry. Depth test stays
         // enabled here.
-        // X-RAY (ghost) pass FIRST: reversed depth test draws ONLY the fragments the terrain occludes, heavily
-        // faded — a trail inside a gully (żleb Kulczyńskiego) or briefly behind a ridge reads as a faint
-        // "behind rock" ghost instead of vanishing. Clearly dimmer than the solid pass, so this cannot recreate
-        // the old full-brightness "szlaki przez skały" regression. Depth writes off (ghosts must not pollute
-        // the depth buffer); blending on for the fade.
-        gl.Uniform1(lineGhostFadeLocation, 0.30f);
-        gl.DepthFunc(DepthFunction.Greater);
-        gl.DepthMask(false);
-        gl.Enable(EnableCap.Blend);
-        gl.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
-        // Re-assert DepthMask(false) after each call: DrawTrailLines/DrawRouteLine restore it to true
-        // internally, and a ghost fragment writing its (farther) depth would corrupt later passes.
-        DrawTrailLines(gl, dedupedTrails, raster, frame, detail);
-        gl.DepthMask(false);
-        DrawExposedRoutes(gl, exposedRoutes, raster, frame, detail);
-        gl.DepthMask(false);
-        DrawRouteLine(gl, route, dedupedTrails, raster, frame, detail);
-        gl.DepthMask(true);
-        gl.DepthFunc(DepthFunction.Less);
+        // X-RAY (ghost) pass: reversed depth test draws ONLY the fragments the terrain occludes, faded and
+        // NARROWER than the solid line — a trail dipping behind a rib (żleb Kulczyńskiego) reads as a thin
+        // faint hint instead of vanishing. Runs ONLY with the ROCK-THICKNESS GATE available (scene depth
+        // blitted to ghostDepthTex; the line shader shows the ghost only where the trail lies < 25–60 m
+        // behind the visible surface). Without the gate the reversed test would draw trails behind whole
+        // massifs as dotted twins ("jakby były dwa szlaki" — the 2026-07-03 saga), so no depth ⇒ NO ghost.
+        // Depth writes off (ghosts must not pollute the depth buffer); blending on for the fade.
+        uint sceneFbo = useMsaa ? msaaFbo : presentFbo;
+        bool ghostDepthOk = sceneFbo != 0 && EnsureGhostDepthTarget(gl, Math.Max(1, width), Math.Max(1, height));
+        gl.Uniform1(lineSceneDepthOnLocation, ghostDepthOk ? 1f : 0f);
+        if (ghostDepthOk)
+        {
+            // MSAA path: BlitFramebuffer resolves the multisampled depth to the single-sample texture
+            // (formats match: DepthComponent24 → DepthComponent24, NEAREST — both blit requirements).
+            gl.BindFramebuffer(FramebufferTarget.ReadFramebuffer, sceneFbo);
+            gl.BindFramebuffer(FramebufferTarget.DrawFramebuffer, ghostDepthFbo);
+            gl.BlitFramebuffer(
+                0, 0, width, height, 0, 0, width, height,
+                (uint)ClearBufferMask.DepthBufferBit, BlitFramebufferFilter.Nearest);
+            gl.BindFramebuffer(FramebufferTarget.Framebuffer, sceneFbo);
+            gl.ActiveTexture(TextureUnit.Texture7);
+            gl.BindTexture(TextureTarget.Texture2D, ghostDepthTex);
+            gl.ActiveTexture(TextureUnit.Texture0);
+            gl.Uniform1(lineSceneDepthLocation, 7);
+            gl.Uniform2(lineDepthNearFarLocation, camera.NearPlane, camera.FarPlane);
+            gl.Uniform1(lineGhostFadeLocation, 0.30f);
+            gl.DepthFunc(DepthFunction.Greater);
+            gl.DepthMask(false);
+            gl.Enable(EnableCap.Blend);
+            gl.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+            // Re-assert DepthMask(false) after each call: DrawTrailLines/DrawRouteLine restore it to true
+            // internally, and a ghost fragment writing its (farther) depth would corrupt later passes.
+            DrawTrailLines(gl, dedupedTrails, raster, frame, detail, GhostWidthScale);
+            gl.DepthMask(false);
+            DrawExposedRoutes(gl, exposedRoutes, raster, frame, detail, GhostWidthScale);
+            gl.DepthMask(false);
+            DrawRouteLine(gl, route, dedupedTrails, raster, frame, detail, GhostWidthScale);
+            gl.DepthMask(true);
+            gl.DepthFunc(DepthFunction.Less);
+        }
 
         // Solid pass: normal depth test (real ridges still occlude into the ghost above, near z-fights handled
         // by the clip-space bias in the vertex shader).
@@ -3734,6 +3801,68 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         presentWidth = width;
         presentHeight = height;
+        return true;
+    }
+
+    /// <summary>
+    /// Ensures the ghost-depth target (a full-resolution DEPTH texture + depth-only FBO) matches the given
+    /// size. The scene depth (msaa or present) is blitted into it just before the x-ray ghost pass so the
+    /// line shader can read "how deep behind the visible surface" each occluded fragment lies (the
+    /// rock-thickness gate). Format matches the scene depth (DepthComponent24) — a blit requirement.
+    /// Returns false (and latches <see cref="ghostDepthUnsupported"/>) when incomplete; the ghost pass then
+    /// falls back to the ungated x-ray rather than losing the feature.
+    /// </summary>
+    private bool EnsureGhostDepthTarget(GL g, int width, int height)
+    {
+        if (ghostDepthUnsupported || width <= 0 || height <= 0)
+        {
+            return false;
+        }
+
+        if (ghostDepthFbo != 0 && ghostDepthWidth == width && ghostDepthHeight == height)
+        {
+            return true;
+        }
+
+        g.DeleteFramebuffer(ghostDepthFbo);
+        g.DeleteTexture(ghostDepthTex);
+
+        ghostDepthTex = g.GenTexture();
+        g.BindTexture(TextureTarget.Texture2D, ghostDepthTex);
+        g.TexImage2D(
+            TextureTarget.Texture2D, 0, (int)InternalFormat.DepthComponent24,
+            (uint)width, (uint)height, 0,
+            PixelFormat.DepthComponent, PixelType.UnsignedInt, null);
+        // NEAREST + no compare mode: the shader reads raw depth values (sampler2D.r), not a shadow lookup.
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+        g.BindTexture(TextureTarget.Texture2D, 0);
+
+        ghostDepthFbo = g.GenFramebuffer();
+        g.BindFramebuffer(FramebufferTarget.Framebuffer, ghostDepthFbo);
+        g.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.DepthAttachment, TextureTarget.Texture2D, ghostDepthTex, 0);
+        // Depth-only FBO: tell GL there is deliberately no colour output (some drivers flag incompleteness
+        // otherwise).
+        g.DrawBuffers(1, stackalloc GLEnum[] { GLEnum.None });
+        g.ReadBuffer(GLEnum.None);
+
+        GLEnum status = g.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
+        g.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+        if (status != GLEnum.FramebufferComplete)
+        {
+            Log.Information("[GL3D] ghost-depth framebuffer incomplete ({Status}) — x-ray rock-thickness gate disabled this session", status);
+            g.DeleteFramebuffer(ghostDepthFbo);
+            g.DeleteTexture(ghostDepthTex);
+            ghostDepthFbo = 0;
+            ghostDepthTex = 0;
+            ghostDepthUnsupported = true;
+            return false;
+        }
+
+        ghostDepthWidth = width;
+        ghostDepthHeight = height;
         return true;
     }
 
@@ -5158,6 +5287,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         lineCameraPosLocation = g.GetUniformLocation(lineProgram, "uCameraPos");
         lineMaxDistLocation = g.GetUniformLocation(lineProgram, "uMaxDist");
         lineGhostFadeLocation = g.GetUniformLocation(lineProgram, "uGhostFade");
+        lineSceneDepthLocation = g.GetUniformLocation(lineProgram, "uSceneDepth");
+        lineSceneDepthOnLocation = g.GetUniformLocation(lineProgram, "uSceneDepthOn");
+        lineDepthNearFarLocation = g.GetUniformLocation(lineProgram, "uDepthNearFar");
 
         g.DeleteShader(vs);
         g.DeleteShader(fs);
@@ -5773,7 +5905,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private static float QuantizeUp(float meters) =>
         MathF.Ceiling(meters / TrailMaskWindowQuantMeters) * TrailMaskWindowQuantMeters;
 
-    private void DrawTrailLines(GL g, IReadOnlyList<Trail>? trails, DemRaster? raster, TerrainMesh3D mesh, DetailElevationField? detail)
+    private void DrawTrailLines(GL g, IReadOnlyList<Trail>? trails, DemRaster? raster, TerrainMesh3D mesh, DetailElevationField? detail, float widthScale = 1f)
     {
         if (trails is null || trails.Count == 0 || raster is null)
         {
@@ -5824,8 +5956,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.Enable(EnableCap.Blend);
         g.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
         g.DepthMask(false);
-        DrawLine(g, trailLines, TrailHalfWidthPx);
-        DrawLine(g, trailLinesBlack, TrailBlackHalfWidthPx);
+        DrawLine(g, trailLines, TrailHalfWidthPx * widthScale);
+        DrawLine(g, trailLinesBlack, TrailBlackHalfWidthPx * widthScale);
         g.DepthMask(true);
     }
 
@@ -5868,7 +6000,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // streaming. This dashed translucent line fills the route in BEYOND that window (far field), where it lies on the
     // smooth base and is not occluded; up close it may be hidden by the detail terrain, but there the decal already
     // shows the route — so near and far stay consistent. Same conflation + violet/dash/alpha as before.
-    private void DrawRouteLine(GL g, Route? route, IReadOnlyList<Trail>? trails, DemRaster? raster, TerrainMesh3D mesh, DetailElevationField? detail)
+    private void DrawRouteLine(GL g, Route? route, IReadOnlyList<Trail>? trails, DemRaster? raster, TerrainMesh3D mesh, DetailElevationField? detail, float widthScale = 1f)
     {
         if (route is null || raster is null)
         {
@@ -5907,12 +6039,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.Enable(EnableCap.Blend);
         g.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
         g.DepthMask(false);
-        DrawLine(g, routeLines, RouteHalfWidthPx);
+        DrawLine(g, routeLines, RouteHalfWidthPx * widthScale);
         g.DepthMask(true);
         g.Disable(EnableCap.Blend);
     }
 
-    private void DrawExposedRoutes(GL g, IReadOnlyList<Trail>? exposed, DemRaster? raster, TerrainMesh3D mesh, DetailElevationField? detail)
+    private void DrawExposedRoutes(GL g, IReadOnlyList<Trail>? exposed, DemRaster? raster, TerrainMesh3D mesh, DetailElevationField? detail, float widthScale = 1f)
     {
         if (exposed is null || exposed.Count == 0 || raster is null)
         {
@@ -5945,7 +6077,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             lastExposedDetail = detail;
         }
 
-        DrawLine(g, exposedLines, ExposedRouteHalfWidthPx);
+        DrawLine(g, exposedLines, ExposedRouteHalfWidthPx * widthScale);
     }
 
     private const float CableHalfWidthPx = 2.2f;     // drawn cable ribbon half-width
@@ -7458,6 +7590,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         presentFbo = 0;
         presentColorTex = 0;
         presentDepthRb = 0;
+        gl.DeleteFramebuffer(ghostDepthFbo);
+        gl.DeleteTexture(ghostDepthTex);
+        ghostDepthFbo = 0;
+        ghostDepthTex = 0;
         gl.DeleteFramebuffer(postFbo);
         gl.DeleteTexture(postColorTex);
         postFbo = 0;
