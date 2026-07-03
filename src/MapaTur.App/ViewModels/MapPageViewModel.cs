@@ -248,9 +248,41 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private bool immersiveMode;
 
-    /// <summary>Whether the floating UI chrome (top menu bar + camera pads) is shown: hidden mid-flight or
-    /// in immersive landscape mode.</summary>
-    public bool ChromeVisible => !Is3DFlying && !ImmersiveMode;
+    /// <summary>Screenshot mode ("daj mi przycisk do chowania UI"): hides EVERY floating UI element — top
+    /// bar, panels, pills, badges, camera pads — leaving only the small toggle button, so a clean screenshot
+    /// is one tap away. Toggled by the 📷 button, which stays visible to bring the UI back.</summary>
+    [ObservableProperty]
+    private bool uiHidden;
+
+    /// <summary>Whether the floating UI chrome (top menu bar + camera pads) is shown: hidden mid-flight,
+    /// in immersive landscape mode, or in screenshot mode.</summary>
+    public bool ChromeVisible => !Is3DFlying && !ImmersiveMode && !UiHidden;
+
+    /// <summary>Status pill visibility gated by screenshot mode.</summary>
+    public bool ShowStatusPill => IsStatusPillVisible && !UiHidden;
+
+    /// <summary>LOD badge visibility gated by screenshot mode.</summary>
+    public bool ShowLodBadge => IsLodStreaming && !UiHidden;
+
+    /// <summary>Detail-fill pill visibility gated by screenshot mode.</summary>
+    public bool ShowStreamingPill => IsStreamingDetail && !UiHidden;
+
+    [RelayCommand]
+    private void ToggleUi() => UiHidden = !UiHidden;
+
+    partial void OnUiHiddenChanged(bool value)
+    {
+        OnPropertyChanged(nameof(ChromeVisible));
+        OnPropertyChanged(nameof(ShowStatusPill));
+        OnPropertyChanged(nameof(ShowLodBadge));
+        OnPropertyChanged(nameof(ShowStreamingPill));
+    }
+
+    partial void OnIsStatusPillVisibleChanged(bool value) => OnPropertyChanged(nameof(ShowStatusPill));
+
+    partial void OnIsLodStreamingChanged(bool value) => OnPropertyChanged(nameof(ShowLodBadge));
+
+    partial void OnIsStreamingDetailChanged(bool value) => OnPropertyChanged(nameof(ShowStreamingPill));
 
     partial void OnIs3DModeChanged(bool value) => OnPropertyChanged(nameof(Show3DChrome));
 
@@ -1564,25 +1596,20 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// </summary>
     private IReadOnlyList<MapaTur.Domain.Pois.MountainPoi> EffectivePois()
     {
-        // Downloaded names in TatraPasses.SuppressedOsmNames are dropped: a curated POI (Honoratka) is
-        // hand-pinned at the same node, and keeping both draws overlapping labels.
-        var result = new List<MapaTur.Domain.Pois.MountainPoi>(
-            (rawPois ?? (IReadOnlyList<MapaTur.Domain.Pois.MountainPoi>)Array.Empty<MapaTur.Domain.Pois.MountainPoi>())
-                .Where(p => !TatraPasses.SuppressedOsmNames.Contains(p.Name)));
-        int suppressed = (rawPois?.Count ?? 0) - result.Count;
-        if (suppressed > 0)
+        // PoiMerger: downloaded wins; bundled fills gaps; duplicates collapse by NAME or by PROXIMITY within
+        // one kind (the "Schronisko nad Morskim Okiem" vs "Schronisko PTTK Morskie Oko" double label);
+        // suppressed downloaded names drop entirely (the Honoratka node). Logged deltas for observability.
+        IReadOnlyList<MapaTur.Domain.Pois.MountainPoi> bundled =
+            TatraHuts.All.Concat(TatraPasses.All).ToList();
+        IReadOnlyList<MapaTur.Domain.Pois.MountainPoi> merged =
+            PoiMerger.Merge(rawPois, bundled, TatraPasses.SuppressedOsmNames);
+        int dropped = ((rawPois?.Count ?? 0) + bundled.Count) - merged.Count;
+        if (dropped > 0)
         {
-            logger.LogInformation("EffectivePois: suppressed {Count} downloaded POI(s) shadowed by curated entries", suppressed);
+            logger.LogInformation("EffectivePois: {Dropped} duplicate/suppressed POI(s) collapsed in the merge", dropped);
         }
-        var present = new HashSet<string>(result.Select(p => p.Name), StringComparer.OrdinalIgnoreCase);
-        foreach (MapaTur.Domain.Pois.MountainPoi bundled in TatraHuts.All.Concat(TatraPasses.All))
-        {
-            if (present.Add(bundled.Name))
-            {
-                result.Add(bundled);
-            }
-        }
-        return result;
+
+        return merged;
     }
 
     /// <summary>
@@ -2927,6 +2954,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         Peaks3DOverlay = await Task.Run(() =>
             RefinePeaksOnBakedTiles(
                 PeakNamer.MergeWithGazetteer(PeakDetector.Detect(peakRaster, peakOptions), gazetteer, raster),
+                gazetteer,
                 bakedTileIndex)).ConfigureAwait(true);
         RebuildPlaceGazetteer();
         logger.LogInformation("Loaded DEM {Label} ({Cols}x{Rows})", label, raster.Columns, raster.Rows);
@@ -3357,6 +3385,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             Peaks3DOverlay = await Task.Run(() =>
                 RefinePeaksOnBakedTiles(
                     PeakNamer.MergeWithGazetteer(PeakDetector.Detect(lodPeakRaster, lodPeakOptions), lodGazetteer, baseRaster),
+                    lodGazetteer,
                     bakedTileIndex)).ConfigureAwait(true);
             RebuildPlaceGazetteer();
             lodBaseTiles = MarkBaseSkin(baseTiles);
@@ -3629,12 +3658,16 @@ public sealed partial class MapPageViewModel : ObservableObject
     // Delay between self-kicked fill rounds — just past BakedStreamMinInterval so the debounce never eats the kick.
     private const int BakedStreamSelfKickDelayMs = 150;
 
-    // Named summit labels re-snapped on the baked z16 tiles: needle summits (Mnich, Zadni Mnich) are blurred
-    // into a neighbour's slope on the coarse base raster, so the coarse snap parks the label BESIDE the tower
-    // ("Mnich ma opis obok siebie"). The 1 m tile still resolves the needle as a true local maximum, so the
-    // marker lands on the actual apex with the real seating height. Null/empty index = unchanged (no bake).
-    private static IReadOnlyList<MapaTur.Application.Terrain.TerrainPeak> RefinePeaksOnBakedTiles(
+    // Named summit labels re-snapped on the baked z16 tiles, ANCHORED at each summit's ORIGINAL gazetteer
+    // coordinate: needle summits (Mnich, Zadni Mnich) are blurred into a neighbour's slope on the coarse
+    // base raster ("Mnich ma opis obok siebie"), and in dense clusters (Mięguszowieckie) the coarse snap
+    // collapses several names onto one blurred blob — so refining from the coarse position lands on the
+    // wrong sub-summit ("klejenie do najbliższego szczytu średnio działa jak jest ich sporo"). The OSM
+    // coordinate is the trustworthy anchor; the 1 m tile resolves each tower as its own local maximum.
+    // Null/empty index = unchanged (no bake). Logs refined/kept counts for observability.
+    private IReadOnlyList<MapaTur.Application.Terrain.TerrainPeak> RefinePeaksOnBakedTiles(
         IReadOnlyList<MapaTur.Application.Terrain.TerrainPeak> peaks,
+        IReadOnlyList<NamedSummit> summits,
         MapaTur.Application.Terrain.BakedTileAvailabilityIndex? bakedIndex)
     {
         if (bakedIndex is null || bakedIndex.Count == 0)
@@ -3642,8 +3675,15 @@ public sealed partial class MapPageViewModel : ObservableObject
             return peaks;
         }
 
+        var anchorByName = new Dictionary<string, GeoPoint>(StringComparer.Ordinal);
+        foreach (NamedSummit summit in summits)
+        {
+            anchorByName.TryAdd(summit.Name, summit.Location);
+        }
+
         var cache = new Dictionary<MapaTur.Application.Terrain.DemTileKey, MapaTur.Domain.Terrain.DemRaster?>();
         var refined = new List<MapaTur.Application.Terrain.TerrainPeak>(peaks.Count);
+        int moved = 0, kept = 0;
         foreach (MapaTur.Application.Terrain.TerrainPeak peak in peaks)
         {
             if (string.IsNullOrEmpty(peak.Name))
@@ -3652,8 +3692,9 @@ public sealed partial class MapPageViewModel : ObservableObject
                 continue;
             }
 
+            GeoPoint anchor = anchorByName.TryGetValue(peak.Name, out GeoPoint gaz) ? gaz : peak.Location;
             (int x, int y) = MapaTur.Application.Terrain.SlippyTileMath.LonLatToTile(
-                peak.Location.Longitude, peak.Location.Latitude, NearDetailZoom);
+                anchor.Longitude, anchor.Latitude, NearDetailZoom);
             var key = new MapaTur.Application.Terrain.DemTileKey(NearDetailZoom, x, y);
             if (!cache.TryGetValue(key, out MapaTur.Domain.Terrain.DemRaster? fine))
             {
@@ -3662,9 +3703,26 @@ public sealed partial class MapPageViewModel : ObservableObject
                 cache[key] = fine;
             }
 
-            refined.Add(fine is null ? peak : PeakNamer.RefineOnRaster(peak, fine));
+            if (fine is null)
+            {
+                refined.Add(peak);
+                kept++;
+                continue;
+            }
+
+            MapaTur.Application.Terrain.TerrainPeak result = PeakNamer.RefineOnRaster(peak, anchor, fine);
+            refined.Add(result);
+            if (result.Location.Equals(peak.Location))
+            {
+                kept++;
+            }
+            else
+            {
+                moved++;
+            }
         }
 
+        logger.LogInformation("[Peaks] fine-apex refine: {Moved} moved to z16 apex, {Kept} kept coarse", moved, kept);
         return refined;
     }
 

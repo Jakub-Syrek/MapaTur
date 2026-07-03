@@ -815,7 +815,7 @@
         <Border Style="{StaticResource GlassBar}" Padding="14,8"
                 HorizontalOptions="Center" VerticalOptions="End" Margin="0,0,0,96"
                 InputTransparent="True"
-                IsVisible="{Binding IsStatusPillVisible}">
+                IsVisible="{Binding ShowStatusPill}">
             <HorizontalStackLayout Spacing="10">
                 <ActivityIndicator IsRunning="{Binding IsBusy}" IsVisible="{Binding IsBusy}" Color="{StaticResource GlassAccent}"
                                    WidthRequest="16" HeightRequest="16" VerticalOptions="Center" />
@@ -828,7 +828,7 @@
         <Border Style="{StaticResource GlassBar}" Padding="10,5"
                 HorizontalOptions="Start" VerticalOptions="End" Margin="12,0,0,48"
                 InputTransparent="True"
-                IsVisible="{Binding IsLodStreaming}">
+                IsVisible="{Binding ShowLodBadge}">
             <Label Text="{Binding LodBadgeText}" Style="{StaticResource GlassCaption}" />
         </Border>
 
@@ -837,7 +837,7 @@
         <Border Style="{StaticResource GlassBar}" Padding="12,6"
                 HorizontalOptions="Center" VerticalOptions="End" Margin="0,0,0,60"
                 InputTransparent="True"
-                IsVisible="{Binding IsStreamingDetail}">
+                IsVisible="{Binding ShowStreamingPill}">
             <HorizontalStackLayout Spacing="8">
                 <ActivityIndicator IsRunning="{Binding IsStreamingDetail}" Color="{StaticResource GlassAccent}"
                                    WidthRequest="14" HeightRequest="14" VerticalOptions="Center" />
@@ -877,6 +877,15 @@
                 </VerticalStackLayout>
             </Border>
         </Grid>
+
+        <!-- Screenshot-mode toggle: the ONLY element that survives UiHidden — hides every floating UI piece
+             for a clean shot, second tap brings the chrome back ("przycisk do chowania UI, zostaje tylko
+             przycisk"). Top-right so it crops away easily. -->
+        <Button Text="📷" FontSize="16" Padding="0"
+                WidthRequest="40" HeightRequest="40" CornerRadius="20"
+                BackgroundColor="#33101418" TextColor="{StaticResource GlassInk}"
+                HorizontalOptions="End" VerticalOptions="Start" Margin="0,10,10,0"
+                Command="{Binding ToggleUiCommand}" />
 
         <!-- STARTUP loading overlay: from launch until the initial terrain scene is built. The stage label
              reuses StatusMessage (every load stage already writes it), the bar tracks LoadProgress
