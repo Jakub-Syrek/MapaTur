@@ -2925,7 +2925,9 @@ public sealed partial class MapPageViewModel : ObservableObject
         DemRaster peakRaster = DemRasterDownsampler.SubsampleToMaxCells(raster, maxCells: 20_000);
         IReadOnlyList<NamedSummit> gazetteer = await GetTatraGazetteerAsync().ConfigureAwait(true);
         Peaks3DOverlay = await Task.Run(() =>
-            PeakNamer.MergeWithGazetteer(PeakDetector.Detect(peakRaster, peakOptions), gazetteer, raster)).ConfigureAwait(true);
+            RefinePeaksOnBakedTiles(
+                PeakNamer.MergeWithGazetteer(PeakDetector.Detect(peakRaster, peakOptions), gazetteer, raster),
+                bakedTileIndex)).ConfigureAwait(true);
         RebuildPlaceGazetteer();
         logger.LogInformation("Loaded DEM {Label} ({Cols}x{Rows})", label, raster.Columns, raster.Rows);
         StatusMessage = $"{Localization.AppStrings.StatusDemLoaded}: {label}";
@@ -3353,7 +3355,9 @@ public sealed partial class MapPageViewModel : ObservableObject
             // PeakNamer now snaps each name to the NEAREST local maximum (its own apex), not the highest cell
             // in the radius — so a low summit (e.g. Mnich) no longer borrows a taller neighbour's ridge.
             Peaks3DOverlay = await Task.Run(() =>
-                PeakNamer.MergeWithGazetteer(PeakDetector.Detect(lodPeakRaster, lodPeakOptions), lodGazetteer, baseRaster)).ConfigureAwait(true);
+                RefinePeaksOnBakedTiles(
+                    PeakNamer.MergeWithGazetteer(PeakDetector.Detect(lodPeakRaster, lodPeakOptions), lodGazetteer, baseRaster),
+                    bakedTileIndex)).ConfigureAwait(true);
             RebuildPlaceGazetteer();
             lodBaseTiles = MarkBaseSkin(baseTiles);
             lodBaseTileFootprints = ComputeBaseTileFootprints(baseTiles);
@@ -3624,6 +3628,45 @@ public sealed partial class MapPageViewModel : ObservableObject
 
     // Delay between self-kicked fill rounds — just past BakedStreamMinInterval so the debounce never eats the kick.
     private const int BakedStreamSelfKickDelayMs = 150;
+
+    // Named summit labels re-snapped on the baked z16 tiles: needle summits (Mnich, Zadni Mnich) are blurred
+    // into a neighbour's slope on the coarse base raster, so the coarse snap parks the label BESIDE the tower
+    // ("Mnich ma opis obok siebie"). The 1 m tile still resolves the needle as a true local maximum, so the
+    // marker lands on the actual apex with the real seating height. Null/empty index = unchanged (no bake).
+    private static IReadOnlyList<MapaTur.Application.Terrain.TerrainPeak> RefinePeaksOnBakedTiles(
+        IReadOnlyList<MapaTur.Application.Terrain.TerrainPeak> peaks,
+        MapaTur.Application.Terrain.BakedTileAvailabilityIndex? bakedIndex)
+    {
+        if (bakedIndex is null || bakedIndex.Count == 0)
+        {
+            return peaks;
+        }
+
+        var cache = new Dictionary<MapaTur.Application.Terrain.DemTileKey, MapaTur.Domain.Terrain.DemRaster?>();
+        var refined = new List<MapaTur.Application.Terrain.TerrainPeak>(peaks.Count);
+        foreach (MapaTur.Application.Terrain.TerrainPeak peak in peaks)
+        {
+            if (string.IsNullOrEmpty(peak.Name))
+            {
+                refined.Add(peak); // unnamed detected maxima don't need apex precision
+                continue;
+            }
+
+            (int x, int y) = MapaTur.Application.Terrain.SlippyTileMath.LonLatToTile(
+                peak.Location.Longitude, peak.Location.Latitude, NearDetailZoom);
+            var key = new MapaTur.Application.Terrain.DemTileKey(NearDetailZoom, x, y);
+            if (!cache.TryGetValue(key, out MapaTur.Domain.Terrain.DemRaster? fine))
+            {
+                MapaTur.Application.Terrain.BakedDemTile? tile = bakedIndex.IsBaked(key) ? bakedIndex.Load(key) : null;
+                fine = tile is not null ? MapaTur.Application.Terrain.BakedTileMeshBuilder.AsRaster(tile) : null;
+                cache[key] = fine;
+            }
+
+            refined.Add(fine is null ? peak : PeakNamer.RefineOnRaster(peak, fine));
+        }
+
+        return refined;
+    }
 
     // Tags every base tile as the BASE SKIN so the renderer can discard its fragments inside the coverage
     // mask (surface ownership: resident hole-free z16 owns its ground — see BaseCoverageMaskBuilder).

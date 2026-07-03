@@ -84,6 +84,32 @@ public static class PeakNamer
     }
 
     /// <summary>
+    /// Refines a (coarse-snapped) peak's position on a FINE raster: re-snaps to the nearest strict local
+    /// maximum within <paramref name="radiusMeters"/> and takes that cell's elevation for seating, keeping
+    /// the name / published label height / curated flag. Needle summits (Mnich, Zadni Mnich) are blurred
+    /// into a neighbour's slope on the coarse base raster, so the coarse snap parks their label BESIDE the
+    /// tower ("Mnich ma opis obok siebie") — the 1 m z16 tile still resolves the needle as a true local
+    /// maximum. A peak outside <paramref name="fineRaster"/> is returned unchanged.
+    /// </summary>
+    /// <param name="peak">The peak to refine (typically a gazetteer summit snapped on the base raster).</param>
+    /// <param name="fineRaster">Fine elevation raster covering the peak (e.g. a baked z16 tile).</param>
+    /// <param name="radiusMeters">Search window around the current position for the true apex.</param>
+    public static TerrainPeak RefineOnRaster(TerrainPeak peak, DemRaster fineRaster, double radiusMeters = 150.0)
+    {
+        ArgumentNullException.ThrowIfNull(fineRaster);
+
+        double lon = peak.Location.Longitude;
+        double lat = peak.Location.Latitude;
+        if (lon < fineRaster.West || lon > fineRaster.East || lat < fineRaster.South || lat > fineRaster.North)
+        {
+            return peak;
+        }
+
+        (GeoPoint location, double elevation) = HighestCellNear(fineRaster, peak.Location, radiusMeters);
+        return peak with { Location = location, ElevationMeters = elevation };
+    }
+
+    /// <summary>
     /// Finds the highest non-no-data DEM cell within <paramref name="radiusMeters"/> of <paramref name="point"/>
     /// and returns its geographic location and elevation. Falls back to the point itself (bilinear sample)
     /// when the whole window is no-data.

@@ -205,4 +205,49 @@ public sealed class PeakNamerTests
 
         result.Single().Name.Should().BeNull();
     }
+
+    [Fact]
+    public void RefineOnRaster_MovesTheLabelOntoTheFineApex()
+    {
+        // The "Mnich ma opis obok siebie" regression: a needle summit is blurred away on the coarse base
+        // raster, so the coarse snap parks the label on a slope bump BESIDE the tower. Refining on a fine
+        // (z16-like) raster must move the marker onto the needle's true apex and take that cell's elevation
+        // for seating — while keeping the name and the published label height.
+        var fineBounds = new MapBounds(new GeoPoint(49.19, 20.05), new GeoPoint(49.21, 20.08));
+        var samples = new float[GridSize * GridSize];
+        Array.Fill(samples, 1900f);
+        samples[(30 * GridSize) + 30] = 2068f; // the needle (true apex) at cell (30,30)
+        var fine = new DemRaster(GridSize, GridSize, fineBounds, samples);
+
+        GeoPoint apexGeo = new(
+            49.21 - ((double)30 / (GridSize - 1) * 0.02),
+            20.05 + ((double)30 / (GridSize - 1) * 0.03));
+        GeoPoint parkedGeo = new(
+            49.21 - ((double)30 / (GridSize - 1) * 0.02),
+            20.05 + ((double)33 / (GridSize - 1) * 0.03)); // coarse snap parked 3 cells east of the needle
+        var coarseSnapped = new TerrainPeak(parkedGeo, 2010, "Mnich", LabelElevationMeters: 2068, Curated: true);
+
+        TerrainPeak refined = PeakNamer.RefineOnRaster(coarseSnapped, fine, radiusMeters: 300.0);
+
+        refined.Location.HaversineDistanceMetersTo(apexGeo).Should().BeLessThan(30.0,
+            "the marker must sit on the needle's apex, not the coarse slope bump beside it");
+        refined.ElevationMeters.Should().Be(2068f, "seating uses the fine cell's real height");
+        refined.Name.Should().Be("Mnich");
+        refined.LabelElevationMeters.Should().Be(2068);
+        refined.Curated.Should().BeTrue();
+    }
+
+    [Fact]
+    public void RefineOnRaster_OutsideTheFineRaster_ReturnsThePeakUnchanged()
+    {
+        var fineBounds = new MapBounds(new GeoPoint(49.19, 20.05), new GeoPoint(49.21, 20.08));
+        var samples = new float[GridSize * GridSize];
+        Array.Fill(samples, 1900f);
+        var fine = new DemRaster(GridSize, GridSize, fineBounds, samples);
+        var peak = new TerrainPeak(new GeoPoint(49.50, 20.50), 2100, "Elsewhere");
+
+        TerrainPeak refined = PeakNamer.RefineOnRaster(peak, fine, radiusMeters: 300.0);
+
+        refined.Should().Be(peak);
+    }
 }
