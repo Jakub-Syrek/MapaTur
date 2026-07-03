@@ -878,7 +878,7 @@
                     <HorizontalStackLayout Spacing="10" HorizontalOptions="Center">
                         <ActivityIndicator IsRunning="{Binding IsInitialLoading}" Color="{StaticResource GlassAccent}"
                                            WidthRequest="16" HeightRequest="16" VerticalOptions="Center" />
-                        <Label Text="{Binding StatusMessage}" Style="{StaticResource GlassCaption}"
+                        <Label Text="{Binding InitialLoadStage}" Style="{StaticResource GlassCaption}"
                                MaximumWidthRequest="300" LineBreakMode="TailTruncation" VerticalOptions="Center" />
                     </HorizontalStackLayout>
                 </VerticalStackLayout>

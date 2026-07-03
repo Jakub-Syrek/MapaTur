@@ -421,6 +421,7 @@
   <data name="StatusPackagesError" xml:space="preserve"><value>Błąd pobierania paczek danych</value></data>
   <data name="StatusLodUnavailable" xml:space="preserve"><value>LOD niedostępne</value></data>
   <data name="StatusMapLoading" xml:space="preserve"><value>Trwa ładowanie mapy — spróbuj za chwilę</value></data>
+  <data name="StatusStartingUp" xml:space="preserve"><value>Uruchamianie…</value></data>
   <data name="StatusLodBase" xml:space="preserve"><value>LOD: baza 30 m…</value></data>
   <data name="StatusLodNoBase" xml:space="preserve"><value>LOD: brak bazy (sieć?)</value></data>
   <data name="StatusLodDetail" xml:space="preserve"><value>LOD: kafel 1 m…</value></data>

@@ -554,6 +554,8 @@ public static class AppStrings
     public static string StatusLodUnavailable => Get(nameof(StatusLodUnavailable));
     /// <summary>"Map is loading — try again in a moment".</summary>
     public static string StatusMapLoading => Get(nameof(StatusMapLoading));
+    /// <summary>"Starting up…" — the startup overlay's initial stage (no call-to-action: the overlay blocks input).</summary>
+    public static string StatusStartingUp => Get(nameof(StatusStartingUp));
     /// <summary>"LOD: 30 m base…".</summary>
     public static string StatusLodBase => Get(nameof(StatusLodBase));
     /// <summary>"LOD: no base (network?)".</summary>

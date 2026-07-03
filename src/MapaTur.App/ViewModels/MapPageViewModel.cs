@@ -219,6 +219,14 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private double loadProgress;
 
+    /// <summary>
+    /// Stage label for the STARTUP overlay. Deliberately separate from <see cref="StatusMessage"/>: the idle
+    /// status is a call-to-action ("wczytaj MBTiles…") which is absurd behind a blocking overlay the user
+    /// cannot act through — this only ever shows load-stage text.
+    /// </summary>
+    [ObservableProperty]
+    private string initialLoadStage = Localization.AppStrings.StatusStartingUp;
+
     /// <summary>Whether to show the 3D on-screen chrome (sliders): only in 3D mode and not mid-flight.</summary>
     public bool Show3DChrome => Is3DMode && !Is3DFlying;
 
@@ -2914,6 +2922,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         if (IsInitialLoading)
         {
             LoadProgress = 0.15; // startup overlay: DEM read done, scene build (0.3+) comes next
+            InitialLoadStage = $"{Localization.AppStrings.StatusDemLoaded}: {label}";
         }
     }
 
@@ -3205,6 +3214,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             IsBusy = true;
             StatusMessage = Localization.AppStrings.StatusLodBase;
+            InitialLoadStage = Localization.AppStrings.StatusLodBase;
             LoadProgress = 0.3;
 
             var center = new GeoPoint(
@@ -3271,6 +3281,7 @@ public sealed partial class MapPageViewModel : ObservableObject
                 baseRaster.Columns, baseRaster.Rows, baseCentre.Latitude, baseCentre.Longitude, bMin, bMax);
 
             StatusMessage = Localization.AppStrings.StatusLodDetail;
+            InitialLoadStage = Localization.AppStrings.StatusLodDetail;
             LoadProgress = 0.7;
             var options = new MapaTur.Application.Terrain.TerrainMeshOptions
             {
@@ -4845,6 +4856,13 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             logger.LogError(ex, "Auto-load failed");
             // Auto-load is best-effort; manual pickers remain available.
+        }
+        finally
+        {
+            // The startup overlay must NEVER outlive auto-load: when no DEM/scene was found the LOD build
+            // (whose finally normally clears this) never runs — without this line the user would be trapped
+            // behind a blocking spinner telling them to load data they cannot reach.
+            IsInitialLoading = false;
         }
     }
 
