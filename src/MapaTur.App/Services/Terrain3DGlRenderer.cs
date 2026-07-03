@@ -954,16 +954,34 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
     // Shadow depth pass: transform the terrain vertex (absolute world aPos) by a cascade's light
     // view-projection and write depth only. No colour output — the FBO has just a depth texture.
+    // Carries the world position through so the fragment stage can apply SURFACE OWNERSHIP: without it the
+    // base skin — 0.5–4 m ABOVE the true z16 surface on convex slopes — won the depth-to-sun everywhere it
+    // was drawn, so the SHADOW SHAPES came from the smooth base while the main pass showed the detailed rock
+    // ("cień generowany na bazie", user-diagnosed). The same coverage mask the main pass uses now discards
+    // base-skin fragments here too — shadows are cast by whatever surface actually OWNS the ground.
     private const string ShadowDepthVertexShaderSource =
         "#version 300 es\n" +
         "layout(location=0) in vec3 aPos;\n" +
         "uniform mat4 uLightVp;\n" +
-        "void main(){ gl_Position = uLightVp * vec4(aPos, 1.0); }\n";
+        "out vec3 vWorldPos;\n" +
+        "void main(){ vWorldPos = aPos; gl_Position = uLightVp * vec4(aPos, 1.0); }\n";
 
     private const string ShadowDepthFragmentShaderSource =
         "#version 300 es\n" +
         "precision highp float;\n" +
-        "void main(){}\n";
+        "in vec3 vWorldPos;\n" +
+        "uniform sampler2D uBaseCover;\n" +
+        "uniform vec2 uBaseCoverMinXY;\n" +
+        "uniform vec2 uBaseCoverSizeXY;\n" +
+        "uniform float uBaseCoverOn;\n" +
+        "uniform float uIsBaseSkin;\n" +
+        "void main(){\n" +
+        "  if (uIsBaseSkin > 0.5 && uBaseCoverOn > 0.5) {\n" +
+        "    vec2 cuv = (vWorldPos.xy - uBaseCoverMinXY) / uBaseCoverSizeXY;\n" +
+        "    if (cuv.x > 0.0 && cuv.x < 1.0 && cuv.y > 0.0 && cuv.y < 1.0\n" +
+        "        && texture(uBaseCover, cuv).r > 0.5) { discard; }\n" +
+        "  }\n" +
+        "}\n";
 
     // Cloud-layer ("sea of clouds") program. A large horizontal quad at a fixed world altitude,
     // drawn AFTER the terrain with the depth test on (so peaks above the layer occlude it and the
@@ -1960,6 +1978,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private readonly bool shadowsEnabled = true; // re-enabled after the unit-0 sampler-collision fix; device perf test
     private uint shadowDepthProgram;
     private int shadowLightVpLoc = -1;
+    private int shadowBaseCoverLoc = -1;
+    private int shadowBaseCoverMinXYLoc = -1;
+    private int shadowBaseCoverSizeXYLoc = -1;
+    private int shadowBaseCoverOnLoc = -1;
+    private int shadowIsBaseSkinLoc = -1;
     private bool shadowPassLogged;
     // Shadow-sampling uniforms on the terrain program (part 4) + per-frame active flag + tuning strength.
     private int shadowMap0Loc = -1, shadowMap1Loc = -1, shadowMap2Loc = -1;
@@ -4370,6 +4393,25 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.Disable(EnableCap.Blend);
         g.UseProgram(shadowDepthProgram);
 
+        // Surface ownership in the shadow map too: bind the SAME coverage mask (unit 8) so base-skin
+        // fragments over resident full-detail ground don't cast the shadows — the smooth base sits metres
+        // ABOVE the z16 rock and otherwise owns the depth-to-sun everywhere ("cień generowany na bazie").
+        EnsureBaseCoverageTexture(g);
+        if (baseCoverTex != 0 && uploadedBaseCoverageMask is { } shadowBcm)
+        {
+            g.ActiveTexture(TextureUnit.Texture8);
+            g.BindTexture(TextureTarget.Texture2D, baseCoverTex);
+            g.ActiveTexture(TextureUnit.Texture0);
+            g.Uniform1(shadowBaseCoverLoc, 8);
+            g.Uniform2(shadowBaseCoverMinXYLoc, shadowBcm.WorldMinX, shadowBcm.WorldMinY);
+            g.Uniform2(shadowBaseCoverSizeXYLoc, shadowBcm.WorldSizeX, shadowBcm.WorldSizeY);
+            g.Uniform1(shadowBaseCoverOnLoc, 1f);
+        }
+        else
+        {
+            g.Uniform1(shadowBaseCoverOnLoc, 0f);
+        }
+
         Span<float> lm = stackalloc float[16];
         float sliceNear = near;
         for (int c = 0; c < ShadowCascadeCount; c++)
@@ -4391,8 +4433,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             lm[12] = lightVp.M41; lm[13] = lightVp.M42; lm[14] = lightVp.M43; lm[15] = lightVp.M44;
             g.UniformMatrix4(shadowLightVpLoc, 1, false, lm);
 
+            float lastShadowIsBase = -1f;
             foreach (KeyValuePair<TerrainMesh3D, TileBuffers> entry in tileBuffers)
             {
+                float isBase = entry.Key.IsBaseSkin ? 1f : 0f;
+                if (isBase != lastShadowIsBase)
+                {
+                    g.Uniform1(shadowIsBaseSkinLoc, isBase);
+                    lastShadowIsBase = isBase;
+                }
+
                 g.BindVertexArray(entry.Value.Vao);
                 g.DrawElements(PrimitiveType.Triangles, (uint)entry.Value.IndexCount, DrawElementsType.UnsignedInt, (void*)0);
             }
@@ -5301,6 +5351,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.DeleteShader(shvs);
         g.DeleteShader(shfs);
         shadowLightVpLoc = g.GetUniformLocation(shadowDepthProgram, "uLightVp");
+        shadowBaseCoverLoc = g.GetUniformLocation(shadowDepthProgram, "uBaseCover");
+        shadowBaseCoverMinXYLoc = g.GetUniformLocation(shadowDepthProgram, "uBaseCoverMinXY");
+        shadowBaseCoverSizeXYLoc = g.GetUniformLocation(shadowDepthProgram, "uBaseCoverSizeXY");
+        shadowBaseCoverOnLoc = g.GetUniformLocation(shadowDepthProgram, "uBaseCoverOn");
+        shadowIsBaseSkinLoc = g.GetUniformLocation(shadowDepthProgram, "uIsBaseSkin");
 
         // Cloud-layer program — horizontal quad at altitude, fBm-alpha "sea of clouds".
         uint cvs = CompileShader(g, ShaderType.VertexShader, CloudLayerVertexShaderSource);
