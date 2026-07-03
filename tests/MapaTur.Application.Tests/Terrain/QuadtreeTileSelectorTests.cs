@@ -193,6 +193,38 @@ public sealed class QuadtreeTileSelectorTests
     }
 
     [Fact]
+    public void LookingAround_KeepsUnderfootDetail()
+    {
+        // The counterpart regression to LookAtFocus (user 2026-07-03: "wyładowujesz mi rzeczy pod stopami
+        // jak się rozglądam"): standing low over point A and LOOKING at a ridge 4 km away must not coarsen
+        // the ground under the eye — the eye keeps a smaller fine bubble besides the target's rings.
+        Vector3 c = TileWorldCentre(RootTile());
+        var eyeGround = new Vector2(c.X, c.Y);
+        // Eye fixed low over the root centre; target ~4 km east at ground level (looking around, not orbiting).
+        var eye = new Vector3(eyeGround.X, eyeGround.Y, GroundElevation + 200f);
+        var target = new Vector3(eyeGround.X + 4_000f, eyeGround.Y, GroundElevation);
+        Vector3 toEye = eye - target;
+        float distance = toEye.Length();
+        var camera = new Camera3D
+        {
+            Target = target,
+            Distance = distance,
+            AzimuthRadians = MathF.Atan2(toEye.Y, toEye.X),
+            PitchRadians = MathF.Asin(toEye.Z / distance),
+            FieldOfViewYRadians = MathF.PI / 4f,
+            NearPlane = 1f,
+            FarPlane = 5_000_000f,
+        };
+
+        QuadtreeTileSelection selection = QuadtreeTileSelector.Select(Options(camera));
+
+        // The tile under the EYE stays at the finest zoom even though the look-at is 4 km away.
+        SelectedTile underEye = selection.Tiles.First(t =>
+            GroundDistance(eyeGround, t.Key) < 300.0);
+        underEye.Key.Zoom.Should().Be(MaxZoom, "the ground under the eye must keep its detail while looking around");
+    }
+
+    [Fact]
     public void LookAtFocus_RefinesTheTargetAcrossTheValley()
     {
         // The "lotnisko obok ostrej grani" regression (2026-07-03): the user looks AT a ridge from across a
@@ -326,10 +358,14 @@ public sealed class QuadtreeTileSelectorTests
 
         QuadtreeTileSelection selection = QuadtreeTileSelector.Select(Options(camera));
 
-        // Ordering is by ground distance to the LOOK-AT anchor (camera.Target), the same metric that drives
-        // the ring LOD — nearest-to-attention streams first.
+        // Ordering is by the EFFECTIVE two-foci distance — min(distance to the look-at's ground, distance to
+        // the eye's ground / bubble fraction) — the same metric that drives the ring LOD, so the tiles nearest
+        // to the user's attention (and underfoot) stream first.
         var targetGroundXY = new Vector2(camera.Target.X, camera.Target.Y);
-        var distances = selection.Tiles.Select(t => GroundDistance(targetGroundXY, t.Key)).ToList();
+        var eyeGroundXY = new Vector2(camera.Position.X, camera.Position.Y);
+        var distances = selection.Tiles
+            .Select(t => Math.Min(GroundDistance(targetGroundXY, t.Key), GroundDistance(eyeGroundXY, t.Key) / 0.4))
+            .ToList();
         distances.Should().BeInAscendingOrder();
     }
 

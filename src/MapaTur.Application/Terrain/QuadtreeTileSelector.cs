@@ -110,12 +110,13 @@ public sealed record QuadtreeTileSelectorOptions
 /// finest radius, then each coarser zoom fills the next ring, down to
 /// <see cref="QuadtreeTileSelectorOptions.MinZoom"/> beyond the outermost ring.
 ///
-/// <para><b>Orbit independence (the design goal, v2 2026-07-03).</b> A tile's LOD is a function ONLY of the
-/// horizontal ground distance from its centre to the LOOK-AT's ground XY, and the ring radii are a function
-/// ONLY of the eye height. Orbiting the target (the app's primary gesture — azimuth/pitch sweep the eye, the
-/// target stays put) yields the IDENTICAL selection — no morphing while you circle a peak. Anchoring on the
-/// eye instead left the LOOKED-AT terrain outside the fine ring whenever the user viewed a ridge from across
-/// a valley ("lotnisko obok ostrej grani") — attention follows the target, so detail must too. There is
+/// <para><b>Two foci (v3 2026-07-03).</b> A tile's LOD is a function ONLY of its EFFECTIVE ground distance:
+/// min(distance to the LOOK-AT's ground XY, distance to the EYE's ground XY ÷ <c>EyeBubbleFraction</c>) —
+/// full rings follow attention, and the eye keeps proportionally smaller rings so the terrain underfoot
+/// never coarsens while the user looks around. Ring radii are a function ONLY of the eye height. Orbiting
+/// the target inside its fine ring yields the IDENTICAL selection (the eye bubble adds nothing not already
+/// finest). Eye-only anchoring left the LOOKED-AT terrain coarse across a valley ("lotnisko obok ostrej
+/// grani"); target-only anchoring dropped the near field the moment the user looked away. There is
 /// deliberately NO frustum cull on the selection (the full 360° ring is the point; retained drawing handles
 /// off-screen tiles, and a separate draw-time cull may still skip them without changing what is
 /// SELECTED).</para>
@@ -159,15 +160,19 @@ public static class QuadtreeTileSelector
             throw new ArgumentException("MaxResidentTiles must be at least 1.", nameof(options));
         }
 
-        // The ground point under the LOOK-AT (camera.Target) anchors the rings, and the camera height above the
-        // ground plane scales them. Target-anchored (2026-07-03, was eye-anchored): the user's attention — and
-        // the app's orbit gesture — pivot on the target, so detail must follow WHERE YOU LOOK ("lotnisko obok
-        // ostrej grani": looking at a ridge across a valley left the looked-at terrain outside the eye-centred
-        // fine ring while z16 sat unused on disk). Orbiting (eye sweeps, target fixed) now yields an IDENTICAL
-        // selection; the same lesson as the trail-mask window (camera.Target, not Position).
+        // TWO FOCI (2026-07-03): the ground point under the LOOK-AT (camera.Target) anchors the full rings —
+        // detail follows WHERE YOU LOOK ("lotnisko obok ostrej grani": looking at a ridge across a valley
+        // left the looked-at terrain outside the eye-centred fine ring; same lesson as the trail-mask window)
+        // — PLUS a smaller bubble around the ground under the EYE, so looking around never coarsens the
+        // terrain underfoot ("wyładowujesz mi rzeczy pod stopami jak się rozglądam" — pure target-anchoring
+        // dropped the near field the moment the target swung away). A tile's effective distance is
+        // min(distance-to-target, distance-to-eye / EyeBubbleFraction): the eye keeps EyeBubbleFraction-sized
+        // copies of every ring. Orbiting inside the target's fine ring still yields an identical selection
+        // (the eye bubble adds nothing that isn't already finest). Camera height above the ground plane
+        // scales all radii as before.
         Vector3 eye = options.Camera.Position;
         Vector3 lookAt = options.Camera.Target;
-        var focusGroundXY = new Vector2(lookAt.X, lookAt.Y);
+        var foci = new SelectionFoci(new Vector2(lookAt.X, lookAt.Y), new Vector2(eye.X, eye.Y));
         double groundPlaneZ = options.GroundElevationMeters * (double)options.VerticalExaggeration;
         double cameraHeight = Math.Max(0.0, eye.Z - groundPlaneZ);
 
@@ -178,13 +183,13 @@ public static class QuadtreeTileSelector
         var selected = new List<DemTileKey>();
         foreach (DemTileKey root in DistinctInOrder(options.Roots))
         {
-            Refine(root, options, focusGroundXY, ringRadii, selected);
+            Refine(root, options, foci, ringRadii, selected);
         }
 
         // 2) Residency cap: coarsen the farthest rings (collapse each parent's present children back into the
         //    parent, farthest first) until within budget; only if nothing remains coarsenable do we drop the
         //    farthest tiles.
-        bool clamped = ApplyResidencyCap(selected, options, focusGroundXY);
+        bool clamped = ApplyResidencyCap(selected, options, foci);
 
         // 3) Materialise the world frame each tile needs and order nearest-camera first (deterministic).
         var tiles = new List<SelectedTile>(selected.Count);
@@ -193,9 +198,18 @@ public static class QuadtreeTileSelector
             tiles.Add(Materialise(key, options, eye));
         }
 
-        tiles.Sort((a, b) => CompareByGroundDistanceThenKey(a, b, focusGroundXY));
+        tiles.Sort((a, b) => CompareByGroundDistanceThenKey(a, b, foci));
         return new QuadtreeTileSelection(tiles, clamped);
     }
+
+    /// <summary>The two ground anchors of a selection: the LOOK-AT's ground XY (full rings) and the EYE's
+    /// ground XY (a smaller bubble — see <see cref="EyeBubbleFraction"/>).</summary>
+    private readonly record struct SelectionFoci(Vector2 Focus, Vector2 Eye);
+
+    // The eye keeps this fraction of every ring radius as its own detail bubble (0.4 ⇒ a 2.5 km finest ring
+    // grants ~1 km of finest tiles around the ground under the camera). Small enough not to double the tile
+    // budget, big enough that the terrain underfoot never degrades while the user looks around.
+    private const double EyeBubbleFraction = 0.4;
 
     // Horizontal ground radius, per coarser zoom from MaxZoom down to MinZoom+1, scaled by camera height.
     // Index 0 is the MaxZoom (finest) ring, index k the (MaxZoom-k) ring. A tile of zoom z is the deepest
@@ -243,16 +257,16 @@ public static class QuadtreeTileSelector
     private static void Refine(
         DemTileKey tile,
         QuadtreeTileSelectorOptions options,
-        Vector2 focusGroundXY,
+        in SelectionFoci foci,
         double[] ringRadii,
         List<DemTileKey> selected)
     {
         bool canRefine = tile.Zoom < options.MaxZoom && AllChildrenBaked(tile, options.IsBaked);
-        if (canRefine && ChildRingReaches(tile, options, focusGroundXY, ringRadii))
+        if (canRefine && ChildRingReaches(tile, options, foci, ringRadii))
         {
             foreach (DemTileKey child in Children(tile))
             {
-                Refine(child, options, focusGroundXY, ringRadii, selected);
+                Refine(child, options, foci, ringRadii, selected);
             }
 
             return;
@@ -264,7 +278,7 @@ public static class QuadtreeTileSelector
     // True when the ring for this tile's CHILD zoom (one level finer) still contains the tile's centre, i.e. the
     // tile is close enough to the camera that the finer level is wanted here.
     private static bool ChildRingReaches(
-        DemTileKey tile, QuadtreeTileSelectorOptions options, Vector2 focusGroundXY, double[] ringRadii)
+        DemTileKey tile, QuadtreeTileSelectorOptions options, in SelectionFoci foci, double[] ringRadii)
     {
         int childZoom = tile.Zoom + 1;
         int index = options.MaxZoom - childZoom; // ringRadii[0] is the MaxZoom ring
@@ -273,19 +287,14 @@ public static class QuadtreeTileSelector
             return false;
         }
 
-        double distance = GroundDistance(tile, options, focusGroundXY);
+        double distance = GroundDistance(tile, options, foci);
         return distance <= ringRadii[index];
     }
 
     // Horizontal (XY-plane) distance from the camera's ground position to the tile centre, in metres. Height is
     // intentionally excluded so a high camera does not lose its near rings to vertical distance.
-    private static double GroundDistance(DemTileKey tile, QuadtreeTileSelectorOptions options, Vector2 focusGroundXY)
-    {
-        Vector3 centre = TileWorldCenter(tile, options);
-        double dx = centre.X - focusGroundXY.X;
-        double dy = centre.Y - focusGroundXY.Y;
-        return Math.Sqrt((dx * dx) + (dy * dy));
-    }
+    private static double GroundDistance(DemTileKey tile, QuadtreeTileSelectorOptions options, in SelectionFoci foci)
+        => GroundDistance(TileWorldCenter(tile, options), foci);
 
     // Tile centre in the shared world frame, using the configured ground elevation for Z.
     private static Vector3 TileWorldCenter(DemTileKey tile, QuadtreeTileSelectorOptions options)
@@ -315,7 +324,7 @@ public static class QuadtreeTileSelector
     // terminates because every merge strictly lowers the total zoom, bounded below by the roots. Only if the cap
     // is below the irreducible root cover do we fall back to dropping the farthest tiles (the one path that
     // leaves a hole, reported via the flag).
-    private static bool ApplyResidencyCap(List<DemTileKey> selected, QuadtreeTileSelectorOptions options, Vector2 focusGroundXY)
+    private static bool ApplyResidencyCap(List<DemTileKey> selected, QuadtreeTileSelectorOptions options, in SelectionFoci foci)
     {
         int cap = options.MaxResidentTiles;
         if (selected.Count <= cap)
@@ -327,7 +336,7 @@ public static class QuadtreeTileSelector
         var present = new HashSet<DemTileKey>(selected);
         while (present.Count > cap)
         {
-            DemTileKey? parent = FindFarthestCoarsenableParent(present, options, focusGroundXY);
+            DemTileKey? parent = FindFarthestCoarsenableParent(present, options, foci);
             if (parent is null)
             {
                 break;
@@ -346,7 +355,8 @@ public static class QuadtreeTileSelector
         List<DemTileKey> remaining = present.ToList();
         if (remaining.Count > cap)
         {
-            remaining.Sort((a, b) => CompareGroundDistanceThenKey(a, b, options, focusGroundXY));
+            SelectionFoci fociCopy = foci; // an `in` parameter cannot be captured by a lambda
+            remaining.Sort((a, b) => CompareGroundDistanceThenKey(a, b, options, fociCopy));
             remaining = remaining.Take(cap).ToList();
             clamped = true;
         }
@@ -362,7 +372,7 @@ public static class QuadtreeTileSelector
     // then the farthest (by ground distance), then the lowest key — fully deterministic. Null when nothing is
     // coarsenable.
     private static DemTileKey? FindFarthestCoarsenableParent(
-        HashSet<DemTileKey> present, QuadtreeTileSelectorOptions options, Vector2 focusGroundXY)
+        HashSet<DemTileKey> present, QuadtreeTileSelectorOptions options, in SelectionFoci foci)
     {
         // Count present direct children per parent, and flag parents that still have a deeper present descendant.
         var directChildren = new Dictionary<DemTileKey, int>();
@@ -401,7 +411,7 @@ public static class QuadtreeTileSelector
             }
 
             bool reduces = count >= 2; // ≥2 children → fewer tiles; a single child only coarsens
-            double distance = GroundDistance(parent, options, focusGroundXY);
+            double distance = GroundDistance(parent, options, foci);
 
             // Prefer count-reducing merges, then farther, then lower key.
             bool better = best is null
@@ -462,25 +472,36 @@ public static class QuadtreeTileSelector
 
     // --- Ordering ----------------------------------------------------------------------------------------
 
-    private static int CompareByGroundDistanceThenKey(SelectedTile a, SelectedTile b, Vector2 focusGroundXY)
+    private static int CompareByGroundDistanceThenKey(SelectedTile a, SelectedTile b, in SelectionFoci foci)
     {
-        double da = GroundDistance(a.WorldCenter, focusGroundXY);
-        double db = GroundDistance(b.WorldCenter, focusGroundXY);
+        double da = GroundDistance(a.WorldCenter, foci);
+        double db = GroundDistance(b.WorldCenter, foci);
         int byDistance = da.CompareTo(db);
         return byDistance != 0 ? byDistance : CompareKey(a.Key, b.Key);
     }
 
     private static int CompareGroundDistanceThenKey(
-        DemTileKey a, DemTileKey b, QuadtreeTileSelectorOptions options, Vector2 focusGroundXY)
+        DemTileKey a, DemTileKey b, QuadtreeTileSelectorOptions options, in SelectionFoci foci)
     {
-        int byDistance = GroundDistance(a, options, focusGroundXY).CompareTo(GroundDistance(b, options, focusGroundXY));
+        int byDistance = GroundDistance(a, options, foci).CompareTo(GroundDistance(b, options, foci));
         return byDistance != 0 ? byDistance : CompareKey(a, b);
     }
 
-    private static double GroundDistance(Vector3 worldCenter, Vector2 focusGroundXY)
+    // EFFECTIVE ground distance — the single metric behind every LOD/ordering decision: the nearer of
+    // (a) the distance to the LOOK-AT's ground point (full rings follow attention) and (b) the distance to
+    // the EYE's ground point stretched by 1/EyeBubbleFraction (the eye keeps proportionally smaller rings, so
+    // the terrain underfoot stays fine while the user looks around).
+    private static double GroundDistance(Vector3 worldCenter, in SelectionFoci foci)
     {
-        double dx = worldCenter.X - focusGroundXY.X;
-        double dy = worldCenter.Y - focusGroundXY.Y;
+        double toFocus = HorizontalDistance(worldCenter, foci.Focus);
+        double toEye = HorizontalDistance(worldCenter, foci.Eye);
+        return Math.Min(toFocus, toEye / EyeBubbleFraction);
+    }
+
+    private static double HorizontalDistance(Vector3 worldCenter, Vector2 groundXY)
+    {
+        double dx = worldCenter.X - groundXY.X;
+        double dy = worldCenter.Y - groundXY.Y;
         return Math.Sqrt((dx * dx) + (dy * dy));
     }
 
