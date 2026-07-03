@@ -315,43 +315,71 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // the imagery (Orla Perć read worse WITH the material than with plain ortho — user 2026-07-02);
         // the Slovak big north faces are 65°+ so they keep their granite rescue.
         "  float rockW = (uSlopeMode < 0.5) ? smoothstep(55.0, 75.0, rockSlopeDeg) * uRockStrength : 0.0;\n" +
-        // PLATE-JOINTED granite (v2, 2026-07-02): Tatra granite is not a granular blob — it breaks into big
-        // parallel SLABS along steep master joints, with sparser cross joints chopping the slabs into blocks
-        // (user reference: Kozi Wierch slabs). Two world-space joint sets → per-plate id; each plate gets its
-        // own tone and a slight FACET tilt of the shading normal (slabs catch the sun differently — that is
-        // what sells the look), with dark AA'd crack seams at the joint lines and a little intra-plate grain.
+        // NESTED granite (v7, 2026-07-03, matched to user reference photos — Orla Perć chimney close-up +
+        // Granaty wall): real Tatra rock is MULTI-SCALE and follows the FALL LINE, not any single motif.
+        // Two nested Voronoi layers on the triplanar plane:
+        //   COARSE (18–40 m) = wall facets/buttresses — strong tonal patches (bleached vs grey faces, the
+        //     dominant read of the Granaty photo) + strong per-facet ANGULAR normal tilt;
+        //   FINE (3–8 m, decorrelated per coarse facet, stretched ~2x ALONG THE FALL LINE) = blocks —
+        //     vertically elongated like the chimney joints, each with its own smaller tone + facet, and
+        //     deep dark crack seams at the borders (the visible black fracture lines of the close-up).
+        // No domes and no global rotation — the reference is angular, and orientation comes from the
+        // fall-line anisotropy alone.
         "  float rk = 0.0;\n" +
         "  if (rockW > 0.001) {\n" +
-        // Regional joint orientation: the strike ROTATES ±~37° over ~150 m ("zbyt równoległe" — one global
-        // direction read as ruler hatching across every face). Same rotation applied to both joint sets.
-        "    float th = (noiseT(vStableWorldPos.xy * 0.007) - 0.5) * 1.3;\n" +
-        "    float cs = cos(th); float si = sin(th);\n" +
-        "    vec3 j1 = normalize(vec3(0.74 * cs - 0.51 * si, 0.74 * si + 0.51 * cs, 0.44));\n" + // master joints (dip ~64°)
-        "    vec3 j2 = normalize(vec3(-0.38 * cs - 0.77 * si, -0.38 * si + 0.77 * cs, 0.52));\n" + // cross joints
-        "    float warp = noiseT(vStableWorldPos.xy * 0.021) * 2.6\n" +
-        "               + (noiseT(vStableWorldPos.xy * 0.09) - 0.5) * 2.2;\n" + // mid-freq wander: seams merge/split
-        "    float pw1 = 4.5 + 4.5 * noiseT(vStableWorldPos.xy * 0.013);\n" +   // slab width 4.5–9 m by region (2.4–5.2 read as dense crosshatch)
-        "    float pw2 = pw1 * 2.3;\n" +
-        "    float u1 = (dot(vStableWorldPos, j1) + warp) / pw1;\n" +
-        "    float u2 = (dot(vStableWorldPos, j2) + warp * 0.6) / pw2;\n" +
-        "    float p1 = floor(u1); float f1 = fract(u1);\n" +
-        "    float p2 = floor(u2); float f2 = fract(u2);\n" +
-        "    float tone = noiseT(vec2(p1 * 2.63 + p2 * 1.37, p2 * 2.91 - p1 * 0.83));\n" + // per-plate tone (stable hash via the noise lattice)
+        "    vec3 anR = abs(shN);\n" +
+        "    int plR = (anR.z >= anR.x && anR.z >= anR.y) ? 0 : ((anR.x >= anR.y) ? 1 : 2);\n" +
+        "    vec2 rp = (plR == 0) ? vStableWorldPos.xy : ((plR == 1) ? vStableWorldPos.yz : vStableWorldPos.zx);\n" +
+        // Fall-line anisotropy: on steep faces one plane axis is world-Z; shrinking it stretches the fine
+        // cells vertically (blocks elongated down the gully). Flat ground stays isotropic.
+        "    vec2 anisoF = (plR == 0) ? vec2(1.0) : ((plR == 1) ? vec2(1.0, 0.5) : vec2(0.5, 1.0));\n" +
+        // COARSE facets. Cell sizes are CONSTANT: a spatially-varying size with floor(coord/size) on
+        // absolute coords makes cell indices sweep along the size-noise contours — dense wavy tone bands
+        // ("regularne pasy poziome", the stripe artifact that plagued v4–v7 regardless of the pattern).
+        // Size variety comes from the Voronoi jitter itself (~2:1 spread).
+        "    float csz = 26.0;\n" +
+        "    vec2 cwp = rp + (vec2(noiseT(rp * 0.03), noiseT(rp * 0.026 + 7.7)) - 0.5) * (csz * 0.5);\n" +
+        "    vec2 cg = floor(cwp / csz); vec2 cf = fract(cwp / csz);\n" +
+        "    float cF1 = 8.0; float cF2 = 8.0; vec2 cidC = cg;\n" +
+        "    for (int oy = -1; oy <= 1; oy++) { for (int ox = -1; ox <= 1; ox++) {\n" +
+        "      vec2 oc = vec2(float(ox), float(oy)); vec2 cid = cg + oc;\n" +
+        "      vec2 sv = oc + vec2(hashT(cid * 1.7 + 3.1), hashT(cid * 2.3 + 9.4)) - cf;\n" +
+        "      float d = length(sv);\n" +
+        "      if (d < cF1) { cF2 = cF1; cF1 = d; cidC = cid; } else if (d < cF2) { cF2 = d; }\n" +
+        "    } }\n" +
+        "    float toneC = hashT(cidC * 2.63 + 1.37);\n" +
+        "    float emC = (cF2 - cF1) * csz;\n" +
+        // FINE blocks: offset by a per-facet vector so the subdivision does not continue across facets.
+        "    float fsz = 5.0;\n" + // constant — see the csz comment (varying size = stripe artifact)
+        "    vec2 fwp = (rp + vec2(hashT(cidC * 4.9 + 0.7), hashT(cidC * 6.1 + 8.2)) * 37.0) * anisoF;\n" +
+        "    fwp += (vec2(noiseT(rp * 0.11), noiseT(rp * 0.09 + 4.4)) - 0.5) * (fsz * 0.7);\n" +
+        "    vec2 fg = floor(fwp / fsz); vec2 ff = fract(fwp / fsz);\n" +
+        "    float fF1 = 8.0; float fF2 = 8.0; vec2 cidF = fg;\n" +
+        "    for (int oy = -1; oy <= 1; oy++) { for (int ox = -1; ox <= 1; ox++) {\n" +
+        "      vec2 oc = vec2(float(ox), float(oy)); vec2 cid = fg + oc;\n" +
+        "      vec2 sv = oc + vec2(hashT(cid * 3.7 + 1.9), hashT(cid * 5.3 + 6.8)) - ff;\n" +
+        "      float d = length(sv);\n" +
+        "      if (d < fF1) { fF2 = fF1; fF1 = d; cidF = cid; } else if (d < fF2) { fF2 = d; }\n" +
+        "    } }\n" +
+        "    float toneF = hashT(cidF * 2.11 + 5.9);\n" +
+        "    float emF = (fF2 - fF1) * fsz;\n" +
+        // Cracks: fine joints are the visible dark fracture lines (depth varies by patch); coarse borders
+        // are BROAD soft tone breaks, not lines.
+        "    float aaF = max(fwidth(emF) * 1.8, 0.06);\n" +
+        "    float crack = (1.0 - smoothstep(0.16, 0.16 + aaF, emF)) * mix(0.45, 1.0, noiseT(rp * 0.07));\n" +
+        "    float aaC = max(fwidth(emC) * 1.8, 0.10);\n" +
+        "    crack = max(crack, (1.0 - smoothstep(0.55, 0.55 + aaC + 0.9, emC)) * 0.5);\n" +
+        // Tone: dominant coarse facet contrast + weathering BLEACH on some facets (the near-white faces in
+        // the reference) + smaller per-block variation + micro grain.
+        "    float bleach = smoothstep(0.68, 0.95, toneC) * 0.30;\n" +
         "    float micro = 0.5 * noiseT(vStableWorldPos.xy * 1.1) + 0.5 * noiseT(vStableWorldPos.yz * 1.1);\n" +
-        "    float e1 = min(f1, 1.0 - f1) * pw1;\n" + // metres to the nearest master joint
-        "    float e2 = min(f2, 1.0 - f2) * pw2;\n" +
-        "    float aa1 = max(fwidth(u1) * pw1, 0.06);\n" +
-        "    float aa2 = max(fwidth(u2) * pw2, 0.06);\n" +
-        "    float crack = 1.0 - smoothstep(0.14, 0.14 + aa1 * 2.2, e1);\n" +
-        "    crack = max(crack, (1.0 - smoothstep(0.20, 0.20 + aa2 * 2.2, e2)) * 0.35);\n" +
-        // Seams show in sparse PATCHES and stay shallow — the SLAB FACETS carry the look, the lines only
-        // hint at it (with strong dense lines the face read as crosshatch/wireframe, not rock).
-        "    crack *= mix(0.12, 0.85, smoothstep(0.42, 0.68, noiseT(vStableWorldPos.xy * 0.05)));\n" +
-        "    rk = clamp(0.55 + (tone - 0.5) * 0.45 + (micro - 0.5) * 0.20 - crack * 0.42, 0.0, 1.0);\n" +
-        // Facet normal: tilt the shading normal per plate along the joint direction projected into the surface
-        // tangent — neighbouring slabs face the sun slightly differently, exactly like the reference photo.
-        "    vec3 tilt = j1 - shN * dot(j1, shN);\n" +
-        "    shN = normalize(shN + tilt * ((tone - 0.5) * 0.45 * rockW));\n" +
+        "    rk = clamp(0.48 + (toneC - 0.5) * 0.5 + (toneF - 0.5) * 0.26 + bleach + (micro - 0.5) * 0.16 - crack * 0.5, 0.0, 1.0);\n" +
+        // Angular facet normals: strong constant tilt per coarse facet + smaller per-block tilt.
+        "    vec3 tcC = vec3(hashT(cidC * 3.3 + 6.1) - 0.5, hashT(cidC * 4.7 + 2.2) - 0.5, (hashT(cidC * 7.9 + 0.4) - 0.5) * 0.6);\n" +
+        "    vec3 tcF = vec3(hashT(cidF * 6.7 + 3.8) - 0.5, hashT(cidF * 8.1 + 7.5) - 0.5, 0.0);\n" +
+        "    vec3 tilt = tcC * 0.8 + tcF * 0.5;\n" +
+        "    tilt = tilt - shN * dot(tilt, shN);\n" +
+        "    shN = normalize(shN + tilt * (0.6 * rockW));\n" +
         "  }\n" +
         // Mid-frequency DETAIL (fix B): a coarse LOD tile box-averaged away the sub-cell bumps; vDetail carries the
         // REAL z16 residual RMS (metres) per vertex — it is 0 on flat ground, on the finest z16 (relief already in

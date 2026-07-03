@@ -117,7 +117,43 @@
       + maska jezior (user: „poblask jezior zajebisty, strumyczki też"; jeziora czyste po masce);
       async trail-mask (płynność potwierdzona), fix okna decali, rock 55→75° („jest ok, pushuj").
       Bramki przeszły: format (po auto-fixie FINALNEWLINE w 6 nowych plikach) + 1590 testów green.
+- [x] DRUGI PUSH DNIA (d5944be, ~23:03): szlaki 0.8 m połówki + casing tylko pod ciemnymi + klamra aa
+      + mipmapy maski (grube wstęgi na dystansie FIXED); granit płytowy v4 (rotacja regionalna, płyty
+      4.5–9 m, rzadkie płytkie szwy, fasety) — user iterował 3×: „zbyt równoległe"→kratka→v4 (werdykt
+      v4 NIEDOMKNIĘTY — sprawdzić rano); budżet rezydencji desktop 448/2 GB (platform-split) — MITYGACJA
+      szwu LOD, przy widoku przez kotlinę selektor DALEJ clamped ⇒ fix docelowy w kolejce.
 - [ ] Bramki + commit + push (osobno per domknięty etap, nie jeden wór).
+- [x] RANO 2026-07-03: werdykty zebrane — szlaki OK; granit v4 ODRZUCONY („flizy") → iteracje v5 (Voronoi
+      bryły) → v6 (miks płyt+brył, rotacja regionalna) → v7 (zagnieżdżone Voronoi: płaty 26 m z bleachem
+      + bloki 5 m wzdłuż linii spadku). **ROOT CAUSE pasów z v4–v7: zmienny w przestrzeni rozmiar komórki
+      + `floor(coord/size)` na absolutnych współrzędnych = indeksy komórek suną wzdłuż poziomic szumu →
+      regularne faliste pasy (na ścianach poziome, bo Z dominuje). Fix = STAŁE rozmiary kraty; różnorodność
+      brył daje jitter Voronoi (~2:1), pofalowanie granic daje warp ADDYTYWNY (translacja nie skaluje).**
+      Werdykt usera na v7+fix: „jest niezle" — przyjęte na teraz.
+- [ ] **ODLEGŁA PRZYSZŁOŚĆ (user 2026-07-03: „kiedyś do tego wrócimy jak będzie więcej czasu")**: dalszy
+      polish granitu v7 — dobór parametrów pod referencje (komin Orlej Perci + ściana Granatów): proporcje
+      płatów/bloków, kontrast tonów/bleach, gęstość i głębokość szczelin, wydłużenie bloków; ew. porosty
+      (żółto-zielone plamy) i lepszy kolor bazowy `rockCol`. NIE wracać do zmiennych rozmiarów komórek
+      (artefakt pasów — patrz wyżej).
+- [ ] DALEJ WG PLANU: (1) szew LOD — fix jakościowy (selektor ważony normalnymi×światło / blend pasa
+      granicznego) + skirt + aktywna eviction dalekiego z16; (2) system ładowania + anty-freeze uploadów.
+- [ ] **SZEW LOD rozszerzony (23:15, screenshot Czarny Mniszek cam 0.2 km): ODSŁONIĘTY SKIRT = „prostokątna
+      płaska ściana" w kadrze** („błąd geometrii, tak nie ma w realu — chuj z tym, czym jest pokryta").
+      Skirt (BakedTileSkirtDepthMeters 6–96 m) widoczny jako wielka pionowa płaszczyzna z rozsmarowanym
+      pionowo orto (faliste „słoje" = wtórne). Do fixu razem ze szwem: (a) PRIORYTET near-field w planie
+      residency/ładowania — najbliższe kafle wypełniać PRZED szerokością, nigdy nie odsłaniać skirtu przy
+      kamerze; (b) skirt renderować dyskretnie (ciemny/bez rozciągniętego orto); (c) pytanie do usera
+      OTWARTE: ściana znika po dociągnięciu streamu (transient) czy trwała (clamp)? — ustala wagę (a) vs (b).
+      Poboczne z tej samej sceny: sharpen orto powinien GASNĄĆ przy magnifikacji (texele>piksel → ringing
+      „słojów" też na legalnej geometrii; fade smoothstep(0.4,1.0, texels-per-pixel) przy :400).
+- [ ] **AKTYWNE WYŁADOWYWANIE dalekiego detalu (user 23:25: „miały się wyładowywać detale z odległych
+      szczytów, a wciąż widzę rzeczkę 10 km z detalem")**: po podbiciu budżetu do 448 eviction (farthest-
+      first POD PRESJĄ budżetu) przestał działać w praktyce (`evicted=0`) — daleki z16 zostaje rezydentny.
+      Fix w tym samym pakiecie co selektor: (a) desire z DYSTANSOWYM sufitem zoomu (szczyt 10 km od
+      kamery NIGDY nie chce z16 — SSE per odległość), (b) aktywna eviction rezydentów, których desired
+      już nie zawiera (nie czekać na presję budżetu), (c) to też walka o FPS — 669-758 kafli @ 13 FPS to
+      draw-calle (znany temat FPS(draw-call)). UWAGA odróżniać: wstążki wody w ORTO (bake, tekstura) są
+      widoczne z każdej odległości i to jest OK — „wyładowanie" dotyczy geometrii z16.
 
 ## Wyniki rekonesansu (wklejać streszczenia z file:line)
 - Menu-mapa: GOTOWE. Panele w `MapPage.xaml`: top bar :88-181 (chipy → `SelectSectionCommand` 1-6) +
