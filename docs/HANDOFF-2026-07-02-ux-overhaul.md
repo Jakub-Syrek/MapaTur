@@ -146,11 +146,23 @@
       + log diagnostyczny; kuratorowany wpis -175 usunięty; testy 15/15).
       LEKCJA PROCESU: grafika = diagnozuj WŁASNYMI zrzutami (computer-use) + deterministycznymi
       przełącznikami CPU, nie iteracjami fade'ów w shaderze na werdyktach z drugiej ręki.
-- [ ] **W TOKU: „lotnisko" obok ostrej grani (user 2026-07-03 po południu, Orla Perć)** — pół grani ostre,
-      obok gładka kopuła; badge `448 (cap)` ⇒ selektor sclampowany, eviction martwa (`evicted=0`) — bliskie
-      kafle nie dostają z16, bo budżet okupują dalecy rezydenci. TO JEST zakolejkowany pakiet: (a) desire
-      z dystansowym sufitem zoomu (SSE per odległość), (b) AKTYWNA eviction rezydentów spoza desired,
-      (c) priorytet near-field. Potem: (2) system ładowania + anty-freeze uploadów.
+- [x] **„LOTNISKO" obok ostrej grani ROZWIĄZANE (2026-07-03, user: „grań wróciła”) — TRZY przyczyny,
+      wszystkie zmierzone przed fixem:**
+      (1) selektor kotwiczył pierścienie detalu POD KAMERĄ — patrząc na grań przez dolinę, cel był poza
+      drobnym ringiem → **kotwica = grunt pod `camera.Target`** (3222c2e; orbit = identyczna selekcja;
+      ta sama lekcja co okno maski szlaków);
+      (2) stream ładował TYLKO przy ruchu kamery — stojąc w miejscu fill zamarzał w połowie (log: utknął
+      296/448) → **self-kick co 150 ms aż resident==desired**, stop przy braku postępu (6f73300);
+      (3) box-averaged BAZA leży 0.5–4 m PONAD powierzchnią z16 na WYPUKŁYCH stokach (zmierzone offline:
+      kopuła nad Roztoką z13−z16=+0.5..+3.8 m) → zawsze-rysowana baza depth-testem ZAKOPYWAŁA gotowe meshe
+      z16 („obły pagórek” = wypukłość) → **culling bazy ON, okludery WYŁĄCZNIE bezdziurowe z16**
+      (regresja szwów spod grubych kafli nie wraca, bo grube nie cullują) (6f73300).
+      METODA: pomiary offline przez PowerShell+reflection na DLL-ach apki (BakedTileAvailabilityIndex.Scan,
+      SampleBilinear, lapRMS, selekcja QuadtreeTileSelector z ręczną kamerą) — NIE zgadywanie z obrazka.
+      FOLLOW-UP: (a) częściowo pokryty kafel bazy dalej może zakopywać z16 na skraju ringu (culled 1/340 —
+      kafle bazy duże/adaptacyjne; ew. cięcie per-komórka z16 albo depth-bias bazy w dół); (b) `desired`
+      wciąż == cap 448 z clamped=true (strojenie promieni/budżetu vs FPS(draw-call)); (c) eviction
+      farthest-first działa (evicted=8 przy pełnym budżecie i ruchu). Potem: system ładowania + anty-freeze.
 - [ ] **SZEW LOD rozszerzony (23:15, screenshot Czarny Mniszek cam 0.2 km): ODSŁONIĘTY SKIRT = „prostokątna
       płaska ściana" w kadrze** („błąd geometrii, tak nie ma w realu — chuj z tym, czym jest pokryta").
       Skirt (BakedTileSkirtDepthMeters 6–96 m) widoczny jako wielka pionowa płaszczyzna z rozsmarowanym
