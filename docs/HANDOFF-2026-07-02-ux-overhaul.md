@@ -135,6 +135,13 @@
       płatów/bloków, kontrast tonów/bleach, gęstość i głębokość szczelin, wydłużenie bloków; ew. porosty
       (żółto-zielone plamy) i lepszy kolor bazowy `rockCol`. NIE wracać do zmiennych rozmiarów komórek
       (artefakt pasów — patrz wyżej).
+- [ ] **ODLEGŁA PRZYSZŁOŚĆ 2 (user 2026-07-03 wieczór, porównanie z fotą komina Mniszka: „na razie jest ok,
+      mamy większe bugi, wrócimy do z17/18 kiedyś")** — sufit wierności blisko ściany; składniki i opcje wg
+      dźwigni/koszt: (a) **AO z krzywizny DEM** (ciemne żleby/szczeliny — największa głębia najtaniej, bez
+      nowych danych); (b) **proceduralny mikrorelief/detail-normal na z16** (struktury <1.5 m — de facto
+      dokończenie granitu v7 jako normal); (c) **bake z17/z18 do bliskich ujęć** (prawdziwe sub-metrowe
+      krawędzie; 4–16× danych, nowy poziom pipeline w TILE-PRODUCTION — duża decyzja). Kontekst: baked z16
+      = siatka ~1.5 m (kafel 256²/~400 m), więc żyletki/kolumnowe spękania z foty NIE istnieją w geometrii.
 - [x] SAGA „DWA SZLAKI" (2026-07-03, ~6 iteracji): przerywany bliźniak przy każdej linii = DWA źródła:
       (a) DECAL szlaków — samo-okluzja pasa na szorstkim reliefie pod skosem (dowód: bisekcja magenta + A/B
       z decalGate na CPU, własne zrzuty przez computer-use) → **decal WYŁĄCZONY** (`TrailDecalStrength=0`;
@@ -159,10 +166,17 @@
       (regresja szwów spod grubych kafli nie wraca, bo grube nie cullują) (6f73300).
       METODA: pomiary offline przez PowerShell+reflection na DLL-ach apki (BakedTileAvailabilityIndex.Scan,
       SampleBilinear, lapRMS, selekcja QuadtreeTileSelector z ręczną kamerą) — NIE zgadywanie z obrazka.
-      FOLLOW-UP: (a) częściowo pokryty kafel bazy dalej może zakopywać z16 na skraju ringu (culled 1/340 —
-      kafle bazy duże/adaptacyjne; ew. cięcie per-komórka z16 albo depth-bias bazy w dół); (b) `desired`
-      wciąż == cap 448 z clamped=true (strojenie promieni/budżetu vs FPS(draw-call)); (c) eviction
-      farthest-first działa (evicted=8 przy pełnym budżecie i ruchu). Potem: system ładowania + anty-freeze.
+      DOMKNIĘCIE (2026-07-03 wieczór, po feedbacku „po co ci 2k testów jak każda zmiana robi rozpierdol"):
+      lekcje przekute w TESTY SYSTEMOWE zamiast notatek — `Invariant_StillCamera_ConvergesToFullDesiredSet`,
+      `Invariant_FocusJump_EvictsEveryStaleResident` (był CZERWONY: rezydenci spoza desired siedzieli pod
+      capem NA ZAWSZE — teza usera „eviction zjebany" potwierdzona; fix = stale-eviction z 3-updatową łaską
+      + `StalePending` napędza pętlę aż poczekalnia pusta), `LookingAround_KeepsUnderfootDetail` (bańka oka
+      0.4× wokół kamery — metryka dwuogniskowa min(d_target, d_eye/0.4)), `LookAtFocus...`. Zakopywanie
+      z16 pod skorupą bazy rozwiązane WŁAŚCICIELEM POWIERZCHNI: `BaseCoverageMaskBuilder` (unia pełnych
+      rezydentnych z16, erozja 1 texel = konserwatywnie; 4 testy) → R8 na unit 8 → shader DISCARDUJE
+      piksele BAZY (per-mesh `IsBaseSkin`) w masce. Per-kafel culling bazy wyłączony jako nadzedowany
+      (culled 0–1/340 w praktyce). Weryfikacja własna: Koszysta/Kopka (wypukłe) z fakturą, res śledzi
+      desired (368/367). Potem: system ładowania + anty-freeze.
 - [ ] **SZEW LOD rozszerzony (23:15, screenshot Czarny Mniszek cam 0.2 km): ODSŁONIĘTY SKIRT = „prostokątna
       płaska ściana" w kadrze** („błąd geometrii, tak nie ma w realu — chuj z tym, czym jest pokryta").
       Skirt (BakedTileSkirtDepthMeters 6–96 m) widoczny jako wielka pionowa płaszczyzna z rozsmarowanym
