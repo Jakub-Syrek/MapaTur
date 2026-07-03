@@ -148,14 +148,22 @@ public sealed class Atmosphere
         var sunHigh = new Vector3(1.00f, 0.97f, 0.92f);
         var sunLow = new Vector3(1.00f, 0.50f, 0.15f);
         Vector3 sunDay = Vector3.Lerp(sunHigh, sunLow, warmth);
-        SunColor = sunElevation > 0f ? sunDay : Vector3.Zero;
+        // DAY GAIN (2026-07-03, "jak jest słońce, powinno być DUŻO jaśniej"): a plain 0..1 palette caps the
+        // midday lightSum well below 1, so a sunny scene rendered murky grey-green (removing the snow slider's
+        // white cover exposed it). Overdrive the direct sun with altitude — ~+45% at noon, fading to ~0 near
+        // the horizon so the approved golden-hour look is untouched. The framebuffer clamps the rare overshoot
+        // on already-bright faces, which reads as sunlit glare, not an artefact.
+        float dayGain = 1f + (0.5f * dayness);
+        SunColor = sunElevation > 0f ? sunDay * dayGain : Vector3.Zero;
 
         // Ambient: tracks sin(elevation) directly (not the day-clamped variant) so the night
         // half of the cycle keeps falling instead of plateauing at the horizon-equivalent. At
         // noon ~0.41 to keep Lambert visible without crushing shadows; at sunset ~0.05; at
         // midnight clamped to ~0.02 so the terrain reads as dark silhouettes against the sky.
         float elevationSin = MathF.Sin(sunElevation);
-        AmbientFactor = Math.Clamp(0.05f + (0.40f * elevationSin), 0.02f, 0.45f);
+        // Slope + cap raised (0.40/0.45 → 0.46/0.52) with the day gain above: brighter daylight fill so the
+        // shadowed sides don't read as murk at noon, while sunset (~0.05) and night (~0.02) stay unchanged.
+        AmbientFactor = Math.Clamp(0.05f + (0.46f * elevationSin), 0.02f, 0.52f);
 
         // Fog: density spikes near the horizon (longer atmospheric path = more aerial
         // perspective), drops to a minimum at noon. Calibrated against the Tatra scene scale

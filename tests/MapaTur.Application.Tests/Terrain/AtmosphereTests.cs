@@ -166,6 +166,20 @@ public sealed class AtmosphereTests
     }
 
     [Fact]
+    public void SunColor_AtHighSun_CarriesTheDayGain()
+    {
+        // "Jak jest słońce, powinno być DUŻO jaśniej": a plain 0..1 palette caps the midday lightSum well
+        // below 1, so the sunny scene rendered murky grey-green (the snow slider only masked it with white).
+        // The direct sun now carries an HDR-ish day gain — noticeably above the palette at high sun, while
+        // the low-sun golden-hour look stays untouched.
+        var noon = new Atmosphere(timeOfDayHours: 12f);
+        var lateGolden = new Atmosphere(timeOfDayHours: 19.5f); // sun near the horizon
+
+        noon.SunColor.X.Should().BeGreaterThan(1.25f, "midday direct sun must overdrive the palette");
+        lateGolden.SunColor.X.Should().BeLessThan(1.1f, "the approved golden-hour look must not brighten");
+    }
+
+    [Fact]
     public void TimeOfDayHours_OutsideRange_IsWrapped()
     {
         // 25 hours = 1am next day. The Atmosphere should treat the input modulo 24 so the
