@@ -238,6 +238,59 @@ public sealed class PeakNamerTests
     }
 
     [Fact]
+    public void RefineOnRaster_AnchoredAtTheGazetteerPoint_SeparatesADenseCluster()
+    {
+        // "Klejenie do najbliższego szczytu średnio działa jak jest ich sporo" (Mięgusze): the COARSE snap
+        // collapses neighbouring summits onto one blurred blob, so refining FROM the coarse position lands
+        // on the wrong sub-summit. Anchoring the fine snap at each summit's ORIGINAL gazetteer coordinate
+        // must put the two labels on their OWN apexes even though both coarse positions collapsed onto one.
+        var fineBounds = new MapBounds(new GeoPoint(49.19, 20.05), new GeoPoint(49.21, 20.08));
+        var samples = new float[GridSize * GridSize];
+        Array.Fill(samples, 2200f);
+        samples[(30 * GridSize) + 20] = 2410f; // apex A (Czarny)
+        samples[(30 * GridSize) + 40] = 2438f; // apex B (Wielki), ~700 m east of A on this grid
+        var fine = new DemRaster(GridSize, GridSize, fineBounds, samples);
+
+        GeoPoint apexA = new(49.21 - ((double)30 / (GridSize - 1) * 0.02), 20.05 + ((double)20 / (GridSize - 1) * 0.03));
+        GeoPoint apexB = new(49.21 - ((double)30 / (GridSize - 1) * 0.02), 20.05 + ((double)40 / (GridSize - 1) * 0.03));
+        GeoPoint collapsed = new(49.21 - ((double)30 / (GridSize - 1) * 0.02), 20.05 + ((double)39 / (GridSize - 1) * 0.03));
+
+        // Both labels were coarse-snapped onto (near) apex B's blob.
+        var czarny = new TerrainPeak(collapsed, 2400, "Czarny", LabelElevationMeters: 2410, Curated: true);
+        var wielki = new TerrainPeak(collapsed, 2430, "Wielki", LabelElevationMeters: 2438, Curated: true);
+
+        TerrainPeak refinedCzarny = PeakNamer.RefineOnRaster(czarny, apexA, fine, radiusMeters: 150.0);
+        TerrainPeak refinedWielki = PeakNamer.RefineOnRaster(wielki, apexB, fine, radiusMeters: 150.0);
+
+        refinedCzarny.Location.HaversineDistanceMetersTo(apexA).Should().BeLessThan(40.0,
+            "Czarny must sit on its OWN apex, not the neighbour's blob the coarse snap collapsed onto");
+        refinedWielki.Location.HaversineDistanceMetersTo(apexB).Should().BeLessThan(40.0);
+        refinedCzarny.ElevationMeters.Should().Be(2410f);
+        refinedWielki.ElevationMeters.Should().Be(2438f);
+    }
+
+    [Fact]
+    public void RefineOnRaster_KeepsTheCoarsePosition_WhenTheFineApexReadsFarBelowThePublishedHeight()
+    {
+        // Safety valve for sloppy curated coordinates: an anchor ~far off the real summit finds only a low
+        // slope bump on the fine raster. Accepting it would recreate the "Świnica 1651 m" class of bug —
+        // the refine must reject the fine result and keep the coarse-snapped position.
+        var fineBounds = new MapBounds(new GeoPoint(49.19, 20.05), new GeoPoint(49.21, 20.08));
+        var samples = new float[GridSize * GridSize];
+        Array.Fill(samples, 1900f);
+        samples[(30 * GridSize) + 30] = 1930f; // just a slope bump near the (bad) anchor
+        var fine = new DemRaster(GridSize, GridSize, fineBounds, samples);
+
+        GeoPoint badAnchor = new(49.21 - ((double)30 / (GridSize - 1) * 0.02), 20.05 + ((double)30 / (GridSize - 1) * 0.03));
+        GeoPoint coarsePos = new(49.2, 20.06);
+        var peak = new TerrainPeak(coarsePos, 2295, "Świnica", LabelElevationMeters: 2301, Curated: true);
+
+        TerrainPeak refined = PeakNamer.RefineOnRaster(peak, badAnchor, fine, radiusMeters: 150.0);
+
+        refined.Should().Be(peak, "a fine apex ~370 m below the published height means the anchor missed the summit");
+    }
+
+    [Fact]
     public void RefineOnRaster_OutsideTheFineRaster_ReturnsThePeakUnchanged()
     {
         var fineBounds = new MapBounds(new GeoPoint(49.19, 20.05), new GeoPoint(49.21, 20.08));

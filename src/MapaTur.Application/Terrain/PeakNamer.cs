@@ -95,17 +95,43 @@ public static class PeakNamer
     /// <param name="fineRaster">Fine elevation raster covering the peak (e.g. a baked z16 tile).</param>
     /// <param name="radiusMeters">Search window around the current position for the true apex.</param>
     public static TerrainPeak RefineOnRaster(TerrainPeak peak, DemRaster fineRaster, double radiusMeters = 150.0)
+        => RefineOnRaster(peak, peak.Location, fineRaster, radiusMeters);
+
+    /// <summary>
+    /// Anchored refine: snaps from <paramref name="anchor"/> (the summit's ORIGINAL gazetteer coordinate)
+    /// instead of the peak's current position. In dense clusters (Mięguszowieckie) the coarse base snap
+    /// collapses neighbouring summits onto one blurred blob — refining from THERE lands on the wrong
+    /// sub-summit; the OSM coordinate is the trustworthy anchor. Safety valve: when the fine apex reads
+    /// more than <paramref name="maxBelowLabelMeters"/> BELOW the published label height, the anchor missed
+    /// the real summit (sloppy curated coordinate on a slope) and the peak is returned unchanged rather
+    /// than recreating the "Świnica 1651 m" class of bug.
+    /// </summary>
+    /// <param name="peak">The peak to refine.</param>
+    /// <param name="anchor">Snap centre — the summit's original gazetteer coordinate.</param>
+    /// <param name="fineRaster">Fine elevation raster covering the anchor (e.g. a baked z16 tile).</param>
+    /// <param name="radiusMeters">Search window around the anchor for the true apex.</param>
+    /// <param name="maxBelowLabelMeters">Reject threshold vs the published height (see summary).</param>
+    public static TerrainPeak RefineOnRaster(
+        TerrainPeak peak,
+        GeoPoint anchor,
+        DemRaster fineRaster,
+        double radiusMeters = 120.0,
+        double maxBelowLabelMeters = 150.0)
     {
         ArgumentNullException.ThrowIfNull(fineRaster);
 
-        double lon = peak.Location.Longitude;
-        double lat = peak.Location.Latitude;
-        if (lon < fineRaster.West || lon > fineRaster.East || lat < fineRaster.South || lat > fineRaster.North)
+        if (anchor.Longitude < fineRaster.West || anchor.Longitude > fineRaster.East
+            || anchor.Latitude < fineRaster.South || anchor.Latitude > fineRaster.North)
         {
             return peak;
         }
 
-        (GeoPoint location, double elevation) = HighestCellNear(fineRaster, peak.Location, radiusMeters);
+        (GeoPoint location, double elevation) = HighestCellNear(fineRaster, anchor, radiusMeters);
+        if (peak.LabelElevationMeters is { } published && elevation < published - maxBelowLabelMeters)
+        {
+            return peak;
+        }
+
         return peak with { Location = location, ElevationMeters = elevation };
     }
 
