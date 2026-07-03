@@ -3458,6 +3458,7 @@ public sealed partial class MapPageViewModel : ObservableObject
 
         bakedStreamUpdating = true;
         lastBakedStreamUtc = DateTime.UtcNow;
+        bool continueFill = false;
         try
         {
             double viewportHeight = viewportHeightPixels > 0 ? viewportHeightPixels : 1000.0;
@@ -3484,7 +3485,12 @@ public sealed partial class MapPageViewModel : ObservableObject
                 int occluderCount = 0;
                 if (BakedStreamCullOccludedBase && lodBaseTileFootprints is { Count: > 0 })
                 {
-                    IReadOnlyList<MapaTur.Application.Terrain.DemTileKey> occluders = bakedStreamManager.OccludingKeys;
+                    // Z16-ONLY: coarser resident tiles must NOT cull the base (their box-averaged surface needs
+                    // the base's smooth underlay to hide LOD seams — the documented regression that kept this
+                    // feature off). Only complete 1 m tiles may claim the ground.
+                    IReadOnlyList<MapaTur.Application.Terrain.DemTileKey> occluders = bakedStreamManager.OccludingKeys
+                        .Where(k => k.Zoom == BakedStreamMaxZoom)
+                        .ToList();
                     occluderCount = occluders.Count;
                     if (occluderCount > 0)
                     {
@@ -3539,6 +3545,14 @@ public sealed partial class MapPageViewModel : ObservableObject
                     + (update.WasClampedByBudget ? " (cap)" : string.Empty);
                 MainThread.BeginInvokeOnMainThread(() => LodBadgeText = badge);
             }
+
+            // SELF-KICK until converged (2026-07-03): updates fire on camera moves, so a STILL camera froze the
+            // fill mid-way ("mogę tam stać tydzień i nic się nie doczyta" — the log showed resident stuck at
+            // 296/448 the moment the user stopped moving). While this update made progress (Loaded > 0) and the
+            // desired set is not fully resident, schedule the next round ourselves. Loaded == 0 stops the loop:
+            // either converged, or the remaining tiles are unreadable (retrying every 200 ms would spin on disk
+            // errors — the next real camera move retries those anyway).
+            continueFill = update.Loaded > 0 && bakedStreamManager.ResidentCount < update.Desired;
         }
         catch (Exception ex)
         {
@@ -3548,7 +3562,18 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             bakedStreamUpdating = false;
         }
+
+        if (continueFill)
+        {
+            // Past the debounce window (120 ms), then re-enter from the CURRENT pose (KickBakedStream reads the
+            // live camera object). Yields the UI thread between rounds, so input stays responsive during the fill.
+            await Task.Delay(BakedStreamSelfKickDelayMs).ConfigureAwait(true);
+            KickBakedStream();
+        }
     }
+
+    // Delay between self-kicked fill rounds — just past BakedStreamMinInterval so the debounce never eats the kick.
+    private const int BakedStreamSelfKickDelayMs = 150;
 
     // Geographic footprint of each base tile from its world AABB (X east, Y north): the SW-most ground corner maps
     // from (WorldMin.X, WorldMin.Y) and the NE-most from (WorldMax.X, WorldMax.Y), via the tile's own anchor. Built
@@ -3682,10 +3707,14 @@ public sealed partial class MapPageViewModel : ObservableObject
     // caps (256 / 1280 MB) — its RAM cannot take a 448×~4 MB resident set.
     private static readonly int BakedStreamMaxResidentTiles =
         DeviceInfo.Platform == DevicePlatform.WinUI ? 448 : 256;
-    // Cull base tiles fully hidden behind resident hole-free baked tiles (overdraw saver). OFF: GPU is cheap
-    // (profiler ~8–16 ms/frame) so the saving is moot, and culling under COARSE baked tiles exposed LOD seams the
-    // base was hiding. Leave off until/unless restricted to z16-only occluders. See StreamBakedDetailAsync.
-    private const bool BakedStreamCullOccludedBase = false;
+    // Cull base tiles fully hidden behind resident hole-free baked tiles. ON with Z16-ONLY occluders
+    // (2026-07-03): the box-averaged base skin sits 0.5–4 m ABOVE the true z16 surface on CONVEX slopes
+    // (measured: kopuła above Roztoka z13−z16 = +0.5..+3.8 m), so the always-drawn base BURIED the streamed
+    // 1 m detail there — whole slopes rendered as the smooth base dome ("lotnisko" next to a sharp ridge)
+    // while the z16 meshes were drawn underneath for nothing. Restricting occluders to FULL-DETAIL z16 tiles
+    // avoids the old regression that kept this off (culling under COARSE z13/14 baked tiles exposed LOD
+    // seams the base was hiding): the base disappears only where complete hole-free 1 m geometry exists.
+    private const bool BakedStreamCullOccludedBase = true;
     // Residency cap by total resident tile GEOMETRY bytes. The broad 1 m ring streamed many tiles whose geometry
     // alone (on top of the resident ortho) tipped the process into OOM at the route film's lowest point. Capping
     // resident geometry bounds memory while the RING SELECTION stays broad (this only bounds what's kept resident
