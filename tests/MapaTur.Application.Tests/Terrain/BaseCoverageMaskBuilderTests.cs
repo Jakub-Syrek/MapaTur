@@ -90,4 +90,21 @@ public sealed class BaseCoverageMaskBuilderTests
 
         mask!.CoveredAt(400f, 400f).Should().BeTrue("the union centre is covered");
     }
+
+    [Fact]
+    public void HugeWindow_IsClippedToMaxTexels_WithoutOvercovering()
+    {
+        // Rects spanning more than MaxTexels × texel are clipped: the mask stays bounded (memory) and the
+        // clipped-off far detail simply keeps its base underlay. SAFETY: clipping must never mark ground
+        // outside the window as covered.
+        float span = BaseCoverageMaskBuilder.MaxTexels * Texel * 3f; // 3× wider than the cap allows
+        BaseCoverageMask? mask = BaseCoverageMaskBuilder.Build(new[] { Rect(0f, 0f, span, 400f) });
+
+        mask.Should().NotBeNull();
+        mask!.Width.Should().BeLessThanOrEqualTo(BaseCoverageMaskBuilder.MaxTexels);
+        mask.Height.Should().BeLessThanOrEqualTo(BaseCoverageMaskBuilder.MaxTexels);
+        // Inside the clipped window: interior covered. Beyond the window: never covered.
+        mask.CoveredAt(500f, 200f).Should().BeTrue("well inside both the rect and the clipped window");
+        mask.CoveredAt(span - 200f, 200f).Should().BeFalse("ground past the clipped window keeps its base");
+    }
 }

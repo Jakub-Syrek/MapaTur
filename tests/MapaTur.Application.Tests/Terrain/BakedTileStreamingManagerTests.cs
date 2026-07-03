@@ -334,4 +334,55 @@ public sealed class BakedTileStreamingManagerTests
             $"loaded={last.Loaded}, evicted={last.Evicted}, desired={last.Desired}, clamped={last.WasClampedByBudget})");
         mgr.ResidentCount.Should().Be(last.Desired, "the new focus's desired set is fully resident");
     }
+
+    [Fact]
+    public void Invariant_StalePending_IsReported_UntilTheGraceWindowDrains()
+    {
+        // The driver keeps ticking as long as StalePending > 0 — without this contract, stales inside the
+        // grace window survived a still camera forever (the fill stopped at Loaded==0/Evicted==0 while the
+        // grace clock still had tiles to evict). Pin: after a focus jump converges its loads, either stales
+        // are reported pending or they are already evicted — they can never silently linger.
+        var mgr = NewManager(AllBaked, maxResidentTiles: 200, maxConcurrentLoads: 8);
+        DemTileKey root = RootTile();
+        var childA = new DemTileKey(MinZoom + 1, root.X * 2, root.Y * 2);
+        var childB = new DemTileKey(MinZoom + 1, (root.X * 2) + 1, (root.Y * 2) + 1);
+        DriveToConvergence(mgr, CameraAbove(childA, 800f), maxRounds: 300);
+
+        // Jump to B and update until loads finish; along the way every update must satisfy the contract.
+        Camera3D cameraB = CameraAbove(childB, 800f);
+        bool sawPendingOrEviction = false;
+        BakedStreamingUpdate update = Update(mgr, cameraB);
+        for (int i = 0; i < 300 && (update.Loaded > 0 || update.Evicted > 0 || update.StalePending > 0); i++)
+        {
+            sawPendingOrEviction |= update.Evicted > 0 || update.StalePending > 0;
+            update = Update(mgr, cameraB);
+        }
+
+        sawPendingOrEviction.Should().BeTrue(
+            "a focus jump with a tight budget must surface its stale residents via Evicted or StalePending");
+        update.StalePending.Should().Be(0, "at convergence the grace window is fully drained");
+        update.Loaded.Should().Be(0);
+        update.Evicted.Should().Be(0);
+    }
+
+    [Fact]
+    public void HoleFreeFinestWorldRects_ReturnsOnlyFinestHoleFreeTiles_AsWorldAabbs()
+    {
+        // The surface-ownership mask's input: world AABBs of the resident hole-free FINEST tiles only.
+        // Coarser residents (retained ring) must never appear — a z14 rect would let the mask discard the
+        // base over ground whose 1 m detail is NOT actually resident.
+        var mgr = NewManager(AllBaked, maxResidentTiles: 60, maxConcurrentLoads: 8);
+        Camera3D camera = CameraAbove(RootTile(), 900f);
+        DriveToConvergence(mgr, camera, maxRounds: 200);
+
+        var rects = mgr.HoleFreeFinestWorldRects();
+
+        rects.Should().NotBeEmpty("a converged scene has finest tiles under the camera");
+        foreach ((System.Numerics.Vector2 min, System.Numerics.Vector2 max) in rects)
+        {
+            (max.X - min.X).Should().BeInRange(300f, 700f,
+                "a z16 tile at Tatra latitude is ~400-620 m across — a coarser tile's rect would be km-scale");
+            (max.Y - min.Y).Should().BeInRange(300f, 700f);
+        }
+    }
 }
