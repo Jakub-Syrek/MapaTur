@@ -410,7 +410,7 @@
   <data name="StatusOfflineSkippedSuffixFormat" xml:space="preserve"><value>, {0} skipped</value></data>
   <data name="StatusDownloadingTatraOfflineProgressFormat" xml:space="preserve"><value>Downloading Tatras offline… {0}% ({1}/{2}{3})</value></data>
   <data name="StatusDownloadingTatraOfflineZoomFormat" xml:space="preserve"><value>Downloading Tatras offline z{0}…</value></data>
-  <data name="StatusTatraOfflineDoneFormat" xml:space="preserve"><value>Tatras offline ready: {0} tiles (base z13/14 + 1 m z16) on disk</value></data>
+  <data name="StatusTatraOfflineDoneFormat" xml:space="preserve"><value>Tatras offline ready: {0} tiles on disk</value></data>
   <data name="StatusTatraOfflinePartialFormat" xml:space="preserve"><value>Tatras offline: {0}/{1} tiles (network/coverage — retry to fetch the rest)</value></data>
   <data name="StatusTatraOfflineError" xml:space="preserve"><value>Tatras offline download error</value></data>
   <data name="StatusPackagesUnavailable" xml:space="preserve"><value>Package download unavailable</value></data>
@@ -419,14 +419,15 @@
   <data name="StatusDownloadingPackageFormat" xml:space="preserve"><value>Downloading {0} ({1}/{2})… {3}%</value></data>
   <data name="StatusPackagesReadyFormat" xml:space="preserve"><value>Data packages ready: {0} downloaded. Restart to load the new data.</value></data>
   <data name="StatusPackagesError" xml:space="preserve"><value>Data package download error</value></data>
-  <data name="StatusLodUnavailable" xml:space="preserve"><value>LOD unavailable</value></data>
+  <data name="StatusLodUnavailable" xml:space="preserve"><value>3D terrain unavailable</value></data>
   <data name="StatusMapLoading" xml:space="preserve"><value>Map is loading — try again in a moment</value></data>
   <data name="StatusStartingUp" xml:space="preserve"><value>Starting up…</value></data>
-  <data name="StatusLodBase" xml:space="preserve"><value>LOD: 30 m base…</value></data>
-  <data name="StatusLodNoBase" xml:space="preserve"><value>LOD: no base (network?)</value></data>
-  <data name="StatusLodDetail" xml:space="preserve"><value>LOD: 1 m tile…</value></data>
-  <data name="StatusLodReady" xml:space="preserve"><value>LOD: base + 1 m follows the camera (Stage 3)</value></data>
-  <data name="StatusLodError" xml:space="preserve"><value>LOD error</value></data>
+  <data name="StatusStreamingDetailFormat" xml:space="preserve"><value>Streaming terrain… {0}/{1}</value></data>
+  <data name="StatusLodBase" xml:space="preserve"><value>Building the terrain…</value></data>
+  <data name="StatusLodNoBase" xml:space="preserve"><value>Terrain data unavailable (network?)</value></data>
+  <data name="StatusLodDetail" xml:space="preserve"><value>Loading terrain detail…</value></data>
+  <data name="StatusLodReady" xml:space="preserve"><value>Terrain ready</value></data>
+  <data name="StatusLodError" xml:space="preserve"><value>Terrain build error</value></data>
   <data name="StatusGpxExportedFormat" xml:space="preserve"><value>Exported GPX to {0}</value></data>
   <data name="StatusGpxExportFailedFormat" xml:space="preserve"><value>Could not write GPX file: {0}</value></data>
   <data name="StatusAutoLoadedFormat" xml:space="preserve"><value>Auto-loaded: {0}</value></data>

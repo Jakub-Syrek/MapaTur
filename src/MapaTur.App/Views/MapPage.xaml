@@ -832,6 +832,19 @@
             <Label Text="{Binding LodBadgeText}" Style="{StaticResource GlassCaption}" />
         </Border>
 
+        <!-- Detail-fill pill: spinner + "Doczytywanie terenu… N/M" while the tile stream is still filling
+             the view — so a temporarily smooth slope reads as "loading", not as the finished terrain. -->
+        <Border Style="{StaticResource GlassBar}" Padding="12,6"
+                HorizontalOptions="Center" VerticalOptions="End" Margin="0,0,0,60"
+                InputTransparent="True"
+                IsVisible="{Binding IsStreamingDetail}">
+            <HorizontalStackLayout Spacing="8">
+                <ActivityIndicator IsRunning="{Binding IsStreamingDetail}" Color="{StaticResource GlassAccent}"
+                                   WidthRequest="14" HeightRequest="14" VerticalOptions="Center" />
+                <Label Text="{Binding StreamingDetailText}" Style="{StaticResource GlassCaption}" VerticalOptions="Center" />
+            </HorizontalStackLayout>
+        </Border>
+
         <!-- Marker details card: styled popup shown when a POI / climbing marker is tapped. -->
         <Grid IsVisible="{Binding IsMarkerPopupVisible}"
               BackgroundColor="#80000000">

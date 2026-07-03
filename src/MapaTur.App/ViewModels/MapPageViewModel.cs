@@ -227,6 +227,16 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private string initialLoadStage = Localization.AppStrings.StatusStartingUp;
 
+    /// <summary>True while the baked-tile stream is still filling the desired set — drives the small
+    /// "Doczytywanie terenu… N/M" pill with a spinner, so the user can tell mid-fill smoothness from the
+    /// finished terrain ("dopóki się doczytują detale powinna być jakaś animacja i status").</summary>
+    [ObservableProperty]
+    private bool isStreamingDetail;
+
+    /// <summary>Live fill progress text for the streaming pill ("Doczytywanie terenu… 296/448").</summary>
+    [ObservableProperty]
+    private string streamingDetailText = string.Empty;
+
     /// <summary>Whether to show the 3D on-screen chrome (sliders): only in 3D mode and not mid-flight.</summary>
     public bool Show3DChrome => Is3DMode && !Is3DFlying;
 
@@ -3568,6 +3578,20 @@ public sealed partial class MapPageViewModel : ObservableObject
                     + (update.WasClampedByBudget ? " (cap)" : string.Empty);
                 MainThread.BeginInvokeOnMainThread(() => LodBadgeText = badge);
             }
+
+            // Live fill indicator: while the desired set is still loading (or stales are draining), show the
+            // "Doczytywanie terenu… N/M" pill so mid-fill smoothness is visibly "still loading", not "done".
+            bool filling = bakedStreamManager.ResidentCount < update.Desired
+                || update.Loaded > 0
+                || update.StalePending > 0;
+            if (filling)
+            {
+                StreamingDetailText = Fmt(
+                    Localization.AppStrings.StatusStreamingDetailFormat,
+                    Math.Min(bakedStreamManager.ResidentCount, update.Desired), update.Desired);
+            }
+
+            IsStreamingDetail = filling;
 
             // SELF-KICK until converged (2026-07-03): updates fire on camera moves, so a STILL camera froze the
             // fill mid-way ("mogę tam stać tydzień i nic się nie doczyta" — the log showed resident stuck at

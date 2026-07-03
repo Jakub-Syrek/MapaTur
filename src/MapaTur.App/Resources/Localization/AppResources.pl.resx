@@ -410,7 +410,7 @@
   <data name="StatusOfflineSkippedSuffixFormat" xml:space="preserve"><value>, {0} pominięto</value></data>
   <data name="StatusDownloadingTatraOfflineProgressFormat" xml:space="preserve"><value>Pobieranie Tatr offline… {0}% ({1}/{2}{3})</value></data>
   <data name="StatusDownloadingTatraOfflineZoomFormat" xml:space="preserve"><value>Pobieranie Tatr offline z{0}…</value></data>
-  <data name="StatusTatraOfflineDoneFormat" xml:space="preserve"><value>Tatry offline gotowe: {0} kafli (baza z13/14 + 1 m z16) na dysku</value></data>
+  <data name="StatusTatraOfflineDoneFormat" xml:space="preserve"><value>Tatry offline gotowe: {0} kafli na dysku</value></data>
   <data name="StatusTatraOfflinePartialFormat" xml:space="preserve"><value>Tatry offline: {0}/{1} kafli (sieć/pokrycie — ponów, by dobrać resztę)</value></data>
   <data name="StatusTatraOfflineError" xml:space="preserve"><value>Błąd pobierania Tatr offline</value></data>
   <data name="StatusPackagesUnavailable" xml:space="preserve"><value>Pobieranie paczek niedostępne</value></data>
@@ -419,14 +419,15 @@
   <data name="StatusDownloadingPackageFormat" xml:space="preserve"><value>Pobieranie {0} ({1}/{2})… {3}%</value></data>
   <data name="StatusPackagesReadyFormat" xml:space="preserve"><value>Paczki danych gotowe: {0} pobrano. Uruchom ponownie, by wczytać nowe dane.</value></data>
   <data name="StatusPackagesError" xml:space="preserve"><value>Błąd pobierania paczek danych</value></data>
-  <data name="StatusLodUnavailable" xml:space="preserve"><value>LOD niedostępne</value></data>
+  <data name="StatusLodUnavailable" xml:space="preserve"><value>Teren 3D niedostępny</value></data>
   <data name="StatusMapLoading" xml:space="preserve"><value>Trwa ładowanie mapy — spróbuj za chwilę</value></data>
   <data name="StatusStartingUp" xml:space="preserve"><value>Uruchamianie…</value></data>
-  <data name="StatusLodBase" xml:space="preserve"><value>LOD: baza 30 m…</value></data>
-  <data name="StatusLodNoBase" xml:space="preserve"><value>LOD: brak bazy (sieć?)</value></data>
-  <data name="StatusLodDetail" xml:space="preserve"><value>LOD: kafel 1 m…</value></data>
-  <data name="StatusLodReady" xml:space="preserve"><value>LOD: baza + 1 m podąża za kamerą (Etap 3)</value></data>
-  <data name="StatusLodError" xml:space="preserve"><value>Błąd LOD</value></data>
+  <data name="StatusStreamingDetailFormat" xml:space="preserve"><value>Doczytywanie terenu… {0}/{1}</value></data>
+  <data name="StatusLodBase" xml:space="preserve"><value>Budowanie terenu…</value></data>
+  <data name="StatusLodNoBase" xml:space="preserve"><value>Brak danych terenu (sieć?)</value></data>
+  <data name="StatusLodDetail" xml:space="preserve"><value>Wczytywanie szczegółów terenu…</value></data>
+  <data name="StatusLodReady" xml:space="preserve"><value>Teren gotowy</value></data>
+  <data name="StatusLodError" xml:space="preserve"><value>Błąd budowania terenu</value></data>
   <data name="StatusGpxExportedFormat" xml:space="preserve"><value>Wyeksportowano GPX do {0}</value></data>
   <data name="StatusGpxExportFailedFormat" xml:space="preserve"><value>Nie udało się zapisać pliku GPX: {0}</value></data>
   <data name="StatusAutoLoadedFormat" xml:space="preserve"><value>Wczytano automatycznie: {0}</value></data>
