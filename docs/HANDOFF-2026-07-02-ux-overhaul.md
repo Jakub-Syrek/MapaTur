@@ -81,13 +81,17 @@
       robi")**: system ładowania — serwis stanów aktywności (VM) + overlay startowego ładowania sceny
       z realnym postępem (DEM → baked → orto → szlaki; `isInitialLoading`/`loadProgress` JUŻ SĄ w VM,
       tylko niezbindowane!) + tacka ikon aktywności na górnym pasku dla każdego pobierania.
-- [ ] **FREEZE przy ładowaniu LOD-ów (user 2026-07-02: „apka nie powinna frezować na ładowaniu lodów,
-      wygląda jak gówno")**: fala uploadu buforów kafli przy starcie sceny (i po dużym skoku kamery) blokuje
-      wątek GL — zmierzony frame gap **12 389 ms / 12 787 ms przy pendingUploads=146→98** (log 20:30:00).
-      Fix: BUDŻET uploadów per klatka (np. ≤8 ms/frame z kolejki pendingUploads, priorytet od kamery),
-      ewentualnie glBufferSubData w plastrach / mniejsze porcje. Mechanizm deferred-upload już istnieje
-      (32d987f) — brakuje mu limitu na klatkę. Robić RAZEM z systemem ładowania (jedno „doświadczenie
-      startu": progres + brak freezów).
+- [~] **FREEZE przy ładowaniu LOD-ów — CZĘŚCIOWO (2026-07-03 wieczór, 3a32bf0)**: budżet uploadów VBO
+      przerobiony ze sztukowego (6 kafli) na CZASOWY (~6 ms/klatkę) + drain w kolejności priorytetu
+      (stary brał z OGONA = najdalsze przed gruntem pod kamerą!). ALE pomiar wykazał, że główny freeze
+      startu (gapy 6–14 s) występuje przy PUSTEJ kolejce VBO — **winowajcą jest synchroniczny dekod+upload
+      ORTO na wątku GL** (8 komórek ~1.7 GB CPU / ~967 MB GPU przy starcie sceny; tytuł okna „Not
+      Responding"). NASTĘPNY CEL CHIRURGICZNY: krojenie uploadu orto na paski glTexSubImage2D per klatka
+      (+ ew. dekod poza wątkiem GL). Overlay startowy DZIAŁA (3a32bf0): karta MapaTur + ProgressBar
+      (0.15 DEM → 0.3 baza → 0.7 detal → 1.0) + StatusMessage; IsInitialLoading gaszone w finally.
+      OBSERWACJA przy okazji: przy klamrze (desired==cap==448, clamped=true) stream MŁÓCI loaded=8/evicted=8
+      co ~1 s w nieskończoność (churn krawędzi ringu pod przycięciem) — do histerezy przy strojeniu
+      selektora; oraz PassTimes urosły (shadow 11.7 ms, sumGpu 23 ms przy 796 kaflach) — FPS(draw-call).
 - [ ] **NOWE (user 2026-07-02 ~21:30, screenshot + fotka referencyjna): OŚWIETLENIE — „jak jest słońce,
       powinno być DUŻO jaśniej" + „przepatrz cienie ponownie, żeby były zgodne ze słońcem”.** Scena w apce
       (Kościelec/Świnica) jest mroczna-szarozielona nawet w dzień; referencja (fot. Nienartowicz, Hala
