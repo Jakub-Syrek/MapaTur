@@ -1807,6 +1807,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // against OrthoDistanceTier.DesiredCapPx every frame to detect a tier change.
         public int UploadedCapPx;
 
+        // Persistent far-tier buffer + the in-flight off-thread box-average producing it. Computed at most
+        // ONCE per cell (~1/16 of the master bytes): the synchronous per-tier-change downsample of a ~180 MB
+        // master on the GL thread was ~1 s of the measured first-swap hitch (4 far cells at scene start).
+        // While FarCompute runs the cell keeps rendering whatever it has (master texture, or nothing on its
+        // very first appearance); every later demotion is a pointer swap via FarRgba.
+        public byte[]? FarRgba;
+        public int FarWidth;
+        public int FarHeight;
+        public Task<(byte[] Rgba, int Width, int Height)>? FarCompute;
+
         // STRIP-SLICED upload state (anti-freeze): the texture is allocated empty up front and filled a few
         // MB of rows per frame via TexSubImage2D; Texture stays 0 (cell renders hypsometric/previous) until
         // the last strip lands and the mip chain is generated. A monolithic TexImage2D of all cells in one
@@ -4642,17 +4652,42 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             }
 
             OrthoTile t = orthoTiles[idx];
+
+            // Harvest a finished off-thread far-tier compute into the cell's persistent cache. A faulted
+            // task is dropped (the scheduler will simply request the compute again next frame).
+            if (t.FarCompute is { IsCompleted: true } farDone)
+            {
+                t.FarCompute = null;
+                if (farDone.IsCompletedSuccessfully)
+                {
+                    (t.FarRgba, t.FarWidth, t.FarHeight) = farDone.Result;
+                }
+            }
+
             Vector3 nearest = Vector3.Clamp(cameraWorldPos, aabb.Min, aabb.Max);
             float distance = Vector3.Distance(cameraWorldPos, nearest);
             int desiredCap = OrthoDistanceTier.DesiredCapPx(t.UploadedCapPx, distance);
-            if (desiredCap == t.UploadedCapPx)
+            switch (OrthoTierScheduler.Decide(
+                desiredCap, t.UploadedCapPx, Math.Max(t.MasterWidth, t.MasterHeight),
+                hasCachedFar: t.FarRgba is not null, farComputePending: t.FarCompute is not null))
             {
-                continue;
+                case OrthoTierAction.SwapToMaster:
+                    (t.Rgba, t.Width, t.Height) = (t.MasterRgba, t.MasterWidth, t.MasterHeight);
+                    break;
+                case OrthoTierAction.SwapToCachedFar:
+                    (t.Rgba, t.Width, t.Height) = (t.FarRgba!, t.FarWidth, t.FarHeight);
+                    break;
+                case OrthoTierAction.StartFarCompute:
+                    // Off the GL thread: the box-average of a ~180 MB master takes ~250 ms of pure CPU.
+                    // The current texture keeps drawing until the swap happens on a later frame.
+                    byte[] master = t.MasterRgba;
+                    (int mw, int mh, int cap) = (t.MasterWidth, t.MasterHeight, desiredCap);
+                    t.FarCompute = Task.Run(() => OrthoCellDownsampler.Downsample(master, mw, mh, cap));
+                    continue;
+                default:
+                    continue;
             }
 
-            (t.Rgba, t.Width, t.Height) = desiredCap >= t.MasterWidth && desiredCap >= t.MasterHeight
-                ? (t.MasterRgba, t.MasterWidth, t.MasterHeight)
-                : OrthoCellDownsampler.Downsample(t.MasterRgba, t.MasterWidth, t.MasterHeight, desiredCap);
             t.UploadedCapPx = desiredCap;
             if (t.Texture != 0)
             {
@@ -4692,6 +4727,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             toUploadNow.UnionWith(tierChanged);
             foreach (int idx in toUploadNow)
             {
+                // Tier not decided yet (first far-tier compute still running off-thread): Rgba still points
+                // at the full master — queueing it now would strip-upload ~180 MB that gets thrown away.
+                // The cell is (re)queued via tierChanged the frame its swap lands.
+                if (orthoTiles[idx].UploadedCapPx == 0)
+                {
+                    continue;
+                }
+
                 if (!orthoUploadQueue.Contains(idx))
                 {
                     orthoUploadQueue.Add(idx);
