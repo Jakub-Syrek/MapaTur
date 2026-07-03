@@ -983,7 +983,7 @@ public sealed partial class MapPageViewModel : ObservableObject
 
                 MainThread.BeginInvokeOnMainThread(() =>
                 {
-                    lodBaseTiles = t.Result;
+                    lodBaseTiles = MarkBaseSkin(t.Result);
                     lodBaseTileFootprints = ComputeBaseTileFootprints(t.Result);
                     detailMeshCache.Clear(); // exaggeration is part of every cached block's identity
                     // Fresh manager = fresh residents, all rebuilt at the new exaggeration on the next update.
@@ -3330,7 +3330,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             Peaks3DOverlay = await Task.Run(() =>
                 PeakNamer.MergeWithGazetteer(PeakDetector.Detect(lodPeakRaster, lodPeakOptions), lodGazetteer, baseRaster)).ConfigureAwait(true);
             RebuildPlaceGazetteer();
-            lodBaseTiles = baseTiles;
+            lodBaseTiles = MarkBaseSkin(baseTiles);
             lodBaseTileFootprints = ComputeBaseTileFootprints(baseTiles);
             lodAnchor = baseCentre;
             lodRingBase = ringBase;
@@ -3518,6 +3518,11 @@ public sealed partial class MapPageViewModel : ObservableObject
                 TerrainTiles = combined; // OnTilesChanged: DetailStreamingEnabled ⇒ repaint only, no reframe
                 OnPropertyChanged(nameof(TerrainFrame));
 
+                // Surface ownership: refresh the coverage mask the shader uses to discard the base skin over
+                // ground whose full 1 m detail is resident (see BaseCoverageMaskBuilder — the "airport" fix).
+                BaseCoverageMask = MapaTur.Application.Terrain.BaseCoverageMaskBuilder.Build(
+                    bakedStreamManager.HoleFreeFinestWorldRects());
+
                 if ((update.Loaded > 0 || update.Evicted > 0) && BakedStreamCullOccludedBase)
                 {
                     logger.LogInformation(
@@ -3548,11 +3553,14 @@ public sealed partial class MapPageViewModel : ObservableObject
 
             // SELF-KICK until converged (2026-07-03): updates fire on camera moves, so a STILL camera froze the
             // fill mid-way ("mogę tam stać tydzień i nic się nie doczyta" — the log showed resident stuck at
-            // 296/448 the moment the user stopped moving). While this update made progress (Loaded > 0) and the
-            // desired set is not fully resident, schedule the next round ourselves. Loaded == 0 stops the loop:
-            // either converged, or the remaining tiles are unreadable (retrying every 200 ms would spin on disk
-            // errors — the next real camera move retries those anyway).
-            continueFill = update.Loaded > 0 && bakedStreamManager.ResidentCount < update.Desired;
+            // 296/448 the moment the user stopped moving). Keep ticking while: this update made progress toward
+            // an incomplete desired set (Loaded), OR stale ex-desired residents are still draining through their
+            // eviction grace window (Evicted / StalePending — without this they'd squat until the next camera
+            // move: "stara grań 5 km dalej nie znika"). A no-progress round with nothing pending stops the loop
+            // (unreadable tiles retry on the next real camera move instead of spinning on disk errors).
+            continueFill = (update.Loaded > 0 && bakedStreamManager.ResidentCount < update.Desired)
+                || update.Evicted > 0
+                || update.StalePending > 0;
         }
         catch (Exception ex)
         {
@@ -3574,6 +3582,24 @@ public sealed partial class MapPageViewModel : ObservableObject
 
     // Delay between self-kicked fill rounds — just past BakedStreamMinInterval so the debounce never eats the kick.
     private const int BakedStreamSelfKickDelayMs = 150;
+
+    // Tags every base tile as the BASE SKIN so the renderer can discard its fragments inside the coverage
+    // mask (surface ownership: resident hole-free z16 owns its ground — see BaseCoverageMaskBuilder).
+    private static IReadOnlyList<TerrainMesh3D> MarkBaseSkin(IReadOnlyList<TerrainMesh3D> tiles)
+    {
+        foreach (TerrainMesh3D tile in tiles)
+        {
+            tile.IsBaseSkin = true;
+        }
+
+        return tiles;
+    }
+
+    /// <summary>World-space coverage mask of the resident full-detail (hole-free z16) ground — the renderer
+    /// discards BASE-SKIN fragments inside it, so the smooth base can never depth-bury the streamed 1 m
+    /// detail on convex slopes ("lotnisko obok ostrej grani"). Null = no discard.</summary>
+    [ObservableProperty]
+    private MapaTur.Application.Terrain.BaseCoverageMask? baseCoverageMask;
 
     // Geographic footprint of each base tile from its world AABB (X east, Y north): the SW-most ground corner maps
     // from (WorldMin.X, WorldMin.Y) and the NE-most from (WorldMax.X, WorldMax.Y), via the tile's own anchor. Built
@@ -3707,14 +3733,13 @@ public sealed partial class MapPageViewModel : ObservableObject
     // caps (256 / 1280 MB) — its RAM cannot take a 448×~4 MB resident set.
     private static readonly int BakedStreamMaxResidentTiles =
         DeviceInfo.Platform == DevicePlatform.WinUI ? 448 : 256;
-    // Cull base tiles fully hidden behind resident hole-free baked tiles. ON with Z16-ONLY occluders
-    // (2026-07-03): the box-averaged base skin sits 0.5–4 m ABOVE the true z16 surface on CONVEX slopes
-    // (measured: kopuła above Roztoka z13−z16 = +0.5..+3.8 m), so the always-drawn base BURIED the streamed
-    // 1 m detail there — whole slopes rendered as the smooth base dome ("lotnisko" next to a sharp ridge)
-    // while the z16 meshes were drawn underneath for nothing. Restricting occluders to FULL-DETAIL z16 tiles
-    // avoids the old regression that kept this off (culling under COARSE z13/14 baked tiles exposed LOD
-    // seams the base was hiding): the base disappears only where complete hole-free 1 m geometry exists.
-    private const bool BakedStreamCullOccludedBase = true;
+    // Cull base tiles fully hidden behind resident hole-free baked tiles. SUPERSEDED (2026-07-03) by the
+    // per-pixel surface-ownership mask (BaseCoverageMaskBuilder → shader discard of base-skin fragments):
+    // whole-base-tile culling required FULL coverage of a large adaptive base tile and almost never fired in
+    // practice (culled 0–1/340), so the box-averaged base — 0.5–4 m ABOVE the true z16 surface on convex
+    // slopes — kept depth-burying the streamed detail ("lotnisko obok ostrej grani"). The machinery stays
+    // for a possible future overdraw optimisation; visual correctness now comes from the mask.
+    private const bool BakedStreamCullOccludedBase = false;
     // Residency cap by total resident tile GEOMETRY bytes. The broad 1 m ring streamed many tiles whose geometry
     // alone (on top of the resident ortho) tipped the process into OOM at the route film's lowest point. Capping
     // resident geometry bounds memory while the RING SELECTION stays broad (this only bounds what's kept resident

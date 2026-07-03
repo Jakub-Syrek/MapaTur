@@ -85,6 +85,15 @@ public sealed class TerrainMesh3D
     /// </summary>
     public long EstimatedGpuBytes { get; }
 
+    /// <summary>
+    /// True when this mesh is the coarse BASE SKIN (the always-drawn smooth underlay beneath the streamed
+    /// baked detail). The renderer discards base-skin fragments inside the <see cref="BaseCoverageMask"/> —
+    /// on convex slopes the box-averaged base sits metres ABOVE the true z16 surface and would otherwise
+    /// depth-bury the streamed detail. Set by the scene builder after the base tiles are built; false for
+    /// every detail/baked mesh.
+    /// </summary>
+    public bool IsBaseSkin { get; set; }
+
     private TerrainMesh3D(
         Vector3[] vertices,
         Vector3[] normals,

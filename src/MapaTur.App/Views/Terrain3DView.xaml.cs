@@ -364,6 +364,19 @@ public partial class Terrain3DView : ContentView
         set => SetValue(BakedElevationIndexProperty, value);
     }
 
+    // Surface-ownership mask (BaseCoverageMaskBuilder): where the resident hole-free z16 detail fully covers
+    // the ground, the renderer DISCARDS base-skin fragments — the box-averaged base otherwise sits metres
+    // ABOVE the true surface on convex slopes and depth-buries the streamed detail ("lotnisko" burial).
+    public static readonly BindableProperty BaseCoverageMaskProperty = BindableProperty.Create(
+        nameof(BaseCoverageMask), typeof(MapaTur.Application.Terrain.BaseCoverageMask), typeof(Terrain3DView), null,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
+
+    public MapaTur.Application.Terrain.BaseCoverageMask? BaseCoverageMask
+    {
+        get => (MapaTur.Application.Terrain.BaseCoverageMask?)GetValue(BaseCoverageMaskProperty);
+        set => SetValue(BaseCoverageMaskProperty, value);
+    }
+
     /// <summary>
     /// Whether the rock material is blended onto steep faces (premium menu "Skały"). When false the steep
     /// walls keep the raw orthophoto (which smears) — useful for an A/B of the blend.
@@ -3141,6 +3154,7 @@ public partial class Terrain3DView : ContentView
             glRenderer.SetOrthoCoverageGeoBounds(LodOrthoCoverageBounds, 300f);
             glRenderer.LakeFineBounds = LodDetailBounds; // lakes inside the 1 m detail keep legacy seating
             glRenderer.BakedElevationIndex = BakedElevationIndex; // trail/route/road lines seat on the REAL baked tile, not the static base
+            glRenderer.BaseCoverageMask = BaseCoverageMask; // surface ownership: discard base-skin pixels over resident full z16 detail
             glRenderer.Waterways = Waterways;   // stream/river polylines → shiny water decal in the terrain shader
             glRenderer.Waterfalls = Waterfalls; // waterfall points → bright foam accents on their streams
             glRenderer.ShowCableCar = ShowCableCar; // "🚠 Kolejka" layer toggle

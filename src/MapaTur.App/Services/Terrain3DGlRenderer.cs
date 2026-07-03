@@ -149,6 +149,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                                                    // contours above. uTrailStrength 0 = off.
         "uniform sampler2D uTrailMask;\n" +
         "uniform float uTrailStrength;\n" +
+        "uniform sampler2D uBaseCover;\n" +   // surface-ownership mask (unit 8): 255 = full-detail z16 ground
+        "uniform vec2 uBaseCoverMinXY;\n" +   // world-XY of the mask window's min corner
+        "uniform vec2 uBaseCoverSizeXY;\n" +  // world-XY extent of the mask window (metres)
+        "uniform float uBaseCoverOn;\n" +     // 1 = mask valid this frame
+        "uniform float uIsBaseSkin;\n" +      // 1 while drawing a BASE tile (set per mesh in the tile loop)
         "uniform sampler2D uWaterMask;\n" +   // parallel R8 watercourse distance field (same window as uTrailMask)
         "uniform float uWaterStrength;\n" +   // 0 = no water layer this frame
         "uniform vec2 uTrailMaskMinXY;\n" +   // world-XY of the mask window's min corner (= uv 0,0)
@@ -238,6 +243,19 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Reflection pre-pass: we're rendering the terrain MIRRORED about the lake plane into the reflection
         // texture. Discard anything below the waterline so only the above-water peaks end up in the reflection.
         "  if (uReflectionPass > 0.5 && vWorldPos.z < uWaterClipZ) { discard; }\n" +
+        // SURFACE OWNERSHIP (2026-07-03): the box-averaged BASE SKIN sits 0.5–4 m ABOVE the true z16 surface
+        // on convex slopes, so — always drawn — it depth-buried the streamed 1 m detail there: whole slopes
+        // rendered as the smooth base dome ("lotnisko obok ostrej grani") while the fine meshes were shaded
+        // for nothing underneath. Where the coverage mask (BaseCoverageMaskBuilder: hole-free resident z16
+        // union, eroded one texel = conservative) marks full-detail ground, base-skin fragments are DISCARDED
+        // per-pixel — ownership independent of base tile sizes and of how the resident set is distributed
+        // (the per-base-tile culling variant almost never triggered: culled 0-1/340). Main pass only: the
+        // water reflection keeps the base (a metres-high skin difference is invisible in a mirrored lake).
+        "  if (uIsBaseSkin > 0.5 && uBaseCoverOn > 0.5 && uReflectionPass < 0.5) {\n" +
+        "    vec2 cuv = (vStableWorldPos.xy - uBaseCoverMinXY) / uBaseCoverSizeXY;\n" +
+        "    if (cuv.x > 0.0 && cuv.x < 1.0 && cuv.y > 0.0 && cuv.y < 1.0\n" +
+        "        && texture(uBaseCover, cuv).r > 0.5) { discard; }\n" +
+        "  }\n" +
         // Lake water (drawn as the polygon fill, uDebugPoly=1): depth-tinted bottom (turquoise rim → navy centre
         // via vColor.r), Fresnel mix with a sky-gradient reflection, gentle ripples + a tight sun glint, and a
         // depth-faded alpha (shallow shore semi-transparent). Flat normal → no patchwork; polygon → no spill.
@@ -1650,6 +1668,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int terrainContourStrengthLocation = -1;
     private int terrainContourWidthPxLocation = -1;
     private int trailMaskSamplerLocation = -1;
+    private int baseCoverSamplerLocation = -1;
+    private int baseCoverMinXYLocation = -1;
+    private int baseCoverSizeXYLocation = -1;
+    private int baseCoverOnLocation = -1;
+    private int isBaseSkinLocation = -1;
     private int trailMaskStrengthLocation = -1;
     private int trailMaskMinXYLocation = -1;
     private int trailMaskSizeXYLocation = -1;
@@ -2006,6 +2029,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private const float TrailMaskWindowQuantMeters = 500f; // snap window min/size to this grid so it rebuilds rarely
     private uint trailMaskTex;
     private bool trailMaskValid;
+
+    /// <summary>Surface-ownership mask from the VM (see <see cref="MapaTur.Application.Terrain.BaseCoverageMaskBuilder"/>):
+    /// where it marks resident full-detail z16 ground, BASE-SKIN fragments are discarded so the box-averaged
+    /// base can't depth-bury the streamed detail on convex slopes. Null = no discard. Re-uploaded (R8, unit 8)
+    /// whenever the reference changes.</summary>
+    public MapaTur.Application.Terrain.BaseCoverageMask? BaseCoverageMask { get; set; }
+    private MapaTur.Application.Terrain.BaseCoverageMask? uploadedBaseCoverageMask;
+    private uint baseCoverTex;
     private float trailMaskMinX, trailMaskMinY, trailMaskSizeX, trailMaskSizeY;
     private IReadOnlyList<Trail>? lastMaskTrails;
     private IReadOnlyList<Trail>? lastMaskRoads;
@@ -2485,6 +2516,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             trailMaskValid = false;
             waterMaskTex = 0;
             waterMaskValid = false;
+            // Surface-ownership mask texture — same context-loss handling: drop the handle, force re-upload.
+            baseCoverTex = 0;
+            uploadedBaseCoverageMask = null;
             lastMaskTrails = null;
             lastMaskRoads = null;
             lastMaskExposed = null;
@@ -3148,16 +3182,41 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             }
         }
 
+        // Surface-ownership mask: upload on change, bind on unit 8 (0/1 = ortho, 2-4 = CSM, 5 = trail mask,
+        // 6 = water mask, 7 = scene depth). uBaseCoverOn gates the base-skin discard in the shader.
+        EnsureBaseCoverageTexture(gl);
+        if (baseCoverTex != 0 && uploadedBaseCoverageMask is { } bcm)
+        {
+            gl.ActiveTexture(TextureUnit.Texture8);
+            gl.BindTexture(TextureTarget.Texture2D, baseCoverTex);
+            gl.ActiveTexture(TextureUnit.Texture0);
+            gl.Uniform1(baseCoverSamplerLocation, 8);
+            gl.Uniform2(baseCoverMinXYLocation, bcm.WorldMinX, bcm.WorldMinY);
+            gl.Uniform2(baseCoverSizeXYLocation, bcm.WorldSizeX, bcm.WorldSizeY);
+            gl.Uniform1(baseCoverOnLocation, 1f);
+        }
+        else
+        {
+            gl.Uniform1(baseCoverOnLocation, 0f);
+        }
+
         // Drape the ortho: bind each mesh tile's own cell texture (OrthoTileIndex) so a multi-cell ortho
         // stays sharp. Without textures the shader uses the hypsometric tint.
         bool anyOrtho = orthoTiles.Count > 0 && OrthoEnabled;
         gl.ActiveTexture(TextureUnit.Texture0);
         gl.Uniform1(orthoSamplerLocation, 0);
         uint boundTexture = 0;
+        float lastIsBaseSkin = -1f;
         GpuBegin(gl, GpuPass.Terrain);
         foreach (KeyValuePair<TerrainMesh3D, TileBuffers> entry in tileBuffers)
         {
             TileBuffers tile = entry.Value;
+            float isBaseSkin = entry.Key.IsBaseSkin ? 1f : 0f;
+            if (isBaseSkin != lastIsBaseSkin)
+            {
+                gl.Uniform1(isBaseSkinLocation, isBaseSkin);
+                lastIsBaseSkin = isBaseSkin;
+            }
             OrthoTile? ot = null;
             if (anyOrtho)
             {
@@ -3802,6 +3861,49 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         presentWidth = width;
         presentHeight = height;
         return true;
+    }
+
+    // Uploads the surface-ownership mask (R8, NEAREST — the discard wants exact texel edges, not blended
+    // half-values) when the VM hands a new one. Null mask just flips uploadedBaseCoverageMask so the caller
+    // sets uBaseCoverOn = 0; the texture object is reused across uploads.
+    private void EnsureBaseCoverageTexture(GL gl)
+    {
+        if (ReferenceEquals(this.uploadedBaseCoverageMask, BaseCoverageMask))
+        {
+            return;
+        }
+
+        MapaTur.Application.Terrain.BaseCoverageMask? mask = BaseCoverageMask;
+        if (mask is null)
+        {
+            this.uploadedBaseCoverageMask = null;
+            return;
+        }
+
+        if (this.baseCoverTex == 0)
+        {
+            this.baseCoverTex = gl.GenTexture();
+        }
+
+        gl.ActiveTexture(TextureUnit.Texture8);
+        gl.BindTexture(TextureTarget.Texture2D, this.baseCoverTex);
+        gl.PixelStore(PixelStoreParameter.UnpackAlignment, 1); // tightly-packed single-channel rows
+        fixed (byte* p = mask.Coverage)
+        {
+            gl.TexImage2D(
+                TextureTarget.Texture2D, 0, (int)InternalFormat.R8,
+                (uint)mask.Width, (uint)mask.Height, 0,
+                PixelFormat.Red, PixelType.UnsignedByte, p);
+        }
+
+        gl.PixelStore(PixelStoreParameter.UnpackAlignment, 4);
+        gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
+        gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
+        gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+        gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+        gl.BindTexture(TextureTarget.Texture2D, 0);
+        gl.ActiveTexture(TextureUnit.Texture0);
+        this.uploadedBaseCoverageMask = mask;
     }
 
     /// <summary>
@@ -5014,6 +5116,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         terrainContourStrengthLocation = g.GetUniformLocation(program, "uContourStrength");
         terrainContourWidthPxLocation = g.GetUniformLocation(program, "uContourWidthPx");
         trailMaskSamplerLocation = g.GetUniformLocation(program, "uTrailMask");
+        baseCoverSamplerLocation = g.GetUniformLocation(program, "uBaseCover");
+        baseCoverMinXYLocation = g.GetUniformLocation(program, "uBaseCoverMinXY");
+        baseCoverSizeXYLocation = g.GetUniformLocation(program, "uBaseCoverSizeXY");
+        baseCoverOnLocation = g.GetUniformLocation(program, "uBaseCoverOn");
+        isBaseSkinLocation = g.GetUniformLocation(program, "uIsBaseSkin");
         waterMaskSamplerLocation = g.GetUniformLocation(program, "uWaterMask");
         waterMaskStrengthLocation = g.GetUniformLocation(program, "uWaterStrength");
         trailMaskStrengthLocation = g.GetUniformLocation(program, "uTrailStrength");
@@ -7639,6 +7746,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.DeleteTexture(waterMaskTex);
         waterMaskTex = 0;
         waterMaskValid = false;
+        gl.DeleteTexture(baseCoverTex);
+        baseCoverTex = 0;
+        uploadedBaseCoverageMask = null;
         foreach (OrthoTile t in orthoTiles)
         {
             if (t.Texture != 0)
