@@ -864,6 +864,26 @@
                 </VerticalStackLayout>
             </Border>
         </Grid>
+
+        <!-- STARTUP loading overlay: from launch until the initial terrain scene is built. The stage label
+             reuses StatusMessage (every load stage already writes it), the bar tracks LoadProgress
+             (0.3 base → 0.7 ortho/detail → 1.0 ready). IsInitialLoading is cleared in the scene build's
+             finally — success or failure — so this can never trap the user behind a spinner. -->
+        <Grid IsVisible="{Binding IsInitialLoading}" BackgroundColor="#C0101418">
+            <Border Style="{StaticResource GlassSurface}" HorizontalOptions="Center" VerticalOptions="Center"
+                    Padding="28,24" MinimumWidthRequest="320" MaximumWidthRequest="420">
+                <VerticalStackLayout Spacing="14" HorizontalOptions="Fill">
+                    <Label Text="MapaTur" Style="{StaticResource GlassTitle}" FontSize="22" HorizontalOptions="Center" />
+                    <ProgressBar Progress="{Binding LoadProgress}" HeightRequest="6" />
+                    <HorizontalStackLayout Spacing="10" HorizontalOptions="Center">
+                        <ActivityIndicator IsRunning="{Binding IsInitialLoading}" Color="{StaticResource GlassAccent}"
+                                           WidthRequest="16" HeightRequest="16" VerticalOptions="Center" />
+                        <Label Text="{Binding StatusMessage}" Style="{StaticResource GlassCaption}"
+                               MaximumWidthRequest="300" LineBreakMode="TailTruncation" VerticalOptions="Center" />
+                    </HorizontalStackLayout>
+                </VerticalStackLayout>
+            </Border>
+        </Grid>
     </Grid>
 
 </ContentPage>

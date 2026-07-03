@@ -1974,7 +1974,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // it ~300 ms. Instead enqueue here and upload a few per frame (DrainTileUploads) — the detail fills in over a
     // few frames with no single-frame freeze. Reused (cached) tiles are already resident ⇒ never enqueued.
     private readonly List<TerrainMesh3D> pendingTileUploads = new();
-    private const int TileUploadBudgetPerFrame = 6;
+    // TIME-budgeted (2026-07-03): the old fixed 6-tiles-per-frame budget froze the frame anyway when the
+    // queued tiles were BIG (a few multi-MB base tiles = hundreds of ms each — the measured 12 s start-of-
+    // scene gap at pendingUploads=146). The drain now uploads until the per-frame time budget is spent,
+    // always at least one tile per frame so the queue can never stall.
+    private const double TileUploadBudgetMsPerFrame = 6.0;
     // Per-swap render-thread cost breakdown (the frame after a detail reload re-runs these over the new tile list).
     private bool dbgTileSwapFrame;
     private double dbgSwapSyncMs, dbgSwapOrthoMs, dbgSwapLakeMs;
@@ -5559,8 +5563,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             }
         }
 
-        // Enqueue new (non-resident) tiles; DrainTileUploads pushes a few per frame so a big reload never freezes
-        // one frame. Recomputed each swap, so a tile that left the window before it uploaded is simply dropped.
+        // Enqueue new (non-resident) tiles; DrainTileUploads spends a per-frame TIME budget so a big reload
+        // never freezes one frame. Recomputed each swap, so a tile that left the window before it uploaded is
+        // simply dropped. The incoming list is already priority-ordered (base safety net first, then the
+        // streamed residents nearest-to-attention first), and the drain consumes it FRONT-first — the old
+        // tail-first drain uploaded the FARTHEST detail before the ground under the camera.
         pendingTileUploads.Clear();
         foreach (TerrainMesh3D t in tiles)
         {
@@ -5569,13 +5576,21 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 pendingTileUploads.Add(t);
             }
         }
+
+        pendingTileUploads.Reverse(); // consume from the END (O(1) RemoveAt) = the list's FRONT priority order
     }
 
-    // Upload at most TileUploadBudgetPerFrame queued tiles this frame — call every frame, not just on a swap.
+    // Uploads queued tiles until the per-frame time budget is spent (at least one per frame so the queue
+    // always advances) — call every frame, not just on a swap.
     private void DrainTileUploads(GL g)
     {
-        int budget = TileUploadBudgetPerFrame;
-        while (budget > 0 && pendingTileUploads.Count > 0)
+        if (pendingTileUploads.Count == 0)
+        {
+            return;
+        }
+
+        long start = frameClock.ElapsedMilliseconds;
+        do
         {
             int last = pendingTileUploads.Count - 1;
             TerrainMesh3D t = pendingTileUploads[last];
@@ -5583,9 +5598,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             if (!tileBuffers.ContainsKey(t))
             {
                 UploadTile(g, t);
-                budget--;
             }
         }
+        while (pendingTileUploads.Count > 0
+            && frameClock.ElapsedMilliseconds - start < TileUploadBudgetMsPerFrame);
     }
 
     // De-duplicates near-parallel duplicate trails ONCE per distinct input set (OSM relation + underlying way),

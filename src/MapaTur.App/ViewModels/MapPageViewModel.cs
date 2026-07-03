@@ -2911,6 +2911,10 @@ public sealed partial class MapPageViewModel : ObservableObject
         RebuildPlaceGazetteer();
         logger.LogInformation("Loaded DEM {Label} ({Cols}x{Rows})", label, raster.Columns, raster.Rows);
         StatusMessage = $"{Localization.AppStrings.StatusDemLoaded}: {label}";
+        if (IsInitialLoading)
+        {
+            LoadProgress = 0.15; // startup overlay: DEM read done, scene build (0.3+) comes next
+        }
     }
 
     /// <summary>
@@ -3366,6 +3370,9 @@ public sealed partial class MapPageViewModel : ObservableObject
         finally
         {
             IsBusy = false;
+            // The startup overlay ends with the scene build — success OR failure (a failed build must never
+            // trap the user behind a spinner; the status pill carries the error).
+            IsInitialLoading = false;
         }
     }
 
