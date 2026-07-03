@@ -143,18 +143,18 @@ public sealed class QuadtreeTileSelectorTests
     }
 
     [Fact]
-    public void PureRotation_YieldsIdenticalSelectionAndPerTileLod()
+    public void PureOrbit_YieldsIdenticalSelectionAndPerTileLod()
     {
-        // The anti-morph guarantee. Same ground position + height, eight azimuths and several pitches:
-        // the selected SET and every tile's LOD must be byte-for-byte identical across all of them.
+        // The anti-morph guarantee, v2 (2026-07-03): the selection is anchored to the LOOK-AT point, so the
+        // invariant gesture is the app's primary one — ORBITING. Same target, same distance, eight azimuths
+        // and several pitches (the EYE sweeps a whole hemisphere): the selected SET and every tile's LOD must
+        // be byte-for-byte identical across all of them.
         Vector3 c = TileWorldCentre(RootTile());
-        var groundXY = new Vector2(c.X, c.Y);
-        const float height = 600f;
+        var target = new Vector3(c.X, c.Y, GroundElevation);
+        const float distance = 900f;
 
-        QuadtreeTileSelection reference =
-            QuadtreeTileSelector.Select(Options(CameraAtGround(groundXY, height, azimuth: 0f, pitch: MathF.PI / 2f)));
-        IReadOnlyList<DemTileKey> referenceKeys = reference.Tiles.Select(t => t.Key).OrderBy(k => k.Zoom)
-            .ThenBy(k => k.X).ThenBy(k => k.Y).ToList();
+        QuadtreeTileSelection? reference = null;
+        IReadOnlyList<DemTileKey>? referenceKeys = null;
 
         float[] azimuths = { 0f, MathF.PI / 4f, MathF.PI / 2f, 3f * MathF.PI / 4f, MathF.PI, 5f * MathF.PI / 4f, 3f * MathF.PI / 2f, 7f * MathF.PI / 4f };
         float[] pitches = { 0.05f, MathF.PI / 6f, MathF.PI / 4f, MathF.PI / 3f, MaxPitch };
@@ -163,15 +163,65 @@ public sealed class QuadtreeTileSelectorTests
         {
             foreach (float pitch in pitches)
             {
-                QuadtreeTileSelection rotated =
-                    QuadtreeTileSelector.Select(Options(CameraAtGround(groundXY, height, azimuth, pitch)));
-                IReadOnlyList<DemTileKey> rotatedKeys = rotated.Tiles.Select(t => t.Key).OrderBy(k => k.Zoom)
+                var camera = new Camera3D
+                {
+                    Target = target,
+                    Distance = distance,
+                    AzimuthRadians = azimuth,
+                    PitchRadians = pitch,
+                    FieldOfViewYRadians = MathF.PI / 4f,
+                    NearPlane = 1f,
+                    FarPlane = 5_000_000f,
+                };
+                QuadtreeTileSelection orbited = QuadtreeTileSelector.Select(Options(camera));
+                IReadOnlyList<DemTileKey> orbitedKeys = orbited.Tiles.Select(t => t.Key).OrderBy(k => k.Zoom)
                     .ThenBy(k => k.X).ThenBy(k => k.Y).ToList();
 
-                rotatedKeys.Should().Equal(referenceKeys,
-                    "rotation (azimuth {0}, pitch {1}) must not change the selected tiles or their LOD", azimuth, pitch);
+                if (referenceKeys is null)
+                {
+                    reference = orbited;
+                    referenceKeys = orbitedKeys;
+                    continue;
+                }
+
+                orbitedKeys.Should().Equal(referenceKeys,
+                    "orbiting (azimuth {0}, pitch {1}) must not change the selected tiles or their LOD", azimuth, pitch);
             }
         }
+
+        reference.Should().NotBeNull();
+    }
+
+    [Fact]
+    public void LookAtFocus_RefinesTheTargetAcrossTheValley()
+    {
+        // The "lotnisko obok ostrej grani" regression (2026-07-03): the user looks AT a ridge from across a
+        // valley; the looked-at terrain must get the finest tiles even when the ground under the EYE is far
+        // away. Camera ground ~3.2 km west of the target — well outside the finest ring radius (2.5 km) — so
+        // an eye-centred selection would leave the target coarse; the look-at-anchored selection must not.
+        Vector3 c = TileWorldCentre(RootTile());
+        var target = new Vector3(c.X, c.Y, GroundElevation);
+        var camera = new Camera3D
+        {
+            Target = target,
+            Distance = 3_300f,
+            AzimuthRadians = 0f,             // eye west of the target along -X at low pitch
+            PitchRadians = 0.1f,
+            FieldOfViewYRadians = MathF.PI / 4f,
+            NearPlane = 1f,
+            FarPlane = 5_000_000f,
+        };
+
+        QuadtreeTileSelection selection = QuadtreeTileSelector.Select(Options(camera));
+
+        // The tile covering the TARGET (the root tile's centre) is at the finest zoom.
+        (double west, double south, double east, double north) =
+            SlippyTileMath.TileBounds(RootTile().X, RootTile().Y, RootTile().Zoom);
+        var targetGeo = new GeoPoint((south + north) / 2.0, (west + east) / 2.0);
+        SelectedTile targetTile = selection.Tiles.First(t =>
+            t.Bounds.SouthWest.Latitude <= targetGeo.Latitude && targetGeo.Latitude <= t.Bounds.NorthEast.Latitude &&
+            t.Bounds.SouthWest.Longitude <= targetGeo.Longitude && targetGeo.Longitude <= t.Bounds.NorthEast.Longitude);
+        targetTile.Key.Zoom.Should().Be(MaxZoom, "the looked-at terrain must stream the finest tiles");
     }
 
     [Fact]
@@ -276,7 +326,10 @@ public sealed class QuadtreeTileSelectorTests
 
         QuadtreeTileSelection selection = QuadtreeTileSelector.Select(Options(camera));
 
-        var distances = selection.Tiles.Select(t => GroundDistance(groundXY, t.Key)).ToList();
+        // Ordering is by ground distance to the LOOK-AT anchor (camera.Target), the same metric that drives
+        // the ring LOD — nearest-to-attention streams first.
+        var targetGroundXY = new Vector2(camera.Target.X, camera.Target.Y);
+        var distances = selection.Tiles.Select(t => GroundDistance(targetGroundXY, t.Key)).ToList();
         distances.Should().BeInAscendingOrder();
     }
 
