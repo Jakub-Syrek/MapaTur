@@ -1546,8 +1546,16 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// </summary>
     private IReadOnlyList<MapaTur.Domain.Pois.MountainPoi> EffectivePois()
     {
+        // Downloaded names in TatraPasses.SuppressedOsmNames are dropped: a curated POI (Honoratka) is
+        // hand-pinned at the same node, and keeping both draws overlapping labels.
         var result = new List<MapaTur.Domain.Pois.MountainPoi>(
-            rawPois ?? (IReadOnlyList<MapaTur.Domain.Pois.MountainPoi>)Array.Empty<MapaTur.Domain.Pois.MountainPoi>());
+            (rawPois ?? (IReadOnlyList<MapaTur.Domain.Pois.MountainPoi>)Array.Empty<MapaTur.Domain.Pois.MountainPoi>())
+                .Where(p => !TatraPasses.SuppressedOsmNames.Contains(p.Name)));
+        int suppressed = (rawPois?.Count ?? 0) - result.Count;
+        if (suppressed > 0)
+        {
+            logger.LogInformation("EffectivePois: suppressed {Count} downloaded POI(s) shadowed by curated entries", suppressed);
+        }
         var present = new HashSet<string>(result.Select(p => p.Name), StringComparer.OrdinalIgnoreCase);
         foreach (MapaTur.Domain.Pois.MountainPoi bundled in TatraHuts.All.Concat(TatraPasses.All))
         {

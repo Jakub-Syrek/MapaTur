@@ -142,4 +142,26 @@ public sealed class PlaceGazetteerTests
         gazetteer.Search("zawrat", 5).Should().Contain(w => w.Name == "Zawrat");
         TatraPasses.All.Should().OnlyContain(p => p.Kind == PoiKind.Pass);
     }
+
+    // Honoratka is hand-pinned AT Zmarzła Przełączka Wyżnia's saddle node, so keeping both entries
+    // renders two labels on the same spot (the user's "honoratka nachodzi na zmarzłą przełączkę wyżnią").
+    // No two curated passes may share coordinates — the overlapping duplicate stays out of the list.
+    [Fact]
+    public void CuratedPasses_HaveNoDuplicateCoordinates()
+    {
+        TatraPasses.All.Should().NotContain(p => p.Name == "Zmarzła Przełączka Wyżnia");
+        TatraPasses.All
+            .GroupBy(p => (p.Position.Latitude, p.Position.Longitude))
+            .Should().OnlyContain(g => g.Count() == 1);
+    }
+
+    // Removing the curated duplicate is not enough: the OSM POI download also carries the saddle node
+    // Honoratka is pinned to, and downloaded POIs win the merge — the two labels overlapped again after
+    // a download. Such names are suppressed from the DOWNLOADED set too, and must never be curated.
+    [Fact]
+    public void SuppressedOsmNames_CoverHonoratkasSaddle_AndAreNotCurated()
+    {
+        TatraPasses.SuppressedOsmNames.Should().Contain("Zmarzła Przełączka Wyżnia");
+        TatraPasses.All.Should().NotContain(p => TatraPasses.SuppressedOsmNames.Contains(p.Name));
+    }
 }

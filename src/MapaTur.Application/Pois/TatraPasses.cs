@@ -13,6 +13,14 @@ namespace MapaTur.Application.Pois;
 /// </summary>
 public static class TatraPasses
 {
+    /// <summary>
+    /// OSM POI names hidden from the DOWNLOADED set (case-insensitive): a curated entry is hand-pinned at
+    /// the same node, so showing both renders overlapping labels. Zmarzła Przełączka Wyżnia is Honoratka's
+    /// saddle — Honoratka wins ("honoratka nachodzi na zmarzła przełączka wyżnia, usuń ostatnią").
+    /// </summary>
+    public static IReadOnlySet<string> SuppressedOsmNames { get; } =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Zmarzła Przełączka Wyżnia" };
+
     /// <summary>Curated named cols / passes, modelled as <see cref="PoiKind.Pass"/> POIs.</summary>
     public static IReadOnlyList<MountainPoi> All { get; } = new[]
     {
@@ -94,7 +102,8 @@ public static class TatraPasses
         new MountainPoi(-172, "Sieczkowa Szczerba", new GeoPoint(49.223888, 20.032786), PoiKind.Pass),
         new MountainPoi(-173, "Pośrednia Sieczkowa Przełączka", new GeoPoint(49.225448, 20.032588), PoiKind.Pass, 2218),
         new MountainPoi(-174, "Skrajna Sieczkowa Przełączka", new GeoPoint(49.226351, 20.033179), PoiKind.Pass),
-        new MountainPoi(-175, "Zmarzła Przełączka Wyżnia", new GeoPoint(49.218842, 20.020172), PoiKind.Pass),
+        // -175 "Zmarzła Przełączka Wyżnia" removed: Honoratka (-100) is hand-pinned at this exact saddle
+        // node, so both entries rendered overlapping labels ("honoratka nachodzi..."); Honoratka wins.
         new MountainPoi(-176, "Magurska Przełęcz", new GeoPoint(49.251668, 20.003482), PoiKind.Pass),
         new MountainPoi(-177, "Niżnie Kasprowe Siodło", new GeoPoint(49.243034, 19.996708), PoiKind.Pass),
         new MountainPoi(-178, "Wyżnie Kasprowe Siodło", new GeoPoint(49.238219, 19.98983), PoiKind.Pass),
