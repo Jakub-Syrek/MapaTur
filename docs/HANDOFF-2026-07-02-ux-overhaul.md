@@ -135,8 +135,22 @@
       płatów/bloków, kontrast tonów/bleach, gęstość i głębokość szczelin, wydłużenie bloków; ew. porosty
       (żółto-zielone plamy) i lepszy kolor bazowy `rockCol`. NIE wracać do zmiennych rozmiarów komórek
       (artefakt pasów — patrz wyżej).
-- [ ] DALEJ WG PLANU: (1) szew LOD — fix jakościowy (selektor ważony normalnymi×światło / blend pasa
-      granicznego) + skirt + aktywna eviction dalekiego z16; (2) system ładowania + anty-freeze uploadów.
+- [x] SAGA „DWA SZLAKI" (2026-07-03, ~6 iteracji): przerywany bliźniak przy każdej linii = DWA źródła:
+      (a) DECAL szlaków — samo-okluzja pasa na szorstkim reliefie pod skosem (dowód: bisekcja magenta + A/B
+      z decalGate na CPU, własne zrzuty przez computer-use) → **decal WYŁĄCZONY** (`TrailDecalStrength=0`;
+      maska żyje — niesie wodę); (b) X-ray ghost rysował szlaki ZA CAŁYM masywem → usunięty i przywrócony
+      na życzenie usera jako v2: **0.65× szerokości + bramka GRUBOŚCI SKAŁY** (depth-blit sceny →
+      `EnsureGhostDepthTarget`, duch tylko przy zagłębieniu <25–60 m; bez depth-tekstury = brak ducha).
+      Werdykt usera: „problem szlaków chyba ok". Przy okazji: Honoratka — duplikat „Zmarzła Przełączka
+      Wyżnia" tłumiony też z POBRANYCH POI (`TatraPasses.SuppressedOsmNames` + filtr w `EffectivePois`
+      + log diagnostyczny; kuratorowany wpis -175 usunięty; testy 15/15).
+      LEKCJA PROCESU: grafika = diagnozuj WŁASNYMI zrzutami (computer-use) + deterministycznymi
+      przełącznikami CPU, nie iteracjami fade'ów w shaderze na werdyktach z drugiej ręki.
+- [ ] **W TOKU: „lotnisko" obok ostrej grani (user 2026-07-03 po południu, Orla Perć)** — pół grani ostre,
+      obok gładka kopuła; badge `448 (cap)` ⇒ selektor sclampowany, eviction martwa (`evicted=0`) — bliskie
+      kafle nie dostają z16, bo budżet okupują dalecy rezydenci. TO JEST zakolejkowany pakiet: (a) desire
+      z dystansowym sufitem zoomu (SSE per odległość), (b) AKTYWNA eviction rezydentów spoza desired,
+      (c) priorytet near-field. Potem: (2) system ładowania + anty-freeze uploadów.
 - [ ] **SZEW LOD rozszerzony (23:15, screenshot Czarny Mniszek cam 0.2 km): ODSŁONIĘTY SKIRT = „prostokątna
       płaska ściana" w kadrze** („błąd geometrii, tak nie ma w realu — chuj z tym, czym jest pokryta").
       Skirt (BakedTileSkirtDepthMeters 6–96 m) widoczny jako wielka pionowa płaszczyzna z rozsmarowanym
