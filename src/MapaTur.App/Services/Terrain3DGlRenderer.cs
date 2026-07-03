@@ -389,9 +389,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    crack = max(crack, (1.0 - smoothstep(0.55, 0.55 + aaC + 0.9, emC)) * 0.5);\n" +
         // Tone: dominant coarse facet contrast + weathering BLEACH on some facets (the near-white faces in
         // the reference) + smaller per-block variation + micro grain.
-        "    float bleach = smoothstep(0.68, 0.95, toneC) * 0.30;\n" +
+        // ALBEDO contrast compressed ~2× + brighter base (2026-07-03): with snow OFF the painted seams/tones
+        // read as a regular UNNATURAL grid; at full snow the ~50% white blend compressed them to a faint
+        // trace and the rock "łapał zajebistą szarość" — so the bare rock now ships pre-compressed the same
+        // way. The block STRUCTURE stays carried by the facet normals (light), not by painted lines.
+        "    float bleach = smoothstep(0.68, 0.95, toneC) * 0.15;\n" +
         "    float micro = 0.5 * noiseT(vStableWorldPos.xy * 1.1) + 0.5 * noiseT(vStableWorldPos.yz * 1.1);\n" +
-        "    rk = clamp(0.48 + (toneC - 0.5) * 0.5 + (toneF - 0.5) * 0.26 + bleach + (micro - 0.5) * 0.16 - crack * 0.5, 0.0, 1.0);\n" +
+        "    rk = clamp(0.62 + (toneC - 0.5) * 0.24 + (toneF - 0.5) * 0.12 + bleach + (micro - 0.5) * 0.08 - crack * 0.22, 0.0, 1.0);\n" +
         // Angular facet normals: strong constant tilt per coarse facet + smaller per-block tilt.
         "    vec3 tcC = vec3(hashT(cidC * 3.3 + 6.1) - 0.5, hashT(cidC * 4.7 + 2.2) - 0.5, (hashT(cidC * 7.9 + 0.4) - 0.5) * 0.6);\n" +
         "    vec3 tcF = vec3(hashT(cidF * 6.7 + 3.8) - 0.5, hashT(cidF * 8.1 + 7.5) - 0.5, 0.0);\n" +
@@ -428,11 +432,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // CSM: attenuate the direct-sun term where the terrain is in its own shadow (cascade chosen by view
         // distance in the render frame; lookup uses the absolute world pos against the absolute light matrix).
         "  sunlit *= csmShadow(length(vWorldPos - uCameraPos), vStableWorldPos, lambert);\n" +
-        "  vec3 lightSum = (uSkyAmbient * uAmbient) + (uSunColor * sunlit);\n" +
+        // HEMISPHERIC ambient (2026-07-03, "bez światła te bryły się chowają"): a flat ambient is
+        // direction-independent, so in shade the granite facets' normal tilts contributed NOTHING and the
+        // block structure vanished. Skylight comes from above — modulating the ambient by the SHADING normal's
+        // up-ness keeps the facets differentiating surfaces even with zero direct sun.
+        "  float skyVis = 0.55 + (0.45 * clamp(shN.z, 0.0, 1.0));\n" +
+        "  vec3 lightSum = (uSkyAmbient * uAmbient * skyVis) + (uSunColor * sunlit);\n" +
         // Ambient FLOOR: steep faces turned from the sun (lambert=0) otherwise collapse to lightSum≈0 → near-BLACK
         // (the "czarne dziury/kropki" — proven: an unlit render has 0 black px). max() lifts ONLY the deepest
-        // shadows to a cool sky-fill minimum, leaving every brighter sun/shadow gradient (the 3D relief) intact.
-        "  lightSum = max(lightSum, uSkyAmbient * 0.45);\n" +
+        // shadows to a cool sky-fill minimum. The floor is hemispheric too (0.30–0.50 by up-ness instead of a
+        // flat 0.45): a flat floor PRESSED every below-threshold face to one brightness, erasing the relief
+        // exactly where the sun doesn't reach.
+        "  lightSum = max(lightSum, uSkyAmbient * (0.30 + (0.20 * clamp(shN.z, 0.0, 1.0))));\n" +
         "  vec3 base;\n" +
         "  if (uUseOrtho == 1) {\n" +
         "    vec3 c = texture(uOrtho, vTex).rgb;\n" +
@@ -496,7 +507,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // (with the detail normal), so here we only tint the base toward the stone colour with a sharp
         // light/dark spread for visible grain.
         "  if (rockW > 0.001) {\n" +
-        "    vec3 rockCol = vec3(0.46, 0.43, 0.40) * (0.52 + 0.92 * rk);\n" +
+        // COOL granite grey (2026-07-03): the warm brown-grey albedo read as mud; at full snow the steep
+        // faces picked up the snow pass's cool-blue blend and "łapały zajebistą szarość" (user) — so the
+        // rock wears that cool grey permanently, snow or not.
+        "    vec3 rockCol = vec3(0.44, 0.46, 0.49) * (0.52 + 0.92 * rk);\n" +
         "    base = mix(base, rockCol, rockW);\n" +
         "  }\n" +
         // Avalanche slope-steepness map: replace the base colour with the band colour for this fragment's
