@@ -1806,11 +1806,21 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // The resolution cap Rgba/Width/Height currently reflect; 0 = never assigned/uploaded yet. Compared
         // against OrthoDistanceTier.DesiredCapPx every frame to detect a tier change.
         public int UploadedCapPx;
+
+        // STRIP-SLICED upload state (anti-freeze): the texture is allocated empty up front and filled a few
+        // MB of rows per frame via TexSubImage2D; Texture stays 0 (cell renders hypsometric/previous) until
+        // the last strip lands and the mip chain is generated. A monolithic TexImage2D of all cells in one
+        // frame was the measured 6–14 s "Not Responding" at scene start.
+        public uint StagingTexture; // allocated, partially filled; 0 = no upload in progress
+        public int UploadedRows;    // rows already pushed into StagingTexture
     }
     private readonly List<OrthoTile> orthoTiles = new();
     // Old tiles whose GL textures still need deleting on the GL thread (set when textures are swapped).
     private readonly List<OrthoTile> pendingOrthoRelease = new();
     private bool orthoDirty;
+    // Cells awaiting the strip-sliced upload (indices into orthoTiles), drained a time-budgeted few MB per
+    // frame — see DrainOrthoUploads.
+    private readonly List<int> orthoUploadQueue = new();
 
     // Viewport-aware ortho streaming (#39) + LRU eviction (#43). Only the ortho cells whose world AABB
     // is inside the view frustum are uploaded; the planner caps resident-cell VRAM at OrthoVramBudgetBytes
@@ -2472,9 +2482,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             // The ortho texture IDs belonged to the dead context; drop the handles (don't GL-delete the
             // stale ones) but keep the CPU bytes so they re-upload on the next EnsureOrthoTextures.
             pendingOrthoRelease.Clear();
+            orthoUploadQueue.Clear();
             foreach (OrthoTile t in orthoTiles)
             {
                 t.Texture = 0;
+                t.StagingTexture = 0; // half-filled staging died with the context too
+                t.UploadedRows = 0;
             }
             if (orthoTiles.Count > 0)
             {
@@ -4559,6 +4572,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 g.DeleteTexture(old.Texture);
                 old.Texture = 0;
             }
+
+            ResetStagingUpload(g, old); // a swap can retire a cell mid-strip-upload
         }
         pendingOrthoRelease.Clear();
     }
@@ -4645,11 +4660,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 t.Texture = 0;
             }
 
+            ResetStagingUpload(g, t); // a resolution change mid-upload restarts the strips at the new size
+
             tierChanged.Add(idx);
         }
 
         if (plan.ToUpload.Count == 0 && plan.ToEvict.Count == 0 && tierChanged.Count == 0)
         {
+            DrainOrthoUploads(g); // no residency changes this frame — keep feeding the strip queue
             return;
         }
 
@@ -4661,42 +4679,153 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 g.DeleteTexture(tile.Texture);
                 tile.Texture = 0;
             }
+
+            ResetStagingUpload(g, tile);
+            orthoUploadQueue.Remove(idx);
         }
 
         if (plan.ToUpload.Count > 0 || tierChanged.Count > 0)
         {
-            // Upload beyond GL_MAX_TEXTURE_SIZE yields a garbage/black texture, so guard the size once.
-            Span<int> maxTexSize = stackalloc int[1] { 2048 };
-            g.GetInteger(GLEnum.MaxTextureSize, maxTexSize);
-            int maxSize = maxTexSize[0];
-
-            // Query the driver's max anisotropy once, outside the upload loop (a per-iteration stackalloc
-            // would risk a stack overflow — CA2014). STAGE-0 max-fidelity: request the driver's ACTUAL max
-            // anisotropy (not a fixed 16) so the ortho drape is as sharp as the GPU allows at grazing angles.
-            const GLEnum maxAnisotropyPName = (GLEnum)0x84FF; // GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
-            Span<float> maxAniso = stackalloc float[1] { 1f };
-            g.GetFloat(maxAnisotropyPName, maxAniso);
-            float aniso = maxAniso[0] < 1f ? 1f : maxAniso[0];
-
             // Union, not concatenation: a cell freshly promoted from ToUpload (first-ever appearance,
-            // UploadedCapPx starts 0) is ALSO caught by the tier check above, so it lands in both lists —
-            // UploadOrthoCell is idempotent (skips once Texture != 0) either way, but dedupe to avoid a
-            // pointless second log line.
+            // UploadedCapPx starts 0) is ALSO caught by the tier check above, so it lands in both lists.
             var toUploadNow = new HashSet<int>(plan.ToUpload);
             toUploadNow.UnionWith(tierChanged);
             foreach (int idx in toUploadNow)
             {
-                OrthoTile cell = orthoTiles[idx];
-                // Report the bound ortho cell's source pixel size + the anisotropy actually applied, so the
-                // near-peak texture resolution is readable from the log (Stage-0 quality proof).
-                Log.Information(
-                    "[GL3D] ortho cell uploaded: {W}x{H}px, mipmapped + anisotropy x{Aniso} (driver max x{MaxAniso})",
-                    cell.Width, cell.Height, aniso, maxAniso[0]);
-                UploadOrthoCell(g, cell, maxSize, aniso);
+                if (!orthoUploadQueue.Contains(idx))
+                {
+                    orthoUploadQueue.Add(idx);
+                }
+            }
+        }
+
+        DrainOrthoUploads(g);
+    }
+
+    // Clears a tile's half-finished strip upload (tier change / eviction / new set): the staging texture
+    // belongs to the OLD resolution and must be rebuilt from row 0.
+    private static void ResetStagingUpload(GL g, OrthoTile tile)
+    {
+        if (tile.StagingTexture != 0)
+        {
+            g.DeleteTexture(tile.StagingTexture);
+            tile.StagingTexture = 0;
+        }
+
+        tile.UploadedRows = 0;
+    }
+
+    // Per-frame ortho upload budget: strips totalling at most this much time leave the CPU each frame, so a
+    // fresh 8-cell set (~1.7 GB) streams over a couple of seconds of smooth frames instead of the measured
+    // 6–14 s single-frame "Not Responding" stall. At least one strip always ships, so the queue never stalls.
+    private const double OrthoUploadBudgetMsPerFrame = 6.0;
+    private const int OrthoUploadBytesPerChunk = 24 * 1024 * 1024; // ~24 MB of rows per TexSubImage2D call
+
+    private void DrainOrthoUploads(GL g)
+    {
+        if (orthoUploadQueue.Count == 0)
+        {
+            return;
+        }
+
+        // Driver limits queried only when there is actual work (queue almost always empty).
+        Span<int> maxTexSize = stackalloc int[1] { 2048 };
+        g.GetInteger(GLEnum.MaxTextureSize, maxTexSize);
+        int maxSize = maxTexSize[0];
+        const GLEnum maxAnisotropyPName = (GLEnum)0x84FF; // GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
+        const GLEnum anisotropyPName = (GLEnum)0x84FE;    // GL_TEXTURE_MAX_ANISOTROPY_EXT
+        Span<float> maxAniso = stackalloc float[1] { 1f };
+        g.GetFloat(maxAnisotropyPName, maxAniso);
+        float aniso = maxAniso[0] < 1f ? 1f : maxAniso[0];
+
+        long start = frameClock.ElapsedMilliseconds;
+        while (orthoUploadQueue.Count > 0)
+        {
+            int idx = orthoUploadQueue[0];
+            if ((uint)idx >= (uint)orthoTiles.Count)
+            {
+                orthoUploadQueue.RemoveAt(0);
+                continue;
             }
 
-            g.BindTexture(TextureTarget.Texture2D, 0);
+            OrthoTile tile = orthoTiles[idx];
+            if (tile.Texture != 0)
+            {
+                orthoUploadQueue.RemoveAt(0); // already resident (e.g. re-queued during a tier flap)
+                continue;
+            }
+
+            if (tile.Width > maxSize || tile.Height > maxSize)
+            {
+                Log.Information("[GL3D] ortho tile {W}x{H} exceeds GL_MAX_TEXTURE_SIZE {Max}; skipping",
+                    tile.Width, tile.Height, maxSize);
+                orthoUploadQueue.RemoveAt(0);
+                continue;
+            }
+
+            if (tile.StagingTexture == 0)
+            {
+                // Allocate the full-size texture EMPTY (no bulk transfer) — the strips fill it below.
+                tile.StagingTexture = g.GenTexture();
+                tile.UploadedRows = 0;
+                g.BindTexture(TextureTarget.Texture2D, tile.StagingTexture);
+                g.TexImage2D(
+                    TextureTarget.Texture2D, 0, (int)InternalFormat.Rgba8,
+                    (uint)tile.Width, (uint)tile.Height, 0,
+                    PixelFormat.Rgba, PixelType.UnsignedByte, null);
+            }
+            else
+            {
+                g.BindTexture(TextureTarget.Texture2D, tile.StagingTexture);
+            }
+
+            int rowBytes = tile.Width * 4;
+            int rowsPerChunk = Math.Max(1, OrthoUploadBytesPerChunk / Math.Max(1, rowBytes));
+            while (tile.UploadedRows < tile.Height)
+            {
+                int rows = Math.Min(rowsPerChunk, tile.Height - tile.UploadedRows);
+                fixed (byte* p = &tile.Rgba[(long)tile.UploadedRows * rowBytes])
+                {
+                    g.TexSubImage2D(
+                        TextureTarget.Texture2D, 0, 0, tile.UploadedRows,
+                        (uint)tile.Width, (uint)rows,
+                        PixelFormat.Rgba, PixelType.UnsignedByte, p);
+                }
+
+                tile.UploadedRows += rows;
+                if (frameClock.ElapsedMilliseconds - start >= OrthoUploadBudgetMsPerFrame)
+                {
+                    break;
+                }
+            }
+
+            if (tile.UploadedRows < tile.Height)
+            {
+                break; // budget spent mid-cell — resume next frame
+            }
+
+            // Last strip landed: build the mip chain + sampling params, then promote the texture so the
+            // draw path starts using it (a partially filled texture must never be sampled).
+            g.GenerateMipmap(TextureTarget.Texture2D);
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+            g.TexParameter(TextureTarget.Texture2D, (TextureParameterName)anisotropyPName, aniso);
+            tile.Texture = tile.StagingTexture;
+            tile.StagingTexture = 0;
+            orthoUploadQueue.RemoveAt(0);
+            Log.Information(
+                "[GL3D] ortho cell uploaded (strip-sliced): {W}x{H}px, mipmapped + anisotropy x{Aniso} (driver max x{MaxAniso})",
+                tile.Width, tile.Height, aniso, maxAniso[0]);
+
+            if (frameClock.ElapsedMilliseconds - start >= OrthoUploadBudgetMsPerFrame)
+            {
+                break;
+            }
         }
+
+        g.BindTexture(TextureTarget.Texture2D, 0);
     }
 
     // Throttled one-line memory snapshot: resident ortho cells + estimated ortho MB (CPU bytes + GPU texture
@@ -4737,38 +4866,6 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             tiles.Count,
             tileGeometryBytes / Mb,
             GC.GetTotalMemory(forceFullCollection: false) / Mb);
-    }
-
-    private static void UploadOrthoCell(GL g, OrthoTile tile, int maxSize, float aniso)
-    {
-        if (tile.Texture != 0)
-        {
-            return; // already resident
-        }
-        if (tile.Width > maxSize || tile.Height > maxSize)
-        {
-            Log.Information("[GL3D] ortho tile {W}x{H} exceeds GL_MAX_TEXTURE_SIZE {Max}; skipping",
-                tile.Width, tile.Height, maxSize);
-            return;
-        }
-
-        const GLEnum anisotropyPName = (GLEnum)0x84FE; // GL_TEXTURE_MAX_ANISOTROPY_EXT
-        tile.Texture = g.GenTexture();
-        g.BindTexture(TextureTarget.Texture2D, tile.Texture);
-        g.TexImage2D<byte>(
-            TextureTarget.Texture2D, 0, (int)InternalFormat.Rgba8,
-            (uint)tile.Width, (uint)tile.Height, 0,
-            PixelFormat.Rgba, PixelType.UnsignedByte, tile.Rgba);
-
-        // Trilinear (mipmapped) minification + anisotropy — the ortho is seen at grazing angles where
-        // plain bilinear shimmers and smears into blocks. ClampToEdge so adjacent cell textures meet
-        // seamlessly at the shared seam. The mobile cells are power-of-two so GenerateMipmap halves cleanly.
-        g.GenerateMipmap(TextureTarget.Texture2D);
-        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
-        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
-        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
-        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
-        g.TexParameter(TextureTarget.Texture2D, (TextureParameterName)anisotropyPName, aniso);
     }
 
     // Resident-cell budget = VRAM budget / per-cell bytes (incl. ~33% for the mip chain), clamped to
@@ -7841,6 +7938,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 gl.DeleteTexture(t.Texture);
                 t.Texture = 0;
             }
+
+            ResetStagingUpload(gl, t);
         }
         foreach (OrthoTile t in pendingOrthoRelease)
         {
@@ -7849,8 +7948,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 gl.DeleteTexture(t.Texture);
                 t.Texture = 0;
             }
+
+            ResetStagingUpload(gl, t);
         }
         pendingOrthoRelease.Clear();
+        orthoUploadQueue.Clear();
         if (programReady)
         {
             gl.DeleteProgram(program);

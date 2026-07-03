@@ -81,17 +81,16 @@
       robi")**: system ładowania — serwis stanów aktywności (VM) + overlay startowego ładowania sceny
       z realnym postępem (DEM → baked → orto → szlaki; `isInitialLoading`/`loadProgress` JUŻ SĄ w VM,
       tylko niezbindowane!) + tacka ikon aktywności na górnym pasku dla każdego pobierania.
-- [~] **FREEZE przy ładowaniu LOD-ów — CZĘŚCIOWO (2026-07-03 wieczór, 3a32bf0)**: budżet uploadów VBO
-      przerobiony ze sztukowego (6 kafli) na CZASOWY (~6 ms/klatkę) + drain w kolejności priorytetu
-      (stary brał z OGONA = najdalsze przed gruntem pod kamerą!). ALE pomiar wykazał, że główny freeze
-      startu (gapy 6–14 s) występuje przy PUSTEJ kolejce VBO — **winowajcą jest synchroniczny dekod+upload
-      ORTO na wątku GL** (8 komórek ~1.7 GB CPU / ~967 MB GPU przy starcie sceny; tytuł okna „Not
-      Responding"). NASTĘPNY CEL CHIRURGICZNY: krojenie uploadu orto na paski glTexSubImage2D per klatka
-      (+ ew. dekod poza wątkiem GL). Overlay startowy DZIAŁA (3a32bf0): karta MapaTur + ProgressBar
-      (0.15 DEM → 0.3 baza → 0.7 detal → 1.0) + StatusMessage; IsInitialLoading gaszone w finally.
-      OBSERWACJA przy okazji: przy klamrze (desired==cap==448, clamped=true) stream MŁÓCI loaded=8/evicted=8
-      co ~1 s w nieskończoność (churn krawędzi ringu pod przycięciem) — do histerezy przy strojeniu
-      selektora; oraz PassTimes urosły (shadow 11.7 ms, sumGpu 23 ms przy 796 kaflach) — FPS(draw-call).
+- [x] **FREEZE przy ładowaniu — ROZWIĄZANE w 2 krokach (2026-07-03 wieczór)**: (1) budżet uploadów VBO
+      czasowy ~6 ms/klatkę + drain od NAJBLIŻSZYCH (3a32bf0; stary brał z ogona = najdalsze najpierw);
+      (2) **upload ORTO pocięty na paski** — tekstura alokowana pusta, wypełniana TexSubImage2D ~24 MB
+      z budżetem 6 ms/klatkę, mipmapy+promocja po ostatnim pasku (częściowa tekstura nigdy nie samplowana);
+      staging sprzątany na tier-change/ewikcji/context-loss/dispose. POMIAR przed/po (ten sam start sceny):
+      7 gapów ~42 s (w tym 12.1 s i 14.2 s) → **2 gapy: 2.1 s + 0.3 s**. Overlay startowy działa
+      (0.15 DEM → 0.3 baza → 0.7 detal → 1.0 + etap słowem), pigułka „Doczytywanie terenu… N/M" przy fillu.
+      ZOSTAJE (drobiazgi): (a) pojedynczy ~2.1 s hitch pierwszego swapu sceny (nie-orto; do profilowania),
+      (b) CPU-downsample przy zmianie tieru odległości orto wciąż na wątku GL (rzadkie — daleki przelot),
+      (c) histereza młócki loaded=8/evicted=8 przy klamrze; (d) FPS(draw-call) — PassTimes 23 ms @ 796 kafli.
 - [ ] **NOWE (user 2026-07-02 ~21:30, screenshot + fotka referencyjna): OŚWIETLENIE — „jak jest słońce,
       powinno być DUŻO jaśniej" + „przepatrz cienie ponownie, żeby były zgodne ze słońcem”.** Scena w apce
       (Kościelec/Świnica) jest mroczna-szarozielona nawet w dzień; referencja (fot. Nienartowicz, Hala
