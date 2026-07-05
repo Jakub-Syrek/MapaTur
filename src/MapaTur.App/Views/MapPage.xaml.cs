@@ -183,6 +183,11 @@ public partial class MapPage : ContentPage
         {
             // Tap fell outside the valid Mercator latitude band; ignore.
         }
+        catch (Exception ex)
+        {
+            // async-void handler: an escaping exception is a process-killing stowed exception (see OnTerrainTapped).
+            Serilog.Log.Error(ex, "Map tap (route planning) failed at {Lat},{Lon}", latitude, longitude);
+        }
     }
 
     // Resolves a 2D map tap to popup content when it hits a POI / climbing marker. The Mapsui feature
@@ -239,9 +244,20 @@ public partial class MapPage : ContentPage
 
     // 3D tap-to-plan: a bare-terrain tap resolved to WGS-84 routes into the SAME waypoint flow as a
     // 2D map tap, so route planning works in the primary (3D) view too.
+    //
+    // try/catch: this is an async-void UI handler — an exception escaping it is a WinUI stowed exception
+    // (0xc000027b) that KILLS the process with nothing in the log (two APPCRASHes while planning a route,
+    // 2026-07-03). Route planning must never take the app down: log it and surface the status instead.
     private async void OnTerrainTapped(object? sender, GeoPoint point)
     {
-        await viewModel.HandleMapTapAsync(point);
+        try
+        {
+            await viewModel.HandleMapTapAsync(point);
+        }
+        catch (Exception ex)
+        {
+            Serilog.Log.Error(ex, "Terrain tap (route planning) failed at {Lat},{Lon}", point.Latitude, point.Longitude);
+        }
     }
 
     // Flies the 3D camera to a route framing: the first stop when planning is turned off, or the whole
@@ -326,14 +342,30 @@ public partial class MapPage : ContentPage
     // on drift + cooldown). The base and camera framing don't change, so this never yanks the camera.
     private async void OnCameraFocusMoved(object? sender, Camera3D camera)
     {
-        await viewModel.OnDetailFocusAsync(camera, TerrainView.SurfacePixelHeight, TerrainView.SurfacePixelWidth);
+        try
+        {
+            await viewModel.OnDetailFocusAsync(camera, TerrainView.SurfacePixelHeight, TerrainView.SurfacePixelWidth);
+        }
+        catch (Exception ex)
+        {
+            // async-void handler: an escaping exception is a process-killing stowed exception (see OnTerrainTapped).
+            Serilog.Log.Error(ex, "Detail-focus update failed");
+        }
     }
 
     // The user dragged a route stop to a new position (CollectionView CanReorderItems) — the stops collection
     // is already reordered, so re-plan the chained route to follow the new sequence.
     private async void OnRouteStopsReorderCompleted(object? sender, EventArgs e)
     {
-        await viewModel.ReplanAfterReorderAsync();
+        try
+        {
+            await viewModel.ReplanAfterReorderAsync();
+        }
+        catch (Exception ex)
+        {
+            // async-void handler: an escaping exception is a process-killing stowed exception (see OnTerrainTapped).
+            Serilog.Log.Error(ex, "Route re-plan after stop reorder failed");
+        }
     }
 
     // "Download whole Tatras offline": a big one-time pull meant for WiFi (no signal in the field). The
