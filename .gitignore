@@ -535,3 +535,4 @@ signing.env
 /*.png
 .sk-clip-backup/
 tools/_demdump/
+installer/out/
