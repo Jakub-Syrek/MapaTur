@@ -7,7 +7,7 @@
 [![MAUI](https://img.shields.io/badge/.NET%20MAUI-Android%20%7C%20iOS%20%7C%20Windows%20%7C%20macOS-512BD4?logo=dotnet&logoColor=white)](https://learn.microsoft.com/dotnet/maui/)
 [![3D engine](https://img.shields.io/badge/3D-OpenGL%20ES%203.0%20%C2%B7%20ANGLE%20%2F%20D3D11-CC3333)](docs/3d-terrain.md)
 [![Mapsui](https://img.shields.io/badge/maps-Mapsui%20%2B%20SkiaSharp-2E7D32)](https://mapsui.com/)
-[![Tests](https://img.shields.io/badge/tests-1291%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1635%20passing-brightgreen)](#testing)
 [![Architecture](https://img.shields.io/badge/architecture-Clean-success)](#architecture)
 [![Top language](https://img.shields.io/github/languages/top/Jakub-Syrek/MapaTur)](#)
 [![Code size](https://img.shields.io/github/languages/code-size/Jakub-Syrek/MapaTur)](#)
@@ -80,7 +80,10 @@ hiking trails, roads and the planned route are draped and depth-occluded by the 
 | Accessibility (semantic labels, AA contrast) | ✅ Verified | Screen-reader hints on toolbar; heading level on status |
 | **Interactive 3D terrain (GPU)** | ✅ Verified | OpenGL ES 3.0 / ANGLE renderer, 24-bit depth buffer; orbit / look-around / pan, mouse + keyboard + on-screen pads — see [`docs/3d-terrain.md`](docs/3d-terrain.md) |
 | High-resolution DEM terrain mesh | ✅ Verified | Copernicus GLO-30 (~30 m), tiled to beat the 16-bit index limit; hypsometric ramp + Lambert hillshade + vertical exaggeration |
-| **Streaming 1 m detail LOD — PL + SK LiDAR** | ✅ Verified | Persistent whole-Tatra base + a **1 m** detail patch that follows the gaze (screen-space-error LOD); **GUGiK NMT** on the Polish side, **ÚGKK DMR 5.0** baked into the same tile cache on the Slovak side; **per-tile roughness** keeps ridges/walls sharp while smooth ground coarsens, under a hard vertex budget; crack-free via skirts, planning off the UI thread |
+| **Baked-tile streaming terrain (quadtree LOD)** | ✅ Verified | The 1 m surface streams from a **pre-baked, pre-repaired z13–z16 tile pyramid** (8 741 tiles) selected by a **two-focus ground-ring quadtree** (full detail rings follow the LOOK-AT, a smaller bubble guards the ground under the eye), diffed against residency and **built in parallel off-thread** — no per-move mosaic/rebuild, no freezes; per-pixel **surface-ownership mask** discards the coarse base skin wherever full 1 m detail is resident |
+| **Streaming 1 m detail LOD — PL + SK LiDAR** | ✅ Verified | **GUGiK NMT** on the Polish side, **ÚGKK DMR 5.0** baked into the same tile cache on the Slovak side; crack-free via per-zoom skirts; desktop budgets: 896 resident tiles / 6 GB geometry / 24 tile builds per update |
+| **Instant scene reveal (async startup pipeline)** | ✅ Verified | Every heavy start-up step runs off the UI/GL thread behind the loading overlay: parallel ortho PNG decode, shader warm-up, background trail/route ribbon builds, distance-tier ortho downsampling — the first scene swap costs ~0.3 s instead of the measured 30 + s of freezes |
+| **Camera anti-tunnelling** | ✅ Verified | The camera floor probes the TRUE rendered 1 m surface (baked tiles) at the eye, ahead of the flight direction and on a small ring — skim 5 m above ridges without ever clipping into the terrain |
 | **Ring-LOD whole-Tatra base** | ✅ Verified | The static base renders the local DEM at per-tile steps — native cells out to 6 km from the demo focus, ×2 to 14 km, ×4 beyond — via the crack-free welded tiler; sharper base silhouettes at no extra vertex cost |
 | **Mountain lake water (171 tarns)** | ✅ Verified | OSM-generated gazetteer (PL + SK, named + unnamed); each tarn ear-clipped at its own waterline with depth-tinted bottom, wind ripples and a planar terrain reflection; seated against the loaded terrain so coarse-LOD basins never leak |
 | Depth-occluded 3D trail & route overlays | ✅ Verified | Screen-space ribbon lines, hidden behind ridges, clipped to the DEM edge |
@@ -91,8 +94,9 @@ hiking trails, roads and the planned route are draped and depth-occluded by the 
 | **Shader contour lines (warstwice)** | ✅ Verified | Iso-elevation lines evaluated per fragment in the terrain shader — thin minor lines every 5 m + a red index line every 100 m — `fwidth`-antialiased and distance-faded so they hug the live 1 m relief instead of poking through it; "Warstwice" toggle |
 | Road overlay (OSM highways) | ✅ Verified | Viewport Overpass download; grey depth-tested ribbons in 3D + 2D layer, independent show/hide |
 | Hillshade base layer | ✅ Verified | Multi-layer MBTiles loader + Copernicus hillshade pipeline |
-| **Time-of-day atmosphere** | ✅ Verified | Procedural world-space sky dome, sun disc + Mie halo, aerial-perspective fog; a "Czas" slider drives a deterministic Tatra-latitude solar arc (sunrise → noon → golden hour → night), persisted |
-| **Procedural clouds + weather** | ✅ Verified | Cirrus sky layer + "sea of clouds" inversion (peaks poke through), drifting fBm with morph; cloud-coverage + wind sliders (wind speeds drift & darkens to storm-grey); cloud altitude tracks the sun + random wander; moving cloud shadows on the terrain |
+| **Time-of-day atmosphere** | ✅ Verified | Procedural world-space sky dome, sun disc + Mie halo, aerial-perspective fog; a "Czas" slider (with an hour scale) drives a deterministic Tatra-latitude solar arc (sunrise → noon → golden hour → night), persisted |
+| **Procedural clouds + weather** | ✅ Verified | Volumetric-look cumulus billboards + a "sea of clouds" inversion sheet on a **1 500 m deck** (peaks poke through); the coverage slider owns EVERY cloud (0 % = dead-clear sky) and **re-rolls which clouds materialise** as it moves (per-puff hash gate + slider-seeded noise); wind drifts & darkens to storm-grey; moving cloud shadows on the terrain |
+| **Night sky (stars, constellations, Moon)** | ✅ Verified | Catalog stars as sky-pinned point sprites with the Big Dipper visible, Moon with phase; fades in after sunset |
 | **Night refuge lights** | ✅ Verified | Warm window glows switch on in huts / shelters / chalets after sunset, fading in through dusk |
 | **POI offline cache** | ✅ Verified | Downloaded POIs persist to SQLite and re-hydrate within the DEM footprint at startup — refuges + their lights survive a restart with no re-download |
 | **Camera state persistence** | ✅ Verified | Camera framing (target / distance / azimuth / pitch) saved per DEM and restored on reload |
@@ -101,6 +105,9 @@ hiking trails, roads and the planned route are draped and depth-occluded by the 
 | **Route film (fly-through of your route)** | ✅ Verified | "Film z trasy" runs the same cinematic camera along the *planned* multi-stop route and records it to an MP4 on Android (desktop preview is a no-op) |
 | **Place teleport (search → fly to)** | ✅ Verified | "Lecę" jumps the 3D camera straight to a gazetteer place by name, framed at a fixed view distance + pitch |
 | GPS dot / live location | ✅ Verified | MAUI Geolocation; blue dot + accuracy halo on 2D & 3D, "Track me" toggle, PL/EN |
+| **Multi-stop route planning (named stops)** | ✅ Verified | Chain named stops (huts, passes, peaks, car parks) into one route; stops reorderable by drag; the plan persists and re-plans on startup |
+| **Offline data packages** | ✅ Verified | Versioned ortho + DEM packages served from a manifest-driven package server (Railway); the phone downloads them in-app — and the **Windows installer ships every package built-in** (~8.5 GB: ortho, DEM, baked z13–z16 pyramid, 1 m source cache, basemaps, hillshade) |
+| **Windows installer (Inno Setup)** | ✅ Verified | Per-user, no-admin install of the self-contained win-x64 build with ALL terrain data bundled — a fresh machine gets the full offline 1 m experience with zero downloads |
 | Elevation-aware routing (SRTM) | ⏳ Planned | Currently routes are flat (Overpass geometry lacks `ele`) |
 | Off-trail edges in graph | ⏳ Planned | Cost penalty exists; UI tagging gesture pending |
 | Signed store builds (Play / App Store / MSIX) | ⏳ Pending | Requires signing credentials |
@@ -113,7 +120,9 @@ The 3D view is a **custom real-time renderer**, not an off-the-shelf 3D engine:
 - **Texture-bridge composition** — the renderer draws into an off-screen colour-texture FBO that it owns; the texture handle is wrapped via `SKImage.FromTexture` (`GRBackendTexture` + `GRGlTextureInfo`) and composed by Skia with `DrawImage`. Sidesteps Android's FBO-0 collision and unifies the Windows / Android render path (no `#if` branch in the renderer).
 - **24-bit depth buffer** for hardware occlusion — no painter's algorithm, correct from any angle, full DEM resolution.
 - **Tiled mesh** (≤65 536-vertex tiles) built from a Copernicus GLO-30 (~30 m) DEM, with adjustable vertical exaggeration.
-- **Streaming level-of-detail (Model 1)** — over the persistent whole-Tatra base, a **1 m LiDAR** detail patch streams to the *look-at* point (raycast through the screen centre, not the camera): **GUGiK NMT** serves the Polish side, and the Slovak side is pre-baked from **ÚGKK DMR 5.0** into the same tile-cache format (so one code path serves both). The window is split into a grid and each tile's resolution is chosen by **screen-space error × terrain roughness** (local curvature measured at ridge scale): sharp ridges/walls hold full 1 m detail from farther out while smooth valleys step down, all under a **hard vertex budget** for stable FPS, with **skirts** hiding the seams between resolutions. The whole plan + mesh build runs on a background thread so flying never stutters, and rich on-device telemetry (per-tile step histogram + timings) drives the tuning.
+- **Baked-tile streaming (the terrain architecture)** — the 1 m surface streams from a **pre-baked, pre-repaired, immutable z13–z16 tile pyramid** (8 741 `.bdt` tiles covering both sides of the border: **GUGiK NMT** for PL, **ÚGKK DMR 5.0** for SK, baked into one cache format). A **two-focus ground-ring quadtree selector** picks the desired set — full detail rings anchored on the LOOK-AT point (detail follows attention) plus a smaller bubble under the EYE (the ground underfoot never coarsens while looking around) — a residency planner diffs it against what's loaded, and tiles are read + meshed **in parallel on a background thread** (24 per update on desktop). Eviction is farthest-first under count + byte budgets (desktop: 896 tiles / 6 GB); off-desired residents drain through a grace window so small camera jitters never thrash. A per-pixel **surface-ownership mask** lets the shader discard the coarse base skin wherever hole-free 1 m detail is resident, so the box-averaged base can never bury the sharp rock. The system's core promises are pinned by system-level invariant tests (still-camera convergence — including under the budget clamp — full stale eviction on refocus, byte/count caps).
+- **Stutter-free by construction** — every heavy step runs off the render thread behind a poll-and-swap pattern: parallel ortho PNG decode, distance-tier ortho downsampling (near cells keep 8 192 px, far cells drop to 2 048 with a persistent cache), trail/route ribbon geometry builds, tile meshing, plus a **shader warm-up** during the loading overlay so the first real frame never pays compile+link. Measured on the reference desktop: the first scene swap went from 30 + s of accumulated freezes to ~0.3 s.
+- **Cascaded shadow maps with per-cascade caster culling** — 3 CSM cascades; each tile's AABB is tested against the cascade's light volume before drawing, which took the shadow pass from ~12 ms to ~2 ms on a full 870-mesh scene.
 - **Ring-LOD base** — the static base itself renders at per-tile steps planned by focus distance (native grid out to 6 km, ×2 to 14 km, ×4 beyond; tiles forced to cut at orthophoto cell boundaries so no UV ever clamps), welded crack-free by the same chunked-LOD tiler as the detail.
 - **Lake water on every tarn** — a gazetteer of **171 Tatra lakes generated from OSM** (`natural=water` filtered by DEM-sampled elevation, both sides of the border); each outline is ear-clipped into a flat mesh at its own waterline, shaded with a depth-tinted bottom, wind ripples and a **planar reflection** of the mirrored terrain, and seated against the terrain actually loaded at that LOD so a coarse-filled basin skips cleanly instead of leaking dark slivers.
 - **Per-pixel lighting** (Lambert shading evaluated per fragment from interpolated normals) and **4× MSAA** for smooth slopes and ridgelines.
@@ -146,7 +155,12 @@ docs/
 ├── adr/                    architecture decision records (MADR format)
 ├── 3d-terrain.md           3D GPU renderer overview
 ├── ROADMAP.md              milestone-tracked feature plan
+├── HANDOFF-*.md            session-by-session engineering log (latest = entry point for new work)
+├── TERRAIN-GRAPHICS-CHECKLIST.md   mandatory checklist before touching the terrain pipeline
+├── TILE-PRODUCTION.md      reproducible DEM/ortho tile-production pipeline (every process documented)
 └── PRIVACY.md              what runs locally vs. on network
+installer/
+└── MapaTur.iss             Windows installer (Inno Setup) — app + ALL data packages (~8.5 GB)
 ```
 
 Dependency direction is inward only: `App → Application → Domain`, `Infrastructure → Application → Domain`, `Routing → Domain`. See [`docs/adr/0001-clean-architecture.md`](docs/adr/0001-clean-architecture.md).
@@ -223,15 +237,17 @@ dotnet test
 
 | Suite | Tests | Focus |
 |---|---|---|
-| `MapaTur.Domain.Tests` | 139 | Value objects, aggregates (Route), elevation math, DEM (+ crop), POI tags + colours |
-| `MapaTur.Application.Tests` | 1015 | Overpass queries (trails/POI/roads), 3D terrain math + camera + atmosphere, screen-space LOD + per-tile roughness planner + ring-base planner + vertex budget + normal smoothing, DEM repair (pit despike / hole fill), lake seating + OSM lake-gazetteer invariants, multi-stop route planner + use cases, route summary + fit-to-route framing, overlay polyline densification + 1 m detail-elevation seating, **marching-squares contour extraction + route-stops persistence serializer** |
-| `MapaTur.Infrastructure.Tests` | 115 | TCX/Overpass/POI/road parsers, MBTiles + DEM readers, GUGiK WCS tile source + cache, SQLite (trails/climbing/POI), GPX |
-| `MapaTur.Routing.Tests` | 22 | Tobler function, distance/time cost functions, graph snapping, A\* correctness |
-| **Total** | **1291** | xUnit + FluentAssertions + NSubstitute + FsCheck |
+| `MapaTur.Domain.Tests` | 144 | Value objects, aggregates (Route), elevation math, DEM (+ crop), POI tags + colours |
+| `MapaTur.Application.Tests` | 1342 | Overpass queries (trails/POI/roads), 3D terrain math + camera + atmosphere, **baked-tile streaming SYSTEM INVARIANTS** (quadtree selector, residency planner, still-camera convergence incl. under the budget clamp, stale eviction, parallel builds, byte/count caps), ortho distance tiers + downsampler + tier scheduler, **camera anti-tunnelling** (fine-surface sampler + floor probes), DEM repair (pit despike / hole fill / dropout strips), lake seating + OSM lake-gazetteer invariants, POI merge/dedup + peak apex refinement, multi-stop route planner + use cases, overlay densification + 1 m seating, contour extraction + route-stops persistence |
+| `MapaTur.Infrastructure.Tests` | 124 | TCX/Overpass/POI/road parsers, MBTiles + DEM readers, GUGiK WCS tile source + cache, SQLite (trails/climbing/POI), GPX |
+| `MapaTur.Routing.Tests` | 25 | Tobler function, distance/time cost functions, graph snapping, A\* correctness |
+| **Total** | **1635** | xUnit + FluentAssertions + NSubstitute + FsCheck |
 
 ## Roadmap
 
-Milestones tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md). Initial milestones (M0–M6), hillshade (M7), climbing POIs (M8), the **3D terrain GPU engine (M9)**, the **streaming 1 m detail LOD with per-tile roughness**, the **whole-Tatra ring-LOD base**, **Slovak-side 1 m detail (DMR 5.0)**, the **GUGiK + ZBGIS cross-border ortho hybrid** and the **OSM lake gazetteer (water on all 171 tarns)** are complete and verified live on real Tatra data (Samsung S25 Ultra). Active line of work: rock material on steep slopes, elevation-aware routing, and signed store builds.
+Milestones tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md). Initial milestones (M0–M6), hillshade (M7), climbing POIs (M8), the **3D terrain GPU engine (M9)**, the **baked-tile streaming re-architecture** (immutable z13–z16 pyramid + two-focus quadtree LOD + surface-ownership masking), **Slovak-side 1 m detail (DMR 5.0)**, the **GUGiK + ZBGIS cross-border ortho hybrid**, the **OSM lake gazetteer (water on all 171 tarns)**, the **async startup pipeline** (instant scene reveal), **golden-hour + night-sky atmospherics**, **multi-stop tourist navigation** and the **all-packages Windows installer** are complete and verified live on real Tatra data (Samsung S25 Ultra + Windows desktop). Active line of work: mobile (GLES/Adreno) verification of the latest shader work, menu regrouping, elevation-aware routing, and signed store builds.
+
+The session-by-session engineering log lives in `docs/HANDOFF-*.md` (latest: [`docs/HANDOFF-2026-07-05.md`](docs/HANDOFF-2026-07-05.md)); terrain-pipeline rules in [`docs/TERRAIN-GRAPHICS-CHECKLIST.md`](docs/TERRAIN-GRAPHICS-CHECKLIST.md) and [`docs/TILE-PRODUCTION.md`](docs/TILE-PRODUCTION.md).
 
 ## Known data quirks
 
