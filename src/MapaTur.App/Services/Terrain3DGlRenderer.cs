@@ -4540,6 +4540,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             float lastShadowIsBase = -1f;
             foreach (KeyValuePair<TerrainMesh3D, TileBuffers> entry in tileBuffers)
             {
+                // Per-cascade caster cull (2026-07-05, FPS #3): every tile used to draw into every cascade
+                // (~870 meshes × 3 ≈ 2600 draws; shadow was the most expensive pass at ~12 ms). The cascade's
+                // light matrix is an ortho box around its view slice (+2000 m depth padding toward the sun),
+                // so a tile whose AABB misses that box cannot contribute any depth the map will read —
+                // cascade 0 covers ~900 m and needs a handful of tiles, not the whole scene.
+                if (!FrustumCuller.IsAabbVisible(lightVp, entry.Key.WorldMin, entry.Key.WorldMax))
+                {
+                    continue;
+                }
+
                 float isBase = entry.Key.IsBaseSkin ? 1f : 0f;
                 if (isBase != lastShadowIsBase)
                 {
