@@ -881,13 +881,29 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "out vec2 vUv;\n" +
         "void main(){ vUv = (aClip * 0.5) + 0.5; gl_Position = vec4(aClip, 0.0, 1.0); }\n";
 
+    // ACES filmic tonemap (Narkowicz fit) shared by BOTH final passes — the composite and this
+    // pass-through — so the scene's character does not flip when bloom/god rays toggle. Linear clamp
+    // burned the sun to flat white and crushed shadows to black; the filmic shoulder/toe keeps both
+    // readable. uTonemap is the A/B lever (0 = legacy linear), uExposure the pre-curve gain.
+    private const string AcesGlsl =
+        "uniform float uTonemap;\n" +
+        "uniform float uExposure;\n" +
+        "vec3 aces(vec3 x){\n" +
+        "  x *= uExposure;\n" +
+        "  return clamp((x * ((2.51 * x) + 0.03)) / ((x * ((2.43 * x) + 0.59)) + 0.14), 0.0, 1.0);\n" +
+        "}\n";
+
     private const string PostFragmentShaderSource =
         "#version 300 es\n" +
         "precision highp float;\n" +
         "in vec2 vUv;\n" +
         "uniform sampler2D uTex;\n" +
         "out vec4 fragColor;\n" +
-        "void main(){ fragColor = texture(uTex, vUv); }\n";
+        AcesGlsl +
+        "void main(){\n" +
+        "  vec3 c = texture(uTex, vUv).rgb;\n" +
+        "  fragColor = vec4(mix(c, aces(c), uTonemap), 1.0);\n" +
+        "}\n";
 
     // Bloom bright-pass: keep only the part of each pixel above the luminance threshold (soft knee via the
     // over-threshold ratio) so the sun disc / luminous sky / lit snow pass through and everything else goes
@@ -936,11 +952,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform float uIntensity;\n" +        // bloom
         "uniform float uGodrayIntensity;\n" +
         "out vec4 fragColor;\n" +
+        AcesGlsl +
         "void main(){\n" +
         "  vec3 sc = texture(uScene, vUv).rgb;\n" +
         "  vec3 bl = texture(uBloom, vUv).rgb;\n" +
         "  vec3 gr = texture(uGodray, vUv).rgb;\n" +
-        "  fragColor = vec4(sc + (bl * uIntensity) + (gr * uGodrayIntensity), 1.0);\n" +
+        "  vec3 hdr = sc + (bl * uIntensity) + (gr * uGodrayIntensity);\n" + // tonemap AFTER bloom/rays add light — the filmic shoulder rolls the sum off
+        "  fragColor = vec4(mix(hdr, aces(hdr), uTonemap), 1.0);\n" +
         "}\n";
 
     // God rays (crepuscular rays): screen-space radial blur of the bright-pass mask toward the sun's
@@ -2003,6 +2021,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int bloomBlurTexLoc = -1, bloomBlurDirLoc = -1;
     private int godrayTexLoc = -1, godraySunUvLoc = -1;
     private int bloomCompSceneLoc = -1, bloomCompBloomLoc = -1, bloomCompIntensityLoc = -1;
+    private int bloomCompTonemapLoc = -1, bloomCompExposureLoc = -1;
+    private int postTonemapLoc = -1, postExposureLoc = -1;
+    // Filmic look (C-package 2026-07-05): 1 = full ACES (0 = legacy linear, kept as the instant A/B
+    // rollback); exposure is the pre-curve gain compensating ACES's mid-tone dip.
+    private const float TonemapStrength = 1f;
+    private const float TonemapExposure = 1.15f;
     private int bloomCompGodrayLoc = -1, bloomCompGodrayIntensityLoc = -1;
     private bool bloomStageLogged;
     private bool godrayStageLogged;
@@ -2600,6 +2624,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             bloomBlurTexLoc = bloomBlurDirLoc = -1;
             godrayTexLoc = godraySunUvLoc = -1;
             bloomCompSceneLoc = bloomCompBloomLoc = bloomCompIntensityLoc = -1;
+            bloomCompTonemapLoc = bloomCompExposureLoc = -1;
+            postTonemapLoc = postExposureLoc = -1;
             bloomCompGodrayLoc = bloomCompGodrayIntensityLoc = -1;
             bloomStageLogged = false;
             godrayStageLogged = false;
@@ -4386,6 +4412,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             g.BindTexture(TextureTarget.Texture2D, godrayTex);
             g.Uniform1(bloomCompGodrayLoc, 2);
             g.Uniform1(bloomCompIntensityLoc, wantBloom ? bloomIntensity : 0f);
+            g.Uniform1(bloomCompTonemapLoc, TonemapStrength);
+            g.Uniform1(bloomCompExposureLoc, TonemapExposure);
             g.Uniform1(bloomCompGodrayIntensityLoc, wantGodray ? godrayIntensity : 0f);
             g.DrawArrays(PrimitiveType.Triangles, 0, 3);
             g.BindTexture(TextureTarget.Texture2D, 0);
@@ -4414,6 +4442,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             g.ActiveTexture(TextureUnit.Texture0);
             g.BindTexture(TextureTarget.Texture2D, sourceTex);
             g.Uniform1(postTexLocation, 0);
+            g.Uniform1(postTonemapLoc, TonemapStrength);
+            g.Uniform1(postExposureLoc, TonemapExposure);
             g.DrawArrays(PrimitiveType.Triangles, 0, 3);
             g.BindTexture(TextureTarget.Texture2D, 0);
 
@@ -5637,6 +5667,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.DeleteShader(pvs);
         g.DeleteShader(pfs);
         postTexLocation = g.GetUniformLocation(postProgram, "uTex");
+        postTonemapLoc = g.GetUniformLocation(postProgram, "uTonemap");
+        postExposureLoc = g.GetUniformLocation(postProgram, "uExposure");
 
         // Bloom programs (bright-pass, separable blur, composite) — all share the post vertex shader.
         bloomBrightProgram = BuildPostProgram(g, BloomBrightFragmentShaderSource, "Bloom bright-pass");
@@ -5647,6 +5679,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         bloomBlurDirLoc = g.GetUniformLocation(bloomBlurProgram, "uDir");
         bloomCompositeProgram = BuildPostProgram(g, BloomCompositeFragmentShaderSource, "Bloom composite");
         bloomCompSceneLoc = g.GetUniformLocation(bloomCompositeProgram, "uScene");
+        bloomCompTonemapLoc = g.GetUniformLocation(bloomCompositeProgram, "uTonemap");
+        bloomCompExposureLoc = g.GetUniformLocation(bloomCompositeProgram, "uExposure");
         bloomCompBloomLoc = g.GetUniformLocation(bloomCompositeProgram, "uBloom");
         bloomCompIntensityLoc = g.GetUniformLocation(bloomCompositeProgram, "uIntensity");
         bloomCompGodrayLoc = g.GetUniformLocation(bloomCompositeProgram, "uGodray");
