@@ -2039,6 +2039,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // Per-swap render-thread cost breakdown (the frame after a detail reload re-runs these over the new tile list).
     private bool dbgTileSwapFrame;
     private double dbgSwapSyncMs, dbgSwapOrthoMs, dbgSwapLakeMs;
+    // Swap-frame breakdown (2026-07-05): sync+ortho+lake explained only ~1.1 of the measured ~2.1 s first
+    // swap; these checkpoints attribute the rest (drain, shadow depth pass, terrain-pass CPU walk) so the
+    // next optimisation aims at a number, not a guess. A single watch read at each stage — negligible cost,
+    // and only ever read on swap frames.
+    private readonly System.Diagnostics.Stopwatch dbgSwapWatch = new();
+    private double dbgSwapDrainMs, dbgSwapShadowMs, dbgSwapTerrainMs;
     // Frame-gap watchdog: catches stalls the per-pass timers miss (GC pauses, CPU starvation by the off-thread build).
     private readonly System.Diagnostics.Stopwatch frameClock = System.Diagnostics.Stopwatch.StartNew();
     private long dbgLastFrameMs;
@@ -2294,6 +2300,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         bool showEagles = false,
         bool animateAtmosphere = true)
     {
+        // Watch restarts at the very ENTRY (not at swap detection below): the measured first-swap frame had
+        // ~950 ms between Render() entry and the old restart point — the setup segment (PlatformGl, watchdog,
+        // BeginGpuFrame query readback, EnsureProgram) was invisible to the breakdown. Unconditional restart
+        // is a few ns; the segments are only ever read on swap frames.
+        dbgSwapWatch.Restart();
+
         gl ??= PlatformGl.Get();
 
         // Frame-gap watchdog: a long gap since the previous frame = a stall the per-pass timers don't see.
@@ -2604,6 +2616,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         EnsureProgram(gl);
 
         dbgTileSwapFrame = !ReferenceEquals(lastTiles, tiles);
+        double dbgSetupMs = dbgTileSwapFrame ? dbgSwapWatch.Elapsed.TotalMilliseconds : 0;
         if (dbgTileSwapFrame)
         {
             // Incremental: keep the reused base tiles' VBOs, swap only the look-at detail patch (see SyncTiles).
@@ -2614,7 +2627,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             dbgSwapSyncMs = swSync.Elapsed.TotalMilliseconds;
         }
 
+        double dbgDrainStart = dbgTileSwapFrame ? dbgSwapWatch.Elapsed.TotalMilliseconds : 0;
         DrainTileUploads(gl); // upload a few queued tiles per frame so a reload never freezes one frame
+        if (dbgTileSwapFrame)
+        {
+            dbgSwapDrainMs = dbgSwapWatch.Elapsed.TotalMilliseconds - dbgDrainStart;
+        }
 
         // Reclaim any GL textures retired by a previous SetOrthoTextures swap. The actual upload/eviction
         // is viewport-aware and runs in StreamOrthoTextures once the view-projection is known (below).
@@ -2676,9 +2694,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         // Cascaded Shadow Maps depth pass (Krok 5): render terrain depth from the sun's POV into the cascade
         // shadow maps before the sky/terrain passes. Self-contained — restores the bound FBO + viewport.
+        double dbgShadowStart = dbgTileSwapFrame ? dbgSwapWatch.Elapsed.TotalMilliseconds : 0;
         GpuBegin(gl, GpuPass.Shadow);
         RenderShadowMaps(gl, camera, atmosphere?.SunDirection ?? Vector3.Zero, (float)width / Math.Max(1, height), vpWidth, vpHeight);
         GpuEnd(gl);
+        if (dbgTileSwapFrame)
+        {
+            dbgSwapShadowMs = dbgSwapWatch.Elapsed.TotalMilliseconds - dbgShadowStart;
+        }
 
         // ── Live weather ────────────────────────────────────────────────────────────────────────
         // Clouds are not a static dial: the coverage wanders over minutes (sometimes near-clear,
@@ -3271,6 +3294,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform1(orthoSamplerLocation, 0);
         uint boundTexture = 0;
         float lastIsBaseSkin = -1f;
+        double dbgTerrainStart = dbgTileSwapFrame ? dbgSwapWatch.Elapsed.TotalMilliseconds : 0;
         GpuBegin(gl, GpuPass.Terrain);
         foreach (KeyValuePair<TerrainMesh3D, TileBuffers> entry in tileBuffers)
         {
@@ -3312,6 +3336,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.DrawElements(PrimitiveType.Triangles, (uint)tile.IndexCount, DrawElementsType.UnsignedInt, (void*)0);
         }
         GpuEnd(gl); // Terrain
+        if (dbgTileSwapFrame)
+        {
+            dbgSwapTerrainMs = dbgSwapWatch.Elapsed.TotalMilliseconds - dbgTerrainStart;
+        }
 
         GpuBegin(gl, GpuPass.LakesForest);
         // Lake water: real OSM outlines (MountainLakeData) for every tarn within the loaded terrain, each at its
@@ -3325,18 +3353,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             var swLake = System.Diagnostics.Stopwatch.StartNew();
             BuildLakeWater(gl, tiles, raster);
             dbgSwapLakeMs = swLake.Elapsed.TotalMilliseconds;
-            double swapTotal = dbgSwapSyncMs + dbgSwapOrthoMs + dbgSwapLakeMs;
-            if (swapTotal > 30.0) // only log genuine hitch frames
-            {
-                Log.Information(
-                    "[GL3D] tile-swap render hitch: sync={Sync:F0}ms ortho={Ortho:F0}ms lake={Lake:F0}ms total={Total:F0}ms ({Tiles} tiles)",
-                    dbgSwapSyncMs, dbgSwapOrthoMs, dbgSwapLakeMs, swapTotal, tiles.Count);
-            }
+            // The breakdown is logged at the END of Render (the line pass below rebuilds trail ribbons on a
+            // tile swap — measuring only up to here hid ~0.9 s of the first-swap gap).
         }
         else
         {
             BuildLakeWater(gl, tiles, raster);
         }
+
+        double dbgAfterLakeMs = dbgTileSwapFrame ? dbgSwapWatch.Elapsed.TotalMilliseconds : 0;
 
         if (debugPolyVertexCount > 0 && lakeDraws.Count > 0)
         {
@@ -3459,6 +3484,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         gl.BindVertexArray(0);
         GpuEnd(gl); // Lines
+        double dbgAfterLinesMs = dbgTileSwapFrame ? dbgSwapWatch.Elapsed.TotalMilliseconds : 0;
 
         GpuBegin(gl, GpuPass.Clouds);
         // "Sea of clouds" layer: a horizontal translucent sheet at the shared cloud altitude, drawn
@@ -3615,6 +3641,28 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Unbind everything before returning. The caller will re-establish whatever framebuffer Skia
         // expects (via GRContext.ResetContext) before sampling the texture we just produced.
         gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+
+        if (dbgTileSwapFrame)
+        {
+            double swapElapsed = dbgSwapWatch.Elapsed.TotalMilliseconds;
+            if (swapElapsed > 30.0) // only log genuine hitch frames
+            {
+                // lines = the lake→lines span (trail/route ribbon rebuild against the new tile set);
+                // tail = clouds + post + everything after; other = the un-checkpointed gaps before lake
+                // (present/MSAA alloc, sky, uniforms). If "other" dominates, the next checkpoint goes THERE.
+                double linesMs = Math.Max(0, dbgAfterLinesMs - dbgAfterLakeMs);
+                double tailMs = Math.Max(0, swapElapsed - dbgAfterLinesMs);
+                double accounted = dbgSetupMs + dbgSwapSyncMs + dbgSwapDrainMs + dbgSwapOrthoMs
+                    + dbgSwapShadowMs + dbgSwapTerrainMs + dbgSwapLakeMs + linesMs + tailMs;
+                Log.Information(
+                    "[GL3D] tile-swap render hitch: setup={Setup:F0} sync={Sync:F0} drain={Drain:F0} ortho={Ortho:F0} "
+                    + "shadow={Shadow:F0} terrain={Terrain:F0} lake={Lake:F0} lines={Lines:F0} tail={Tail:F0} "
+                    + "other={Other:F0} elapsed={Elapsed:F0}ms ({Tiles} tiles)",
+                    dbgSetupMs, dbgSwapSyncMs, dbgSwapDrainMs, dbgSwapOrthoMs, dbgSwapShadowMs, dbgSwapTerrainMs,
+                    dbgSwapLakeMs, linesMs, tailMs, Math.Max(0, swapElapsed - accounted), swapElapsed, tiles.Count);
+            }
+        }
+
         return finalTex;
     }
 
@@ -5248,6 +5296,19 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         lastStarLat = anchor.Latitude;
         lastStarLon = anchor.Longitude;
         starBufferReady = true;
+    }
+
+    /// <summary>
+    /// Compiles every shader program (and probes the GPU timers) ahead of the first real frame. Call from
+    /// a paint that happens BEFORE the terrain arrives (the startup placeholder), with the GL context
+    /// current: the full compile+link of all programs measured ~1.0 s, previously paid on the first scene
+    /// swap — exactly when the loading overlay lifts. Idempotent; near-free once everything is ready.
+    /// </summary>
+    public void WarmUp()
+    {
+        gl ??= PlatformGl.Get();
+        EnsureGpuTimers(gl);
+        EnsureProgram(gl);
     }
 
     private void EnsureProgram(GL g)

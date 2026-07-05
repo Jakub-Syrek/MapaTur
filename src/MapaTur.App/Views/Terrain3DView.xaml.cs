@@ -1879,6 +1879,12 @@ public partial class Terrain3DView : ContentView
         }
     }
 
+    // Swap-paint breakdown (2026-07-05): the renderer's own hitch log covers only Render() (~0.3 s of the
+    // measured ~1.1 s first-swap frame gap) — these attribute the rest of the PAINT handler (marker
+    // projection/occlusion prep vs the GL render vs the Skia overlay draw) on the frame the tile set changes.
+    private IReadOnlyList<TerrainMesh3D>? dbgLastPaintTiles;
+    private readonly System.Diagnostics.Stopwatch dbgPaintWatch = new();
+
     private void OnPaintSurface(object? sender, SKPaintGLSurfaceEventArgs e)
     {
         var canvas = e.Surface.Canvas;
@@ -1890,7 +1896,34 @@ public partial class Terrain3DView : ContentView
             // and reads as solid white on mobile. Fill with the sky colour so the empty 3D scene
             // looks like a placeholder rather than a blank page.
             canvas.Clear(new SkiaSharp.SKColor(0x6C, 0x8E, 0xB0));
+
+#if WINDOWS || ANDROID
+            // Shader warm-up behind the startup overlay: the first REAL frame used to pay ~1.0 s of
+            // compile+link for every GL program (measured setup=1030 ms) at the exact moment the loading
+            // overlay lifts. The placeholder paints run while the overlay is still up — compile now.
+            // ResetContext hands the compile-touched GL state back to Skia.
+            if (UseGlRenderer && !glDisabled && Canvas.GRContext is { } warmCtx)
+            {
+                try
+                {
+                    (glRenderer ??= new Services.Terrain3DGlRenderer()).WarmUp();
+                    warmCtx.ResetContext();
+                }
+                catch (Exception ex)
+                {
+                    Serilog.Log.Warning(ex, "[GL3D] shader warm-up failed (the real frame will retry)");
+                }
+            }
+#endif
             return;
+        }
+
+        bool dbgSwapPaint = !ReferenceEquals(dbgLastPaintTiles, tiles);
+        dbgLastPaintTiles = tiles;
+        dbgSwapPaintActive = dbgSwapPaint; // lets TryRenderTerrainGl attribute its own pre/render/post split
+        if (dbgSwapPaint)
+        {
+            dbgPaintWatch.Restart();
         }
 
         if (DebugEnabled)
@@ -2120,8 +2153,10 @@ public partial class Terrain3DView : ContentView
         // composes into the surface via DrawImage. Sidesteps the FBO-0 collision on Android (where Skia
         // would re-paint over anything we drew into its on-screen FBO) and lets the same code path work on
         // Windows. Any GL/shader/wrapper failure disables it for the session and falls through to Skia.
+        double dbgPrepMs = dbgSwapPaint ? dbgPaintWatch.Elapsed.TotalMilliseconds : 0;
         if (UseGlRenderer && TryRenderTerrainGl(canvas, tiles, e.Info.Width, e.Info.Height))
         {
+            double dbgGlMs = dbgSwapPaint ? dbgPaintWatch.Elapsed.TotalMilliseconds - dbgPrepMs : 0;
             // GL already drew the (depth-occluded) trails + route; Skia only adds the markers/labels on top.
             // POI text labels only when the camera is close — a far view of 1000+ POIs is a wall of text.
             bool poiLabelsVisible = Camera.Distance < Services.Terrain3DCanvasRenderer.PoiLabelMaxDistanceWorld;
@@ -2131,6 +2166,19 @@ public partial class Terrain3DView : ContentView
             DrawStarLabelsOverScene(canvas, frame, e.Info.Width, e.Info.Height);
             DrawNightLights(canvas, projectedPois);
             DrawFlightMarker(canvas, e.Info.Width, e.Info.Height);
+            if (dbgSwapPaint)
+            {
+                double dbgTotalMs = dbgPaintWatch.Elapsed.TotalMilliseconds;
+                if (dbgTotalMs > 100)
+                {
+                    // prep = marker projection + occlusion before the GL call; gl = TryRenderTerrainGl
+                    // (its internal split is the renderer's own hitch line); skia = the overlay draw above.
+                    Serilog.Log.Information(
+                        "[GL3D] swap paint breakdown: prep={Prep:F0} gl={Gl:F0} skia={Skia:F0} total={Total:F0}ms",
+                        dbgPrepMs, dbgGlMs, dbgTotalMs - dbgPrepMs - dbgGlMs, dbgTotalMs);
+                }
+            }
+
             // Recording capture for this path happens inside TryRenderTerrainGl (GL FBO readback), not here.
             return;
         }
@@ -3231,7 +3279,21 @@ public partial class Terrain3DView : ContentView
             // During a film the time arc sweeps the sun; pin the snow line to the pre-film sun so the cover the
             // user set doesn't melt/reform mid-shot (only the lighting moves). Off-film = snow follows the sun.
             glRenderer.SnowSunOverride = flightActive ? flightBaseSun : null;
+            double dbgPreRenderMs = dbgSwapPaintActive ? dbgPaintWatch.Elapsed.TotalMilliseconds : 0;
             uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere, forest, DetailElevation, ShowNightSky ? DateOnly.FromDateTime(DateTime.Now) : null, ExposedRoutes, ShowSauronTower, ShowEagles, AtmosphereEffectsEnabled);
+            if (dbgSwapPaintActive)
+            {
+                double afterRenderMs = dbgPaintWatch.Elapsed.TotalMilliseconds;
+                if (afterRenderMs > 100)
+                {
+                    // pre = property pushes + ortho apply + forest cache; render = the GL frame itself
+                    // (its internal split is the renderer's hitch line); everything after is Skia compose.
+                    Serilog.Log.Information(
+                        "[GL3D] swap gl-block: pre={Pre:F0} render={Render:F0}ms",
+                        dbgPreRenderMs, afterRenderMs - dbgPreRenderMs);
+                }
+            }
+
             if (terrainTextureId == 0)
             {
                 return false;
@@ -3292,27 +3354,81 @@ public partial class Terrain3DView : ContentView
             return;
         }
 
-        var decoded = new List<(byte[] Rgba, int Width, int Height)>(paths.Count);
-        foreach (string path in paths)
+        // OFF-THREAD DECODE (2026-07-05): decoding the 8 bundled ortho PNGs (8192×5462 each) + the master
+        // downsample took a MEASURED 31 s synchronously on this (paint/UI) thread — the window froze solid
+        // behind the startup overlay (no frames, no progress animation; the log goes silent for the whole
+        // span). Same pattern as the far-tier compute: kick a background task, keep painting (terrain shows
+        // hypsometric until the pixels arrive), poll for the result on later paints. A path-set change mid-
+        // decode is detected by signature — the stale result is dropped and the new decode starts.
+        if (orthoDecodeTask is { } task && orthoDecodeSignature == signature)
         {
-            if (DecodeOrtho(path) is { } tile)
+            if (!task.IsCompleted)
             {
-                decoded.Add(tile);
+                orthoPathDirty = true; // keep polling on subsequent paints
+                return;
             }
-        }
 
-        if (decoded.Count != paths.Count)
-        {
-            cachedOrthoSignature = null;
-            cachedOrthoDecoded = null;
-            renderer.SetOrthoTextures(Array.Empty<(byte[], int, int)>());
+            orthoDecodeTask = null;
+            List<(byte[] Rgba, int Width, int Height)>? decoded = task.IsCompletedSuccessfully ? task.Result : null;
+            if (decoded is null || decoded.Count != paths.Count)
+            {
+                cachedOrthoSignature = null;
+                cachedOrthoDecoded = null;
+                renderer.SetOrthoTextures(Array.Empty<(byte[], int, int)>());
+                return;
+            }
+
+            cachedOrthoSignature = signature;
+            cachedOrthoDecoded = decoded;
+            renderer.SetOrthoTextures(decoded);
             return;
         }
 
-        cachedOrthoSignature = signature;
-        cachedOrthoDecoded = decoded;
-        renderer.SetOrthoTextures(decoded);
+        orthoDecodeSignature = signature;
+        var pathsCopy = paths.ToList();
+        orthoDecodeTask = Task.Run(() =>
+        {
+            // Cells decode in PARALLEL (independent files, pure decode+resize) — sequential took ~40 s for
+            // the 8 bundled cells, which is how long the terrain stayed hypsometric after the scene reveal.
+            // Indexed slots keep the list order = the mesh ortho-cell order (OrthoTileIndex is positional).
+            var slots = new (byte[] Rgba, int Width, int Height)?[pathsCopy.Count];
+            System.Threading.Tasks.Parallel.For(0, pathsCopy.Count, i =>
+            {
+                if (DecodeOrtho(pathsCopy[i]) is { } tile)
+                {
+                    // Pre-shrink to the master cap HERE so SetOrthoTextures' own downsample is a no-op —
+                    // the whole heavy lift stays off the paint thread.
+                    slots[i] = MapaTur.Application.Terrain.OrthoCellDownsampler.Downsample(
+                        tile.Rgba, tile.Width, tile.Height,
+                        MapaTur.Application.Terrain.OrthoDistanceTier.NearCapPx);
+                }
+            });
+
+            var decoded = new List<(byte[] Rgba, int Width, int Height)>(pathsCopy.Count);
+            foreach ((byte[] Rgba, int Width, int Height)? slot in slots)
+            {
+                if (slot.HasValue)
+                {
+                    decoded.Add(slot.Value);
+                }
+            }
+
+            return decoded;
+        });
+        // Wake the paint loop when the pixels are ready (a still camera would otherwise not repaint).
+        orthoDecodeTask.ContinueWith(
+            _ => MainThread.BeginInvokeOnMainThread(() => Canvas.InvalidateSurface()),
+            TaskScheduler.Default);
+        orthoPathDirty = true; // poll again next paint
     }
+
+    // In-flight background ortho decode + the path signature it was started for (stale results are dropped).
+    private Task<List<(byte[] Rgba, int Width, int Height)>>? orthoDecodeTask;
+    private string? orthoDecodeSignature;
+
+    // True while the current paint is the tile-swap paint (set in OnPaintSurface) — TryRenderTerrainGl
+    // uses it to log its own pre/render/post split on exactly that frame.
+    private bool dbgSwapPaintActive;
 
     // Skips DecodeOrtho entirely: pre-composited cells (e.g. from an MBTiles archive) already carry
     // RGBA8 pixels and just need to flow through to SetOrthoTextures in row-major order.
