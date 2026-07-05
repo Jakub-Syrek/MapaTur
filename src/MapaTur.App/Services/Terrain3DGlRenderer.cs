@@ -98,9 +98,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform mat4 uCascadeVp2;\n" +
         "uniform vec3 uCascadeSplit;\n" +
         "uniform float uShadowStrength;\n" +
-        // Cloud-shadow inputs: the SAME field the sea-of-clouds layer draws, so the shadows on the
-        // ground line up with the clouds overhead. The terrain fragment projects up along the sun
-        // ray to the cloud plane and samples the field there — moving dappled light at any sun angle.
+        "uniform float uShadowTexel;\n" + // 1/ShadowMapSize — keeps the PCF radius true at any map size
+                                          // Cloud-shadow inputs: the SAME field the sea-of-clouds layer draws, so the shadows on the
+                                          // ground line up with the clouds overhead. The terrain fragment projects up along the sun
+                                          // ray to the cloud plane and samples the field there — moving dappled light at any sun angle.
         "uniform float uCloudAltitude;\n" +
         "uniform float uCloudNoiseScale;\n" +
         "uniform vec2 uCloudWind;\n" +
@@ -212,22 +213,28 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  float sy = s.z / (s.z + s.w);\n" +
         "  return mix(mix(s11, s01, sx), mix(s10, s00, sx), sy);\n" +
         "}\n" +
-        // Cascaded Shadow Maps (Krok 5 part 4): 3x3 PCF of one cascade (hardware depth compare), then pick the
-        // cascade by camera-space view distance, project the ABSOLUTE world position into its light space, and
-        // compare with a slope-scaled bias. Returns 1 = fully lit, →0 = shadowed (scaled by uShadowStrength).
-        "float pcfShadow(highp sampler2DShadow sm, vec2 uv, float depthRef){\n" +
-        "  float t = 1.0 / 1024.0;\n" +
+        // Cascaded Shadow Maps: 12-tap Poisson-disc PCF (hardware depth compare) with a per-pixel rotation
+        // (interleaved gradient noise) so the disc never bands — soft, natural penumbra instead of the old
+        // 3×3 box "ladder". Cascade picked by view distance; the last 10% of each cascade's range
+        // CROSS-FADES into the next one, so the quality step at a split is a blend, not a visible seam.
+        // uShadowTexel = 1/ShadowMapSize (desktop 2048, phone 1024) — set from the C# constant.
+        "const vec2 POISSON12[12] = vec2[](\n" +
+        "  vec2(-0.326, -0.406), vec2(-0.840, -0.074), vec2(-0.696,  0.457), vec2(-0.203,  0.621),\n" +
+        "  vec2( 0.962, -0.195), vec2( 0.473, -0.480), vec2( 0.519,  0.767), vec2( 0.185, -0.893),\n" +
+        "  vec2( 0.507,  0.064), vec2( 0.896,  0.412), vec2(-0.322, -0.933), vec2(-0.792, -0.598));\n" +
+        "float pcfShadow(highp sampler2DShadow sm, vec2 uv, float depthRef, vec2 rot){\n" +
+        "  float radius = uShadowTexel * 1.5;\n" +
         "  float s = 0.0;\n" +
-        "  for (int x = -1; x <= 1; x++) {\n" +
-        "    for (int y = -1; y <= 1; y++) {\n" +
-        "      s += texture(sm, vec3(uv + (vec2(float(x), float(y)) * t), depthRef));\n" +
-        "    }\n" +
+        "  for (int i = 0; i < 12; i++) {\n" +
+        "    vec2 o = POISSON12[i];\n" +
+        "    vec2 ro = vec2((o.x * rot.x) - (o.y * rot.y), (o.x * rot.y) + (o.y * rot.x));\n" +
+        "    s += texture(sm, vec3(uv + (ro * radius), depthRef));\n" +
         "  }\n" +
-        "  return s / 9.0;\n" +
+        "  return s / 12.0;\n" +
         "}\n" +
-        "float csmShadow(float viewDist, vec3 worldPos, float ndotl){\n" +
-        "  if (uShadowStrength < 0.001) return 1.0;\n" +
-        "  int ci = (viewDist < uCascadeSplit.x) ? 0 : ((viewDist < uCascadeSplit.y) ? 1 : 2);\n" +
+        // One cascade's lit factor for a world position (1 = lit). Out-of-map → 1 so the caller's blend
+        // toward the coarser cascade degrades gracefully at the fine map's edge.
+        "float cascadeLit(int ci, vec3 worldPos, float ndotl, vec2 rot){\n" +
         "  mat4 vp = (ci == 0) ? uCascadeVp0 : ((ci == 1) ? uCascadeVp1 : uCascadeVp2);\n" +
         "  vec4 lc = vp * vec4(worldPos, 1.0);\n" +
         "  vec3 p = lc.xyz / lc.w;\n" +
@@ -235,8 +242,22 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  if (p.z >= 1.0 || p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0) return 1.0;\n" +
         "  float bias = max(0.0025 * (1.0 - ndotl), 0.0007);\n" +
         "  float d = p.z - bias;\n" +
-        "  float lit = (ci == 0) ? pcfShadow(uShadowMap0, p.xy, d)\n" +
-        "            : ((ci == 1) ? pcfShadow(uShadowMap1, p.xy, d) : pcfShadow(uShadowMap2, p.xy, d));\n" +
+        "  return (ci == 0) ? pcfShadow(uShadowMap0, p.xy, d, rot)\n" +
+        "       : ((ci == 1) ? pcfShadow(uShadowMap1, p.xy, d, rot) : pcfShadow(uShadowMap2, p.xy, d, rot));\n" +
+        "}\n" +
+        "float csmShadow(float viewDist, vec3 worldPos, float ndotl){\n" +
+        "  if (uShadowStrength < 0.001) return 1.0;\n" +
+        // Per-pixel disc rotation from interleaved gradient noise — stable per screen position.
+        "  float ang = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))) * 6.2831853;\n" +
+        "  vec2 rot = vec2(cos(ang), sin(ang));\n" +
+        "  int ci = (viewDist < uCascadeSplit.x) ? 0 : ((viewDist < uCascadeSplit.y) ? 1 : 2);\n" +
+        "  float lit = cascadeLit(ci, worldPos, ndotl, rot);\n" +
+        "  float splitFar = (ci == 0) ? uCascadeSplit.x : ((ci == 1) ? uCascadeSplit.y : uCascadeSplit.z);\n" +
+        "  float fadeStart = splitFar * 0.9;\n" +
+        "  if (ci < 2 && viewDist > fadeStart) {\n" +
+        "    float f = smoothstep(fadeStart, splitFar, viewDist);\n" +
+        "    lit = mix(lit, cascadeLit(ci + 1, worldPos, ndotl, rot), f);\n" +
+        "  }\n" +
         "  return mix(1.0, lit, uShadowStrength);\n" +
         "}\n" +
         "void main(){\n" +
@@ -1991,7 +2012,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // each fit by an orthographic light matrix (CascadeLightMatrix). aPos is absolute world, so the depth
     // pass transforms it straight by the cascade light matrix — no model/stable offset needed.
     private const int ShadowCascadeCount = 3;
-    private const int ShadowMapSize = 1024; // mobile-friendly (was 2048); raise later if quality needs it
+    // Desktop 2048 (A-package 2026-07-05: crisp near-shadow edges; per-cascade caster culling freed the
+    // budget), phones keep the mobile-friendly 1024. The shader reads the texel size via uShadowTexel,
+    // so the two never drift apart.
+    private static readonly int ShadowMapSize = OperatingSystem.IsWindows() ? 2048 : 1024;
     private const float ShadowMaxDistance = 15000f; // cap cascade far so texels stay dense over visible terrain
     private const float ShadowSplitLambda = 0.85f;
     private readonly uint[] shadowFbos = new uint[ShadowCascadeCount];
@@ -2012,7 +2036,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // Shadow-sampling uniforms on the terrain program (part 4) + per-frame active flag + tuning strength.
     private int shadowMap0Loc = -1, shadowMap1Loc = -1, shadowMap2Loc = -1;
     private int cascadeVp0Loc = -1, cascadeVp1Loc = -1, cascadeVp2Loc = -1;
-    private int cascadeSplitLoc = -1, shadowStrengthLoc = -1;
+    private int cascadeSplitLoc = -1, shadowStrengthLoc = -1, shadowTexelLoc = -1;
     private bool shadowsActiveThisFrame;
     private const float ShadowStrength = 0.7f;
 
@@ -2592,7 +2616,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             shadowPassLogged = false;
             shadowMap0Loc = shadowMap1Loc = shadowMap2Loc = -1;
             cascadeVp0Loc = cascadeVp1Loc = cascadeVp2Loc = -1;
-            cascadeSplitLoc = shadowStrengthLoc = -1;
+            cascadeSplitLoc = shadowStrengthLoc = shadowTexelLoc = -1;
             shadowsActiveThisFrame = false;
             // The planar-reflection target belonged to the dead context — drop the handles so it's rebuilt fresh.
             reflectionFbo = 0;
@@ -3242,6 +3266,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 UploadMatrix(gl, cascadeVp2Loc, cascadeLightVp[2]);
                 gl.Uniform3(cascadeSplitLoc, cascadeSplitFar[0], cascadeSplitFar[1], cascadeSplitFar[2]);
                 gl.Uniform1(shadowStrengthLoc, ShadowStrength);
+                gl.Uniform1(shadowTexelLoc, 1f / ShadowMapSize);
             }
             else
             {
@@ -4425,7 +4450,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             g.BindTexture(TextureTarget.Texture2D, tex);
             g.TexImage2D(
                 TextureTarget.Texture2D, 0, (int)InternalFormat.DepthComponent24,
-                ShadowMapSize, ShadowMapSize, 0, PixelFormat.DepthComponent, PixelType.UnsignedInt, null);
+                (uint)ShadowMapSize, (uint)ShadowMapSize, 0, PixelFormat.DepthComponent, PixelType.UnsignedInt, null);
             g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
             g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
             g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
@@ -4526,7 +4551,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             cascadeSplitFar[c] = sliceFar;
 
             g.BindFramebuffer(FramebufferTarget.Framebuffer, shadowFbos[c]);
-            g.Viewport(0, 0, ShadowMapSize, ShadowMapSize);
+            g.Viewport(0, 0, (uint)ShadowMapSize, (uint)ShadowMapSize);
             g.Clear((uint)ClearBufferMask.DepthBufferBit);
 
             // Same row-major upload as uMvp (transpose=false): GL reads it column-major, so GLSL's
@@ -5046,6 +5071,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private object? lakeWaterRasterRef;
     private MapaTur.Domain.Geography.MapBounds? lakeWaterFineBounds;
 
+    // In-flight off-thread lake-water build + the inputs it was started for (see BuildLakeWater).
+    private Task<(List<LakeDraw> Draws, float[] Verts, int Count)>? lakeBuildTask;
+    private object? lakeBuildTilesRef;
+    private object? lakeBuildRasterRef;
+    private MapaTur.Domain.Geography.MapBounds? lakeBuildFineBounds;
+
     private unsafe void BuildLakeWater(GL g, IReadOnlyList<TerrainMesh3D> tiles, MapaTur.Domain.Terrain.DemRaster? raster)
     {
         if (ReferenceEquals(tiles, lakeWaterTilesRef)
@@ -5055,15 +5086,91 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             return; // same terrain inputs — the uploaded VBO and lakeDraws are still valid
         }
 
-        lakeWaterTilesRef = tiles;
-        lakeWaterRasterRef = raster;
-        lakeWaterFineBounds = LakeFineBounds;
+        // OFF-THREAD build, same poll-and-swap pattern as the ribbons / ortho decode: ear-clipping all the
+        // in-extent lake outlines measured ~160 ms on the swap frame — the last chunk of the first-swap
+        // hitch. The previous water keeps drawing until the fresh result lands; a stale result (any input
+        // changed mid-build) is dropped and the build re-kicked.
+        bool taskMatches = lakeBuildTask is not null
+            && ReferenceEquals(lakeBuildTilesRef, tiles)
+            && ReferenceEquals(lakeBuildRasterRef, raster)
+            && Equals(lakeBuildFineBounds, LakeFineBounds);
+        if (taskMatches && lakeBuildTask!.IsCompleted)
+        {
+            if (lakeBuildTask.IsCompletedSuccessfully)
+            {
+                (List<LakeDraw> draws, float[] built, int count) = lakeBuildTask.Result;
+                UploadLakeWater(g, draws, built, count);
+                lakeWaterTilesRef = tiles;
+                lakeWaterRasterRef = raster;
+                lakeWaterFineBounds = LakeFineBounds;
+            }
 
+            lakeBuildTask = null; // success consumed the result; a failure re-kicks below next frame
+        }
+        else if (!taskMatches)
+        {
+            (IReadOnlyList<TerrainMesh3D> bTiles, MapaTur.Domain.Terrain.DemRaster? bRaster) = (tiles, raster);
+            MapaTur.Domain.Geography.MapBounds? bFine = LakeFineBounds;
+            lakeBuildTilesRef = tiles;
+            lakeBuildRasterRef = raster;
+            lakeBuildFineBounds = LakeFineBounds;
+            lakeBuildTask = Task.Run(() => BuildLakeWaterCpu(bTiles, bRaster, bFine));
+        }
+    }
+
+    // GL half of the lake-water swap: replaces the draw list and (re)uploads the vertex buffer.
+    private unsafe void UploadLakeWater(GL g, List<LakeDraw> draws, float[] built, int count)
+    {
+        const int stride = 12;
         lakeDraws.Clear();
-        debugPolyVertexCount = 0;
-        if (tiles.Count == 0)
+        lakeDraws.AddRange(draws);
+        debugPolyVertexCount = count / stride;
+        if (count == 0)
         {
             return;
+        }
+
+        if (debugPolyFloats is null || debugPolyFloats.Length < count)
+        {
+            debugPolyFloats = new float[count];
+        }
+
+        Array.Copy(built, debugPolyFloats, count);
+        float[] buf = debugPolyFloats;
+
+        if (debugPolyVao == 0)
+        {
+            debugPolyVao = g.GenVertexArray();
+            debugPolyVbo = g.GenBuffer();
+            g.BindVertexArray(debugPolyVao);
+            g.BindBuffer(BufferTargetARB.ArrayBuffer, debugPolyVbo);
+            int sb = stride * sizeof(float);
+            g.EnableVertexAttribArray(0); g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, (uint)sb, (void*)0);
+            g.EnableVertexAttribArray(1); g.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, (uint)sb, (void*)(3 * sizeof(float)));
+            g.EnableVertexAttribArray(2); g.VertexAttribPointer(2, 3, VertexAttribPointerType.Float, false, (uint)sb, (void*)(7 * sizeof(float)));
+            g.EnableVertexAttribArray(3); g.VertexAttribPointer(3, 2, VertexAttribPointerType.Float, false, (uint)sb, (void*)(10 * sizeof(float)));
+        }
+        else
+        {
+            g.BindVertexArray(debugPolyVao);
+            g.BindBuffer(BufferTargetARB.ArrayBuffer, debugPolyVbo);
+        }
+
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, new ReadOnlySpan<float>(buf, 0, count), BufferUsageARB.DynamicDraw);
+        g.BindVertexArray(0);
+    }
+
+    // CPU half (background thread): seat + ear-clip every in-extent lake into a vertex list + draw records.
+    // Pure — every input is read-only (tile meshes, raster samples, static lake data), so it is safe off-thread.
+    private static (List<LakeDraw> Draws, float[] Verts, int Count) BuildLakeWaterCpu(
+        IReadOnlyList<TerrainMesh3D> tiles,
+        MapaTur.Domain.Terrain.DemRaster? raster,
+        MapaTur.Domain.Geography.MapBounds? fineBounds)
+    {
+        var draws = new List<LakeDraw>();
+        if (tiles.Count == 0)
+        {
+            return (draws, Array.Empty<float>(), 0);
         }
 
         // Only lakes within the loaded terrain extent — so water never floats over un-loaded ground (empty in
@@ -5090,7 +5197,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             for (int i = 0; i < m; i++) { cLat += ring[i].Latitude; cLon += ring[i].Longitude; }
             var centroidGeo = new MapaTur.Domain.Geography.GeoPoint(cLat / m, cLon / m);
             float waterElevM;
-            if (raster is null || (LakeFineBounds is { } fine && fine.Contains(centroidGeo)))
+            if (raster is null || (fineBounds is { } fine && fine.Contains(centroidGeo)))
             {
                 waterElevM = (float)lake.ElevationMeters + 4f; // legacy: just above the (accurate) bed
             }
@@ -5143,41 +5250,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             float maxR = 1f;
             for (int i = 0; i < m; i++) { maxR = MathF.Max(maxR, Vector2.Distance(center, w2[i])); }
 
-            lakeDraws.Add(new LakeDraw(startVertex, tris.Count, center, maxR));
+            draws.Add(new LakeDraw(startVertex, tris.Count, center, maxR));
         }
 
-        int n = verts.Count;
-        debugPolyVertexCount = n / stride;
-        if (n == 0)
-        {
-            return;
-        }
-        if (debugPolyFloats is null || debugPolyFloats.Length < n)
-        {
-            debugPolyFloats = new float[n];
-        }
-        verts.CopyTo(debugPolyFloats);
-        float[] buf = debugPolyFloats;
-
-        if (debugPolyVao == 0)
-        {
-            debugPolyVao = g.GenVertexArray();
-            debugPolyVbo = g.GenBuffer();
-            g.BindVertexArray(debugPolyVao);
-            g.BindBuffer(BufferTargetARB.ArrayBuffer, debugPolyVbo);
-            int sb = stride * sizeof(float);
-            g.EnableVertexAttribArray(0); g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, (uint)sb, (void*)0);
-            g.EnableVertexAttribArray(1); g.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, (uint)sb, (void*)(3 * sizeof(float)));
-            g.EnableVertexAttribArray(2); g.VertexAttribPointer(2, 3, VertexAttribPointerType.Float, false, (uint)sb, (void*)(7 * sizeof(float)));
-            g.EnableVertexAttribArray(3); g.VertexAttribPointer(3, 2, VertexAttribPointerType.Float, false, (uint)sb, (void*)(10 * sizeof(float)));
-        }
-        else
-        {
-            g.BindVertexArray(debugPolyVao);
-            g.BindBuffer(BufferTargetARB.ArrayBuffer, debugPolyVbo);
-        }
-        g.BufferData<float>(BufferTargetARB.ArrayBuffer, new ReadOnlySpan<float>(buf, 0, n), BufferUsageARB.DynamicDraw);
-        g.BindVertexArray(0);
+        return (draws, verts.ToArray(), verts.Count);
     }
 
     // Ear-clipping triangulation of a simple (possibly concave) polygon. Returns a flat list of vertex indices
@@ -5438,6 +5514,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         cascadeVp2Loc = g.GetUniformLocation(program, "uCascadeVp2");
         cascadeSplitLoc = g.GetUniformLocation(program, "uCascadeSplit");
         shadowStrengthLoc = g.GetUniformLocation(program, "uShadowStrength");
+        shadowTexelLoc = g.GetUniformLocation(program, "uShadowTexel");
 
         // Sky program — single triangle covering the screen, fragment-shader-only atmospheric model.
         uint sks = CompileShader(g, ShaderType.VertexShader, SkyVertexShaderSource);
