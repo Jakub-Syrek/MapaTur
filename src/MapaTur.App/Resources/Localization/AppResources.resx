@@ -258,9 +258,9 @@
 
   <!-- ════ Menu chrome: top tab chips ════ -->
   <data name="TabRoute" xml:space="preserve"><value>Route</value></data>
-  <data name="TabModes" xml:space="preserve"><value>Modes</value></data>
-  <data name="TabView" xml:space="preserve"><value>View</value></data>
-  <data name="TabMap" xml:space="preserve"><value>Map</value></data>
+  <data name="TabModes" xml:space="preserve"><value>Layers</value></data>
+  <data name="TabView" xml:space="preserve"><value>Terrain</value></data>
+  <data name="TabMap" xml:space="preserve"><value>Data</value></data>
   <data name="TabWeather" xml:space="preserve"><value>Weather</value></data>
   <data name="TabSettings" xml:space="preserve"><value>Settings</value></data>
 
@@ -275,9 +275,9 @@
 
   <!-- ════ Section titles ════ -->
   <data name="SectionRouteTitle" xml:space="preserve"><value>🧭  Route</value></data>
-  <data name="SectionModesTitle" xml:space="preserve"><value>🎚️  Modes</value></data>
-  <data name="SectionViewTitle" xml:space="preserve"><value>🎥  View</value></data>
-  <data name="SectionMapTitle" xml:space="preserve"><value>🗺️  Map</value></data>
+  <data name="SectionModesTitle" xml:space="preserve"><value>🗺️  Layers</value></data>
+  <data name="SectionViewTitle" xml:space="preserve"><value>🏔️  Terrain</value></data>
+  <data name="SectionMapTitle" xml:space="preserve"><value>📦  Data</value></data>
   <data name="SectionWeatherTitle" xml:space="preserve"><value>🌦️  Weather</value></data>
   <data name="SectionSettingsTitle" xml:space="preserve"><value>⚙️  Settings</value></data>
 

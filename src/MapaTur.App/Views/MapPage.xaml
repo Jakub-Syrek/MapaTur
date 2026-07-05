@@ -107,7 +107,7 @@
                         </VerticalStackLayout>
                     </Grid>
 
-                    <!-- 🎚️ Tryby -->
+                    <!-- 🗺️ Warstwy (layer visibility only — render/terrain toggles live under Teren) -->
                     <Grid Grid.Column="1" Padding="2,4">
                         <Grid.GestureRecognizers>
                             <TapGestureRecognizer Command="{Binding SelectSectionCommand}" CommandParameter="2" />
@@ -117,12 +117,12 @@
                             <Border.StrokeShape><RoundRectangle CornerRadius="16" /></Border.StrokeShape>
                         </Border>
                         <VerticalStackLayout Spacing="1" Padding="0,4" HorizontalOptions="Center" InputTransparent="True">
-                            <Label Text="🎚️" FontSize="19" HorizontalOptions="Center" />
+                            <Label Text="🗺️" FontSize="19" HorizontalOptions="Center" />
                             <Label Text="{x:Static loc:AppStrings.TabModes}" Style="{StaticResource GlassCaption}" FontSize="10" HorizontalOptions="Center" />
                         </VerticalStackLayout>
                     </Grid>
 
-                    <!-- 🎥 Widok -->
+                    <!-- 🏔️ Teren (terrain look: Pion, ortho/rock/biomes/slope, camera, easter eggs) -->
                     <Grid Grid.Column="2" Padding="2,4">
                         <Grid.GestureRecognizers>
                             <TapGestureRecognizer Command="{Binding SelectSectionCommand}" CommandParameter="3" />
@@ -132,12 +132,12 @@
                             <Border.StrokeShape><RoundRectangle CornerRadius="16" /></Border.StrokeShape>
                         </Border>
                         <VerticalStackLayout Spacing="1" Padding="0,4" HorizontalOptions="Center" InputTransparent="True">
-                            <Label Text="🎥" FontSize="19" HorizontalOptions="Center" />
+                            <Label Text="🏔️" FontSize="19" HorizontalOptions="Center" />
                             <Label Text="{x:Static loc:AppStrings.TabView}" Style="{StaticResource GlassCaption}" FontSize="10" HorizontalOptions="Center" />
                         </VerticalStackLayout>
                     </Grid>
 
-                    <!-- 🗺️ Mapa -->
+                    <!-- 📦 Dane (data lifecycle: regions, loads, downloads, cache) -->
                     <Grid Grid.Column="3" Padding="2,4">
                         <Grid.GestureRecognizers>
                             <TapGestureRecognizer Command="{Binding SelectSectionCommand}" CommandParameter="4" />
@@ -147,7 +147,7 @@
                             <Border.StrokeShape><RoundRectangle CornerRadius="16" /></Border.StrokeShape>
                         </Border>
                         <VerticalStackLayout Spacing="1" Padding="0,4" HorizontalOptions="Center" InputTransparent="True">
-                            <Label Text="🗺️" FontSize="19" HorizontalOptions="Center" />
+                            <Label Text="📦" FontSize="19" HorizontalOptions="Center" />
                             <Label Text="{x:Static loc:AppStrings.TabMap}" Style="{StaticResource GlassCaption}" FontSize="10" HorizontalOptions="Center" />
                         </VerticalStackLayout>
                     </Grid>
@@ -379,31 +379,8 @@
                 <VerticalStackLayout Spacing="12">
                     <Label Text="{x:Static loc:AppStrings.SectionModesTitle}" Style="{StaticResource GlassTitle}" />
 
-                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                        <Label Grid.Column="0" Text="{x:Static loc:AppStrings.ToggleOrtho}" Style="{StaticResource GlassLabel}" />
-                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowOrtho}" />
-                    </Grid>
-                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                        <VerticalStackLayout Grid.Column="0" Spacing="0">
-                            <Label Text="{x:Static loc:AppStrings.ToggleRock}" Style="{StaticResource GlassLabel}" />
-                            <Label Text="{x:Static loc:AppStrings.ToggleRockHint}" Style="{StaticResource GlassCaption}" FontSize="10" />
-                        </VerticalStackLayout>
-                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding RockMaterialOn}" />
-                    </Grid>
-                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                        <VerticalStackLayout Grid.Column="0" Spacing="0">
-                            <Label Text="{x:Static loc:AppStrings.ToggleBiomes}" Style="{StaticResource GlassLabel}" />
-                            <Label Text="{x:Static loc:AppStrings.ToggleBiomesHint}" Style="{StaticResource GlassCaption}" FontSize="10" />
-                        </VerticalStackLayout>
-                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding BiomeMaterialOn}" />
-                    </Grid>
-                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                        <VerticalStackLayout Grid.Column="0" Spacing="0">
-                            <Label Text="{x:Static loc:AppStrings.ToggleSlopeMap}" Style="{StaticResource GlassLabel}" />
-                            <Label Text="{x:Static loc:AppStrings.ToggleSlopeMapHint}" Style="{StaticResource GlassCaption}" FontSize="10" />
-                        </VerticalStackLayout>
-                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding SlopeMapMode}" />
-                    </Grid>
+                    <!-- LAYER visibility only (accepted redesign 2026-07-05): terrain-LOOK toggles
+                         (ortho / rock / biomes / slope) live under Teren; perf toggles under Ustawienia. -->
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                         <Label Grid.Column="0" Text="{x:Static loc:AppStrings.ToggleTrails}" Style="{StaticResource GlassLabel}" />
                         <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowTrails}" />
@@ -423,26 +400,21 @@
                         </VerticalStackLayout>
                         <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowExposedRoutes}" />
                     </Grid>
+                    <!-- Name layers as switches too (one idiom: Switch = layer on/off, chip = filter within). -->
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                        <VerticalStackLayout Grid.Column="0" Spacing="0">
-                            <Label Text="{x:Static loc:AppStrings.ToggleSauronTower}" Style="{StaticResource GlassLabel}" />
-                            <Label Text="{x:Static loc:AppStrings.ToggleSauronTowerHint}" Style="{StaticResource GlassCaption}" FontSize="10" />
-                        </VerticalStackLayout>
-                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowSauronTower}" />
+                        <Label Grid.Column="0" Text="{x:Static loc:AppStrings.LayerPeakNames}" Style="{StaticResource GlassLabel}" />
+                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowPeakNames}" />
+                    </Grid>
+                    <!-- Peak-name label radius: only summits within this camera distance show a name. -->
+                    <Grid ColumnDefinitions="64,*,52" ColumnSpacing="10" IsVisible="{Binding ShowPeakNames}">
+                        <Label Grid.Column="0" Text="{x:Static loc:AppStrings.PeakRangeLabel}" Style="{StaticResource GlassLabel}" />
+                        <Slider Grid.Column="1" Style="{StaticResource GlassSlider}" Minimum="1000" Maximum="30000"
+                                Value="{Binding PeakLabelRadiusMeters, Mode=TwoWay}" SemanticProperties.Hint="{x:Static loc:AppStrings.PeakRangeHint}" />
+                        <Label Grid.Column="2" Text="{Binding PeakLabelRadiusText}" Style="{StaticResource GlassValue}" />
                     </Grid>
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                        <VerticalStackLayout Grid.Column="0" Spacing="0">
-                            <Label Text="{x:Static loc:AppStrings.ToggleEagles}" Style="{StaticResource GlassLabel}" />
-                            <Label Text="{x:Static loc:AppStrings.ToggleEaglesHint}" Style="{StaticResource GlassCaption}" FontSize="10" />
-                        </VerticalStackLayout>
-                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowEagles}" />
-                    </Grid>
-                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                        <VerticalStackLayout Grid.Column="0" Spacing="0">
-                            <Label Text="{x:Static loc:AppStrings.ToggleAtmosphereEffects}" Style="{StaticResource GlassLabel}" />
-                            <Label Text="{x:Static loc:AppStrings.ToggleAtmosphereEffectsHint}" Style="{StaticResource GlassCaption}" FontSize="10" />
-                        </VerticalStackLayout>
-                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding AtmosphereEffectsEnabled}" />
+                        <Label Grid.Column="0" Text="{x:Static loc:AppStrings.LayerContours}" Style="{StaticResource GlassLabel}" />
+                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowContours}" />
                     </Grid>
 
                     <Label Text="{x:Static loc:AppStrings.TrailColoursHeader}" Style="{StaticResource GlassCaption}" Margin="0,2,0,0" />
@@ -479,42 +451,8 @@
                         </Border>
                     </FlexLayout>
 
-                    <Label Text="{x:Static loc:AppStrings.LayersHeader}" Style="{StaticResource GlassCaption}" />
-                    <FlexLayout Wrap="Wrap" JustifyContent="Start" AlignItems="Center">
-                        <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
-                                Background="{Binding ShowTrails, Converter={StaticResource BoolToBrush}, ConverterParameter='#5536E2FF|#14FFFFFF'}">
-                            <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
-                            <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="Trails" /></Border.GestureRecognizers>
-                            <Label Text="{x:Static loc:AppStrings.LayerTrails}" Style="{StaticResource GlassLabel}" FontSize="12" />
-                        </Border>
-                        <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
-                                Background="{Binding ShowPeakNames, Converter={StaticResource BoolToBrush}, ConverterParameter='#5536E2FF|#14FFFFFF'}">
-                            <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
-                            <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="PeakNames" /></Border.GestureRecognizers>
-                            <Label Text="{x:Static loc:AppStrings.LayerPeakNames}" Style="{StaticResource GlassLabel}" FontSize="12" />
-                        </Border>
-                        <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
-                                Background="{Binding ShowNightSky, Converter={StaticResource BoolToBrush}, ConverterParameter='#5536E2FF|#14FFFFFF'}">
-                            <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
-                            <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="NightSky" /></Border.GestureRecognizers>
-                            <Label Text="{x:Static loc:AppStrings.LayerNightSky}" Style="{StaticResource GlassLabel}" FontSize="12" />
-                        </Border>
-                        <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
-                                Background="{Binding ShowContours, Converter={StaticResource BoolToBrush}, ConverterParameter='#5536E2FF|#14FFFFFF'}">
-                            <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
-                            <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding ToggleFlagCommand}" CommandParameter="Contours" /></Border.GestureRecognizers>
-                            <Label Text="{x:Static loc:AppStrings.LayerContours}" Style="{StaticResource GlassLabel}" FontSize="12" />
-                        </Border>
-                    </FlexLayout>
-
-                    <!-- Peak-name label radius: only summits within this camera distance show a name. Sits right
-                         under the "Nazwy szczytów" toggle and appears only while that layer is on. -->
-                    <Grid ColumnDefinitions="64,*,52" ColumnSpacing="10" IsVisible="{Binding ShowPeakNames}">
-                        <Label Grid.Column="0" Text="{x:Static loc:AppStrings.PeakRangeLabel}" Style="{StaticResource GlassLabel}" />
-                        <Slider Grid.Column="1" Style="{StaticResource GlassSlider}" Minimum="1000" Maximum="30000"
-                                Value="{Binding PeakLabelRadiusMeters, Mode=TwoWay}" SemanticProperties.Hint="{x:Static loc:AppStrings.PeakRangeHint}" />
-                        <Label Grid.Column="2" Text="{Binding PeakLabelRadiusText}" Style="{StaticResource GlassValue}" />
-                    </Grid>
+                    <!-- The old "Warstwy" chip row is gone: Trails chip duplicated the Switch above, Night sky
+                         moved to Pogoda (it belongs to the time of day), PeakNames/Contours are switches now. -->
 
                     <Label Text="{x:Static loc:AppStrings.PoiHeader}" Style="{StaticResource GlassCaption}" />
                     <FlexLayout Wrap="Wrap" JustifyContent="Start" AlignItems="Center">
@@ -610,14 +548,21 @@
                                 Value="{Binding Storm, Mode=TwoWay}" SemanticProperties.Hint="{x:Static loc:AppStrings.WeatherStormHint}" />
                         <Label Grid.Column="2" Text="{Binding Storm, StringFormat='{0:P0}'}" Style="{StaticResource GlassValue}" />
                     </Grid>
+                    <!-- Night sky belongs to the time of day (moved from the old Tryby chip row). -->
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <Label Grid.Column="0" Text="{x:Static loc:AppStrings.LayerNightSky}" Style="{StaticResource GlassLabel}" />
+                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowNightSky}" />
+                    </Grid>
                 </VerticalStackLayout>
             </Border>
 
-            <!-- 🎥 WIDOK -->
+            <!-- 🏔️ TEREN (ex-Widok): how the terrain LOOKS — Pion, surface materials, camera, easter eggs.
+                 Layer visibility lives under Warstwy; perf/battery toggles under Ustawienia. -->
             <Border x:Name="PanelWidok" Style="{StaticResource GlassSurface}" Padding="16,14"
-                    VerticalOptions="Start" Margin="10,120,10,12"
+                    VerticalOptions="Fill" Margin="10,120,10,12"
                     IsVisible="{Binding ActiveSection, Converter={StaticResource IntEquals}, ConverterParameter=3}">
-                <VerticalStackLayout Spacing="14">
+                <ScrollView VerticalScrollBarVisibility="Always">
+                <VerticalStackLayout Spacing="12">
                     <Label Text="{x:Static loc:AppStrings.SectionViewTitle}" Style="{StaticResource GlassTitle}" />
                     <Grid ColumnDefinitions="64,*,52" ColumnSpacing="10">
                         <Label Grid.Column="0" Text="{x:Static loc:AppStrings.ViewVertical}" Style="{StaticResource GlassLabel}" />
@@ -625,11 +570,57 @@
                                 Value="{Binding VerticalExaggeration, Mode=TwoWay}" SemanticProperties.Hint="{x:Static loc:AppStrings.LabelVerticalExaggeration}" />
                         <Label Grid.Column="2" Text="{Binding VerticalExaggeration, StringFormat='{0:F1}×'}" Style="{StaticResource GlassValue}" />
                     </Grid>
+
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <Label Grid.Column="0" Text="{x:Static loc:AppStrings.ToggleOrtho}" Style="{StaticResource GlassLabel}" />
+                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowOrtho}" />
+                    </Grid>
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <VerticalStackLayout Grid.Column="0" Spacing="0">
+                            <Label Text="{x:Static loc:AppStrings.ToggleRock}" Style="{StaticResource GlassLabel}" />
+                            <Label Text="{x:Static loc:AppStrings.ToggleRockHint}" Style="{StaticResource GlassCaption}" FontSize="10" />
+                        </VerticalStackLayout>
+                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding RockMaterialOn}" />
+                    </Grid>
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <VerticalStackLayout Grid.Column="0" Spacing="0">
+                            <Label Text="{x:Static loc:AppStrings.ToggleBiomes}" Style="{StaticResource GlassLabel}" />
+                            <Label Text="{x:Static loc:AppStrings.ToggleBiomesHint}" Style="{StaticResource GlassCaption}" FontSize="10" />
+                        </VerticalStackLayout>
+                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding BiomeMaterialOn}" />
+                    </Grid>
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <VerticalStackLayout Grid.Column="0" Spacing="0">
+                            <Label Text="{x:Static loc:AppStrings.ToggleSlopeMap}" Style="{StaticResource GlassLabel}" />
+                            <Label Text="{x:Static loc:AppStrings.ToggleSlopeMapHint}" Style="{StaticResource GlassCaption}" FontSize="10" />
+                        </VerticalStackLayout>
+                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding SlopeMapMode}" />
+                    </Grid>
+
                     <Grid ColumnDefinitions="*,*" ColumnSpacing="10">
                         <Button Grid.Column="0" Style="{StaticResource GlassButton}" Text="{x:Static loc:AppStrings.ViewResetCamera}" Clicked="OnResetCameraClicked" />
                         <Button Grid.Column="1" Style="{StaticResource GlassButtonAccent}" Text="{x:Static loc:AppStrings.ViewFlythrough}" Clicked="OnFlyThroughClicked" />
                     </Grid>
+
+                    <BoxView HeightRequest="1" Color="#1AFFFFFF" Margin="0,2" />
+
+                    <!-- Easter eggs, tucked at the bottom of the terrain-look panel. -->
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <VerticalStackLayout Grid.Column="0" Spacing="0">
+                            <Label Text="{x:Static loc:AppStrings.ToggleSauronTower}" Style="{StaticResource GlassLabel}" />
+                            <Label Text="{x:Static loc:AppStrings.ToggleSauronTowerHint}" Style="{StaticResource GlassCaption}" FontSize="10" />
+                        </VerticalStackLayout>
+                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowSauronTower}" />
+                    </Grid>
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <VerticalStackLayout Grid.Column="0" Spacing="0">
+                            <Label Text="{x:Static loc:AppStrings.ToggleEagles}" Style="{StaticResource GlassLabel}" />
+                            <Label Text="{x:Static loc:AppStrings.ToggleEaglesHint}" Style="{StaticResource GlassCaption}" FontSize="10" />
+                        </VerticalStackLayout>
+                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowEagles}" />
+                    </Grid>
                 </VerticalStackLayout>
+                </ScrollView>
             </Border>
 
             <!-- 🗺️ MAPA (data: regions, terrain loads, viewport downloads) -->
@@ -711,13 +702,12 @@
                                 Command="{Binding DownloadWaterwaysForViewportCommand}" IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
                     </Grid>
 
-                    <Label Text="{x:Static loc:AppStrings.MapRouteHeader}" Style="{StaticResource GlassCaption}" />
-                    <Grid ColumnDefinitions="*,*" ColumnSpacing="8">
-                        <Button Grid.Column="0" Style="{StaticResource GlassButton}" Text="{x:Static loc:AppStrings.ClearRoute}"
-                                Command="{Binding ClearRouteCommand}" IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
-                        <Button Grid.Column="1" Style="{StaticResource GlassButton}" Text="{x:Static loc:AppStrings.ExportGpx}"
-                                Command="{Binding ExportRouteCommand}" IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
-                    </Grid>
+                    <!-- Route actions live ONLY under Trasa now (this was a duplicated block).
+                         The whole data LIFECYCLE ends here: cache summary + clear, moved from Ustawienia. -->
+                    <Label Text="{x:Static loc:AppStrings.SettingsCacheHeader}" Style="{StaticResource GlassCaption}" />
+                    <Label Text="{Binding CacheSummary}" Style="{StaticResource GlassLabel}" FontSize="12" />
+                    <Button Style="{StaticResource GlassButton}" Text="{x:Static loc:AppStrings.SettingsClearCache}"
+                            Command="{Binding ClearCacheCommand}" IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
                 </VerticalStackLayout>
                 </ScrollView>
             </Border>
@@ -790,13 +780,15 @@
                     </Border>
                     <Label Text="{x:Static loc:AppStrings.QualityHint}"
                            Style="{StaticResource GlassCaption}" />
-
-                    <BoxView HeightRequest="1" Color="#1AFFFFFF" Margin="0,2" />
-
-                    <Label Text="{x:Static loc:AppStrings.SettingsCacheHeader}" Style="{StaticResource GlassCaption}" />
-                    <Label Text="{Binding CacheSummary}" Style="{StaticResource GlassLabel}" FontSize="12" />
-                    <Button Style="{StaticResource GlassButton}" Text="{x:Static loc:AppStrings.SettingsClearCache}"
-                            Command="{Binding ClearCacheCommand}" IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
+                    <!-- Atmospheric effects are a perf/battery lever, so they sit with quality
+                         (moved from the old Tryby panel; cache moved the other way, to Dane). -->
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <VerticalStackLayout Grid.Column="0" Spacing="0">
+                            <Label Text="{x:Static loc:AppStrings.ToggleAtmosphereEffects}" Style="{StaticResource GlassLabel}" />
+                            <Label Text="{x:Static loc:AppStrings.ToggleAtmosphereEffectsHint}" Style="{StaticResource GlassCaption}" FontSize="10" />
+                        </VerticalStackLayout>
+                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding AtmosphereEffectsEnabled}" />
+                    </Grid>
 
                     <BoxView HeightRequest="1" Color="#1AFFFFFF" Margin="0,2" />
 
