@@ -571,11 +571,20 @@
                     IsVisible="{Binding ActiveSection, Converter={StaticResource IntEquals}, ConverterParameter=5}">
                 <VerticalStackLayout Spacing="14">
                     <Label Text="{x:Static loc:AppStrings.SectionWeatherTitle}" Style="{StaticResource GlassTitle}" />
-                    <Grid ColumnDefinitions="64,*,52" ColumnSpacing="10">
+                    <Grid ColumnDefinitions="64,*,52" RowDefinitions="Auto,Auto" ColumnSpacing="10" RowSpacing="0">
                         <Label Grid.Column="0" Text="{x:Static loc:AppStrings.WeatherTime}" Style="{StaticResource GlassLabel}" />
                         <Slider Grid.Column="1" Style="{StaticResource GlassSlider}" Minimum="0" Maximum="24"
                                 Value="{Binding TimeOfDayHours, Mode=TwoWay}" SemanticProperties.Hint="{x:Static loc:AppStrings.WeatherTimeHint}" />
                         <Label Grid.Column="2" Text="{Binding TimeOfDayHours, Converter={StaticResource HoursToClock}}" Style="{StaticResource GlassValue}" />
+                        <!-- Hour scale under the track: fixed anchors every 6 h so a slider position reads as a
+                             time-of-day at a glance (the star gaps space the labels evenly, ends flush). -->
+                        <Grid Grid.Row="1" Grid.Column="1" ColumnDefinitions="Auto,*,Auto,*,Auto,*,Auto,*,Auto" Margin="0,-4,0,0">
+                            <Label Grid.Column="0" Text="0"  FontSize="10" Opacity="0.55" TextColor="White" />
+                            <Label Grid.Column="2" Text="6"  FontSize="10" Opacity="0.55" TextColor="White" />
+                            <Label Grid.Column="4" Text="12" FontSize="10" Opacity="0.55" TextColor="White" />
+                            <Label Grid.Column="6" Text="18" FontSize="10" Opacity="0.55" TextColor="White" />
+                            <Label Grid.Column="8" Text="24" FontSize="10" Opacity="0.55" TextColor="White" />
+                        </Grid>
                     </Grid>
                     <Grid ColumnDefinitions="64,*,52" ColumnSpacing="10">
                         <Label Grid.Column="0" Text="{x:Static loc:AppStrings.WeatherClouds}" Style="{StaticResource GlassLabel}" />
