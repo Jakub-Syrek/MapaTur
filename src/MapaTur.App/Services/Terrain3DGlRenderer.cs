@@ -105,6 +105,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform float uCloudAltitude;\n" +
         "uniform float uCloudNoiseScale;\n" +
         "uniform vec2 uCloudWind;\n" +
+        "uniform vec2 uCloudShadowOffset;\n" + // sheet's slider-seeded field offset (ground shadows re-roll with the sky)
         "uniform float uCloudTime;\n" +
         "uniform float uCloudCoverage;\n" +
         "uniform float uCloudShadow;\n" + // strength 0..1; 0 disables
@@ -328,9 +329,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // grazing angles the projection length explodes and shadows would smear.
         "  float sunShadow = 0.0;\n" +
         "  if (uCloudShadow > 0.001 && uCloudCoverage > 0.001 && uLightDir.z > 0.12) {\n" +
-        "    float tt = (uCloudAltitude - vWorldPos.z) / uLightDir.z;\n" +
+        // vStableWorldPos.z, NOT vWorldPos.z: the render frame is camera-relative, so the ray length to the
+        // cloud deck changed as the camera tilted and the shadow pattern "swam" — the same latent bug the
+        // snow line had (snowH vs render-frame z), now fixed on this last remaining site.
+        "    float tt = (uCloudAltitude - vStableWorldPos.z) / uLightDir.z;\n" +
         "    if (tt > 0.0) {\n" +
-        "      vec2 cp = vStableWorldPos.xy + (uLightDir.xy * tt);\n" +
+        // uCloudShadowOffset = the sheet's slider-seeded field offset, so ground shadows re-roll WITH the
+        // clouds overhead when the coverage slider moves (the two patterns used to be unrelated).
+        "      vec2 cp = (vStableWorldPos.xy - uCloudShadowOffset) + (uLightDir.xy * tt);\n" +
         "      vec2 p = cp * uCloudNoiseScale + uCloudWind * uCloudTime;\n" +
         "      vec2 warp = vec2(fbmT(p * 0.5 + uCloudTime * 0.010),\n" +
         "                       fbmT(p * 0.5 + vec2(5.2, 1.3) + uCloudTime * 0.012));\n" +
@@ -1715,6 +1721,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int terrainCloudAltitudeLocation = -1;
     private int terrainCloudNoiseScaleLocation = -1;
     private int terrainCloudWindLocation = -1;
+    private int terrainCloudShadowOffsetLocation = -1;
     private int terrainCloudTimeLocation = -1;
     private int terrainCloudCoverageLocation = -1;
     private int terrainCloudShadowLocation = -1;
@@ -2457,6 +2464,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             terrainCloudAltitudeLocation = -1;
             terrainCloudNoiseScaleLocation = -1;
             terrainCloudWindLocation = -1;
+            terrainCloudShadowOffsetLocation = -1;
             terrainCloudTimeLocation = -1;
             terrainCloudCoverageLocation = -1;
             terrainCloudShadowLocation = -1;
@@ -3087,6 +3095,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform1(terrainCloudAltitudeLocation, cloudAltitude);
         gl.Uniform1(terrainCloudNoiseScaleLocation, cloudNoiseScale);
         gl.Uniform2(terrainCloudWindLocation, windVec.X, windVec.Y);
+        gl.Uniform2(terrainCloudShadowOffsetLocation, sheetSeedOffset.X, sheetSeedOffset.Y);
         gl.Uniform1(terrainCloudTimeLocation, weatherT);
         gl.Uniform1(terrainCloudCoverageLocation, cloudsActive ? effectiveCoverage : 0f);
         gl.Uniform1(terrainCloudShadowLocation, (cloudsActive ? CloudShadowStrength : 0f) * seaGate);
@@ -5508,6 +5517,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         terrainCloudAltitudeLocation = g.GetUniformLocation(program, "uCloudAltitude");
         terrainCloudNoiseScaleLocation = g.GetUniformLocation(program, "uCloudNoiseScale");
         terrainCloudWindLocation = g.GetUniformLocation(program, "uCloudWind");
+        terrainCloudShadowOffsetLocation = g.GetUniformLocation(program, "uCloudShadowOffset");
         terrainCloudTimeLocation = g.GetUniformLocation(program, "uCloudTime");
         terrainCloudCoverageLocation = g.GetUniformLocation(program, "uCloudCoverage");
         terrainCloudShadowLocation = g.GetUniformLocation(program, "uCloudShadow");
