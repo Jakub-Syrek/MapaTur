@@ -14,13 +14,25 @@ namespace MapaTur.Application.Terrain;
 /// <param name="StalePending">Residents currently OFF the desired set that are still inside their eviction
 /// grace window — the driver must keep updating until this reaches 0, or they would squat until the next
 /// camera move (the "stara grań 5 km dalej nie znika" bug).</param>
+/// <param name="LoadedKeys">Keys of the tiles loaded this update (churn diagnosability: WHICH tiles flap,
+/// not just how many). Same count as <paramref name="Loaded"/>.</param>
+/// <param name="EvictedKeys">Keys of the tiles evicted this update. Same count as <paramref name="Evicted"/>.</param>
 public sealed record BakedStreamingUpdate(
     IReadOnlyList<TerrainMesh3D> ResidentTiles,
     int Loaded,
     int Evicted,
     int Desired,
     bool WasClampedByBudget,
-    int StalePending = 0);
+    int StalePending = 0,
+    IReadOnlyList<DemTileKey>? LoadedKeys = null,
+    IReadOnlyList<DemTileKey>? EvictedKeys = null)
+{
+    /// <summary>Keys loaded this update (never null; empty when nothing loaded).</summary>
+    public IReadOnlyList<DemTileKey> LoadedKeys { get; init; } = LoadedKeys ?? Array.Empty<DemTileKey>();
+
+    /// <summary>Keys evicted this update (never null; empty when nothing evicted).</summary>
+    public IReadOnlyList<DemTileKey> EvictedKeys { get; init; } = EvictedKeys ?? Array.Empty<DemTileKey>();
+}
 
 /// <summary>
 /// Stage 2c of the terrain re-architecture: the streaming driver that turns a moving camera into a resident
@@ -287,6 +299,7 @@ public sealed class BakedTileStreamingManager
         // on move" flicker). Resident is typically far below the cap, so there's room to cache. Eviction is
         // CAP-DRIVEN below — only when resident exceeds maxResidentTiles, farthest/oldest first.
         int loaded = 0;
+        var loadedKeys = new List<DemTileKey>();
         if (diff.ToLoad.Count > 0)
         {
             IReadOnlyList<(DemTileKey Key, IReadOnlyList<TerrainMesh3D> Meshes, bool HoleFree)> built =
@@ -295,6 +308,7 @@ public sealed class BakedTileStreamingManager
             {
                 this.resident[key] = meshes;
                 this.holeFreeByKey[key] = holeFree;
+                loadedKeys.Add(key);
                 loaded++;
             }
         }
@@ -330,6 +344,7 @@ public sealed class BakedTileStreamingManager
         }
 
         int evicted = 0;
+        var evictedKeys = new List<DemTileKey>();
         // Over the COUNT cap can evict down to the cap; over the BYTE cap keeps at least one tile resident (you
         // can't render a hole, and a single tile bigger than the whole byte budget is pathological, not a leak).
         while ((orderedResident.Count > this.maxResidentTiles) ||
@@ -341,6 +356,7 @@ public sealed class BakedTileStreamingManager
             this.resident.Remove(far);
             this.holeFreeByKey.Remove(far);
             this.lastDesiredTick.Remove(far);
+            evictedKeys.Add(far);
             evicted++;
         }
 
@@ -372,6 +388,7 @@ public sealed class BakedTileStreamingManager
                     this.resident.Remove(key);
                     this.holeFreeByKey.Remove(key);
                     this.lastDesiredTick.Remove(key);
+                    evictedKeys.Add(key);
                     evicted++;
                 }
                 else if (offDesiredFor > 0)
@@ -388,7 +405,9 @@ public sealed class BakedTileStreamingManager
         }
 
         this.residentOrder = orderedResident;
-        return new BakedStreamingUpdate(drawable, loaded, evicted, desired.Count, selection.WasClampedByBudget, stalePending);
+        return new BakedStreamingUpdate(
+            drawable, loaded, evicted, desired.Count, selection.WasClampedByBudget, stalePending,
+            loadedKeys, evictedKeys);
     }
 
     /// <summary>Drops every resident tile (e.g. a new scene loads, or the anchor / ortho coverage changed).</summary>
@@ -404,21 +423,36 @@ public sealed class BakedTileStreamingManager
     // simply stays un-resident and reappears in the next selection's to-load until it can be read. A tile that
     // straddles an ortho cell boundary is cut into per-cell sub-meshes (BuildCut), so the result is one OR MORE
     // meshes per key — the anti-stripe fix (§B.3).
+    //
+    // PARALLEL (2026-07-03): tiles are independent — the loader opens its own stream per call and the mesh
+    // builder is pure — and building them sequentially made one 8-tile update take ~1 s, so a 448-tile refocus
+    // was ~a minute of visible "loaded=8 evicted=8" churn. A fixed result slot per index keeps the output
+    // order identical to the sequential version (deterministic residency bookkeeping downstream).
     private List<(DemTileKey Key, IReadOnlyList<TerrainMesh3D> Meshes, bool HoleFree)> BuildTiles(IReadOnlyList<DemTileKey> toLoad)
     {
-        var built = new List<(DemTileKey, IReadOnlyList<TerrainMesh3D>, bool)>(toLoad.Count);
-        foreach (DemTileKey key in toLoad)
+        var slots = new (DemTileKey Key, IReadOnlyList<TerrainMesh3D> Meshes, bool HoleFree)?[toLoad.Count];
+        Parallel.For(0, toLoad.Count, i =>
         {
+            DemTileKey key = toLoad[i];
             BakedDemTile? tile = this.loadTile(key);
             if (tile is null)
             {
-                continue;
+                return;
             }
 
             IReadOnlyList<TerrainMesh3D> meshes = BakedTileMeshBuilder.BuildCut(
                 tile, this.projectionAnchor, this.meshOptions, this.skirtDepthMeters(key),
                 this.orthoCoverage, this.orthoTileIndexOffset);
-            built.Add((key, meshes, IsHoleFree(tile)));
+            slots[i] = (key, meshes, IsHoleFree(tile));
+        });
+
+        var built = new List<(DemTileKey, IReadOnlyList<TerrainMesh3D>, bool)>(toLoad.Count);
+        foreach ((DemTileKey Key, IReadOnlyList<TerrainMesh3D> Meshes, bool HoleFree)? slot in slots)
+        {
+            if (slot.HasValue)
+            {
+                built.Add(slot.Value);
+            }
         }
 
         return built;

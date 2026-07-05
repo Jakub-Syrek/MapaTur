@@ -287,6 +287,72 @@ public sealed class BakedTileStreamingManagerTests
     }
 
     [Fact]
+    public void Update_BuildsIndependentTilesConcurrently_NotSequentially()
+    {
+        // Measured 2026-07-03 (churn diagnosis): a refocus streamed 8 tiles per ~1 s update because the
+        // 8 loads+meshes ran SEQUENTIALLY inside one Task.Run — a full 448-tile refocus was ~a minute of
+        // visible "loaded=8 evicted=8". Tiles are independent (loader opens its own stream, mesh builder
+        // is pure), so one update's builds must overlap.
+        int inFlight = 0;
+        int maxInFlight = 0;
+        BakedDemTile? Loader(DemTileKey k)
+        {
+            int now = Interlocked.Increment(ref inFlight);
+            int seen;
+            while (now > (seen = Volatile.Read(ref maxInFlight))
+                && Interlocked.CompareExchange(ref maxInFlight, now, seen) != seen)
+            {
+            }
+
+            Thread.Sleep(30); // long enough that 8 sequential loads cannot masquerade as overlapping
+            Interlocked.Decrement(ref inFlight);
+            return FakeTile(k);
+        }
+
+        var mgr = NewManager(AllBaked, Loader, maxConcurrentLoads: 8);
+
+        Update(mgr, CameraAbove(RootTile(), 4000f));
+
+        maxInFlight.Should().BeGreaterThan(1, "independent tile builds within one update must run in parallel");
+    }
+
+    [Fact]
+    public void Update_ExposesTheLoadedAndEvictedKeys_MatchingTheCounts()
+    {
+        // Churn diagnosability: the update must SAY which tiles it loaded/evicted, so the app log can show
+        // WHAT is flapping (ring edge? clamp cascade?) instead of bare counts ("loaded=8 evicted=8" told us
+        // nothing about the cause for a whole session).
+        var mgr = NewManager(AllBaked, maxConcurrentLoads: 8);
+        Camera3D camera = CameraAbove(RootTile(), 4000f);
+
+        BakedStreamingUpdate first = Update(mgr, camera);
+
+        first.LoadedKeys.Should().HaveCount(first.Loaded);
+        first.EvictedKeys.Should().HaveCount(first.Evicted);
+        first.LoadedKeys.Should().OnlyHaveUniqueItems();
+        first.Loaded.Should().BeGreaterThan(0, "the first update loads something so the contract is exercised");
+    }
+
+    [Fact]
+    public void Invariant_StillCamera_UnderBudgetClamp_StopsChurning()
+    {
+        // INV (the "loaded=8 evicted=8 co ~1 s bez końca" symptom): when the residency cap CLAMPS the
+        // selection (desired == cap, WasClampedByBudget=true), a still camera must still converge to a
+        // stable resident set — the clamp must not create a load/evict oscillation where the same edge
+        // tiles are evicted and re-loaded forever.
+        var mgr = NewManager(AllBaked, maxResidentTiles: 16, maxConcurrentLoads: 8);
+        Camera3D camera = CameraAbove(RootTile(), 900f); // close ⇒ ideal selection far exceeds the 16 cap
+
+        BakedStreamingUpdate first = Update(mgr, camera);
+        first.WasClampedByBudget.Should().BeTrue("the scenario only tests the clamp when the clamp engages");
+        first.Desired.Should().BeLessThanOrEqualTo(16, "the clamp coarsens the selection to (or under) the cap");
+
+        BakedStreamingUpdate last = DriveToConvergence(mgr, camera, maxRounds: 100);
+
+        mgr.ResidentCount.Should().Be(last.Desired, "after convergence every clamped-desired tile is resident");
+    }
+
+    [Fact]
     public void Invariant_FocusJump_EvictsEveryStaleResident()
     {
         // INV: after attention moves elsewhere, the OLD focus's detail is fully replaced — stale residents
