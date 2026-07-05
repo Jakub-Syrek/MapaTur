@@ -237,6 +237,12 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private string streamingDetailText = string.Empty;
 
+    /// <summary>Sampler of the TRUE rendered surface (baked 1 m tiles) for the 3D view's camera
+    /// anti-tunnelling floor: (lon, lat) → elevation metres, or null off-coverage. Null until a baked
+    /// scene is streaming (the view then floors on the coarse raster alone).</summary>
+    [ObservableProperty]
+    private Func<double, double, double?>? fineElevationSampler;
+
     /// <summary>Whether to show the 3D on-screen chrome (sliders): only in 3D mode and not mid-flight.</summary>
     public bool Show3DChrome => Is3DMode && !Is3DFlying;
 
@@ -3442,6 +3448,7 @@ public sealed partial class MapPageViewModel : ObservableObject
 
         if (!UseBakedTileStreaming || bakedTileIndex is null || bakedTileIndex.Count == 0)
         {
+            FineElevationSampler = null; // coarse-only camera floor (pre-bake scenes)
             logger.LogInformation(
                 "[BakedStream] inactive (enabled={Enabled}, bakedTiles={Count}) — using runtime-build detail",
                 UseBakedTileStreaming, bakedTileIndex?.Count ?? 0);
@@ -3470,6 +3477,14 @@ public sealed partial class MapPageViewModel : ObservableObject
             orthoTileIndexOffset: 0, // baked tiles share the base scene's ortho coverage grid → same cell indices
             maxResidentBytes: BakedStreamMaxResidentBytes);
         bakedStreamActive = true;
+
+        // Camera anti-tunnelling floor: give the 3D view a sampler of the TRUE rendered surface (the baked
+        // 1 m z16), because the coarse base raster it samples otherwise understates ridges by metres and the
+        // eye clipped into the drawn terrain ("wjazd w powierzchnię mapy zdarza się często").
+        var floorSampler = new MapaTur.Application.Terrain.BakedFineElevationSampler(
+            index.IsBaked, index.Load, Math.Max(index.MinZoom, BakedStreamMaxZoom));
+        FineElevationSampler = floorSampler.Sample;
+
         logger.LogInformation(
             "[BakedStream] active: {Count} baked tiles, roots={Roots} z{MinZoom}-{MaxZoom}, cap={Cap}, ortho={Ortho}",
             index.Count, index.Roots.Count, index.MinZoom, Math.Max(index.MinZoom, BakedStreamMaxZoom),
@@ -3599,9 +3614,17 @@ public sealed partial class MapPageViewModel : ObservableObject
 
             if (update.Loaded > 0 || update.Evicted > 0)
             {
+                // Keys + pose make churn diagnosable from the log alone: WHICH tiles flap (a ring edge shows
+                // adjacent x/y, a clamp cascade shows a parent/children mix) and whether the camera actually
+                // moved between ticks (a "still" camera that drifts is the churn's suspected driver).
                 logger.LogInformation(
-                    "[BakedStream] resident={Resident} loaded={Loaded} evicted={Evicted} desired={Desired} clamped={Clamped}",
-                    bakedStreamManager.ResidentCount, update.Loaded, update.Evicted, update.Desired, update.WasClampedByBudget);
+                    "[BakedStream] resident={Resident} loaded={Loaded} evicted={Evicted} desired={Desired} clamped={Clamped} "
+                    + "eye=({EyeX:F1},{EyeY:F1},{EyeZ:F1}) target=({TgtX:F1},{TgtY:F1},{TgtZ:F1}) "
+                    + "in=[{LoadedKeys}] out=[{EvictedKeys}]",
+                    bakedStreamManager.ResidentCount, update.Loaded, update.Evicted, update.Desired, update.WasClampedByBudget,
+                    camera.Position.X, camera.Position.Y, camera.Position.Z,
+                    camera.Target.X, camera.Target.Y, camera.Target.Z,
+                    FormatTileKeys(update.LoadedKeys), FormatTileKeys(update.EvictedKeys));
             }
 
             if (ShowLodDiagnostics)
@@ -3657,6 +3680,16 @@ public sealed partial class MapPageViewModel : ObservableObject
 
     // Delay between self-kicked fill rounds — just past BakedStreamMinInterval so the debounce never eats the kick.
     private const int BakedStreamSelfKickDelayMs = 150;
+
+    // Compact "z16/35205/22289" list for the [BakedStream] churn log; capped so a big legitimate stream
+    // (first fill loads hundreds) doesn't flood the line — the interesting case (churn) flips only a few.
+    private static string FormatTileKeys(IReadOnlyList<MapaTur.Application.Terrain.DemTileKey> keys)
+    {
+        const int maxShown = 10;
+        IEnumerable<string> shown = keys.Take(maxShown).Select(k => $"z{k.Zoom}/{k.X}/{k.Y}");
+        string suffix = keys.Count > maxShown ? $" +{keys.Count - maxShown}" : string.Empty;
+        return string.Join(" ", shown) + suffix;
+    }
 
     // Named summit labels re-snapped on the baked z16 tiles, ANCHORED at each summit's ORIGINAL gazetteer
     // coordinate: needle summits (Mnich, Zadni Mnich) are blurred into a neighbour's slope on the coarse
@@ -3874,8 +3907,12 @@ public sealed partial class MapPageViewModel : ObservableObject
     // and under grazing golden-hour light the coarse tile's box-averaged macro-normal points into shadow →
     // razor-straight lit/black seams along tile borders ("obcięcie nożem", Buczynowe). The phone keeps the old
     // caps (256 / 1280 MB) — its RAM cannot take a 448×~4 MB resident set.
+    // 2026-07-05: desktop 448 → 896. At 448 the selector rode the cap (desired=439-448, clamped often true)
+    // — one camera step back from a big face (Gerlach) and the clamp coarsened tiles right where the user
+    // looked, on a 64 GB RAM / 16 GB VRAM machine where 896 × ~4 MB ≈ 3.6 GB of geometry is comfortable.
+    // Watch [PassTimes] sumGpu after this: more resident tiles = more draw calls (the known FPS ceiling).
     private static readonly int BakedStreamMaxResidentTiles =
-        DeviceInfo.Platform == DevicePlatform.WinUI ? 448 : 256;
+        DeviceInfo.Platform == DevicePlatform.WinUI ? 896 : 256;
     // Cull base tiles fully hidden behind resident hole-free baked tiles. SUPERSEDED (2026-07-03) by the
     // per-pixel surface-ownership mask (BaseCoverageMaskBuilder → shader discard of base-skin fragments):
     // whole-base-tile culling required FULL coverage of a large adaptive base tile and almost never fired in
@@ -3894,8 +3931,12 @@ public sealed partial class MapPageViewModel : ObservableObject
     // limit. Trade-off: more resident geometry = more RAM/VRAM — watch [Mem] heap for OOM; base-occlusion culling
     // (BaseTileOcclusionPlanner) frees the covered base VBOs, reclaiming some of it.
     private static readonly long BakedStreamMaxResidentBytes =
-        DeviceInfo.Platform == DevicePlatform.WinUI ? 2048L * 1024 * 1024 : 1280L * 1024 * 1024; // 448 tiles × ~4 MB ≈ 1.8 GB needs the 2 GB desktop budget
-    private const int BakedStreamMaxConcurrentLoads = 8;   // tiles read+meshed per camera update (a jump streams over several)
+        DeviceInfo.Platform == DevicePlatform.WinUI ? 6144L * 1024 * 1024 : 1280L * 1024 * 1024; // 896 tiles × ~4 MB ≈ 3.6 GB; 6 GB leaves headroom so the byte cap never silently undercuts the count cap
+    // Desktop 8 → 24 (2026-07-05): BuildTiles now builds tiles in PARALLEL, so 24 per update costs close to
+    // what 8 sequential did — a full ~450-tile refocus drops from ~40 s of visible fill to ~10 s. The phone
+    // keeps 8 (fewer cores, and the old budget was tuned for its thermals).
+    private static readonly int BakedStreamMaxConcurrentLoads =
+        DeviceInfo.Platform == DevicePlatform.WinUI ? 24 : 8;
     private const double BakedStreamMaxErrorPixels = 2.5;  // screen-space pixel-error budget driving refinement
     private const int BakedStreamMaxZoom = NearDetailZoom; // finest baked zoom = the native 1 m level (z16)
     // The streaming manager for the current LOD scene (rebuilt per BuildLodSceneAsync; null when streaming is
