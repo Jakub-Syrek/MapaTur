@@ -708,6 +708,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform vec3 uSkyHorizon;\n" +
         "uniform float uTime;\n" +          // seconds since renderer start; drives cloud drift
         "uniform float uCloudCoverage;\n" + // 0 = clear, 1 = overcast
+        "uniform vec2 uCloudSeed;\n" +      // slider-derived pattern offset: moving the slider re-rolls the cirrus field
         "uniform vec2 uCloudDrift;\n" +     // wind drift velocity (scaled by the wind setting)
         "uniform float uCloudDark;\n" +     // storm darkening, 1 = bright, <1 = darker
         "uniform float uSunGlowIntensity;\n" + // forward-scatter glow strength (swells near horizon, 0 at noon/night)
@@ -750,32 +751,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  float below = clamp(-h, 0.0, 1.0);\n" +            // 0 at the horizon, 1 straight down
         "  vec3 skyDown = mix(uSkyHorizon, uSkyHorizon * 0.82, smoothstep(0.0, 0.5, below));\n" +
         "  vec3 sky = mix(skyDown, skyUp, smoothstep(-0.12, 0.06, h));\n" +
-        // Cirrus on an INFINITE horizontal layer overhead: perspective-project the view ray
-        // onto a constant-world-Z plane by dividing xy by the up component. Classic skybox
-        // cloud trick — bands lock to world directions, pan correctly as the camera rotates,
-        // and only appear in genuinely upward-looking pixels.
-        "  float cloudDensity = 0.0;\n" +
-        "  if (h > 0.015) {\n" +
-        "    vec2 cloudUv = viewDir.xy / h;\n" +
-        "    cloudUv = vec2(cloudUv.x * 0.42, cloudUv.y * 2.0) + (uCloudDrift * uTime);\n" +
-        "    float clouds = fbm(cloudUv * 1.25);\n" + // 5-octave fBm: soft WISPY cirrus, no value-noise grid (kills the angular/pixelated bands)
-        "    float threshold = 0.48 - (uCloudCoverage * 0.34);\n" + // lower base + stronger coverage pull = much more cloud
-        "    cloudDensity = smoothstep(threshold, threshold + 0.30, clouds) * 0.8;\n" + // wide band = feathered (pierzaste) edges, not hard angular ones
-                                                                                        // Fade clouds out near the horizon (h -> 0) where the overhead-plane projection
-                                                                                        // stretches to infinity and would smear into a hard band.
-        "    cloudDensity *= smoothstep(0.015, 0.18, h);\n" +
-        "  }\n" +
-        // Cloud colour: noon -> bright lit-from-above white; sunset -> warm pink-orange built
-        // from a boosted horizon tint; night -> dim cool blue-grey for silhouettes.
-        "  vec3 cloudHot = clamp(uSkyHorizon * 2.0 + vec3(0.25, 0.10, 0.05), 0.0, 1.5);\n" +
-        "  vec3 cloudBright = vec3(1.0, 0.99, 0.97);\n" +
-        "  vec3 cloudNight = vec3(0.18, 0.20, 0.28);\n" +
-        "  float sunHeight = clamp(uSunDir.z, 0.0, 1.0);\n" +
-        "  float nightFactor = clamp(-uSunDir.z * 3.0, 0.0, 1.0);\n" +
-        "  vec3 cloudColor = mix(cloudHot, cloudBright, sunHeight);\n" +
-        "  cloudColor = mix(cloudColor, cloudNight, nightFactor);\n" +
-        "  cloudColor *= uCloudDark;\n" +
-        "  sky = mix(sky, cloudColor, cloudDensity);\n" +
+        // CIRRUS REMOVED (2026-07-05, user): the procedural high wisps ("postrzępione wysokie") clashed with
+        // the volumetric cumulus + sea-of-clouds look — the sky stays a clean gradient; ALL clouds now come
+        // from the cumulus billboards and the inversion sheet, both on the 1500 m deck and slider-gated.
+        // (uCloudCoverage/uCloudSeed/uCloudDrift/uCloudDark stay declared; the driver reports their locations
+        // as -1 and the renderer's uniform pushes become silent no-ops.)
         // Sun disc + halo. smoothstep gives a soft-edged disc the right pixel size; pow gives
         // the Mie-style fall-off (the "glow") that bleeds well past the disc.
         "  float sunDot = dot(viewDir, uSunDir);\n" +
@@ -1096,11 +1076,19 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform vec2 uFieldCenter;\n" +   // world XY the field is centred on (scene centre)
         "uniform float uBaseAltitude;\n" + // world Z of the cumulus condensation base
         "uniform vec2 uDrift;\n" +         // wind * time (m) — clouds slide downwind
+        "uniform float uCoverage;\n" +     // Zachmurzenie slider: per-instance hash gate (which puffs exist)
+        "uniform float uMemberSeed;\n" +   // re-rolled per ~8% slider step — moving the slider swaps WHICH puffs show
         "out vec2 vCard;\n" +
         "out float vSeed;\n" +
         "out vec3 vWorldPos;\n" +
         "void main(){\n" +
-        "  float s = aSizeSeed.x;\n" +
+        // Membership gate: a stable per-puff hash + slider-stepped seed vs the coverage threshold. A hidden
+        // puff collapses to a zero-area quad (no fragments). This replaces the old \"draw the first N
+        // instances\" count — raising/lowering the slider now materialises DIFFERENT puffs in scattered
+        // places instead of growing/shrinking the same fixed field.
+        "  float member = fract(fract(sin(dot(aOffset.xy, vec2(12.9898, 78.233))) * 43758.5453) + uMemberSeed);\n" +
+        "  float show = step(member, uCoverage);\n" +
+        "  float s = aSizeSeed.x * show;\n" +
         "  vSeed = aSizeSeed.y;\n" +
         "  vec2 drifted = aOffset.xy + uDrift;\n" +
         // Wrap the field into a 32 km torus around the scene centre so cumulus drift downwind forever without
@@ -1727,6 +1715,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int skyHorizonLocation = -1;
     private int skyTimeLocation = -1;
     private int skyCloudCoverageLocation = -1;
+    private int skyCloudSeedLocation = -1;
     private int skyCloudDriftLocation = -1;
     private int skyCloudDarkLocation = -1;
     private int skySunGlowIntensityLocation = -1;
@@ -1886,6 +1875,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int cumulusFogColorLocation = -1;
     private int cumulusFogDensityLocation = -1;
     private int cumulusOpacityLocation = -1;
+    private int cumulusCoverageLocation = -1;
+    private int cumulusMemberSeedLocation = -1;
     private uint cumulusVao;
     private uint cumulusQuadVbo;
     private uint cumulusInstanceVbo;
@@ -2361,6 +2352,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             lastCableExaggeration = -1f;
             cumulusProgram = 0;
             cumulusInstanceCount = 0;
+            cumulusCoverageLocation = -1;
+            cumulusMemberSeedLocation = -1;
             cumulusUnsupported = false;
             sauronProgram = 0;
             sauronVertexCount = 0;
@@ -2419,6 +2412,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             skyHorizonLocation = -1;
             skyTimeLocation = -1;
             skyCloudCoverageLocation = -1;
+            skyCloudSeedLocation = -1;
             skyCloudDriftLocation = -1;
             skyCloudDarkLocation = -1;
             skySunGlowIntensityLocation = -1;
@@ -2795,39 +2789,39 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         float invRaw = (0.55f * (0.5f + (0.5f * invNoise))) + (0.45f * lowSun);
         float invT = Math.Clamp((invRaw - 0.30f) / 0.40f, 0f, 1f);
         float inversion = invT * invT * (3f - (2f * invT)); // smoothstep — lingers at both regimes
-        // The cloud SLIDER (not the weather noise) now drives the deck height, per the user's ask: above ~80%
-        // it drops onto the peaks as a low ~2000 m overcast; below that it parks high above them. lowDeck ramps
-        // in over [0.78, 1.0]; liftClear raises the deck as the sky clears. Weather (inversion/altNoise) still
-        // adds the "czasem" wander on top so the same slider value isn't a fixed height.
+        // DECK AT 1500 m (2026-07-05, user): the slider-driven clouds live on a FIXED real-altitude deck of
+        // ~1500 m (× exaggeration — world Z is elevation × Pion, same convention as the camera floor), well
+        // below the Tatra ridge line so peaks always stand above the layer. The old peak-relative altFraction
+        // regime (deck riding 0.2–1.2 of the relief) is gone; what remains is a gentle wander (altNoise) plus
+        // a SLIDER-SEEDED offset — every slider position re-rolls its own deck height a little, so raising /
+        // lowering coverage never replays the identical sky (the "większa randomizacja" ask).
         float cloudSlider = baseCoverage;
         float lowDeck = Math.Clamp((cloudSlider - 0.78f) / 0.22f, 0f, 1f);
         lowDeck = lowDeck * lowDeck * (3f - (2f * lowDeck)); // smoothstep — 0 below ~80%, 1 at 100%
-        float liftClear = 1f - cloudSlider;
         float seaGate = Math.Max(inversion, lowDeck); // a high slider forces the low sheet on, no inversion needed
 
-        // Inversion pulls the sheet DOWN into the valleys (peaks poke through); a high slider drops it the same
-        // way (lowDeck ~2000 m onto the ridges), while a clear sky lifts it above the peaks (liftClear).
-        float altFraction = Math.Clamp(
-            0.62f + (0.45f * liftClear) - (0.40f * inversion) - (0.40f * lowDeck) - (0.30f * storm) + (0.06f * altNoise),
-            -0.25f, 1.20f); // floor BELOW the frame centre so a full overcast / storm deck can sink into the valleys (~1500 m and lower)
-        float cloudAltitude = float.IsNegativeInfinity(cloudMaxZ)
-            ? 0f
-            : geomFrame.Center.Z + ((cloudMaxZ - geomFrame.Center.Z) * altFraction);
+        // Slider-derived pseudo-random seeds: incommensurate sines of the RAW slider value give each slider
+        // position its own stable pattern (same value → same sky, different value → visibly re-rolled sky).
+        float sliderWander = (MathF.Sin(cloudSlider * 41.7f) * 0.6f) + (MathF.Sin((cloudSlider * 17.3f) + 1.1f) * 0.4f); // ~[-1,1]
+        var cirrusSeed = new Vector2(MathF.Sin(cloudSlider * 37.3f) * 8f, MathF.Cos(cloudSlider * 23.9f) * 8f);
+        var sheetSeedOffset = new Vector2(MathF.Sin(cloudSlider * 29.1f) * 6_000f, MathF.Cos(cloudSlider * 43.7f) * 6_000f);
+
+        float exaggeration = geomFrame.VerticalExaggeration;
+        const float CloudDeckBaseMeters = 1_500f;
+        float cloudAltitude = (CloudDeckBaseMeters + (altNoise * 120f) + (sliderWander * 100f) - (storm * 200f)) * exaggeration;
         float cloudHalfExtent = MathF.Max(geomFrame.HorizontalExtent * 4f, 20_000f);
         float cloudNoiseScale = 1f / MathF.Max(geomFrame.HorizontalExtent * 0.5f, 4_000f);
         float seaCoverage = effectiveCoverage * seaGate; // the sea-of-clouds sheet only forms during inversion
         bool cloudsActive = animateAtmosphere && atmosphere is not null && effectiveCoverage > 0.001f && !float.IsNegativeInfinity(cloudMaxZ);
-        // Cumulus sit over the ridges (bases ~at peak level, tops rising into the sky) — a VISIBLE level for a
-        // terrain-facing camera, NOT tied to the inversion (which would lift them off the top of the screen).
-        // The regime variety comes from their opacity (they thin as inversion deepens) + the sea-of-clouds sheet.
-        // Above ~80% the slider (lowDeck) drops the cumulus down onto the ridges with the sea sheet, so the
-        // whole low sky fills in — not a thin band of puffs parked high above an otherwise clear view.
-        float cumulusBase = float.IsNegativeInfinity(cloudMaxZ)
-            ? 0f
-            : geomFrame.Center.Z + ((cloudMaxZ - geomFrame.Center.Z) * (0.62f - (0.40f * lowDeck) - (0.25f * storm))) + (350f * (1f - (0.7f * lowDeck)));
+        // Cumulus condensation bases share the 1500 m deck (they are "the slider's clouds" too), with their
+        // own independent wander so the puffs don't ride the exact sheet plane.
+        float cumulusBase = (CloudDeckBaseMeters + (altNoise * 80f) + (MathF.Sin((cloudSlider * 31.9f) + 0.7f) * 110f)) * exaggeration;
         // Keep the cumulus opaque even as an inversion deepens at a high slider (lowDeck cancels the thinning),
         // so a 100% storm sky stays packed rather than fading to the bare sea sheet.
         float cumulusOpacity = 1.0f * (1f - (0.35f * inversion * (1f - lowDeck)));
+        // Membership seed for the per-instance cumulus gate: re-rolled at every ~8% slider step, so dragging
+        // the slider up/down brings DIFFERENT clouds in scattered places, not the same field denser/thinner.
+        float cumulusSeed = MathF.Sin(MathF.Floor(cloudSlider * 12f) * 53.7f) * 0.5f + 0.5f;
         // Cloud-shadow darkening of direct sun where a cloud blocks the ray (0 = off).
         const float CloudShadowStrength = 0.55f;
 
@@ -2860,6 +2854,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.Uniform3(skyHorizonLocation, hor.X, hor.Y, hor.Z);
             gl.Uniform1(skyTimeLocation, weatherT);
             gl.Uniform1(skyCloudCoverageLocation, effectiveCoverage);
+            gl.Uniform2(skyCloudSeedLocation, cirrusSeed.X, cirrusSeed.Y);
             gl.Uniform2(skyCloudDriftLocation, windVec.X, windVec.Y);
             gl.Uniform1(skyCloudDarkLocation, stormDarken);
             gl.Uniform1(skySunGlowIntensityLocation, atmosphere.SunGlowIntensity);
@@ -3505,7 +3500,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.DepthMask(false); // translucent: test against terrain but don't write depth
             gl.UseProgram(cloudProgram);
             gl.UniformMatrix4(cloudMvpLocation, 1, false, m);
-            gl.Uniform2(cloudCenterLocation, geomFrame.Center.X, geomFrame.Center.Y);
+            // Slider-seeded field offset: the sheet's noise is anchored to the centre, so shifting the centre
+            // by a slider-derived few km re-rolls the whole undulation pattern as the slider moves.
+            gl.Uniform2(cloudCenterLocation, geomFrame.Center.X + sheetSeedOffset.X, geomFrame.Center.Y + sheetSeedOffset.Y);
             gl.Uniform1(cloudHalfExtentLocation, cloudHalfExtent);
             gl.Uniform1(cloudAltitudeLocation, cloudAltitude);
             gl.Uniform1(cloudTimeLocation, weatherT);
@@ -3553,11 +3550,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 lastCumulusDriftSeconds = weatherT;
                 cumulusDriftAccum += windDir * (windWorldSpeed * driftDt);
                 Vector2 cumDrift = cumulusDriftAccum;
-                // The "Zachmurzenie" slider (effectiveCoverage) sets HOW MANY cumulus draw: 0 % = clear sky,
-                // 100 % = the full field.
-                int cumCount = (int)MathF.Round(cumulusInstanceCount * Math.Clamp(effectiveCoverage, 0f, 1f));
+                // The "Zachmurzenie" slider sets the per-puff hash threshold (WHICH and how many puffs exist);
+                // the stepped member seed re-rolls the membership as the slider moves.
                 DrawCumulus(gl, m, camera, atmosphere!, new Vector2(geomFrame.Center.X, geomFrame.Center.Y),
-                    cumulusBase, cumDrift, cumulusOpacity, cumCount, fogColor, fogDensity, stormDarken, lightningFlash);
+                    cumulusBase, cumDrift, cumulusOpacity, Math.Clamp(effectiveCoverage, 0f, 1f), cumulusSeed,
+                    fogColor, fogDensity, stormDarken, lightningFlash);
             }
         }
 
@@ -5435,6 +5432,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         skyHorizonLocation = g.GetUniformLocation(skyProgram, "uSkyHorizon");
         skyTimeLocation = g.GetUniformLocation(skyProgram, "uTime");
         skyCloudCoverageLocation = g.GetUniformLocation(skyProgram, "uCloudCoverage");
+        skyCloudSeedLocation = g.GetUniformLocation(skyProgram, "uCloudSeed");
         skyCloudDriftLocation = g.GetUniformLocation(skyProgram, "uCloudDrift");
         skyCloudDarkLocation = g.GetUniformLocation(skyProgram, "uCloudDark");
         skySunGlowIntensityLocation = g.GetUniformLocation(skyProgram, "uSunGlowIntensity");
@@ -7348,6 +7346,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         cumulusFogColorLocation = g.GetUniformLocation(cumulusProgram, "uFogColor");
         cumulusFogDensityLocation = g.GetUniformLocation(cumulusProgram, "uFogDensity");
         cumulusOpacityLocation = g.GetUniformLocation(cumulusProgram, "uOpacity");
+        cumulusCoverageLocation = g.GetUniformLocation(cumulusProgram, "uCoverage");
+        cumulusMemberSeedLocation = g.GetUniformLocation(cumulusProgram, "uMemberSeed");
 
         float[] quad = { -1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f }; // triangle strip [-1,1]²
         cumulusVao = g.GenVertexArray();
@@ -7375,13 +7375,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // Draws the scattered cumulus billboards above the terrain. Alpha-blended, depth-tested (foreground peaks
     // occlude clouds behind them), depth-write off. mvp must be the ABSOLUTE scene mvp (puffs are absolute world).
     private void DrawCumulus(GL g, ReadOnlySpan<float> mvp, Camera3D camera, Atmosphere atmosphere,
-        Vector2 fieldCenter, float baseAltitude, Vector2 drift, float opacity, int drawCount, Vector3 fogColor,
-        float fogDensity, float cloudDark, float lightningFlash)
+        Vector2 fieldCenter, float baseAltitude, Vector2 drift, float opacity, float coverage, float memberSeed,
+        Vector3 fogColor, float fogDensity, float cloudDark, float lightningFlash)
     {
-        // drawCount lets the weather slider thin the field out: only the first N puffs are drawn (the clusters
-        // are at random positions, so the tail is a random spatial subset → fewer/more clouds, not "a wedge").
-        drawCount = Math.Clamp(drawCount, 0, cumulusInstanceCount);
-        if (cumulusProgram == 0 || drawCount == 0 || opacity <= 0.001f)
+        // The whole field is ALWAYS submitted; the vertex shader's per-puff hash gate (coverage + memberSeed)
+        // decides which puffs materialise. Replaces the old "draw the first N instances" count, so slider
+        // moves re-roll WHICH puffs exist rather than growing/shrinking one fixed field.
+        if (cumulusProgram == 0 || cumulusInstanceCount == 0 || coverage <= 0.001f || opacity <= 0.001f)
         {
             return;
         }
@@ -7413,8 +7413,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.Uniform3(cumulusFogColorLocation, fogColor.X, fogColor.Y, fogColor.Z);
         g.Uniform1(cumulusFogDensityLocation, fogDensity);
         g.Uniform1(cumulusOpacityLocation, opacity);
+        g.Uniform1(cumulusCoverageLocation, coverage);
+        g.Uniform1(cumulusMemberSeedLocation, memberSeed);
         g.BindVertexArray(cumulusVao);
-        g.DrawArraysInstanced(PrimitiveType.TriangleStrip, 0, 4, (uint)drawCount);
+        g.DrawArraysInstanced(PrimitiveType.TriangleStrip, 0, 4, (uint)cumulusInstanceCount);
         g.BindVertexArray(0);
         g.DepthMask(true);
         g.Disable(EnableCap.Blend);
