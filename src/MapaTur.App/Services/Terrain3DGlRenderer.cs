@@ -2048,6 +2048,28 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private TerrainMesh3D? lastTrailMesh;
     private DetailElevationField? lastTrailDetail;
 
+    // In-flight OFF-THREAD trail ribbon build + the inputs it was started for. The world projection (1 m
+    // densification + seating on the baked tiles) plus ribbon assembly for the full 560-trail network
+    // measured 5-7 s ON THE GL THREAD the first time trails bound to a scene ("lines=7454ms" in the swap
+    // breakdown) — the whole visible app froze for it. Same pattern as the ortho decode / far-tier
+    // downsample: build on a background task (ToWorld keeps a per-CALL tile cache and the availability
+    // index opens its own stream per read, so the off-thread call is safe), keep drawing the previous
+    // ribbon — or nothing on the first scene — and upload when the result lands. A stale result (any
+    // input reference changed while building) is dropped and the build re-kicked.
+    private Task<(RibbonBuilder Ribbon, RibbonBuilder Black)>? trailBuildTask;
+    private IReadOnlyList<Trail>? trailBuildTrails;
+    private DemRaster? trailBuildRaster;
+    private TerrainMesh3D? trailBuildMesh;
+    private DetailElevationField? trailBuildDetail;
+
+    // Same async-build state for the route ribbon (conflation + seating measured ~2 s on the GL thread).
+    private Task<RibbonBuilder>? routeBuildTask;
+    private Route? routeBuildRoute;
+    private IReadOnlyList<Trail>? routeBuildTrails;
+    private DemRaster? routeBuildRaster;
+    private TerrainMesh3D? routeBuildMesh;
+    private DetailElevationField? routeBuildDetail;
+
     // Near-parallel duplicate trails (OSM relation + underlying way) deduped ONCE per distinct input set and reused
     // for the decal mask, the trail line overlay AND the route conflation — so only one of a duplicate pair is drawn
     // and the route lands on it. Keyed on the input ref so it is NOT recomputed every frame (the deduped ref is then
@@ -6306,39 +6328,69 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // The detail field is part of the cache key: as the 1 m window streams with the look-at point a new
         // field arrives, and the seated trail heights must be rebuilt against it (else they'd stay on the
         // stale window's surface).
-        if (trailLines is null
-            || !ReferenceEquals(lastTrails, trails)
-            || !ReferenceEquals(lastTrailRaster, raster)
-            || !ReferenceEquals(lastTrailMesh, mesh)
-            || !ReferenceEquals(lastTrailDetail, detail))
+        bool ribbonCurrent = trailLines is not null
+            && ReferenceEquals(lastTrails, trails)
+            && ReferenceEquals(lastTrailRaster, raster)
+            && ReferenceEquals(lastTrailMesh, mesh)
+            && ReferenceEquals(lastTrailDetail, detail);
+        if (!ribbonCurrent)
         {
-            DeleteLine(g, ref trailLines);
-            DeleteLine(g, ref trailLinesBlack);
-            IReadOnlyList<TrailWorldLine> world = Trail3DWorldProjection.ToWorld(trails, raster, mesh, TrailLiftMeters, detail, BakedElevationIndex);
-
-            // Black trails go in their own ribbon so they can be drawn thicker (a thin black line is nearly
-            // invisible on the dark terrain); every other colour stays on the delicate-thread width.
-            var ribbon = new RibbonBuilder();
-            var ribbonBlack = new RibbonBuilder();
-            foreach (TrailWorldLine line in world)
+            bool taskMatches = trailBuildTask is not null
+                && ReferenceEquals(trailBuildTrails, trails)
+                && ReferenceEquals(trailBuildRaster, raster)
+                && ReferenceEquals(trailBuildMesh, mesh)
+                && ReferenceEquals(trailBuildDetail, detail);
+            if (taskMatches && trailBuildTask!.IsCompleted)
             {
-                (byte r, byte gg, byte b) = PttkRgb(line.Source.PrimaryColor);
-                if (line.Source.PrimaryColor == PttkColor.Black)
+                if (trailBuildTask.IsCompletedSuccessfully)
                 {
-                    ribbonBlack.Append(line.World, r, gg, b, TrailOverlayAlpha);
+                    (RibbonBuilder ribbon, RibbonBuilder ribbonBlack) = trailBuildTask.Result;
+                    DeleteLine(g, ref trailLines);
+                    DeleteLine(g, ref trailLinesBlack);
+                    trailLines = UploadLine(g, ribbon);
+                    trailLinesBlack = UploadLine(g, ribbonBlack);
+                    lastTrails = trails;
+                    lastTrailRaster = raster;
+                    lastTrailMesh = mesh;
+                    lastTrailDetail = detail;
                 }
-                else
-                {
-                    ribbon.Append(line.World, r, gg, b, TrailOverlayAlpha);
-                }
-            }
 
-            trailLines = UploadLine(g, ribbon);
-            trailLinesBlack = UploadLine(g, ribbonBlack);
-            lastTrails = trails;
-            lastTrailRaster = raster;
-            lastTrailMesh = mesh;
-            lastTrailDetail = detail;
+                trailBuildTask = null; // success consumed the result; a failure simply re-kicks below next frame
+            }
+            else if (!taskMatches)
+            {
+                (IReadOnlyList<Trail> bTrails, DemRaster bRaster, TerrainMesh3D bMesh) = (trails, raster, mesh);
+                DetailElevationField? bDetail = detail;
+                MapaTur.Application.Terrain.BakedTileAvailabilityIndex? bIndex = BakedElevationIndex;
+                trailBuildTrails = trails;
+                trailBuildRaster = raster;
+                trailBuildMesh = mesh;
+                trailBuildDetail = detail;
+                trailBuildTask = Task.Run(() =>
+                {
+                    IReadOnlyList<TrailWorldLine> world = Trail3DWorldProjection.ToWorld(
+                        bTrails, bRaster, bMesh, TrailLiftMeters, bDetail, bIndex);
+
+                    // Black trails go in their own ribbon so they can be drawn thicker (a thin black line is
+                    // nearly invisible on the dark terrain); every other colour stays on the delicate width.
+                    var ribbon = new RibbonBuilder();
+                    var ribbonBlack = new RibbonBuilder();
+                    foreach (TrailWorldLine line in world)
+                    {
+                        (byte r, byte gg, byte b) = PttkRgb(line.Source.PrimaryColor);
+                        if (line.Source.PrimaryColor == PttkColor.Black)
+                        {
+                            ribbonBlack.Append(line.World, r, gg, b, TrailOverlayAlpha);
+                        }
+                        else
+                        {
+                            ribbon.Append(line.World, r, gg, b, TrailOverlayAlpha);
+                        }
+                    }
+
+                    return (ribbon, ribbonBlack);
+                });
+            }
         }
 
         // Alpha-blend so a fragment that loses the near-field z-fight (see TrailOverlayAlpha) reveals the
@@ -6398,30 +6450,63 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             return;
         }
 
-        if (routeLines is null
-            || !ReferenceEquals(lastRoute, route)
-            || !ReferenceEquals(lastRouteTrails, trails)
-            || !ReferenceEquals(lastRouteRaster, raster)
-            || !ReferenceEquals(lastRouteMesh, mesh)
-            || !ReferenceEquals(lastRouteDetail, detail))
+        bool routeCurrent = routeLines is not null
+            && ReferenceEquals(lastRoute, route)
+            && ReferenceEquals(lastRouteTrails, trails)
+            && ReferenceEquals(lastRouteRaster, raster)
+            && ReferenceEquals(lastRouteMesh, mesh)
+            && ReferenceEquals(lastRouteDetail, detail);
+        if (!routeCurrent)
         {
-            DeleteLine(g, ref routeLines);
-            // followTrails: re-lay the route onto the SAME polyline as the trail it traverses (conflation), so the
-            // line lies ON the trail instead of beside it — matching the decal. Seated/densified on the detail.
-            RouteWorldLine world = Route3DWorldProjection.ToWorld(route, raster, mesh, RouteLiftMeters, detail, followTrails: trails, bakedIndex: BakedElevationIndex);
+            // OFF-THREAD build, same pattern (and reasons) as the trail ribbon above: the route conflation +
+            // 1 m seating of a long multi-stop route measured ~2 s on the GL thread at scene start. The old
+            // (or absent) dashes keep drawing until the fresh ribbon lands; a stale result is dropped.
+            bool taskMatches = routeBuildTask is not null
+                && ReferenceEquals(routeBuildRoute, route)
+                && ReferenceEquals(routeBuildTrails, trails)
+                && ReferenceEquals(routeBuildRaster, raster)
+                && ReferenceEquals(routeBuildMesh, mesh)
+                && ReferenceEquals(routeBuildDetail, detail);
+            if (taskMatches && routeBuildTask!.IsCompleted)
+            {
+                if (routeBuildTask.IsCompletedSuccessfully)
+                {
+                    DeleteLine(g, ref routeLines);
+                    routeLines = UploadLine(g, routeBuildTask.Result);
+                    lastRoute = route;
+                    lastRouteTrails = trails;
+                    lastRouteRaster = raster;
+                    lastRouteMesh = mesh;
+                    lastRouteDetail = detail;
+                }
 
-            var ribbon = new RibbonBuilder();
-            // DASHED + SEMI-TRANSPARENT: the route is a violet highlight lying ON its trail (conflated onto the
-            // trail's polyline), with the trail showing through the dashes and the ~60% alpha. Violet matches the
-            // 2D planner. The route is NOT painted into the surface decal — it's only this translucent overlay.
-            ribbon.AppendDashed(world.World, 0x7C, 0x3A, 0xED, RouteDashSegments, RouteGapSegments, RouteAlpha);
+                routeBuildTask = null;
+            }
+            else if (!taskMatches)
+            {
+                (Route bRoute, DemRaster bRaster, TerrainMesh3D bMesh) = (route, raster, mesh);
+                IReadOnlyList<Trail>? bTrails = trails;
+                DetailElevationField? bDetail = detail;
+                MapaTur.Application.Terrain.BakedTileAvailabilityIndex? bIndex = BakedElevationIndex;
+                routeBuildRoute = route;
+                routeBuildTrails = trails;
+                routeBuildRaster = raster;
+                routeBuildMesh = mesh;
+                routeBuildDetail = detail;
+                routeBuildTask = Task.Run(() =>
+                {
+                    // followTrails: re-lay the route onto the SAME polyline as the trail it traverses
+                    // (conflation), so the line lies ON the trail instead of beside it. Seated on the detail.
+                    RouteWorldLine world = Route3DWorldProjection.ToWorld(
+                        bRoute, bRaster, bMesh, RouteLiftMeters, bDetail, followTrails: bTrails, bakedIndex: bIndex);
 
-            routeLines = UploadLine(g, ribbon);
-            lastRoute = route;
-            lastRouteTrails = trails;
-            lastRouteRaster = raster;
-            lastRouteMesh = mesh;
-            lastRouteDetail = detail;
+                    var ribbon = new RibbonBuilder();
+                    // DASHED + SEMI-TRANSPARENT: a violet highlight lying ON its trail, trail showing through
+                    // the dashes and the ~60% alpha. Violet matches the 2D planner.
+                    ribbon.AppendDashed(world.World, 0x7C, 0x3A, 0xED, RouteDashSegments, RouteGapSegments, RouteAlpha);
+                    return ribbon;
+                });
+            }
         }
 
         // Alpha-blend just the route so the trail beneath shows through (other overlays stay opaque). Depth-test
