@@ -61,6 +61,21 @@ public partial class Terrain3DView : ContentView
         set => SetValue(RasterProperty, value);
     }
 
+    /// <summary>Bindable sampler of the TRUE rendered surface (baked 1 m tiles) for the camera's
+    /// anti-tunnelling floor: (lon, lat) → elevation metres, or null off-coverage. The coarse
+    /// <see cref="Raster"/> understates ridges by metres (box-average), so the floor clips into the drawn
+    /// 1 m terrain without this. Null = coarse-only floor (pre-bake scenes).</summary>
+    public static readonly BindableProperty FineElevationSamplerProperty = BindableProperty.Create(
+        nameof(FineElevationSampler),
+        typeof(Func<double, double, double?>),
+        typeof(Terrain3DView));
+
+    public Func<double, double, double?>? FineElevationSampler
+    {
+        get => (Func<double, double, double?>?)GetValue(FineElevationSamplerProperty);
+        set => SetValue(FineElevationSamplerProperty, value);
+    }
+
     /// <summary>Bindable 1 m LOD detail field: when present, trail/road/route vertices inside its window
     /// seat on the detail surface instead of the coarse base, so overlays don't float over the carved-deeper
     /// near-field terrain. Null until the LOD pipeline has built a detail patch.</summary>
@@ -1920,7 +1935,34 @@ public partial class Terrain3DView : ContentView
         {
             GeoPoint eyeGeo = frame.WorldToGeo(Camera.Position);
             double groundElev = floorRaster.SampleBilinear(eyeGeo.Longitude, eyeGeo.Latitude);
-            if (groundElev > floorRaster.NoDataValue)
+            if (groundElev <= floorRaster.NoDataValue)
+            {
+                groundElev = double.MinValue;
+            }
+
+            // ANTI-TUNNELLING (2026-07-03, "wjazd w powierzchnię mapy zdarza się często"): the coarse raster
+            // above is box-averaged 30 m data that understates ridges by metres, while the RENDERED surface
+            // is the baked 1 m z16 — and a single sample under the eye misses the wall the camera is flying
+            // TOWARD. Probe the TRUE baked surface at the eye, ahead of it and on a small ring, and let the
+            // floor track the HIGHEST of all samples. Falls back to the coarse sample where nothing is baked.
+            if (FineElevationSampler is { } fineSampler)
+            {
+                Vector3 towardTarget = Camera.Target - Camera.Position;
+                foreach (System.Numerics.Vector2 probe in MapaTur.Application.Terrain.CameraFloorProbe.ProbePoints(
+                    new System.Numerics.Vector2(Camera.Position.X, Camera.Position.Y),
+                    new System.Numerics.Vector2(towardTarget.X, towardTarget.Y),
+                    aheadMeters: 35f,
+                    ringRadiusMeters: 12f))
+                {
+                    GeoPoint probeGeo = frame.WorldToGeo(new Vector3(probe.X, probe.Y, 0f));
+                    if (fineSampler(probeGeo.Longitude, probeGeo.Latitude) is { } fineElev && fineElev > groundElev)
+                    {
+                        groundElev = fineElev;
+                    }
+                }
+            }
+
+            if (groundElev > double.MinValue)
             {
                 controller.CameraFloorZ = (float)((groundElev + CameraClearanceMeters) * frame.VerticalExaggeration);
             }

@@ -26,6 +26,7 @@
         <views:Terrain3DView x:Name="TerrainView"
                              Tiles="{Binding TerrainTiles}"
                              Raster="{Binding TerrainRaster}"
+                             FineElevationSampler="{Binding FineElevationSampler}"
                              DetailElevation="{Binding DetailElevation}"
                              Trails="{Binding Trails3DOverlay}"
                              Roads="{Binding Roads3DOverlay}"
