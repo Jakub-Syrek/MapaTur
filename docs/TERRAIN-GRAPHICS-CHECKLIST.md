@@ -123,8 +123,16 @@ chain, called by every path, so coverage can't drift. **TODO: this consolidation
 6. **Rock material on steep slopes** (slope-driven triplanar granite) — hides the ortho top-down smear on
    vertical walls.
 7. **SkiaSharp `DrawVertices`** needs `SKBlendMode.Modulate` + white paint (else solid black).
-8. **Known latent (NOT fixed):** cloud-shadow march also compares absolute `uCloudAltitude` against
-   camera-relative `vWorldPos.z` — same class as §C.1.
+8. ~~**Known latent (NOT fixed):** cloud-shadow march also compares absolute `uCloudAltitude` against
+   camera-relative `vWorldPos.z` — same class as §C.1.~~ **✅ FIXED (2026-07-05):** the march uses
+   `vStableWorldPos.z` and subtracts `uCloudShadowOffset` (the sheet's slider-seeded field offset), so the
+   dappling is pinned to the world AND re-rolls with the clouds overhead when the coverage slider moves.
+9. **Curvature AO lives in the vertex colour's ALPHA byte** (`TerrainCurvatureAo`, baked in `BuildBlock` —
+   so EVERY mesh path gets it: adaptive base, baked z16, legacy). The alpha was always 0xFF before; if you
+   ever need vertex alpha for something else, AO must move to its own attribute first. The shader multiplies
+   the light sum by `mix(1, vColor.a, uAoStrength)` AFTER the anti-black floor — an enclosed gully floor is
+   SUPPOSED to sit below the open-ground floor; readability is guaranteed by the bake's own `MinAo = 0.4`.
+   Probe radii are METRIC (6/18/45 m), so the coarse base and the 1 m tiles shade consistently.
 
 ---
 
@@ -161,7 +169,7 @@ No datum/flightline steps in the valid data (vertical & horizontal step scans = 
    (b) reproducing the base mesh offline and scanning for the artefact rather than trusting "the DEM is smooth".
 3. **Wide-void boundary residual shading** (smooth base normals vs detailed 1 m) after `FillNoDataFromFeathered`
    removed the height step — optional normal-smoothing at the boundary if still visible.
-4. **Cloud-shadow** still samples camera-relative `vWorldPos.z` (§C.8).
+4. ~~**Cloud-shadow** still samples camera-relative `vWorldPos.z` (§C.8).~~ **✅ RESOLVED 2026-07-05** — see §C.8.
 
 ## E. VERIFICATION — run after ANY tile/pipeline change (do NOT skip)
 

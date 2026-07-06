@@ -99,6 +99,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform vec3 uCascadeSplit;\n" +
         "uniform float uShadowStrength;\n" +
         "uniform float uShadowTexel;\n" + // 1/ShadowMapSize — keeps the PCF radius true at any map size
+        "uniform float uAoStrength;\n" +  // curvature-AO multiplier strength (0 = off)
                                           // Cloud-shadow inputs: the SAME field the sea-of-clouds layer draws, so the shadows on the
                                           // ground line up with the clouds overhead. The terrain fragment projects up along the sun
                                           // ray to the cloud plane and samples the field there — moving dappled light at any sun angle.
@@ -471,6 +472,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // flat 0.45): a flat floor PRESSED every below-threshold face to one brightness, erasing the relief
         // exactly where the sun doesn't reach.
         "  lightSum = max(lightSum, uSkyAmbient * (0.30 + (0.20 * clamp(shN.z, 0.0, 1.0))));\n" +
+        // Curvature AO baked into the colour attribute's alpha (TerrainCurvatureAo, floored at 0.4 so it
+        // darkens, never blackens): gully/bowl floors receive less sky than open ridges. Applied AFTER the
+        // anti-black floor by design — an enclosed floor SHOULD sit below the open-ground floor; the bake's
+        // own MinAo is the readability guarantee. uAoStrength scales the effect (0 = off).
+        "  lightSum *= mix(1.0, vColor.a, uAoStrength);\n" +
         "  vec3 base;\n" +
         "  if (uUseOrtho == 1) {\n" +
         "    vec3 c = texture(uOrtho, vTex).rgb;\n" +
@@ -2068,6 +2074,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int shadowMap0Loc = -1, shadowMap1Loc = -1, shadowMap2Loc = -1;
     private int cascadeVp0Loc = -1, cascadeVp1Loc = -1, cascadeVp2Loc = -1;
     private int cascadeSplitLoc = -1, shadowStrengthLoc = -1, shadowTexelLoc = -1;
+    private int aoStrengthLoc = -1;
+    // Curvature-AO strength (B-package 2026-07-05); 0 = instant off for A/B comparison.
+    private const float AoStrength = 0.6f;
     private bool shadowsActiveThisFrame;
     private const float ShadowStrength = 0.7f;
 
@@ -2651,6 +2660,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             shadowMap0Loc = shadowMap1Loc = shadowMap2Loc = -1;
             cascadeVp0Loc = cascadeVp1Loc = cascadeVp2Loc = -1;
             cascadeSplitLoc = shadowStrengthLoc = shadowTexelLoc = -1;
+            aoStrengthLoc = -1;
             shadowsActiveThisFrame = false;
             // The planar-reflection target belonged to the dead context — drop the handles so it's rebuilt fresh.
             reflectionFbo = 0;
@@ -3284,6 +3294,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             // texture image unit makes the program invalid to USE, and Adreno rejects the WHOLE terrain draw
             // (GL_INVALID_OPERATION) → terrain vanishes. Desktop GL tolerated it; the device did not. Must be
             // set even when shadows are off (csmShadow early-returns before sampling, so empty units are fine).
+            gl.Uniform1(aoStrengthLoc, AoStrength);
             gl.Uniform1(shadowMap0Loc, 2);
             gl.Uniform1(shadowMap1Loc, 3);
             gl.Uniform1(shadowMap2Loc, 4);
@@ -5555,6 +5566,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         cascadeSplitLoc = g.GetUniformLocation(program, "uCascadeSplit");
         shadowStrengthLoc = g.GetUniformLocation(program, "uShadowStrength");
         shadowTexelLoc = g.GetUniformLocation(program, "uShadowTexel");
+        aoStrengthLoc = g.GetUniformLocation(program, "uAoStrength");
 
         // Sky program — single triangle covering the screen, fragment-shader-only atmospheric model.
         uint sks = CompileShader(g, ShaderType.VertexShader, SkyVertexShaderSource);

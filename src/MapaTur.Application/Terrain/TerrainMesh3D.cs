@@ -964,7 +964,12 @@ public sealed class TerrainMesh3D
                 {
                     baseColor = BlendColor(baseColor, tint, options.OverlayTintStrength);
                 }
-                baseColors[li] = baseColor;
+
+                // Curvature AO in the (otherwise always-0xFF) ALPHA byte: gully/bowl floors darken, ridges
+                // stay open. Rides the existing colour attribute through EVERY mesh path (base, baked z16,
+                // legacy) with no new plumbing; the terrain shader multiplies its light sum by vColor.a.
+                float ao = TerrainCurvatureAo.At(raster, c, r, frame.CellWidthMeters);
+                baseColors[li] = (baseColor & 0x00FFFFFFu) | ((uint)(byte)(ao * 255f) << 24);
                 float lambert = Math.Max(0f, Vector3.Dot(normal, options.LightDirection));
                 float shade = options.AmbientFactor + ((1f - options.AmbientFactor) * lambert);
                 colors[li] = ApplyShade(baseColor, shade);
