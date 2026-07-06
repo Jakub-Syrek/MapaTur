@@ -3392,12 +3392,20 @@ public partial class Terrain3DView : ContentView
             // the 8 bundled cells, which is how long the terrain stayed hypsometric after the scene reveal.
             // Indexed slots keep the list order = the mesh ortho-cell order (OrthoTileIndex is positional).
             var slots = new (byte[] Rgba, int Width, int Height)?[pathsCopy.Count];
-            System.Threading.Tasks.Parallel.For(0, pathsCopy.Count, i =>
+            // MaxDegreeOfParallelism 3 (RAM step 1, 2026-07-06): one source cell decodes to a 16384×10923
+            // RGBA buffer = 683 MB TRANSIENT before the master downsample discards it — all 8 in parallel
+            // spiked ~7 GB of short-lived LOH at every scene load (measured heap 12-16 GB). Three at a time
+            // caps the spike at ~2.6 GB, and the wall time barely moves (the 8-wide run did not scale
+            // linearly anyway: decode is memory-bandwidth-bound).
+            System.Threading.Tasks.Parallel.For(
+                0, pathsCopy.Count, new ParallelOptions { MaxDegreeOfParallelism = 3 }, i =>
             {
                 if (DecodeOrtho(pathsCopy[i]) is { } tile)
                 {
                     // Pre-shrink to the master cap HERE so SetOrthoTextures' own downsample is a no-op —
-                    // the whole heavy lift stays off the paint thread.
+                    // the whole heavy lift stays off the paint thread, and the renderer's MasterRgba ends up
+                    // REFERENCING these same arrays (factor-1 Downsample returns its input), so the view
+                    // cache adds no duplicate copy.
                     slots[i] = MapaTur.Application.Terrain.OrthoCellDownsampler.Downsample(
                         tile.Rgba, tile.Width, tile.Height,
                         MapaTur.Application.Terrain.OrthoDistanceTier.NearCapPx);
