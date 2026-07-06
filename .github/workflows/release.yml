@@ -57,7 +57,7 @@ jobs:
           dotnet publish src/MapaTur.App/MapaTur.App.csproj
           -c Release -f net10.0-android
           -p:ApplicationDisplayVersion=${{ steps.ver.outputs.display }}
-          -p:ApplicationVersion=${{ github.run_number }}
+          -p:ApplicationVersion=$(${{ github.run_number }} + 200)
           -p:AndroidSigningKeyStore="$env:RUNNER_TEMP/mapatur.keystore"
           -p:AndroidSigningKeyAlias="${{ secrets.ANDROID_KEY_ALIAS }}"
           -p:AndroidSigningStorePass="${{ secrets.ANDROID_KEYSTORE_PASSWORD }}"
