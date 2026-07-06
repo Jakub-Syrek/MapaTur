@@ -5037,13 +5037,26 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         lastMemLogTick = now;
 
+        // DISTINCT CPU bytes (RAM step 0, 2026-07-06): Rgba usually REFERENCES MasterRgba (near tier) —
+        // summing both would double-count. Count each distinct array once, so the log answers "how much
+        // RAM do the ortho pixels actually hold" instead of overstating it.
         long orthoCpuBytes = 0;
         long orthoGpuBytes = 0;
+        long masterBytes = 0;
+        long farBytes = 0;
         foreach (OrthoTile tile in orthoTiles)
         {
-            orthoCpuBytes += tile.Rgba.LongLength;
+            masterBytes += tile.MasterRgba.LongLength;
+            farBytes += tile.FarRgba?.LongLength ?? 0;
+            if (!ReferenceEquals(tile.Rgba, tile.MasterRgba) && !ReferenceEquals(tile.Rgba, tile.FarRgba))
+            {
+                orthoCpuBytes += tile.Rgba.LongLength; // a third, transient buffer (tier change mid-swap)
+            }
+
             orthoGpuBytes += OrthoVramBudget.CellResidentBytes(tile.Width, tile.Height);
         }
+
+        orthoCpuBytes += masterBytes + farBytes;
 
         long tileGeometryBytes = 0;
         for (int i = 0; i < tiles.Count; i++)
@@ -5053,14 +5066,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         const double Mb = 1024.0 * 1024.0;
         Log.Information(
-            "[Mem] ortho {Cells} cells ~{OrthoMb:F0}MB (cpu {CpuMb:F0}+gpu {GpuMb:F0}) | tiles {Tiles} ~{TileMb:F0}MB | heap {HeapMb:F0}MB",
+            "[Mem] ortho {Cells} cells ~{OrthoMb:F0}MB (cpu {CpuMb:F0} [masters {MasterMb:F0} far {FarMb:F0}] + gpu {GpuMb:F0}) | tiles {Tiles} ~{TileMb:F0}MB | heap {HeapMb:F0}MB ws {WsMb:F0}MB",
             orthoTiles.Count,
             (orthoCpuBytes + orthoGpuBytes) / Mb,
             orthoCpuBytes / Mb,
+            masterBytes / Mb,
+            farBytes / Mb,
             orthoGpuBytes / Mb,
             tiles.Count,
             tileGeometryBytes / Mb,
-            GC.GetTotalMemory(forceFullCollection: false) / Mb);
+            GC.GetTotalMemory(forceFullCollection: false) / Mb,
+            Environment.WorkingSet / Mb);
     }
 
     // Resident-cell budget = VRAM budget / per-cell bytes (incl. ~33% for the mip chain), clamped to
