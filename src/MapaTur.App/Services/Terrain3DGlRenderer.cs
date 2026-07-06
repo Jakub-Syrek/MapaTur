@@ -119,10 +119,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform float uSnowSlopeCosBare;\n" + // cos(steep angle): at/below this n.z the face is bare rock
         "uniform float uSnowSlopeCosFull;\n" + // cos(gentle angle): at/above this n.z snow fully holds
         "uniform float uNoonSnowLift;\n" + // extra white-lift for snow at high (noon) sun, 0..~0.30 (NoonLightModel)
-                                           // Elevation-zone biomes ("Biomy"): paint the base albedo by alpine zonation — meadow/hala low,
-                                           // scree/piargi mid, snow/ice high — from elevation (vWorldPos.z, world-Z = metres×Pion), slope and
-                                           // aspect (northness). Mirrors the unit-tested BiomeClassifier; the granite rock material (rockW) and
-                                           // the dynamic snow slider still layer on top. uBiomeMode (0/1) gates it; thresholds are world-Z.
+                                           // Perennial firn (lodowczyki): world-Z line/band of the ~2000 m REAL altitude gate + strength.
+        "uniform float uFirnLineZ;\n" +
+        "uniform float uFirnBandZ;\n" +
+        "uniform float uFirnDropZ;\n" + // how far full concavity pulls the line DOWN (runout tongues), world-Z
+        "uniform float uFirnStrength;\n" +
+        "uniform vec4 uFirnSites[12];\n" + // curated glacieret sites: world XY + reach (m); WHERE comes from data
+        "uniform float uFirnSiteCount;\n" +
+        "uniform float uFirnChannelOn;\n" + // channel texels present in the water mask (static firn streams count)
+                                            // Elevation-zone biomes ("Biomy"): paint the base albedo by alpine zonation — meadow/hala low,
+                                            // scree/piargi mid, snow/ice high — from elevation (vWorldPos.z, world-Z = metres×Pion), slope and
+                                            // aspect (northness). Mirrors the unit-tested BiomeClassifier; the granite rock material (rockW) and
+                                            // the dynamic snow slider still layer on top. uBiomeMode (0/1) gates it; thresholds are world-Z.
         "uniform float uBiomeMode;\n" +
         "uniform float uBiomeScreeSlopeDeg;\n" + // slope at/above which non-rock ground reads as talus
         "uniform float uBiomeMeadowMaxZ;\n" +    // world-Z above which gentle ground stops being meadow
@@ -572,23 +580,93 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    float southness = max(0.0, -nrm.y);\n" +
         "    float sunInc = max(0.0, dot(nrm, uSnowSun)) * clamp(uSnowSun.z, 0.0, 1.0);\n" +
         // Wind / curvature proxy: low-freq noise (2 cheap taps, not the 5-octave fbm that tanked FPS).
-        "    float snowN = (noiseT(vStableWorldPos.xy * 0.012) * 0.6) + (noiseT(vStableWorldPos.xy * 0.030) * 0.4);\n" +
+        // REAL DEM curvature (baked AO in vColor.a) replaces the old random noise: seasonal snow
+        // ACCUMULATES in concave gullies/couloirs (avalanche loading → line drops, holds steep) and is
+        // WIND-SCOURED off convex ridges. A mapped stream channel (the firn water mask) is a full gully.
+        "    float sConcave = clamp((1.0 - vColor.a) / 0.6, 0.0, 1.0);\n" +
+        "    if (uFirnChannelOn > 0.5) {\n" +
+        "      vec2 suv = (vStableWorldPos.xy - uTrailMaskMinXY) / uTrailMaskSizeXY;\n" +
+        "      if (suv.x >= 0.0 && suv.x <= 1.0 && suv.y >= 0.0 && suv.y <= 1.0) {\n" +
+        "        float swA = texture(uWaterMask, suv).r;\n" +
+        "        if (swA > 0.003) { sConcave = max(sConcave, 1.0 - smoothstep(10.0, 32.0, (1.0 - swA) * uTrailMaxDist)); }\n" +
+        "      }\n" +
+        "    }\n" +
         // Warming weakens as the pack deepens: at the full slider every aspect is buried (uniform line →
         // solid white); a thin cover differentiates strongly by aspect/sun/wind (natural spring patchiness).
         "    float warmGate = 1.0 - uSnowStrength;\n" +
         // Effective LOCAL snowline (m a.s.l.). The weights are the physical knobs, in metres of snowline lift:
         //   aspect 260 m · sun-incidence 160 m · wind/curvature ±150 m.
-        "    float effLine = uSnowLineZ + ((((southness * 260.0) + (sunInc * 160.0)) + ((snowN - 0.5) * 300.0)) * warmGate);\n" +
+        "    float effLine = uSnowLineZ + ((((southness * 260.0) + (sunInc * 160.0)) - (sConcave * 500.0) + ((1.0 - sConcave) * 120.0)) * warmGate);\n" +
         "    float snowH = smoothstep(effLine, effLine + uSnowBandZ, vStableWorldPos.z);\n" +
         // Mechanical shedding (NOT temperature): snow can't cling to steep faces / sharp ridges → bare rock.
         // n.z = cos(slope): 1 flat, 0 vertical. A crisp cut on the steeps leaves the sharp ridges bare.
-        "    float slopeShed = smoothstep(uSnowSlopeCosBare, uSnowSlopeCosFull, nrm.z);\n" +
+        "    float slopeShed = smoothstep(uSnowSlopeCosBare - (0.30 * sConcave), uSnowSlopeCosFull - (0.20 * sConcave), nrm.z);\n" +
         // Deep snow BRIDGES small steep bumps (glacier-smooth, fewer rock specks); a thin cover still bares
         // every steep face. Lift the shed toward full-hold as the pack deepens (only the sharpest aretes stay bare).
         "    slopeShed = slopeShed + ((1.0 - slopeShed) * uSnowStrength * 0.5);\n" +
         "    snowMix = clamp(snowH * slopeShed, 0.0, 1.0) * uSnowStrength;\n" +
         // NB: the snow albedo is NOT baked into `base` here — snow gets its own dedicated bright/cool
         // lighting below (after `lit = base * lightSum`) so shadowed faces don't grey out.
+        "  }\n" +
+        // PERENNIAL FIRN ("lodowczyki") — mirrors the unit-tested PerennialFirn: above ~2000 m REAL the
+        // snow presence stops being a function of altitude; N-facing / wall-enclosed cirques (Mięguszowiecki
+        // Kocioł, Bandzioch, pod Rysami) hold multi-year patches EVEN AT SNOW SLIDER 0 (summer) — local mass
+        // balance: wind/avalanche deposition + wall shade + latent-heat buffering. Sheltering is a WEIGHTED
+        // SUM of northness and concavity (a flat Bandzioch floor has no own northness — its WALLS shade it,
+        // carried by the concavity term = 1−AO from the vertex alpha). Independent of uSnowStrength.
+        // V2 (photo-matched at Czarny Staw pod Rysami): CONCAVITY-LED — real patches are bright tongues in
+        // couloirs/enclosed floors; bare northness alone stays UNDER the patch threshold (v1 glazed whole N
+        // faces milky). The effective line sinks with concavity (uFirnDropZ — avalanche runout tongues live
+        // lower than open ground), and the final smoothstep sharpens the film into discrete patches.
+        // V3: the WHERE is DATA (FirnSiteData — the documented glacieret sites; feathered radial mask),
+        // the procedure only shapes the tongue INSIDE a site (v2 placed plausible patches on the wrong
+        // faces — real ones are a short curated list, like the lakes/summits gazetteers).
+        "  if (uFirnStrength > 0.001 && uSlopeMode < 0.5 && uFirnSiteCount > 0.5) {\n" +
+        "    float fSite = 0.0;\n" +
+        "    float fCap = 1.0;\n" +
+        "    for (int i = 0; i < 12; i++) {\n" +
+        "      if (float(i) >= uFirnSiteCount) { break; }\n" +
+        "      vec4 st = uFirnSites[i];\n" +
+        "      float d = distance(vStableWorldPos.xy, st.xy);\n" +
+        "      float m = 1.0 - smoothstep(st.z * 0.55, st.z, d);\n" +
+        "      if (m > fSite) {\n" +
+        "        fSite = m;\n" +
+        "        fCap = 1.0 - smoothstep(st.w - 80.0, st.w, vStableWorldPos.z);\n" + // tongues live LOW: fade under the site cap; crags higher on the same wall stay bare
+        "      }\n" +
+        "    }\n" +
+        "    if (fSite * fCap > 0.01) {\n" +
+        "      vec3 nrmF = normalize(vNormal);\n" +
+        "      float fNorth = max(0.0, nrmF.y);\n" +
+        "      float fSouth = max(0.0, -nrmF.y);\n" +
+        "      float fConcave = clamp((1.0 - vColor.a) / 0.6, 0.0, 1.0);\n" +
+        // Amplified channel response (mirrors PerennialFirn): narrow gullies read only ~0.2-0.3 on
+        // vertex-scale AO; safe to boost because the site mask + cap already confine the firn.
+        "      float fBroad = smoothstep(0.20, 0.55, fConcave);\n" + // deep enclosed nooks only (raw AO)
+                                                                     // Channel prior: the real tongues lie ALONG the mapped watercourses they feed (stream
+                                                                     // proximity from the water-decal distance field = a full deposition channel).
+                                                                     // Stream channel (the couloir slots): the PRIMARY driver — the real tongues are here, NOT on
+                                                                     // the broad sun-melted apron. fChannel = 1 within ~25 m of a mapped stream, else 0.
+        "      float fChannel = 0.0;\n" +
+        "      if (uFirnChannelOn > 0.5) {\n" +
+        "        vec2 fuv = (vStableWorldPos.xy - uTrailMaskMinXY) / uTrailMaskSizeXY;\n" +
+        "        if (fuv.x >= 0.0 && fuv.x <= 1.0 && fuv.y >= 0.0 && fuv.y <= 1.0) {\n" +
+        "          float fwA = texture(uWaterMask, fuv).r;\n" +
+        "          if (fwA > 0.003) {\n" +
+        "            float fwDist = (1.0 - fwA) * uTrailMaxDist;\n" +
+        "            float fEdgeN = noiseT(vStableWorldPos.xy * 0.09);\n" + // ~10 m ragged edge
+        "            float fSpread = clamp(((uFirnLineZ - vStableWorldPos.z) / 300.0) + 0.25, 0.0, 1.0);\n" + // splay wide downhill (avalanche fan), pinch up top
+        "            float fOuter = 12.0 + (28.0 * fSpread) + (10.0 * fEdgeN);\n" +
+        "            fChannel = (1.0 - smoothstep(8.0, fOuter, fwDist)) * (0.45 + (0.55 * fBroad));\n" + // wider in the concave couloir, pinches on a convex spur
+        "          }\n" +
+        "        }\n" +
+        "      }\n" +
+        "      float fDepo = max(fChannel, fBroad);\n" +
+        "      float fLine = uFirnLineZ - (uFirnDropZ * fDepo);\n" +
+        "      float fAlt = smoothstep(fLine - (uFirnBandZ * 0.5), fLine + (uFirnBandZ * 0.5), vStableWorldPos.z);\n" +
+        "      float fShelter = clamp(fChannel + (fBroad * fNorth * 0.5) + (0.10 * fNorth) - (0.85 * fSouth), 0.0, 1.0);\n" +
+        "      float fHold = smoothstep(uSnowSlopeCosBare - (0.25 * fDepo), uSnowSlopeCosFull - (0.20 * fDepo), nrmF.z);\n" + // channel firn is bed-anchored: holds far steeper (mirrors PerennialFirn)
+        "      snowMix = max(snowMix, smoothstep(0.45, 0.72, fAlt * fShelter) * fHold * fSite * fCap * uFirnStrength);\n" +
+        "    }\n" +
         "  }\n" +
         "  vec3 lit = base * lightSum;\n" +
         // Snow shading (dedicated): high albedo + sky/multiple scattering keeps snow BRIGHT and COOL-BLUE in
@@ -1733,6 +1811,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int terrainCloudShadowLocation = -1;
     private int terrainSnowStrengthLocation = -1;
     private int terrainSnowLineZLocation = -1;
+    private int terrainFirnLineZLocation = -1;
+    private int terrainFirnBandZLocation = -1;
+    private int terrainFirnDropZLocation = -1;
+    private int terrainFirnSitesLocation = -1;
+    private int firnChannelOnLocation = -1;
+    private int terrainFirnSiteCountLocation = -1;
+    private readonly float[] firnSiteScratch = new float[12 * 4];
+    private int terrainFirnStrengthLocation = -1;
+    // Perennial-firn coverage strength (0 = off; the instant rollback lever).
+    private const float FirnStrength = 0.85f;
     private int terrainContourSpacingZLocation = -1;
     private int terrainContourColorLocation = -1;
     private int terrainContourMajorSpacingZLocation = -1;
@@ -2193,6 +2281,36 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// <summary>Watercourse polylines (waterway=river|stream), painted into the terrain as a shiny water decal.</summary>
     public IReadOnlyList<Trail>? Waterways { get; set; }
 
+    // Static high-alpine stream polylines (MountainStreamData, generated from OSM) as Trail objects —
+    // used when the LIVE waterways layer is empty, which it usually is: the streams were baked into the
+    // ortho for performance, so the layer has no data yet the firn channel prior still needs the REAL
+    // channel geometry. They fill only the water FIELD (the firn prior); the water DECAL stays off for
+    // them (uWaterStrength gated on the live layer), so nothing double-paints over the ortho-baked look.
+    private static IReadOnlyList<Trail>? staticFirnStreams;
+
+    private static IReadOnlyList<Trail> StaticFirnStreams
+    {
+        get
+        {
+            if (staticFirnStreams is null)
+            {
+                var list = new List<Trail>();
+                long id = -1;
+                foreach (MapaTur.Domain.Geography.GeoPoint[] seg in MapaTur.Application.Terrain.MountainStreamData.NearFirnSites)
+                {
+                    list.Add(new Trail(id--, string.Empty, Array.Empty<MapaTur.Domain.Trails.TrailMarking>(), seg));
+                }
+
+                staticFirnStreams = list;
+            }
+
+            return staticFirnStreams;
+        }
+    }
+
+    /// <summary>The live waterways layer when it has data, else the static firn-stream gazetteer.</summary>
+    private IReadOnlyList<Trail> EffectiveWaterways => Waterways is { Count: > 0 } w ? w : StaticFirnStreams;
+
     /// <summary>Waterfall points rendered as bright foam accents on their streams.</summary>
     public IReadOnlyList<MapaTur.Application.Waterways.Waterfall>? Waterfalls { get; set; }
 
@@ -2479,6 +2597,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             terrainCloudShadowLocation = -1;
             terrainSnowStrengthLocation = -1;
             terrainSnowLineZLocation = -1;
+            terrainFirnLineZLocation = terrainFirnBandZLocation = terrainFirnStrengthLocation = -1;
+            terrainFirnDropZLocation = -1;
+            terrainFirnSitesLocation = terrainFirnSiteCountLocation = -1;
+            firnChannelOnLocation = -1;
             terrainContourSpacingZLocation = -1;
             terrainContourColorLocation = -1;
             terrainContourMajorSpacingZLocation = -1;
@@ -3120,6 +3242,32 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform1(terrainSnowStrengthLocation, snowAmount);
         gl.Uniform1(terrainSnowLineZLocation, snow.LineZ);
 
+        // Perennial firn gate in world-Z: the ~2000 m REAL line x Pion (PerennialFirn is the tested mirror).
+        float firnExag = lightFrame.VerticalExaggeration > 0f ? lightFrame.VerticalExaggeration : 1f;
+        gl.Uniform1(terrainFirnLineZLocation, MapaTur.Application.Terrain.PerennialFirn.LineMeters * firnExag);
+        gl.Uniform1(terrainFirnBandZLocation, MapaTur.Application.Terrain.PerennialFirn.BandMeters * firnExag);
+        gl.Uniform1(terrainFirnDropZLocation, MapaTur.Application.Terrain.PerennialFirn.RunoutDropMeters * firnExag);
+        gl.Uniform1(terrainFirnStrengthLocation, FirnStrength);
+
+        // Curated glacieret sites -> world XY + reach: the WHERE of the firn is data, not procedure.
+        var firnSites = MapaTur.Application.Terrain.FirnSiteData.Sites;
+        int firnCount = Math.Min(firnSites.Count, 12);
+        for (int i = 0; i < firnCount; i++)
+        {
+            Vector3 sw = lightFrame.GeoToWorld(firnSites[i].Location, 0f);
+            firnSiteScratch[(i * 4) + 0] = sw.X;
+            firnSiteScratch[(i * 4) + 1] = sw.Y;
+            firnSiteScratch[(i * 4) + 2] = (float)firnSites[i].RadiusMeters;
+            firnSiteScratch[(i * 4) + 3] = (float)firnSites[i].MaxElevationMeters * firnExag; // tongue cap, world-Z
+        }
+
+        fixed (float* fs = firnSiteScratch)
+        {
+            gl.Uniform4(terrainFirnSitesLocation, 12, fs);
+        }
+
+        gl.Uniform1(terrainFirnSiteCountLocation, (float)firnCount);
+
         // Contour lines (warstwice) — shader overlay; spacing in world-Z (interval m × the mesh's Pion) so it
         // tracks exaggeration. Strength 0 when the layer is toggled off.
         float contourExag = lightFrame.VerticalExaggeration > 0f ? lightFrame.VerticalExaggeration : 1f;
@@ -3136,6 +3284,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform1(trailMaskStrengthLocation, 0f);
         gl.Uniform1(waterMaskSamplerLocation, 6);
         gl.Uniform1(waterMaskStrengthLocation, 0f);
+        gl.Uniform1(firnChannelOnLocation, 0f);
 
         gl.Uniform1(terrainSnowBandZLocation, snow.BandZ);
         gl.Uniform1(terrainSnowSlopeCosBareLocation, snow.SlopeCosBare);
@@ -3353,7 +3502,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 gl.ActiveTexture(TextureUnit.Texture6);
                 gl.BindTexture(TextureTarget.Texture2D, waterMaskTex);
                 gl.ActiveTexture(TextureUnit.Texture0);
-                gl.Uniform1(waterMaskStrengthLocation, 1f);
+                gl.Uniform1(waterMaskStrengthLocation, Waterways is { Count: > 0 } ? 1f : 0f);
+                gl.Uniform1(firnChannelOnLocation, 1f);
             }
         }
 
@@ -5550,6 +5700,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         terrainCloudShadowLocation = g.GetUniformLocation(program, "uCloudShadow");
         terrainSnowStrengthLocation = g.GetUniformLocation(program, "uSnowStrength");
         terrainSnowLineZLocation = g.GetUniformLocation(program, "uSnowLineZ");
+        terrainFirnLineZLocation = g.GetUniformLocation(program, "uFirnLineZ");
+        terrainFirnBandZLocation = g.GetUniformLocation(program, "uFirnBandZ");
+        terrainFirnDropZLocation = g.GetUniformLocation(program, "uFirnDropZ");
+        terrainFirnSitesLocation = g.GetUniformLocation(program, "uFirnSites[0]");
+        firnChannelOnLocation = g.GetUniformLocation(program, "uFirnChannelOn");
+        terrainFirnSiteCountLocation = g.GetUniformLocation(program, "uFirnSiteCount");
+        terrainFirnStrengthLocation = g.GetUniformLocation(program, "uFirnStrength");
         terrainContourSpacingZLocation = g.GetUniformLocation(program, "uContourSpacingZ");
         terrainContourColorLocation = g.GetUniformLocation(program, "uContourColor");
         terrainContourMajorSpacingZLocation = g.GetUniformLocation(program, "uContourMajorSpacingZ");
@@ -6145,7 +6302,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         bool linesUnchanged = ReferenceEquals(lastMaskTrails, trails)
             && ReferenceEquals(lastMaskRoads, roads)
             && ReferenceEquals(lastMaskExposed, exposed)
-            && ReferenceEquals(lastMaskWaterways, Waterways)
+            && ReferenceEquals(lastMaskWaterways, EffectiveWaterways)
             && ReferenceEquals(lastMaskWaterfalls, Waterfalls)
             && ReferenceEquals(lastMaskRoute, route)
             && ReferenceEquals(lastMaskRaster, raster);
@@ -6176,7 +6333,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         lastMaskTrails = trails;
         lastMaskRoads = roads;
         lastMaskExposed = exposed;
-        lastMaskWaterways = Waterways;
+        lastMaskWaterways = EffectiveWaterways;
         lastMaskWaterfalls = Waterfalls;
         lastMaskRoute = route;
         lastMaskRaster = raster;
@@ -6201,7 +6358,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         var roadsSnap = roads;
         var exposedSnap = exposed;
         var routeSnap = route;
-        var waterSnap = Waterways;
+        var waterSnap = EffectiveWaterways;
         var fallsSnap = Waterfalls;
         var rasterSnap = raster;
         var meshSnap = mesh;
