@@ -44,6 +44,12 @@
 *Golden hour over Czarny Szczyt — a physically-driven sun position with warm aerial perspective and screen-space crepuscular rays ("god rays"), all rendered live in the terrain engine.*
 
 <p align="center">
+  <img src="docs/screenshots/3d-tatry-slope-lod.png" alt="MapaTur 3D slope map over the Rysy massif — the two-focus quadtree LOD streams razor-sharp 1 m detail into the ridge under the look-at while the un-attended cirque on the right stays on the coarse base" width="92%" />
+</p>
+
+*The **two-focus quadtree LOD** at work, shown on the slope map (orthophoto off; colour = slope angle — magenta for steep rock, green for gentle grass). Full-detail rings anchor on the **look-at point, not the camera**, and here it resolved onto **Rysy (2 501 m)**, the highest peak in frame — so the engine poured the 1 m LiDAR budget into the ridge being examined and the ground under the eye (every couloir and rock rib on the left is razor-sharp), while the un-attended cirque on the **right** stays on the coarse base and shows the quadtree's blocky LOD terraces. Detail follows attention, not just camera distance. Windows desktop (ANGLE → Direct3D 11).*
+
+<p align="center">
   <img src="docs/screenshots/tatry-real-photo.jpg" alt="The real Tatra mountains — a sharp granite peak under a summer sky" width="38%" />
 </p>
 

@@ -206,10 +206,16 @@ public static class QuadtreeTileSelector
     /// ground XY (a smaller bubble — see <see cref="EyeBubbleFraction"/>).</summary>
     private readonly record struct SelectionFoci(Vector2 Focus, Vector2 Eye);
 
-    // The eye keeps this fraction of every ring radius as its own detail bubble (0.4 ⇒ a 2.5 km finest ring
-    // grants ~1 km of finest tiles around the ground under the camera). Small enough not to double the tile
-    // budget, big enough that the terrain underfoot never degrades while the user looks around.
-    private const double EyeBubbleFraction = 0.4;
+    // The eye keeps this fraction of every ring radius as its own detail bubble. 1.0 ⇒ the EYE gets the SAME
+    // full rings as the look-at, so the near field (the wall right in front of you) is ALWAYS at full detail
+    // regardless of where you look. 2026-07-07: raised 0.4 → 1.0. At 0.4 the eye bubble was only ~1 km while
+    // the look-at got the full 2.5 km, so standing at the base of a wall and looking PAST it at a distant
+    // ridge poured detail 5 km away while the near wall — only half-covered by the small bubble — lost and
+    // regained detail on every camera nudge ("na cholerę mi detal 5 km dalej jak ściana obok churnuje").
+    // A full eye ring keeps the near wall solidly inside the finest ring so small moves never flip it out;
+    // affordable now that the desktop budget is 2400 tiles (the union of two full ring sets fits well under
+    // the cap, so nothing clamps).
+    private const double EyeBubbleFraction = 1.0;
 
     // Horizontal ground radius, per coarser zoom from MaxZoom down to MinZoom+1, scaled by camera height.
     // Index 0 is the MaxZoom (finest) ring, index k the (MaxZoom-k) ring. A tile of zoom z is the deepest

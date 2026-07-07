@@ -95,6 +95,9 @@ least-squares log-gainów per kanał (kotwica: średni log-gain = 0), zapis + we
 Wynik wykonania: skoki krawędziowe z ±20–33 → **±0.4–3.4**. Tworzy backup `*.pre-colorfix.bak` (oryginały!).
 
 ### 3.4 Wyrównanie niskoczęstotliwościowej ekspozycji (łagodzi łaty w obrębie komórek)
+> ⛔ **DEPRECATED dla bazy GUGiK (2026-07-06).** Pisany pod patchwork Esri. Na czystym GUGiK (który jest
+> radiometrycznie zbalansowany u źródła) tylko **przyciemnia** (mean luma kotła 58→41) i nasyca klamrą.
+> NIE uruchamiać na bazie GUGiK. Patrz §3.11.
 `python testdata/maps/ortho-flatten-exposure.py` — per kanał: gain = target/blur(~1.5 km), klamra ±20%.
 Wynik: szew wewnętrzny r1c2 z [23.5,20.9,15.2] → [17.4,14.8,9.0] (klamra się nasyca — dlatego 3.6).
 
@@ -103,6 +106,9 @@ Wynik: szew wewnętrzny r1c2 z [23.5,20.9,15.2] → [17.4,14.8,9.0] (klamra się
 (wątki, pomija istniejące). Jednorazowe; cache służy też ewentualnemu pełnemu re-bake z z16.
 
 ### 3.6 „Nadpisanie" ciemnych nalotów mozaiką z16 (WYKONANE 2026-07-02, wersja v2)
+> ⛔ **DEPRECATED / SZKODLIWY dla bazy GUGiK (2026-07-06).** Domalowuje **Esri z16 na ciemne partie GUGiK**
+> (8–39% każdej komórki) → wmieszuje trzecią teksturę w czysty GUGiK = „lepione z różnych map" + miększe pasy.
+> To była główna przyczyna patchworku zgłoszonego przez usera. NIE uruchamiać na bazie GUGiK. Patrz §3.11.
 `python testdata/maps/ortho-patch-dark-acquisitions.py`:
 1. Overview 1/16: referencja z16 (bilinear z mozaiki) vs obecny PNG; maska = `ref_lum − cur_lum > 14`
    (naturalnie ciemny las jest ciemny w OBU źródłach → nie łapie się).
@@ -149,7 +155,100 @@ za wyłącznikiem `ShowWaterways` (default OFF) do A/B i obszarów bez ortho.
 
 ### 3.8 Restore
 Pełny powrót: `*.pre-colorfix.bak` → PNG (stan z bake 3.1). Powrót tylko z łatki 3.6:
-`*.pre-z16patch.bak` → PNG (stan po 3.3+3.4). Po każdej podmianie plików: restart aplikacji.
+`*.pre-z16patch.bak` → PNG (stan po 3.3+3.4). Powrót tylko z łatki 3.10:
+`*.pre-dehaze.bak` → PNG (stan sprzed de-haze/de-light). Po każdej podmianie plików: restart aplikacji.
+
+### 3.10 De-haze welonu + de-light wypalonego cienia (PILOT r1-c2 2026-07-06, wariant A = korekta pikseli)
+**OBJAW (dwa zjawiska w tym samym rejonie kotłów Morskie Oko / Dolina Pięciu Stawów):**
+(a) mleczny **niebiesko-szary welon** atmosferyczny; (b) **wypalony w orto cień kierunkowy** z chwili nalotu —
+widoczny nawet o 12:00, gdy nasze słońce cienia nie rzuca (user potwierdził zrzutem), z niebieskim castem
+(cień oświetlony niebem: głęboki cień B/R≈1.21 vs nasłonecznione B/R≈0.98). Leży w komórce `r1-c2`.
+
+**DECYZJA (user):** NIE podmiana na z16 (miażdży cienie do czerni + kostka mozaiki). Korekta OBECNYCH pikseli.
+**PORZUCONY auto-detektor z16** (`bright_excess = cur_dc − ref_dc`): pali ~70% komórki, bo z16 jest globalnie
+ciemniejszy niż nalot WSZĘDZIE + patchwork nalotów w `r1-c2` (ukośne szwy tonalne). Zamiast tego:
+**obrys GEOGRAFICZNY potwierdzony przez usera** (na arkuszu wariantów) + lokalna bramka.
+
+`python testdata/maps/ortho-dehaze-patch.py --dry` (podgląd całej komórki) → `... r1-c2` (bake). Łańcuch 3 kroków,
+pola liczone na overview (DOWN=6, ~matchuje rozdz. arkusza) i aplikowane per-piksel na pełnej rozdzielczości w paskach:
+1. **Dehaze** (dark-channel prior) na welon: airlight z najmleczniejszych (jasne+niski kontrast) pikseli w obrysie,
+   `J=(I−A)/t+A`, transmisja floored `T0=0.50` (cienie NIE w czerń), `OMEGA=0.72`; bramka „mleczności"
+   (niski lokalny kontrast) piórkuje efekt → brak prostokątnego szwu.
+2. **De-light** na wypalony cień: `L=gaussian(luma, ILLUM_M=320 m)` = estymata wypieczonego oświetlenia;
+   `gain=clip((Lref/L)^DELIGHT_EXP, 0.80, 2.7)`, `Lref`=72. percentyl `L` w obrysie → podnosi cienie ku poziomowi
+   nasłonecznionemu (realnie doszło do ~1.63×). `DELIGHT_EXP=1.0` (strong).
+3. **De-blue** residualu: w podniesionych cieniach `R*(1+0.10·sw·kc)`, `G*(1+0.02…)`, `B*(1−0.14…)`, `DEBLUE_KC=1.1`,
+   `sw`=smoothstep ciemności × maska obrysu.
+
+Obrys **B broad** (user-zatwierdzony na `dehaze-sheet2`): lon 19.988–20.112, lat 49.196–49.250. Wynik: airlight
+[133.9,149.2,131.4], Lref=87, gain[0.83,1.63], efekt 21.6% komórki.
+
+**SEAM-SAFETY (obowiązkowo):** twardy `EDGE_MARGIN=96 px` przy 4 krawędziach zeruje weight/gain/maskę → korekcje
+§3.3 **byte-identyczne**. Weryfikacja: `ortho-analyze-seams.py` przed/po = te same delty na krawędziach
+r1-c2 (`c1|c2` [1.6,1.9,0.6], `c2|c3` [−3.7,−2.1,−1.4], `c2 r0|r1` [−0.9,0.8,4.8]) — POTWIERDZONE.
+Backup `*.pre-dehaze.bak` (raz; czysty oryginał sprzed łańcucha). ⚠️ Skrypt czyta BIEŻĄCY PNG — przed
+ponownym bake NAJPIERW restore `*.pre-dehaze.bak` → PNG (inaczej podwójna korekcja).
+
+**STATUS:** werdykt wizualny w apce (3D, 12:00) — w toku u usera; parametry do dostrojenia (`DELIGHT_EXP`/gain za
+słabo→podbić, za płasko→med). Rollout na inne komórki (welon też w `r0-c2`?) + regeneracja zestawu mobilnego —
+dopiero po akceptacji. Proces uzgadniania wyglądu = arkusze w scratchpadzie sesji (`dehaze-sheet2`, `deblue-sheet`,
+`delight-sheet`). ⚠️ Re-tune 2026-07-06: dotychczasowe stałe dobrane były pod ZABRUDZONY stan (§3.6). Po §3.11
+baza jest jaśniejsza (~58) → parametry przeliczane od nowa na czystym GUGiK.
+
+### 3.11 RECEPTURA GUGiK-RESTORE (2026-07-06) — czyszczenie polskiej strony z naszego własnego brudu
+**DIAGNOZA (twarda, potwierdzona 3-way compare `ortho-provenance-compare.py`):** polska strona ORTO **JEST z
+GUGiK Ortofotomapy** od 2026-06-10/12 (`overlay-gugik-ortho.py`; SK = ZBGIS `overlay-zbgis-ortho.py`). „Patchwork
++ granatowe doliny" zgłoszone przez usera pochodzi z:
+1. **naszych korekt §3.4 (przyciemnienie 58→41) i §3.6 (domalowanie Esri z16 na ciemny GUGiK)** — SZKODLIWE dla
+   bazy GUGiK, wmieszały Esri z powrotem;
+2. dwóch **realnych residuów GUGiK**: (a) własny szew nalotów GUGiK (różne lata), (b) wypalone cienie kierunkowe
+   (shadow `blue_excess=+7.0`, oświetlone niebem) — usuwalne tylko przez de-light §3.10.
+
+**RECEPTURA (kolejność):**
+1. **Restore 8 kafli:** `tatry-ortho-r{R}-c{C}.png.pre-colorfix.bak` → `.png` (czysty GUGiK+ZBGIS z 12.06;
+   `.pre-colorfix.bak` = KLEJNOTY, nigdy nie kasować). Skasować nieaktualne `.pre-water.bak`/`.pre-dehaze.bak`
+   (wskazują zabrudzony stan; skrypty backupują „if absent" → inaczej utrwalą złą linię).
+2. **§3.3** `ortho-seam-gains.py` globalnie na czystym GUGiK (jedyny krok wolno ruszający krawędzie).
+3. **NIE uruchamiać §3.4 ani §3.6** (deprecated — patrz wyżej).
+4. **§3.10 de-light** (RE-TUNE na czystym GUGiK) na kaflach z granatowym cieniem — PL i **SK** (ZBGIS też ma
+   wypalone cienie w kotłach; de-light jest source-agnostic). Rozszerzyć dict `OUTLINE`.
+5. **Harmonizacja bloku GUGiK** (szew nalotów) = reużycie Reinhard seam-band z `overlay-gugik-ortho.py`, bounded
+   do bboxa bloku + EDGE_MARGIN.
+6. **§3.9 waterways** przepiec na wszystkich 8 (restore je zdejmuje; brak backupu „GUGiK+woda").
+7. **Mobile:** `generate-tatry-ortho-mobile.py` z GUGiK-skorygowanych masterów + `PackageBaker` (na końcu).
+Seam-safety: `ortho-analyze-seams.py` przed/po każdym zapisie; per-cell edits (§3.10) tylko wnętrze; cross-cell
+(§3.12) transform ciągły.
+
+### 3.12 Harmonizacja bloku akwizycji GUGiK (CROSS-CELL, 2026-07-06)
+`python testdata/maps/ortho-harmonize-gugik-block.py [--dry]` — GUGiK ma własny **szew nalotów**: sucha,
+żółto-zielona akwizycja (inny rok) pokrywa środkowe podnóża **na 4 kaflach** (r0-c1/r0-c2/r1-c1/r1-c2) =
+główne „lepione z różnych map". Blok **przecina szwy kafli** (c1|c2, r0|r1), więc per-cell EDGE_MARGIN
+zostawiłby pas na styku. Rozwiązanie: **globalny Reinhard** (blok→statystyki otaczającej zieleni, liczone RAZ
+ze wszystkich 4 kafli) = identyczny transform po obu stronach każdego szwu → ciągłość, zero nowego szwu.
+Bramka „żółtości" (`(R−B)` wysokie + jasność) ogranicza efekt do pikseli bloku (zielony las poza blokiem
+nietknięty), piórkowana. Obrys = user-potwierdzony bbox `BLOCK=(19.86,49.195,20.09,49.345)`. STRENGTH=1.0.
+Wynik: blok [96,107,**71.7**] → dopasowany do zieleni [80.8,95.3,**89.2**]; gate 8.6–31.5% per kafel.
+Backup `*.pre-blockfix.bak`. Weryfikacja: `ortho-analyze-seams.py` — szwy zostają ±3.4 (jak po §3.3, ciągłe).
+KOLEJNOŚĆ: §3.12 (blok, kolor) PRZED §3.10 (de-light, cień) — w większości rozłączne piksele.
+
+**§3.10 tryb GRUPOWY (cross-cell de-light, 2026-07-06):** granatowy cień też przechodzi przez szew c1|c2
+(wysokie Tatry ciągłe). `ortho-dehaze-patch.py` liczy teraz **globalny airlight A + Lref dla GRUPY**
+(`GROUPS=[[(1,1),(1,2)]]`) i pomija EDGE_MARGIN tylko na **wspólnym** szwie (zewnętrzne krawędzie chronione)
+→ de-light ciągły przez c1|c2. Obrysy w `OUTLINE`. Re-tune na czystym GUGiK: A≈[158,170,146], Lref≈97.
+
+### 3.13 De-blue wypalonych cieni (SHIP, 2026-07-07) — zamiast pełnego de-lightingu
+`python testdata/maps/ortho-deblue-shadow.py` — neutralizuje **niebieski cast** wypalonych cieni nalotu na
+WSZYSTKICH 8 kaflach, zachowując głębię i teksturę. Samobramkujące, per-piksel, bez fitowania:
+`excess = max(0, B − max(R,G))` (o ile niebieski przewyższa oba pozostałe = cast nieba), `B −= 0.85·excess`,
+`G += 0.35·excess` (odcień ku **jasnozieleni jak ZBGIS/SK** — user wybrał zieleń, nie brąz). Gdzie niebieski
+nie dominuje (las zielony, skała szara, śnieg jasny) `excess≈0` → piksel nietknięty; luma ~zachowana (kolor
+przesunięty B→G, nie podniesiony) → **zero prania**. Transform identyczny wszędzie → szwy automatycznie
+ciągłe (bez EDGE_MARGIN). Czyta bazę `*.pre-colorfix.bak` (nie stackuje na wcześniejszych operacjach koloru);
+restore = `*.pre-colorfix.bak` → PNG.
+**KONTEKST:** to połowa problemu cienia. Usunięcie CIEMNOŚCI cienia (prawdziwy de-lighting, żeby render robił
+całe światło) = ZAPARKOWANE, `docs/DELIGHT-RESEARCH.md` (prototyp nie złapał: DEM 15 m za gruby, orto źle
+zortorektyfikowane → cień DEM nie leży na cieniu orto, patchwork nalotów o różnym słońcu). Ekspozycja renderu
+1.15→1.0 (`TonemapExposure`, `sunCol ×1.15→1.0`) — to była główna „przepalona jasność bazowa".
 
 ---
 
@@ -161,8 +260,9 @@ Pełny powrót: `*.pre-colorfix.bak` → PNG (stan z bake 3.1). Powrót tylko z 
 
 ## 5. Znane ograniczenia / TODO
 - 282 kafle z16 na skrajnym zachodzie (lon 19.50–19.58) = NoData rogu LOT26; 100% wymaga sąsiedniego LOT.
-- Zestaw mobilny (`Data\maps`, 8192×4096) NIE przeszedł korekcji 3.3–3.6 — przy najbliższej paczce
-  przegenerować z poprawionych masterów (`generate-tatry-ortho-mobile.py` czyta desktopowe PNG).
-- Esri z17 poza podmienionymi pasami nadal zawiera drobniejsze łaty nalotów (poniżej progu detekcji).
+- Zestaw mobilny (`Data\maps`, 8192×4096) jest STARY — przegenerować z masterów po §3.11 (GUGiK-restore +
+  de-light + waterways), NIE z korekcji 3.3–3.6 (deprecated). `generate-tatry-ortho-mobile.py` czyta desktopowe PNG.
+- Polska strona ORTO = **GUGiK Ortofotomapa** (nie Esri! Esri to tylko bazowy bake sprzed nakładek + fallback
+  poza pokryciem GUGiK/ZBGIS). SK = ZBGIS. Patrz §3.11.
 - RAM desktopu ~16–17 GB przy pełnych masterach (duplikacja zdekodowanego zestawu w cache widoku) —
   do przycięcia (cache widoku w rozdzielczości master, nie źródła).

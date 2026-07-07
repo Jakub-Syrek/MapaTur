@@ -18,6 +18,10 @@
     <!-- GPU 3D engine (Windows): raw OpenGL ES bindings rendered on the SKGLView context. -->
     <PackageVersion Include="Silk.NET.OpenGLES" Version="2.22.0" />
 
+    <!-- glTF import + runtime animation for the ridden dragon (rigged/skinned model). MIT. -->
+    <PackageVersion Include="SharpGLTF.Core" Version="1.0.6" />
+    <PackageVersion Include="SharpGLTF.Runtime" Version="1.0.6" />
+
     <!-- Storage -->
     <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.0" />
     <PackageVersion Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />

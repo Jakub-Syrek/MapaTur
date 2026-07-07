@@ -360,11 +360,13 @@ public sealed class QuadtreeTileSelectorTests
 
         // Ordering is by the EFFECTIVE two-foci distance — min(distance to the look-at's ground, distance to
         // the eye's ground / bubble fraction) — the same metric that drives the ring LOD, so the tiles nearest
-        // to the user's attention (and underfoot) stream first.
+        // to the user's attention (and underfoot) stream first. EyeBubbleFraction is 1.0 (2026-07-07: the eye
+        // gets the SAME full rings as the look-at, so a near wall is always full detail), so the eye term is
+        // simply its ground distance.
         var targetGroundXY = new Vector2(camera.Target.X, camera.Target.Y);
         var eyeGroundXY = new Vector2(camera.Position.X, camera.Position.Y);
         var distances = selection.Tiles
-            .Select(t => Math.Min(GroundDistance(targetGroundXY, t.Key), GroundDistance(eyeGroundXY, t.Key) / 0.4))
+            .Select(t => Math.Min(GroundDistance(targetGroundXY, t.Key), GroundDistance(eyeGroundXY, t.Key) / 1.0))
             .ToList();
         distances.Should().BeInAscendingOrder();
     }

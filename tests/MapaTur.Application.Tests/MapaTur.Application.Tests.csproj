@@ -21,6 +21,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- A rigged + animated CC0 test model (Khronos glTF sample assets) for the skinning-engine tests. -->
+    <None Include="TestData\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\MapaTur.Application\MapaTur.Application.csproj" />
   </ItemGroup>
 

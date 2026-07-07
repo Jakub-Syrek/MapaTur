@@ -3,6 +3,10 @@ root = true
 # All files
 [*]
 indent_style = space
+# Match .gitattributes (* text=auto eol=lf): the repo stores LF, so dotnet format must expect LF too.
+# Without this, dotnet format defaults to the platform ending (CRLF on Windows) and --verify reports
+# hundreds of spurious WHITESPACE diffs on every checkout (the recurring CRLF cycle).
+end_of_line = lf
 
 # Xml files
 [*.xml]

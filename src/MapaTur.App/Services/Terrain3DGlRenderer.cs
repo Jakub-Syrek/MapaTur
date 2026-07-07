@@ -676,9 +676,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // pulled DOWN (×0.65) for darker-but-still-blue shadows, and the direct-sun term is boosted (×1.4) so
         // lit slopes pop to bright white. The two knobs: floor down / sun up = more relief, but watch for grey.
         "  if (snowMix > 0.001) {\n" +
-        "    vec3 snowAlbedo = vec3(0.96, 0.98, 1.0);\n" +
-        "    vec3 snowLit = snowAlbedo * ((uSkyAmbient * 0.65) + (uSunColor * sunlit * 1.4));\n" +
-        "    snowLit = mix(snowLit, vec3(1.0), uNoonSnowLift * 0.5);\n" +   // intense midday → extra pop toward pure white
+        // 2026-07-07: at snow 100% the cover blew out to a flat white sheet — snow starts near-white (albedo
+        // ~1.0) so the ×1.4 sun boost + noon lift already clip it to 1.0, and the ACES exposure 1.15 (66bcb4a)
+        // then has no headroom left (dark terrain does, snow doesn't). Give snow headroom BELOW 1.0 pre-tonemap:
+        // lower albedo (0.96→0.88) + gentler sun boost (1.4→1.15) + smaller noon lift — the ACES roll-off keeps
+        // the highlight detail instead of a solid white clip. Still bright, still cool-blue in shadow.
+        "    vec3 snowAlbedo = vec3(0.80, 0.82, 0.86);\n" +
+        "    vec3 snowLit = snowAlbedo * ((uSkyAmbient * 0.45) + (uSunColor * sunlit * 1.15));\n" +   // ambient 0.65→0.45: deeper shadow = 3-D relief, not a flat white sheet
+        "    snowLit = mix(snowLit, vec3(0.92), uNoonSnowLift * 0.30);\n" +   // intense midday → pop toward bright (not pure) white
         "    lit = mix(lit, min(snowLit, vec3(1.0)), snowMix);\n" +
         "  }\n" +
         "  float dist = length(vWorldPos - uCameraPos);\n" +
@@ -686,10 +691,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Snow keeps NEAR detail crisp, but DISTANT snowfields pick up cool aerial perspective — they fade
         // into the horizon haze like the real range, instead of staying a hard white cut-out. Only a mild
         // reduction (was a near-full block), so close snow is still sharp while far snow reads as luminous distance.
-        "  fogAmount *= (1.0 - 0.35 * snowMix);\n" +
-        // Contour lines (warstwice): tint the surface near each iso-elevation level, computed from THIS
-        // fragment's elevation so the line lies exactly on whatever LOD is drawn (coarse base OR 1 m detail) —
-        // no float, no rock poke-through. fwidth keeps it a constant pixel width; applied pre-fog so it fades.
+        "  fogAmount *= (1.0 - 0.65 * snowMix);\n" +   // 0.35→0.65 (2026-07-07): snow was fading into the bright uFogColor = a milky white haze over the whole cover; let snow keep its own tone
+                                                       // Contour lines (warstwice): tint the surface near each iso-elevation level, computed from THIS
+                                                       // fragment's elevation so the line lies exactly on whatever LOD is drawn (coarse base OR 1 m detail) —
+                                                       // no float, no rock poke-through. fwidth keeps it a constant pixel width; applied pre-fog so it fades.
         "  if (uContourStrength > 0.001 && uReflectionPass < 0.5) {\n" +
         // Minor lines. fwidth(cz) = contour levels spanned by one pixel; fade the lines out once they crowd
         // below a few px so dense 5 m contours in the distance don't smear into a solid tint.
@@ -2127,7 +2132,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // Filmic look (C-package 2026-07-05): 1 = full ACES (0 = legacy linear, kept as the instant A/B
     // rollback); exposure is the pre-curve gain compensating ACES's mid-tone dip.
     private const float TonemapStrength = 1f;
-    private const float TonemapExposure = 1.15f;
+    // 2026-07-07: 1.15 → 1.0. The +15% pre-curve exposure (with the ×1.15 sun-colour boost = ~×1.32 on lit
+    // ground) pushed sunlit terrain and snow into ACES's shoulder and BLEW OUT the colour — the "wszystko
+    // przepalone, bez kolorów, za jasno" the user reported across BOTH ortho sources. Neutral 1.0 keeps the
+    // deep GUGiK/ZBGIS colour; ACES still rolls off genuine highlights.
+    private const float TonemapExposure = 1.0f;
     private int bloomCompGodrayLoc = -1, bloomCompGodrayIntensityLoc = -1;
     private bool bloomStageLogged;
     private bool godrayStageLogged;
@@ -2636,6 +2645,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             starVbo = 0;
             starCount = 0;
             starBufferReady = false;
+            dragonProgram = 0; // context lost → rebuild the skinned-dragon program + buffers on next draw
+            dragonVao = 0;
             moonProgram = 0;
             moonViewProjLocation = -1;
             moonDirLocation = -1;
@@ -3213,8 +3224,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             // Direct sun: lift toward white only a little (0.15) so the sun keeps more of its warmth —
             // golden-hour slopes (and the snow alpenglow that reuses uSunColor) read genuinely warm — while
-            // the small lift + ×1.15 still keep a deep-orange sunset luminous enough to light the slopes.
-            sunCol = Vector3.Lerp(atmosphere.SunColor, Vector3.One, 0.15f) * 1.15f;
+            // the small lift keeps a deep-orange sunset luminous enough to light the slopes. 2026-07-07: the
+            // ×1.15 sun boost is dropped (was compounding with the 1.15 exposure = ~×1.32 on lit ground →
+            // blown-out colour); neutral sun keeps the deep tones.
+            sunCol = Vector3.Lerp(atmosphere.SunColor, Vector3.One, 0.15f);
             // Ambient fill = a bright, desaturated version of the zenith sky tint so shadowed
             // faces pick up a soft cool cast that contrasts with the warm sun.
             skyAmbient = Vector3.Lerp(atmosphere.SkyZenithColor, Vector3.One, 0.55f);
@@ -3637,6 +3650,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             DrawForestImpostors(gl, m, camera, atmosphere);
         }
         GpuEnd(gl); // LakesForest
+
+        // The ridden dragon (F7): a rigged, CPU-skinned model drawn opaque + depth-tested in the ABSOLUTE world
+        // frame, so the terrain occludes it correctly. Its own program/uniforms, so it doesn't disturb the shared
+        // `m` MVP buffer the line pass restores below.
+        DrawDragon(gl, mvp);
 
         // Trails + route as depth-tested screen-space ribbons (occluded by the terrain). Switch to the line
         // program; it shares the depth state and the same MVP, plus the viewport for the pixel expansion.
@@ -6029,6 +6047,185 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             throw new InvalidOperationException($"Terrain {type} compile failed: {log}");
         }
         return shader;
+    }
+
+    // ── DRAGON (rigged skinned model, F7 flight) ─────────────────────────────────────────────────────────────
+    private uint dragonProgram;
+    private int dragonMvpLoc = -1, dragonModelLoc = -1, dragonNormalLoc = -1;
+    private int dragonLightLoc = -1, dragonColorLoc = -1, dragonAmbientLoc = -1;
+    private uint dragonVao, dragonPosVbo, dragonNrmVbo, dragonEbo;
+    private float[] dragonPosScratch = Array.Empty<float>();
+    private float[] dragonNrmScratch = Array.Empty<float>();
+    private readonly float[] dragonMat4 = new float[16];
+    private readonly float[] dragonMat3 = new float[9];
+
+    private MapaTur.Application.Terrain.SkinnedModel? dragonModel;
+    private Matrix4x4 dragonWorld = Matrix4x4.Identity;
+    private Matrix4x4 dragonNormalRot = Matrix4x4.Identity;
+    private Vector3 dragonLightDir = Vector3.Normalize(new Vector3(0.4f, 0.4f, 1f));
+    private bool dragonVisible;
+
+    /// <summary>Sets the dragon drawn this frame: the already-posed CPU-skinned model, its model→world matrix, the
+    /// rotation-only matrix for normals, and the world light direction. <paramref name="visible"/> false hides it.</summary>
+    public void SetDragon(
+        MapaTur.Application.Terrain.SkinnedModel? model, Matrix4x4 world, Matrix4x4 normalRotation, Vector3 lightDir, bool visible)
+    {
+        dragonModel = model;
+        dragonWorld = world;
+        dragonNormalRot = normalRotation;
+        if (lightDir.LengthSquared() > 1e-6f)
+        {
+            dragonLightDir = Vector3.Normalize(lightDir);
+        }
+
+        dragonVisible = visible;
+    }
+
+    private void EnsureDragonProgram(GL g)
+    {
+        if (dragonProgram != 0 && g.IsProgram(dragonProgram))
+        {
+            return;
+        }
+
+        const string vs =
+            "#version 300 es\n" +
+            "layout(location=0) in vec3 aPos;\n" +
+            "layout(location=1) in vec3 aNormal;\n" +
+            "uniform mat4 uMvp;\n" +
+            "uniform mat4 uModel;\n" +
+            "uniform mat3 uNormal;\n" +
+            "out vec3 vN;\n" +
+            "void main(){ vec4 wp = uModel * vec4(aPos, 1.0); vN = uNormal * aNormal; gl_Position = uMvp * wp; }\n";
+        const string fs =
+            "#version 300 es\n" +
+            "precision highp float;\n" +
+            "in vec3 vN;\n" +
+            "uniform vec3 uLight;\n" +
+            "uniform vec3 uColor;\n" +
+            "uniform float uAmbient;\n" +
+            "out vec4 frag;\n" +
+            "void main(){ float d = max(0.0, dot(normalize(vN), normalize(uLight)));" +
+            " float sh = uAmbient + (1.0 - uAmbient) * d; frag = vec4(uColor * sh, 1.0); }\n";
+
+        uint v = CompileShader(g, ShaderType.VertexShader, vs);
+        uint f = CompileShader(g, ShaderType.FragmentShader, fs);
+        dragonProgram = g.CreateProgram();
+        g.AttachShader(dragonProgram, v);
+        g.AttachShader(dragonProgram, f);
+        g.LinkProgram(dragonProgram);
+        g.GetProgram(dragonProgram, ProgramPropertyARB.LinkStatus, out int linked);
+        g.DetachShader(dragonProgram, v);
+        g.DetachShader(dragonProgram, f);
+        g.DeleteShader(v);
+        g.DeleteShader(f);
+        if (linked == 0)
+        {
+            string log = g.GetProgramInfoLog(dragonProgram);
+            g.DeleteProgram(dragonProgram);
+            dragonProgram = 0;
+            throw new InvalidOperationException("Dragon program link failed: " + log);
+        }
+
+        dragonMvpLoc = g.GetUniformLocation(dragonProgram, "uMvp");
+        dragonModelLoc = g.GetUniformLocation(dragonProgram, "uModel");
+        dragonNormalLoc = g.GetUniformLocation(dragonProgram, "uNormal");
+        dragonLightLoc = g.GetUniformLocation(dragonProgram, "uLight");
+        dragonColorLoc = g.GetUniformLocation(dragonProgram, "uColor");
+        dragonAmbientLoc = g.GetUniformLocation(dragonProgram, "uAmbient");
+
+        dragonVao = g.GenVertexArray();
+        dragonPosVbo = g.GenBuffer();
+        dragonNrmVbo = g.GenBuffer();
+        dragonEbo = g.GenBuffer();
+        g.BindVertexArray(dragonVao);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, dragonPosVbo);
+        g.EnableVertexAttribArray(0);
+        g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, dragonNrmVbo);
+        g.EnableVertexAttribArray(1);
+        g.VertexAttribPointer(1, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
+        g.BindVertexArray(0);
+    }
+
+    private void DrawDragon(GL g, Matrix4x4 mvp)
+    {
+        if (!dragonVisible || dragonModel is not { } model)
+        {
+            return;
+        }
+
+        EnsureDragonProgram(g);
+        g.UseProgram(dragonProgram);
+        WriteMat4(dragonMat4, mvp);
+        g.UniformMatrix4(dragonMvpLoc, 1, false, dragonMat4);
+        WriteMat4(dragonMat4, dragonWorld);
+        g.UniformMatrix4(dragonModelLoc, 1, false, dragonMat4);
+        WriteMat3(dragonMat3, dragonNormalRot);
+        g.UniformMatrix3(dragonNormalLoc, 1, false, dragonMat3);
+        g.Uniform3(dragonLightLoc, dragonLightDir.X, dragonLightDir.Y, dragonLightDir.Z);
+        g.Uniform3(dragonColorLoc, 0.34f, 0.09f, 0.09f); // dark blood-red hide
+        g.Uniform1(dragonAmbientLoc, 0.38f);
+
+        g.Enable(EnableCap.DepthTest);
+        g.DepthFunc(DepthFunction.Lequal);
+        g.DepthMask(true);
+        g.Disable(EnableCap.Blend);
+        g.Disable(EnableCap.CullFace); // model winding varies — draw both faces so it's never see-through
+        g.BindVertexArray(dragonVao);
+
+        foreach (MapaTur.Application.Terrain.SkinnedModel.Primitive p in model.Primitives)
+        {
+            int n = p.PosedPositions.Length;
+            if (n == 0)
+            {
+                continue;
+            }
+
+            if (dragonPosScratch.Length < n * 3)
+            {
+                dragonPosScratch = new float[n * 3];
+                dragonNrmScratch = new float[n * 3];
+            }
+
+            for (int i = 0; i < n; i++)
+            {
+                Vector3 pos = p.PosedPositions[i];
+                Vector3 nrm = p.PosedNormals[i];
+                int b = i * 3;
+                dragonPosScratch[b] = pos.X;
+                dragonPosScratch[b + 1] = pos.Y;
+                dragonPosScratch[b + 2] = pos.Z;
+                dragonNrmScratch[b] = nrm.X;
+                dragonNrmScratch[b + 1] = nrm.Y;
+                dragonNrmScratch[b + 2] = nrm.Z;
+            }
+
+            g.BindBuffer(BufferTargetARB.ArrayBuffer, dragonPosVbo);
+            g.BufferData<float>(BufferTargetARB.ArrayBuffer, new ReadOnlySpan<float>(dragonPosScratch, 0, n * 3), BufferUsageARB.DynamicDraw);
+            g.BindBuffer(BufferTargetARB.ArrayBuffer, dragonNrmVbo);
+            g.BufferData<float>(BufferTargetARB.ArrayBuffer, new ReadOnlySpan<float>(dragonNrmScratch, 0, n * 3), BufferUsageARB.DynamicDraw);
+            g.BindBuffer(BufferTargetARB.ElementArrayBuffer, dragonEbo);
+            g.BufferData<uint>(BufferTargetARB.ElementArrayBuffer, new ReadOnlySpan<uint>(p.Indices), BufferUsageARB.DynamicDraw);
+            g.DrawElements(PrimitiveType.Triangles, (uint)p.Indices.Length, DrawElementsType.UnsignedInt, (void*)0);
+        }
+
+        g.BindVertexArray(0);
+    }
+
+    private static void WriteMat4(float[] m, Matrix4x4 x)
+    {
+        m[0] = x.M11; m[1] = x.M12; m[2] = x.M13; m[3] = x.M14;
+        m[4] = x.M21; m[5] = x.M22; m[6] = x.M23; m[7] = x.M24;
+        m[8] = x.M31; m[9] = x.M32; m[10] = x.M33; m[11] = x.M34;
+        m[12] = x.M41; m[13] = x.M42; m[14] = x.M43; m[15] = x.M44;
+    }
+
+    private static void WriteMat3(float[] m, Matrix4x4 x)
+    {
+        m[0] = x.M11; m[1] = x.M12; m[2] = x.M13;
+        m[3] = x.M21; m[4] = x.M22; m[5] = x.M23;
+        m[6] = x.M31; m[7] = x.M32; m[8] = x.M33;
     }
 
     private void UploadTile(GL g, TerrainMesh3D tile)
