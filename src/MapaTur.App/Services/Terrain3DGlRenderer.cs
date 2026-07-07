@@ -692,9 +692,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // into the horizon haze like the real range, instead of staying a hard white cut-out. Only a mild
         // reduction (was a near-full block), so close snow is still sharp while far snow reads as luminous distance.
         "  fogAmount *= (1.0 - 0.65 * snowMix);\n" +   // 0.35→0.65 (2026-07-07): snow was fading into the bright uFogColor = a milky white haze over the whole cover; let snow keep its own tone
-        // Contour lines (warstwice): tint the surface near each iso-elevation level, computed from THIS
-        // fragment's elevation so the line lies exactly on whatever LOD is drawn (coarse base OR 1 m detail) —
-        // no float, no rock poke-through. fwidth keeps it a constant pixel width; applied pre-fog so it fades.
+                                                       // Contour lines (warstwice): tint the surface near each iso-elevation level, computed from THIS
+                                                       // fragment's elevation so the line lies exactly on whatever LOD is drawn (coarse base OR 1 m detail) —
+                                                       // no float, no rock poke-through. fwidth keeps it a constant pixel width; applied pre-fog so it fades.
         "  if (uContourStrength > 0.001 && uReflectionPass < 0.5) {\n" +
         // Minor lines. fwidth(cz) = contour levels spanned by one pixel; fade the lines out once they crowd
         // below a few px so dense 5 m contours in the distance don't smear into a solid tint.
