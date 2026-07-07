@@ -691,6 +691,37 @@ public partial class Terrain3DView : ContentView
         }
     }
 
+    /// <summary>Two-way toggle for DRAGON FLIGHT (F7): ride a dragon over the terrain, third-person. Right-drag
+    /// steers (yaw + pitch), W/S throttle, A/D bank. Mutually exclusive with walk mode.</summary>
+    public static readonly BindableProperty IsDragonFlightActiveProperty = BindableProperty.Create(
+        nameof(IsDragonFlightActive),
+        typeof(bool),
+        typeof(Terrain3DView),
+        defaultValue: false,
+        defaultBindingMode: BindingMode.TwoWay,
+        propertyChanged: OnIsDragonFlightActiveChanged);
+
+    public bool IsDragonFlightActive
+    {
+        get => (bool)GetValue(IsDragonFlightActiveProperty);
+        set => SetValue(IsDragonFlightActiveProperty, value);
+    }
+
+    private static void OnIsDragonFlightActiveChanged(BindableObject bindable, object oldValue, object newValue)
+    {
+        if (bindable is Terrain3DView view)
+        {
+            if ((bool)newValue)
+            {
+                view.EnterDragonFlight();
+            }
+            else
+            {
+                view.ExitDragonFlight();
+            }
+        }
+    }
+
     /// <summary>When true (LOD Etap 3), the view reports the camera's ground focus as it moves so the host
     /// can stream the 1 m DETAIL tiles to follow it. The coarse base stays static and framed — only the
     /// detail layer swaps — so a detail reload must NOT reframe the camera.</summary>
@@ -1783,6 +1814,24 @@ public partial class Terrain3DView : ContentView
     private const float WalkMouseLookRadiansPerPixel = 0.005f; // mouse-drag look sensitivity
     private static readonly float WalkMaxLookPitchRadians = (MathF.PI / 2f) - 0.05f;
 
+    // ── DRAGON FLIGHT (F7) ───────────────────────────────────────────────────────────────────────────────────
+    // Ride a dragon over the terrain: DragonFlight (pure arcade physics) drives a chase camera and a big animated
+    // Skia dragon drawn from behind. Right-drag steers (yaw + pitch), W/S throttle, A/D bank/turn. The wings flap
+    // on a time cycle and the dragon rolls into turns.
+    private IDispatcherTimer? dragonTimer;
+    private readonly System.Diagnostics.Stopwatch dragonClock = new();
+    private double dragonLastSeconds;
+    private MapaTur.Application.Terrain.DragonFlight? dragon;
+    private bool dragonActive;
+    private float dragonFlapPhase;      // wing-flap phase, advanced each tick (faster at speed)
+    private int dragonDetailTick;
+    private float dragonMouseDx, dragonMouseDy; // right-drag steer accumulated since the last tick
+    private bool dragonW, dragonS, dragonA, dragonD;
+
+    private const float DragonChaseDistanceMeters = 46f; // camera behind the dragon (world units)
+    private const float DragonChaseHeightMeters = 16f;   // and above it
+    private const float DragonMouseSteerPerPixel = 0.05f; // right-drag pixels → steer input
+
     // Real elevation (metres) of the terrain under a world-XY point, or null off-coverage. Prefers the true
     // 1 m baked surface (what the walker visually stands on) and falls back to the coarse base DEM.
     private float? SampleWalkGround(System.Numerics.Vector2 xy)
@@ -1828,6 +1877,10 @@ public partial class Terrain3DView : ContentView
 
         Serilog.Log.Information("[Walk] entering walk mode at eye=({X:F0},{Y:F0})", Camera.Position.X, Camera.Position.Y);
         StopFlight(); // never walk during a cinematic fly-through
+        if (dragonActive)
+        {
+            IsDragonFlightActive = false; // walk and dragon are exclusive
+        }
 
         var startXY = new System.Numerics.Vector2(Camera.Position.X, Camera.Position.Y);
         walker = new MapaTur.Application.Terrain.WalkPhysics(startXY, SampleWalkGround);
@@ -1934,6 +1987,129 @@ public partial class Terrain3DView : ContentView
                 Distance = d,
                 AzimuthRadians = MathF.Atan2(off.Y, off.X),
                 PitchRadians = MathF.Asin(Math.Clamp(off.Z / d, -1f, 1f)),
+                FieldOfViewYRadians = Camera.FieldOfViewYRadians,
+                NearPlane = Camera.NearPlane,
+                FarPlane = Camera.FarPlane,
+            });
+        }
+
+        Canvas.InvalidateSurface();
+    }
+
+    // Enters dragon flight: launches a DragonFlight above the current camera focus, facing the way the camera
+    // looked, and starts the ~60 Hz flight tick. Needs a built scene; a stray toggle before the DEM loads is undone.
+    private void EnterDragonFlight()
+    {
+        if (dragonActive)
+        {
+            return;
+        }
+
+        if (WorldFrame is null)
+        {
+            IsDragonFlightActive = false;
+            return;
+        }
+
+        StopFlight();
+        if (walkActive)
+        {
+            IsWalkModeActive = false; // dragon and walk are exclusive
+        }
+
+        var startXY = new System.Numerics.Vector2(Camera.Target.X, Camera.Target.Y);
+        Vector3 viewDir = Camera.Target - Camera.Position;
+        float heading = MathF.Atan2(viewDir.Y, viewDir.X);
+        dragon = new MapaTur.Application.Terrain.DragonFlight(startXY, heading, SampleWalkGround);
+
+        dragonMouseDx = dragonMouseDy = 0f;
+        dragonW = dragonS = dragonA = dragonD = false;
+        dragonFlapPhase = 0f;
+        dragonDetailTick = 0;
+        dragonActive = true;
+        dragonClock.Restart();
+        dragonLastSeconds = 0.0;
+        if (dragonTimer is null)
+        {
+            dragonTimer = Dispatcher.CreateTimer();
+            dragonTimer.Interval = TimeSpan.FromMilliseconds(16); // ~60 fps
+            dragonTimer.Tick += OnDragonTick;
+        }
+
+        dragonTimer.Start();
+        Serilog.Log.Information("[Dragon] flight ON at ({X:F0},{Y:F0}) heading={H:F2}", startXY.X, startXY.Y, heading);
+        Canvas.InvalidateSurface();
+    }
+
+    // Leaves dragon flight and frames its final spot from an orbit vantage.
+    private void ExitDragonFlight()
+    {
+        if (!dragonActive)
+        {
+            return;
+        }
+
+        dragonActive = false;
+        dragonTimer?.Stop();
+        dragonW = dragonS = dragonA = dragonD = false;
+
+        if (dragon is { } d && WorldFrame is { } frame)
+        {
+            Camera.Target = new Vector3(d.PositionXY.X, d.PositionXY.Y, d.ElevationMeters * frame.VerticalExaggeration);
+            Camera.Distance = 900f;
+            Camera.AzimuthRadians = d.HeadingRadians + MathF.PI;
+            Camera.PitchRadians = 0.4f;
+        }
+
+        dragon = null;
+        Canvas.InvalidateSurface();
+    }
+
+    private void OnDragonTick(object? sender, EventArgs e)
+    {
+        if (!dragonActive || dragon is not { } d || WorldFrame is not { } frame)
+        {
+            dragonTimer?.Stop();
+            return;
+        }
+
+        double now = dragonClock.Elapsed.TotalSeconds;
+        var dt = (float)Math.Clamp(now - dragonLastSeconds, 0.0, 0.1);
+        dragonLastSeconds = now;
+
+        // Steer: right-drag (accumulated this tick) + A/D yaw, W/S throttle. Consume the mouse delta.
+        float yaw = Math.Clamp(
+            (dragonMouseDx * DragonMouseSteerPerPixel) + (dragonD ? 1f : 0f) - (dragonA ? 1f : 0f), -1f, 1f);
+        float pitch = Math.Clamp(-dragonMouseDy * DragonMouseSteerPerPixel, -1f, 1f); // drag up → nose up
+        float throttle = (dragonW ? 1f : 0f) - (dragonS ? 1f : 0f);
+        dragonMouseDx = dragonMouseDy = 0f;
+
+        d.Step(dt, yaw, pitch, throttle);
+
+        // Wings beat faster the quicker we fly.
+        dragonFlapPhase += dt * (2.2f + ((d.SpeedMetersPerSecond / 55f) * 2.0f));
+
+        // Chase camera: behind + above the dragon along the (world) flight vector, looking ahead of it.
+        float exagg = frame.VerticalExaggeration;
+        var dragonWorld = new Vector3(d.PositionXY.X, d.PositionXY.Y, d.ElevationMeters * exagg);
+        float ch = MathF.Cos(d.HeadingRadians), sh = MathF.Sin(d.HeadingRadians);
+        float cp = MathF.Cos(d.PitchRadians), sp = MathF.Sin(d.PitchRadians);
+        Vector3 worldFwd = Vector3.Normalize(new Vector3(cp * ch, cp * sh, sp * exagg));
+        Vector3 eye = dragonWorld - (worldFwd * DragonChaseDistanceMeters) + new Vector3(0f, 0f, DragonChaseHeightMeters * exagg);
+        Vector3 lookAt = dragonWorld + (worldFwd * 30f);
+        ApplyFreeCamera(eye, lookAt);
+
+        if (DetailStreamingEnabled && dragonDetailTick++ % 45 == 0)
+        {
+            Vector3 focus = dragonWorld + (worldFwd * 200f);
+            Vector3 off = eye - focus;
+            float dist = MathF.Max(1f, off.Length());
+            CameraFocusMoved?.Invoke(this, new MapaTur.Application.Terrain.Camera3D
+            {
+                Target = focus,
+                Distance = dist,
+                AzimuthRadians = MathF.Atan2(off.Y, off.X),
+                PitchRadians = MathF.Asin(Math.Clamp(off.Z / dist, -1f, 1f)),
                 FieldOfViewYRadians = Camera.FieldOfViewYRadians,
                 NearPlane = Camera.NearPlane,
                 FarPlane = Camera.FarPlane,
@@ -2245,6 +2421,201 @@ public partial class Terrain3DView : ContentView
             float yy = cy + (8f * u) - (k * 8f * u);
             canvas.DrawLine(0f, yy, -7f * u, yy - (7f * u), line);
             canvas.DrawLine(0f, yy, 7f * u, yy - (7f * u), line);
+        }
+    }
+
+    // ── DRAGON VIEWMODEL ─────────────────────────────────────────────────────────────────────────────────────
+    // Draws the ridden dragon third-person (from behind + a little above): the great membrane wings beating, the
+    // scaled body + spine, the neck reaching forward to a horned head, and the spiked tail sweeping toward us.
+    // The whole beast banks with the flight roll and bobs on the wing-beat. Composited last, over the terrain.
+    private void DrawDragon(SKCanvas canvas, int width, int height)
+    {
+        if (!dragonActive || dragon is not { } d || width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        float u = height / 800f;
+        float flap = MathF.Sin(dragonFlapPhase); // −1 (down-stroke) … +1 (up-stroke)
+        float bobY = (-flap * 10f * u) + (d.PitchRadians * 55f * u); // lift on the beat + pitch shift in frame
+
+        canvas.Save();
+        canvas.Translate(width * 0.5f, (height * 0.6f) + bobY);
+        canvas.RotateDegrees(d.RollRadians * 57.2958f * 0.85f); // bank the whole beast into the turn
+
+        float flapDeg = flap * 24f;
+        DrawDragonWing(canvas, u, +1f, flapDeg); // right wing (behind the body)
+        DrawDragonWing(canvas, u, -1f, flapDeg); // left wing
+        DrawDragonNeckHead(canvas, u);
+        DrawDragonBodyTail(canvas, u);
+
+        canvas.Restore();
+    }
+
+    // One membrane wing, mirrored by <paramref name="side"/> (+1 right, −1 left), rotated at the shoulder by the
+    // flap. Filled blood-red membrane with a scalloped trailing edge, then the dark arm + finger bones on top.
+    private static void DrawDragonWing(SKCanvas canvas, float u, float side, float flapDeg)
+    {
+        canvas.Save();
+        canvas.Translate(side * 26f * u, -70f * u); // shoulder joint
+        canvas.RotateDegrees(-side * flapDeg);      // both wings beat together
+
+        float S(float x) => side * x * u; // mirrored, scaled x
+        float Y(float y) => y * u;
+
+        using (var membrane = new SKPath())
+        {
+            membrane.MoveTo(0f, 0f);              // shoulder
+            membrane.LineTo(S(120f), Y(-18f));    // elbow (leading edge)
+            membrane.LineTo(S(210f), Y(6f));      // wrist
+            membrane.LineTo(S(248f), Y(-66f));    // finger 1 tip
+            membrane.QuadTo(S(280f), Y(-24f), S(302f), Y(-6f));  // scallop → f2
+            membrane.QuadTo(S(300f), Y(30f), S(286f), Y(56f));   // → f3
+            membrane.QuadTo(S(264f), Y(94f), S(224f), Y(110f));  // → f4
+            membrane.QuadTo(S(120f), Y(122f), S(28f), Y(118f));  // trailing edge back toward the hip
+            membrane.Close();
+
+            using var fill = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill };
+            fill.Shader = SKShader.CreateLinearGradient(
+                new SKPoint(0f, 0f),
+                new SKPoint(S(290f), Y(20f)),
+                new[] { new SKColor(0x4A, 0x18, 0x18), new SKColor(0x74, 0x24, 0x22), new SKColor(0x39, 0x12, 0x12) },
+                new[] { 0f, 0.5f, 1f },
+                SKShaderTileMode.Clamp);
+            canvas.DrawPath(membrane, fill);
+        }
+
+        using (var bone = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 6f * u, Color = new SKColor(0x18, 0x0E, 0x0C), StrokeCap = SKStrokeCap.Round })
+        {
+            canvas.DrawLine(0f, 0f, S(120f), Y(-18f), bone);       // humerus
+            canvas.DrawLine(S(120f), Y(-18f), S(210f), Y(6f), bone); // forearm
+            bone.StrokeWidth = 4f * u;
+            canvas.DrawLine(S(210f), Y(6f), S(248f), Y(-66f), bone); // finger 1
+            canvas.DrawLine(S(210f), Y(6f), S(302f), Y(-6f), bone);  // finger 2
+            canvas.DrawLine(S(210f), Y(6f), S(286f), Y(56f), bone);  // finger 3
+            canvas.DrawLine(S(210f), Y(6f), S(224f), Y(110f), bone); // finger 4
+        }
+
+        canvas.Restore();
+    }
+
+    // The neck reaching forward (up-screen) from the shoulders to a small horned head, with a row of spine spikes.
+    private static void DrawDragonNeckHead(SKCanvas canvas, float u)
+    {
+        var hide = new SKColor(0x22, 0x20, 0x1D);
+        var hideDk = new SKColor(0x12, 0x11, 0x0F);
+
+        using (var neck = new SKPath())
+        {
+            neck.MoveTo(-20f * u, -78f * u);
+            neck.CubicTo(-16f * u, -170f * u, -10f * u, -250f * u, -8f * u, -312f * u); // left side up to head
+            neck.LineTo(8f * u, -312f * u);
+            neck.CubicTo(10f * u, -250f * u, 16f * u, -170f * u, 20f * u, -78f * u);    // right side back down
+            neck.Close();
+            using var np = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill };
+            np.Shader = SKShader.CreateLinearGradient(
+                new SKPoint(-20f * u, 0f), new SKPoint(20f * u, 0f),
+                new[] { hideDk, hide, hideDk }, new[] { 0f, 0.5f, 1f }, SKShaderTileMode.Clamp);
+            canvas.DrawPath(neck, np);
+        }
+
+        // Spine spikes down the neck.
+        DrawSpineSpikes(canvas, u, -300f, -90f, 26f, 5f);
+
+        // Head: a small blunt skull with two back-swept horns.
+        using (var head = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill, Color = new SKColor(0x1C, 0x1A, 0x17) })
+        {
+            canvas.DrawRoundRect(new SKRect(-16f * u, -344f * u, 16f * u, -300f * u), 10f * u, 10f * u, head);
+            // snout tapering forward (away)
+            using var snout = new SKPath();
+            snout.MoveTo(-11f * u, -338f * u);
+            snout.LineTo(0f, -366f * u);
+            snout.LineTo(11f * u, -338f * u);
+            snout.Close();
+            canvas.DrawPath(snout, head);
+        }
+
+        using (var horn = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 5f * u, Color = new SKColor(0x0E, 0x0C, 0x0A), StrokeCap = SKStrokeCap.Round })
+        using (var hL = new SKPath())
+        using (var hR = new SKPath())
+        {
+            hL.MoveTo(-12f * u, -340f * u);
+            hL.QuadTo(-34f * u, -344f * u, -40f * u, -318f * u);
+            hR.MoveTo(12f * u, -340f * u);
+            hR.QuadTo(34f * u, -344f * u, 40f * u, -318f * u);
+            canvas.DrawPath(hL, horn);
+            canvas.DrawPath(hR, horn);
+        }
+    }
+
+    // The scaled body hump and the spiked tail sweeping down toward the camera, with a spade fin at the tip.
+    private static void DrawDragonBodyTail(SKCanvas canvas, float u)
+    {
+        var hide = new SKColor(0x26, 0x23, 0x20);
+        var hideDk = new SKColor(0x11, 0x10, 0x0E);
+        var belly = new SKColor(0x3C, 0x37, 0x2F);
+
+        // Tail first (nearest) so the body overlaps its root.
+        using (var tail = new SKPath())
+        {
+            tail.MoveTo(-34f * u, 96f * u);
+            tail.CubicTo(-30f * u, 220f * u, -16f * u, 330f * u, -6f * u, 392f * u); // left edge down toward us
+            tail.LineTo(6f * u, 392f * u);
+            tail.CubicTo(16f * u, 330f * u, 30f * u, 220f * u, 34f * u, 96f * u);    // right edge
+            tail.Close();
+            using var tp = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill };
+            tp.Shader = SKShader.CreateLinearGradient(
+                new SKPoint(-34f * u, 0f), new SKPoint(34f * u, 0f),
+                new[] { hideDk, hide, hideDk }, new[] { 0f, 0.5f, 1f }, SKShaderTileMode.Clamp);
+            canvas.DrawPath(tail, tp);
+        }
+
+        DrawSpineSpikes(canvas, u, 110f, 372f, 30f, 7f);
+
+        // Spade fin at the tail tip.
+        using (var spade = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill, Color = new SKColor(0x2A, 0x14, 0x14) })
+        using (var sp = new SKPath())
+        {
+            sp.MoveTo(0f, 372f * u);
+            sp.LineTo(-26f * u, 410f * u);
+            sp.LineTo(0f, 402f * u);
+            sp.LineTo(26f * u, 410f * u);
+            sp.Close();
+            canvas.DrawPath(sp, spade);
+        }
+
+        // Body hump over the shoulders/hips.
+        using (var body = new SKPath())
+        {
+            body.MoveTo(-42f * u, -92f * u);
+            body.CubicTo(-58f * u, -10f * u, -52f * u, 70f * u, -34f * u, 104f * u);
+            body.LineTo(34f * u, 104f * u);
+            body.CubicTo(52f * u, 70f * u, 58f * u, -10f * u, 42f * u, -92f * u);
+            body.Close();
+            using var bp = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill };
+            bp.Shader = SKShader.CreateLinearGradient(
+                new SKPoint(0f, -92f * u), new SKPoint(0f, 104f * u),
+                new[] { hideDk, hide, belly }, new[] { 0f, 0.55f, 1f }, SKShaderTileMode.Clamp);
+            canvas.DrawPath(body, bp);
+        }
+
+        // Spine ridge over the body.
+        DrawSpineSpikes(canvas, u, -80f, 96f, 34f, 8f);
+    }
+
+    // A row of dark back-swept spikes marching along the spine from y=<paramref name="fromY"/> (top) to
+    // <paramref name="toY"/> (bottom) at <paramref name="spacing"/>, each <paramref name="size"/> tall (× u).
+    private static void DrawSpineSpikes(SKCanvas canvas, float u, float fromY, float toY, float spacing, float size)
+    {
+        using var spike = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill, Color = new SKColor(0x0C, 0x0B, 0x0A) };
+        for (float y = fromY; y <= toY; y += spacing)
+        {
+            using var path = new SKPath();
+            path.MoveTo(-4f * u, y * u);
+            path.LineTo(0f, (y - size) * u);   // spike points up-screen (forward)
+            path.LineTo(4f * u, y * u);
+            path.Close();
+            canvas.DrawPath(path, spike);
         }
     }
 
@@ -2714,6 +3085,7 @@ public partial class Terrain3DView : ContentView
             DrawNightLights(canvas, projectedPois);
             DrawFlightMarker(canvas, e.Info.Width, e.Info.Height);
             DrawWalkViewmodel(canvas, e.Info.Width, e.Info.Height);
+            DrawDragon(canvas, e.Info.Width, e.Info.Height);
             if (dbgSwapPaint)
             {
                 double dbgTotalMs = dbgPaintWatch.Elapsed.TotalMilliseconds;
@@ -2755,6 +3127,7 @@ public partial class Terrain3DView : ContentView
         renderer.RenderTiles(canvas, e.Info.Width, e.Info.Height, tiles, Camera, frameScratch, null, projectedTrails, projectedRoute, projectedClimbing, projectedPois, projectedPeaks, projectedUserLocation);
         DrawNightLights(canvas, projectedPois);
         DrawWalkViewmodel(canvas, e.Info.Width, e.Info.Height);
+        DrawDragon(canvas, e.Info.Width, e.Info.Height);
         ServiceRecording(e);
     }
 
@@ -3459,6 +3832,7 @@ public partial class Terrain3DView : ContentView
     private int mouseDragButton;
     private Windows.Foundation.Point lastPointerPosition;
     private long lastF8ToggleMs; // debounce for the F8 walk toggle (dual listener + key-repeat)
+    private long lastF7ToggleMs; // debounce for the F7 dragon-flight toggle
 
     // Keyboard-step constants tuned to feel close to one drag-pixel of the gesture
     // recognisers (controller.PanSensitivity = 0.001 m/px/m).
@@ -3552,9 +3926,9 @@ public partial class Terrain3DView : ContentView
 
     private void OnPointerWheelChanged(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
     {
-        if (walkActive)
+        if (walkActive || dragonActive)
         {
-            return; // no orbit-zoom while walking; the eye is pinned to the ground
+            return; // no orbit-zoom while walking or flying the dragon
         }
 
         int delta = e.GetCurrentPoint((Microsoft.UI.Xaml.UIElement)sender).Properties.MouseWheelDelta;
@@ -3589,6 +3963,20 @@ public partial class Terrain3DView : ContentView
         }
 
         var props = e.GetCurrentPoint(element).Properties;
+
+        // Dragon flight: RIGHT-drag steers (yaw + pitch). Capture so the moves flow even off the canvas.
+        if (dragonActive)
+        {
+            mouseDragButton = props.IsRightButtonPressed ? 2 : 0;
+            if (mouseDragButton != 0)
+            {
+                lastPointerPosition = e.GetCurrentPoint(element).Position;
+                element.CapturePointer(e.Pointer);
+                e.Handled = true;
+            }
+
+            return;
+        }
 
         // Walk mode: LEFT = swing the ciupaga (a strike), RIGHT-drag = look around. So the left button never
         // starts a look-drag while walking.
@@ -3642,6 +4030,15 @@ public partial class Terrain3DView : ContentView
         float dx = (float)(point.Position.X - lastPointerPosition.X);
         float dy = (float)(point.Position.Y - lastPointerPosition.Y);
         lastPointerPosition = point.Position;
+
+        if (dragonActive)
+        {
+            // Right-drag accumulates a steer the flight tick consumes (dx → yaw, dy → pitch).
+            dragonMouseDx += dx;
+            dragonMouseDy += dy;
+            e.Handled = true;
+            return;
+        }
 
         if (walkActive)
         {
@@ -3708,6 +4105,30 @@ public partial class Terrain3DView : ContentView
                 IsWalkModeActive, !IsWalkModeActive, WorldFrame is not null, Tiles?.Count ?? 0);
             IsWalkModeActive = !IsWalkModeActive;
             e.Handled = true;
+            return;
+        }
+
+        // F7 toggles dragon flight (same debounce as F8).
+        if (e.Key == Windows.System.VirtualKey.F7)
+        {
+            long nowMs = Environment.TickCount64;
+            if (nowMs - lastF7ToggleMs < 350)
+            {
+                e.Handled = true;
+                return;
+            }
+
+            lastF7ToggleMs = nowMs;
+            Serilog.Log.Information("[Dragon] F7 pressed → toggling {From}->{To}", IsDragonFlightActive, !IsDragonFlightActive);
+            IsDragonFlightActive = !IsDragonFlightActive;
+            e.Handled = true;
+            return;
+        }
+
+        // Dragon flight: WASD/arrows steer throttle + bank (right-drag steers the rest).
+        if (dragonActive)
+        {
+            HandleDragonKeyDown(e);
             return;
         }
 
@@ -3860,8 +4281,61 @@ public partial class Terrain3DView : ContentView
         e.Handled = true;
     }
 
+    // Dragon-flight key DOWN: WASD/arrows set the throttle (W/S) and bank/turn (A/D) held state; the right-drag
+    // supplies the finer yaw/pitch steering. Polled by the flight tick.
+    private void HandleDragonKeyDown(Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    {
+        switch (e.Key)
+        {
+            case Windows.System.VirtualKey.W:
+            case Windows.System.VirtualKey.Up:
+                dragonW = true;
+                break;
+            case Windows.System.VirtualKey.S:
+            case Windows.System.VirtualKey.Down:
+                dragonS = true;
+                break;
+            case Windows.System.VirtualKey.A:
+            case Windows.System.VirtualKey.Left:
+                dragonA = true;
+                break;
+            case Windows.System.VirtualKey.D:
+            case Windows.System.VirtualKey.Right:
+                dragonD = true;
+                break;
+        }
+
+        e.Handled = true;
+    }
+
     private void OnPlatformKeyUp(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
     {
+        if (dragonActive)
+        {
+            switch (e.Key)
+            {
+                case Windows.System.VirtualKey.W:
+                case Windows.System.VirtualKey.Up:
+                    dragonW = false;
+                    break;
+                case Windows.System.VirtualKey.S:
+                case Windows.System.VirtualKey.Down:
+                    dragonS = false;
+                    break;
+                case Windows.System.VirtualKey.A:
+                case Windows.System.VirtualKey.Left:
+                    dragonA = false;
+                    break;
+                case Windows.System.VirtualKey.D:
+                case Windows.System.VirtualKey.Right:
+                    dragonD = false;
+                    break;
+            }
+
+            e.Handled = true;
+            return;
+        }
+
         if (!walkActive)
         {
             return;

@@ -5,6 +5,12 @@
     <ProjectReference Include="..\MapaTur.Routing\MapaTur.Routing.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- glTF import + runtime skinning for the ridden dragon. -->
+    <PackageReference Include="SharpGLTF.Core" />
+    <PackageReference Include="SharpGLTF.Runtime" />
+  </ItemGroup>
+
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
