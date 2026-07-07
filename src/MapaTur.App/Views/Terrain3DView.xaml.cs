@@ -1812,7 +1812,7 @@ public partial class Terrain3DView : ContentView
     private const float WalkLookDistanceMeters = 250f;        // look-at point ahead of the eye (sets Camera.Distance)
     private const float WalkKeyTurnRadians = 0.045f;          // Q/E yaw + R/F pitch step per key event (OS-repeat = smooth)
     private const float WalkMouseLookRadiansPerPixel = 0.005f; // mouse-drag look sensitivity
-    private static readonly float WalkMaxLookPitchRadians = (MathF.PI / 2f) - 0.05f;
+    private const float WalkMaxLookPitchRadians = (MathF.PI / 2f) - 0.05f;
 
     // ── DRAGON FLIGHT (F7) ───────────────────────────────────────────────────────────────────────────────────
     // Ride a dragon over the terrain: DragonFlight (pure arcade physics) drives a chase camera and a big animated
@@ -1826,11 +1826,34 @@ public partial class Terrain3DView : ContentView
     private float dragonFlapPhase;      // wing-flap phase, advanced each tick (faster at speed)
     private int dragonDetailTick;
     private float dragonMouseDx, dragonMouseDy; // right-drag steer accumulated since the last tick
-    private bool dragonW, dragonS, dragonA, dragonD;
+    private bool dragonW, dragonS, dragonA, dragonD;          // WASD: throttle (W/S) + bank (A/D)
+    private bool dragonPitchUp, dragonPitchDown;             // ↑/↓ arrows steer pitch (nose up/down)
+    private bool dragonYawLeft, dragonYawRight;              // ←/→ arrows steer yaw (turn)
+    private bool dragonRmbHeld;                              // right button held → hold the steered attitude (no auto-level)
 
-    private const float DragonChaseDistanceMeters = 46f; // camera behind the dragon (world units)
-    private const float DragonChaseHeightMeters = 16f;   // and above it
-    private const float DragonMouseSteerPerPixel = 0.05f; // right-drag pixels → steer input
+    // 3D rigged dragon model (loaded once from Resources/Raw/dragon.glb) + its procedural wing-flap rig. Until it
+    // loads, the procedural Skia dragon is drawn as a fallback. The posed model + its world/normal matrices are
+    // computed in the flight tick and pushed to the GL renderer in OnPaintSurface.
+    private MapaTur.Application.Terrain.SkinnedModel? dragonModel3D;
+    private MapaTur.Application.Terrain.DragonRig? dragonRig;
+    private bool dragonModelLoading;
+    private float dragonTailPhase;
+    private Matrix4x4 dragonWorldMatrix = Matrix4x4.Identity;
+    private Matrix4x4 dragonNormalMatrix = Matrix4x4.Identity;
+    private const float DragonModelSizeMeters = 24f; // target max extent of the dragon in world metres
+    private const float DragonFlapLiftMeters = 1.6f; // rises on the down-stroke, sinks on the up-stroke
+    // Model-orientation tuning (glTF bone/axis frames vary — adjusted by eye):
+    private static readonly float DragonYawOffset = MathF.PI / 2f; // model head is +Z; after Y-up→Z-up remap, +90° aims it along +X (head forward)
+    private const float DragonDropMeters = 1f; // slight seat below the flight point (centring now does the heavy lifting)
+    private const float DragonPitchSign = -1f; // model noses DOWN when descending (↑ = dive), matched to the flight
+    private const float DragonRollSign = 1f;
+    private float dragonCamPitch;              // camera pitch LAGS the dragon's (dragon responds first, camera catches up)
+    private const float DragonCamPitchFollow = 2.4f; // per-second lerp of the camera toward the dragon's pitch
+
+    private const float DragonChaseDistanceMeters = 20f; // camera behind the dragon (world units)
+    private const float DragonChaseHeightMeters = 6f;    // and above it
+    private const float DragonMouseSteerPerPixel = 0.05f; // right-drag pixels → yaw steer input
+    private const float DragonMousePitchPerPixel = 0.11f;  // right-drag pixels → pitch steer (stronger, so the mouse climbs/dives clearly)
 
     // Real elevation (metres) of the terrain under a world-XY point, or null off-coverage. Prefers the true
     // 1 m baked surface (what the walker visually stands on) and falls back to the coarse base DEM.
@@ -2024,6 +2047,9 @@ public partial class Terrain3DView : ContentView
 
         dragonMouseDx = dragonMouseDy = 0f;
         dragonW = dragonS = dragonA = dragonD = false;
+        dragonPitchUp = dragonPitchDown = dragonYawLeft = dragonYawRight = false;
+        dragonRmbHeld = false;
+        dragonCamPitch = 0f;
         dragonFlapPhase = 0f;
         dragonDetailTick = 0;
         dragonActive = true;
@@ -2037,8 +2063,45 @@ public partial class Terrain3DView : ContentView
         }
 
         dragonTimer.Start();
+        LoadDragonModelAsync(); // fire-and-forget; the procedural Skia dragon shows until the 3D model is ready
         Serilog.Log.Information("[Dragon] flight ON at ({X:F0},{Y:F0}) heading={H:F2}", startXY.X, startXY.Y, heading);
         Canvas.InvalidateSurface();
+    }
+
+    // Loads the bundled rigged dragon (Resources/Raw/dragon.glb) once, off the UI thread, and builds its rig.
+    private async void LoadDragonModelAsync()
+    {
+        if (dragonModel3D is not null || dragonModelLoading)
+        {
+            return;
+        }
+
+        dragonModelLoading = true;
+        try
+        {
+            await using Stream s = await Microsoft.Maui.Storage.FileSystem.OpenAppPackageFileAsync("dragon.glb").ConfigureAwait(false);
+            using var ms = new MemoryStream();
+            await s.CopyToAsync(ms).ConfigureAwait(false);
+            var model = MapaTur.Application.Terrain.SkinnedModel.LoadGlb(ms.ToArray());
+            var rig = new MapaTur.Application.Terrain.DragonRig(model);
+            MainThread.BeginInvokeOnMainThread(() =>
+            {
+                dragonModel3D = model;
+                dragonRig = rig;
+                Canvas.InvalidateSurface();
+            });
+            Serilog.Log.Information(
+                "[Dragon] 3D model loaded: {Prims} prims, extent={Ext:F2}, bones={Bones}",
+                model.Primitives.Count, model.LocalExtent, model.BoneNames.Count);
+        }
+        catch (Exception ex)
+        {
+            Serilog.Log.Warning(ex, "[Dragon] 3D model load failed — keeping the procedural dragon");
+        }
+        finally
+        {
+            dragonModelLoading = false;
+        }
     }
 
     // Leaves dragon flight and frames its final spot from an orbit vantage.
@@ -2052,6 +2115,9 @@ public partial class Terrain3DView : ContentView
         dragonActive = false;
         dragonTimer?.Stop();
         dragonW = dragonS = dragonA = dragonD = false;
+        dragonPitchUp = dragonPitchDown = dragonYawLeft = dragonYawRight = false;
+        dragonRmbHeld = false;
+        dragonCamPitch = 0f;
 
         if (dragon is { } d && WorldFrame is { } frame)
         {
@@ -2077,23 +2143,61 @@ public partial class Terrain3DView : ContentView
         var dt = (float)Math.Clamp(now - dragonLastSeconds, 0.0, 0.1);
         dragonLastSeconds = now;
 
-        // Steer: right-drag (accumulated this tick) + A/D yaw, W/S throttle. Consume the mouse delta.
+        // Steer: right-drag (accumulated this tick) + arrows (↑↓ pitch, ←→ yaw) + A/D bank; W/S throttle.
+        // Arrow yaw is inverted from the naive sign so → turns right and ← turns left (the intuitive directional feel).
         float yaw = Math.Clamp(
-            (dragonMouseDx * DragonMouseSteerPerPixel) + (dragonD ? 1f : 0f) - (dragonA ? 1f : 0f), -1f, 1f);
-        float pitch = Math.Clamp(-dragonMouseDy * DragonMouseSteerPerPixel, -1f, 1f); // drag up → nose up
+            (dragonMouseDx * DragonMouseSteerPerPixel)
+            + (dragonD ? 1f : 0f) - (dragonA ? 1f : 0f)
+            - (dragonYawRight ? 1f : 0f) + (dragonYawLeft ? 1f : 0f),
+            -1f, 1f);
+        // Pitch is inverted from the naive sign: ↑ climbs (dragon noses up, camera drops behind-below), ↓ dives.
+        float pitch = Math.Clamp(
+            (dragonMouseDy * DragonMousePitchPerPixel)
+            - (dragonPitchUp ? 1f : 0f) + (dragonPitchDown ? 1f : 0f),
+            -1f, 1f);
         float throttle = (dragonW ? 1f : 0f) - (dragonS ? 1f : 0f);
         dragonMouseDx = dragonMouseDy = 0f;
 
-        d.Step(dt, yaw, pitch, throttle);
+        // Hold the steered attitude while the right button is down, so a climb/dive set by the mouse doesn't
+        // auto-level the instant the mouse stops moving.
+        d.Step(dt, yaw, pitch, throttle, holdPitch: dragonRmbHeld);
 
-        // Wings beat faster the quicker we fly.
-        dragonFlapPhase += dt * (2.2f + ((d.SpeedMetersPerSecond / 55f) * 2.0f));
+        // Wing dynamics from pitch: climbing → beat faster; diving → beat fades and the wings fold in (a glide).
+        float climbFactor = Math.Clamp(d.PitchRadians / 1.2f, -1f, 1f); // + climbing, − diving
+        float flapActivity = Math.Clamp(1f + climbFactor, 0f, 1.8f);
+        float dragonFold = Math.Clamp(-climbFactor, 0f, 1f);
+        dragonFlapPhase += dt * 3.2f * flapActivity;
+        dragonTailPhase += dt * 3.0f;
 
-        // Chase camera: behind + above the dragon along the (world) flight vector, looking ahead of it.
+        // Drive the 3D rig (once loaded) and build its world/normal matrices from the flight pose.
+        if (dragonModel3D is { } model3D && dragonRig is { } rig)
+        {
+            rig.Pose(dragonFlapPhase, dragonTailPhase, d.RollRadians, d.PitchRadians, dragonFold);
+
+            float exaggeration3D = frame.VerticalExaggeration;
+            float scale = DragonModelSizeMeters / MathF.Max(0.001f, model3D.LocalExtent);
+            Vector3 boundsCenter = (model3D.BoundsMin + model3D.BoundsMax) * 0.5f;
+            Matrix4x4 center = Matrix4x4.CreateTranslation(-boundsCenter); // pivot on the model centre, not its rig root
+            Matrix4x4 remap = Matrix4x4.CreateRotationX(MathF.PI / 2f); // glTF Y-up → world Z-up
+            Matrix4x4 bank = Matrix4x4.CreateRotationY(DragonRollSign * d.RollRadians);
+            Matrix4x4 climb = Matrix4x4.CreateRotationX(DragonPitchSign * d.PitchRadians);
+            Matrix4x4 yawRot = Matrix4x4.CreateRotationZ(d.HeadingRadians + DragonYawOffset);
+            Matrix4x4 rot = remap * bank * climb * yawRot;
+            dragonNormalMatrix = rot;
+            // Flap lift: rise on the down-stroke (flap → −1), sink on the up-stroke (flap → +1).
+            float flapLift = -MathF.Sin(dragonFlapPhase) * DragonFlapLiftMeters;
+            var worldPos = new Vector3(
+                d.PositionXY.X, d.PositionXY.Y, (d.ElevationMeters - DragonDropMeters + flapLift) * exaggeration3D);
+            dragonWorldMatrix = center * Matrix4x4.CreateScale(scale) * rot * Matrix4x4.CreateTranslation(worldPos);
+        }
+
+        // Chase camera: behind + above the dragon along the (world) flight vector, looking ahead of it. The
+        // camera pitch LAGS the dragon's, so a held climb/dive moves the dragon first and the camera catches up.
+        dragonCamPitch += (d.PitchRadians - dragonCamPitch) * Math.Clamp(DragonCamPitchFollow * dt, 0f, 1f);
         float exagg = frame.VerticalExaggeration;
         var dragonWorld = new Vector3(d.PositionXY.X, d.PositionXY.Y, d.ElevationMeters * exagg);
         float ch = MathF.Cos(d.HeadingRadians), sh = MathF.Sin(d.HeadingRadians);
-        float cp = MathF.Cos(d.PitchRadians), sp = MathF.Sin(d.PitchRadians);
+        float cp = MathF.Cos(dragonCamPitch), sp = MathF.Sin(dragonCamPitch);
         Vector3 worldFwd = Vector3.Normalize(new Vector3(cp * ch, cp * sh, sp * exagg));
         Vector3 eye = dragonWorld - (worldFwd * DragonChaseDistanceMeters) + new Vector3(0f, 0f, DragonChaseHeightMeters * exagg);
         Vector3 lookAt = dragonWorld + (worldFwd * 30f);
@@ -2430,7 +2534,8 @@ public partial class Terrain3DView : ContentView
     // The whole beast banks with the flight roll and bobs on the wing-beat. Composited last, over the terrain.
     private void DrawDragon(SKCanvas canvas, int width, int height)
     {
-        if (!dragonActive || dragon is not { } d || width <= 0 || height <= 0)
+        // The 3D rigged model (drawn in the GL pass) replaces this procedural Skia dragon once it's loaded.
+        if (!dragonActive || dragon is not { } d || width <= 0 || height <= 0 || dragonModel3D is not null)
         {
             return;
         }
@@ -3970,6 +4075,7 @@ public partial class Terrain3DView : ContentView
             mouseDragButton = props.IsRightButtonPressed ? 2 : 0;
             if (mouseDragButton != 0)
             {
+                dragonRmbHeld = true; // hold the steered attitude while the button is down
                 lastPointerPosition = e.GetCurrentPoint(element).Position;
                 element.CapturePointer(e.Pointer);
                 e.Handled = true;
@@ -4074,6 +4180,7 @@ public partial class Terrain3DView : ContentView
     {
         mouseDragButton = 0;
         walkLmbDown = false; // releasing the left button lets the ciupaga go — the hang drops
+        dragonRmbHeld = false; // release the dragon attitude hold → pitch auto-levels again
         ((Microsoft.UI.Xaml.UIElement)sender).ReleasePointerCapture(e.Pointer);
     }
 
@@ -4288,20 +4395,28 @@ public partial class Terrain3DView : ContentView
         switch (e.Key)
         {
             case Windows.System.VirtualKey.W:
-            case Windows.System.VirtualKey.Up:
                 dragonW = true;
                 break;
             case Windows.System.VirtualKey.S:
-            case Windows.System.VirtualKey.Down:
                 dragonS = true;
                 break;
             case Windows.System.VirtualKey.A:
-            case Windows.System.VirtualKey.Left:
                 dragonA = true;
                 break;
             case Windows.System.VirtualKey.D:
-            case Windows.System.VirtualKey.Right:
                 dragonD = true;
+                break;
+            case Windows.System.VirtualKey.Up:
+                dragonPitchUp = true;
+                break;
+            case Windows.System.VirtualKey.Down:
+                dragonPitchDown = true;
+                break;
+            case Windows.System.VirtualKey.Left:
+                dragonYawLeft = true;
+                break;
+            case Windows.System.VirtualKey.Right:
+                dragonYawRight = true;
                 break;
         }
 
@@ -4315,20 +4430,28 @@ public partial class Terrain3DView : ContentView
             switch (e.Key)
             {
                 case Windows.System.VirtualKey.W:
-                case Windows.System.VirtualKey.Up:
                     dragonW = false;
                     break;
                 case Windows.System.VirtualKey.S:
-                case Windows.System.VirtualKey.Down:
                     dragonS = false;
                     break;
                 case Windows.System.VirtualKey.A:
-                case Windows.System.VirtualKey.Left:
                     dragonA = false;
                     break;
                 case Windows.System.VirtualKey.D:
-                case Windows.System.VirtualKey.Right:
                     dragonD = false;
+                    break;
+                case Windows.System.VirtualKey.Up:
+                    dragonPitchUp = false;
+                    break;
+                case Windows.System.VirtualKey.Down:
+                    dragonPitchDown = false;
+                    break;
+                case Windows.System.VirtualKey.Left:
+                    dragonYawLeft = false;
+                    break;
+                case Windows.System.VirtualKey.Right:
+                    dragonYawRight = false;
                     break;
             }
 
@@ -4481,6 +4604,12 @@ public partial class Terrain3DView : ContentView
             // During a film the time arc sweeps the sun; pin the snow line to the pre-film sun so the cover the
             // user set doesn't melt/reform mid-shot (only the lighting moves). Off-film = snow follows the sun.
             glRenderer.SnowSunOverride = flightActive ? flightBaseSun : null;
+            // Push the ridden 3D dragon (F7) into the GL pass so it draws depth-tested in the scene. Visible only
+            // while flying AND the model is loaded (until then the procedural Skia dragon shows). Light = the
+            // scene's terrain light so it shades consistently.
+            bool dragon3DVisible = dragonActive && dragonModel3D is not null;
+            Vector3 dragonLight = tiles.Count > 0 ? tiles[0].LightDirection : new Vector3(0.4f, 0.4f, 1f);
+            glRenderer.SetDragon(dragonModel3D, dragonWorldMatrix, dragonNormalMatrix, dragonLight, dragon3DVisible);
             double dbgPreRenderMs = dbgSwapPaintActive ? dbgPaintWatch.Elapsed.TotalMilliseconds : 0;
             uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere, forest, DetailElevation, ShowNightSky ? DateOnly.FromDateTime(DateTime.Now) : null, ExposedRoutes, ShowSauronTower, ShowEagles, AtmosphereEffectsEnabled);
             if (dbgSwapPaintActive)

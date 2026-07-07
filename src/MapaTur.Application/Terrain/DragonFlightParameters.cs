@@ -20,17 +20,22 @@ public sealed record DragonFlightParameters
     /// <summary>Throttle acceleration, m/s² (W speeds up, S slows down).</summary>
     public float AccelMetersPerSecondSquared { get; init; } = 40f;
 
+    /// <summary>Gravity's pull along the flight path, m/s²: diving picks up speed, climbing bleeds it — so a dive
+    /// accelerates and a climb slows down without any throttle.</summary>
+    public float PitchGravityMetersPerSecondSquared { get; init; } = 22f;
+
     /// <summary>Yaw (turn) rate at full steering input, rad/s.</summary>
     public float TurnRateRadiansPerSecond { get; init; } = 0.95f;
 
     /// <summary>Pitch (climb/dive) rate at full steering input, rad/s.</summary>
-    public float PitchRateRadiansPerSecond { get; init; } = 0.85f;
+    public float PitchRateRadiansPerSecond { get; init; } = 1.5f;
 
-    /// <summary>Climb/dive limit, radians (~63°).</summary>
-    public float MaxPitchRadians { get; init; } = 1.1f;
+    /// <summary>Climb/dive limit, radians (~72°).</summary>
+    public float MaxPitchRadians { get; init; } = 1.25f;
 
-    /// <summary>How fast pitch eases back to level when there's no pitch input, rad/s.</summary>
-    public float PitchLevelRadiansPerSecond { get; init; } = 0.9f;
+    /// <summary>How fast pitch eases back to level when there's no pitch input, rad/s. Gentle, so a climb/dive you
+    /// steered holds its altitude gain instead of snapping flat.</summary>
+    public float PitchLevelRadiansPerSecond { get; init; } = 0.35f;
 
     /// <summary>Minimum altitude the dragon holds above the terrain below it, metres (a swoop clearance).</summary>
     public float GroundClearanceMeters { get; init; } = 30f;

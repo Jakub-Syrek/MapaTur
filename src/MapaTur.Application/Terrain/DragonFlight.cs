@@ -60,7 +60,7 @@ public sealed class DragonFlight
     /// <paramref name="throttleInput"/> in [-1,1] speeds up (W) / slows down (S). The dragon glides forward along
     /// its heading and is held above the terrain by the swoop clearance.
     /// </summary>
-    public void Step(float dt, float yawInput, float pitchInput, float throttleInput)
+    public void Step(float dt, float yawInput, float pitchInput, float throttleInput, bool holdPitch = false)
     {
         if (dt <= 0f)
         {
@@ -69,7 +69,9 @@ public sealed class DragonFlight
 
         HeadingRadians += yawInput * this.p.TurnRateRadiansPerSecond * dt;
 
-        // Pitch follows the input, or eases back to level when the stick is centred.
+        // Pitch follows the input; when the stick is centred it eases back to level UNLESS holdPitch is set (the
+        // rider is holding an attitude, e.g. right-mouse steering), in which case the current pitch is kept so
+        // you can hold a climb/dive with the mouse instead of it snapping flat the moment you stop moving.
         if (MathF.Abs(pitchInput) > 1e-3f)
         {
             PitchRadians = Math.Clamp(
@@ -77,18 +79,23 @@ public sealed class DragonFlight
                 -this.p.MaxPitchRadians,
                 this.p.MaxPitchRadians);
         }
-        else
+        else if (!holdPitch)
         {
             PitchRadians = MoveToward(PitchRadians, 0f, this.p.PitchLevelRadiansPerSecond * dt);
         }
 
+        // Throttle plus gravity along the flight path: diving (pitch < 0) speeds up, climbing bleeds speed.
+        float speedDelta =
+            ((throttleInput * this.p.AccelMetersPerSecondSquared)
+            - (MathF.Sin(PitchRadians) * this.p.PitchGravityMetersPerSecondSquared)) * dt;
         SpeedMetersPerSecond = Math.Clamp(
-            SpeedMetersPerSecond + (throttleInput * this.p.AccelMetersPerSecondSquared * dt),
+            SpeedMetersPerSecond + speedDelta,
             this.p.MinSpeedMetersPerSecond,
             this.p.MaxSpeedMetersPerSecond);
 
-        // Bank into the turn (visual only): roll chases a target proportional to the yaw input.
-        float rollTarget = Math.Clamp(-yawInput, -1f, 1f) * this.p.MaxRollRadians;
+        // Bank into the turn (visual only): roll chases a target proportional to the yaw input, SAME sign as the
+        // turn so the dragon leans into the direction it's actually turning.
+        float rollTarget = Math.Clamp(yawInput, -1f, 1f) * this.p.MaxRollRadians;
         RollRadians += (rollTarget - RollRadians) * Math.Clamp(this.p.RollResponsePerSecond * dt, 0f, 1f);
 
         // Glide forward along heading + pitch.

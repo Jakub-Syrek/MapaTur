@@ -2645,6 +2645,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             starVbo = 0;
             starCount = 0;
             starBufferReady = false;
+            dragonProgram = 0; // context lost → rebuild the skinned-dragon program + buffers on next draw
+            dragonVao = 0;
             moonProgram = 0;
             moonViewProjLocation = -1;
             moonDirLocation = -1;
@@ -3648,6 +3650,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             DrawForestImpostors(gl, m, camera, atmosphere);
         }
         GpuEnd(gl); // LakesForest
+
+        // The ridden dragon (F7): a rigged, CPU-skinned model drawn opaque + depth-tested in the ABSOLUTE world
+        // frame, so the terrain occludes it correctly. Its own program/uniforms, so it doesn't disturb the shared
+        // `m` MVP buffer the line pass restores below.
+        DrawDragon(gl, mvp);
 
         // Trails + route as depth-tested screen-space ribbons (occluded by the terrain). Switch to the line
         // program; it shares the depth state and the same MVP, plus the viewport for the pixel expansion.
@@ -6040,6 +6047,185 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             throw new InvalidOperationException($"Terrain {type} compile failed: {log}");
         }
         return shader;
+    }
+
+    // ── DRAGON (rigged skinned model, F7 flight) ─────────────────────────────────────────────────────────────
+    private uint dragonProgram;
+    private int dragonMvpLoc = -1, dragonModelLoc = -1, dragonNormalLoc = -1;
+    private int dragonLightLoc = -1, dragonColorLoc = -1, dragonAmbientLoc = -1;
+    private uint dragonVao, dragonPosVbo, dragonNrmVbo, dragonEbo;
+    private float[] dragonPosScratch = Array.Empty<float>();
+    private float[] dragonNrmScratch = Array.Empty<float>();
+    private readonly float[] dragonMat4 = new float[16];
+    private readonly float[] dragonMat3 = new float[9];
+
+    private MapaTur.Application.Terrain.SkinnedModel? dragonModel;
+    private Matrix4x4 dragonWorld = Matrix4x4.Identity;
+    private Matrix4x4 dragonNormalRot = Matrix4x4.Identity;
+    private Vector3 dragonLightDir = Vector3.Normalize(new Vector3(0.4f, 0.4f, 1f));
+    private bool dragonVisible;
+
+    /// <summary>Sets the dragon drawn this frame: the already-posed CPU-skinned model, its model→world matrix, the
+    /// rotation-only matrix for normals, and the world light direction. <paramref name="visible"/> false hides it.</summary>
+    public void SetDragon(
+        MapaTur.Application.Terrain.SkinnedModel? model, Matrix4x4 world, Matrix4x4 normalRotation, Vector3 lightDir, bool visible)
+    {
+        dragonModel = model;
+        dragonWorld = world;
+        dragonNormalRot = normalRotation;
+        if (lightDir.LengthSquared() > 1e-6f)
+        {
+            dragonLightDir = Vector3.Normalize(lightDir);
+        }
+
+        dragonVisible = visible;
+    }
+
+    private void EnsureDragonProgram(GL g)
+    {
+        if (dragonProgram != 0 && g.IsProgram(dragonProgram))
+        {
+            return;
+        }
+
+        const string vs =
+            "#version 300 es\n" +
+            "layout(location=0) in vec3 aPos;\n" +
+            "layout(location=1) in vec3 aNormal;\n" +
+            "uniform mat4 uMvp;\n" +
+            "uniform mat4 uModel;\n" +
+            "uniform mat3 uNormal;\n" +
+            "out vec3 vN;\n" +
+            "void main(){ vec4 wp = uModel * vec4(aPos, 1.0); vN = uNormal * aNormal; gl_Position = uMvp * wp; }\n";
+        const string fs =
+            "#version 300 es\n" +
+            "precision highp float;\n" +
+            "in vec3 vN;\n" +
+            "uniform vec3 uLight;\n" +
+            "uniform vec3 uColor;\n" +
+            "uniform float uAmbient;\n" +
+            "out vec4 frag;\n" +
+            "void main(){ float d = max(0.0, dot(normalize(vN), normalize(uLight)));" +
+            " float sh = uAmbient + (1.0 - uAmbient) * d; frag = vec4(uColor * sh, 1.0); }\n";
+
+        uint v = CompileShader(g, ShaderType.VertexShader, vs);
+        uint f = CompileShader(g, ShaderType.FragmentShader, fs);
+        dragonProgram = g.CreateProgram();
+        g.AttachShader(dragonProgram, v);
+        g.AttachShader(dragonProgram, f);
+        g.LinkProgram(dragonProgram);
+        g.GetProgram(dragonProgram, ProgramPropertyARB.LinkStatus, out int linked);
+        g.DetachShader(dragonProgram, v);
+        g.DetachShader(dragonProgram, f);
+        g.DeleteShader(v);
+        g.DeleteShader(f);
+        if (linked == 0)
+        {
+            string log = g.GetProgramInfoLog(dragonProgram);
+            g.DeleteProgram(dragonProgram);
+            dragonProgram = 0;
+            throw new InvalidOperationException("Dragon program link failed: " + log);
+        }
+
+        dragonMvpLoc = g.GetUniformLocation(dragonProgram, "uMvp");
+        dragonModelLoc = g.GetUniformLocation(dragonProgram, "uModel");
+        dragonNormalLoc = g.GetUniformLocation(dragonProgram, "uNormal");
+        dragonLightLoc = g.GetUniformLocation(dragonProgram, "uLight");
+        dragonColorLoc = g.GetUniformLocation(dragonProgram, "uColor");
+        dragonAmbientLoc = g.GetUniformLocation(dragonProgram, "uAmbient");
+
+        dragonVao = g.GenVertexArray();
+        dragonPosVbo = g.GenBuffer();
+        dragonNrmVbo = g.GenBuffer();
+        dragonEbo = g.GenBuffer();
+        g.BindVertexArray(dragonVao);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, dragonPosVbo);
+        g.EnableVertexAttribArray(0);
+        g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, dragonNrmVbo);
+        g.EnableVertexAttribArray(1);
+        g.VertexAttribPointer(1, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
+        g.BindVertexArray(0);
+    }
+
+    private void DrawDragon(GL g, Matrix4x4 mvp)
+    {
+        if (!dragonVisible || dragonModel is not { } model)
+        {
+            return;
+        }
+
+        EnsureDragonProgram(g);
+        g.UseProgram(dragonProgram);
+        WriteMat4(dragonMat4, mvp);
+        g.UniformMatrix4(dragonMvpLoc, 1, false, dragonMat4);
+        WriteMat4(dragonMat4, dragonWorld);
+        g.UniformMatrix4(dragonModelLoc, 1, false, dragonMat4);
+        WriteMat3(dragonMat3, dragonNormalRot);
+        g.UniformMatrix3(dragonNormalLoc, 1, false, dragonMat3);
+        g.Uniform3(dragonLightLoc, dragonLightDir.X, dragonLightDir.Y, dragonLightDir.Z);
+        g.Uniform3(dragonColorLoc, 0.34f, 0.09f, 0.09f); // dark blood-red hide
+        g.Uniform1(dragonAmbientLoc, 0.38f);
+
+        g.Enable(EnableCap.DepthTest);
+        g.DepthFunc(DepthFunction.Lequal);
+        g.DepthMask(true);
+        g.Disable(EnableCap.Blend);
+        g.Disable(EnableCap.CullFace); // model winding varies — draw both faces so it's never see-through
+        g.BindVertexArray(dragonVao);
+
+        foreach (MapaTur.Application.Terrain.SkinnedModel.Primitive p in model.Primitives)
+        {
+            int n = p.PosedPositions.Length;
+            if (n == 0)
+            {
+                continue;
+            }
+
+            if (dragonPosScratch.Length < n * 3)
+            {
+                dragonPosScratch = new float[n * 3];
+                dragonNrmScratch = new float[n * 3];
+            }
+
+            for (int i = 0; i < n; i++)
+            {
+                Vector3 pos = p.PosedPositions[i];
+                Vector3 nrm = p.PosedNormals[i];
+                int b = i * 3;
+                dragonPosScratch[b] = pos.X;
+                dragonPosScratch[b + 1] = pos.Y;
+                dragonPosScratch[b + 2] = pos.Z;
+                dragonNrmScratch[b] = nrm.X;
+                dragonNrmScratch[b + 1] = nrm.Y;
+                dragonNrmScratch[b + 2] = nrm.Z;
+            }
+
+            g.BindBuffer(BufferTargetARB.ArrayBuffer, dragonPosVbo);
+            g.BufferData<float>(BufferTargetARB.ArrayBuffer, new ReadOnlySpan<float>(dragonPosScratch, 0, n * 3), BufferUsageARB.DynamicDraw);
+            g.BindBuffer(BufferTargetARB.ArrayBuffer, dragonNrmVbo);
+            g.BufferData<float>(BufferTargetARB.ArrayBuffer, new ReadOnlySpan<float>(dragonNrmScratch, 0, n * 3), BufferUsageARB.DynamicDraw);
+            g.BindBuffer(BufferTargetARB.ElementArrayBuffer, dragonEbo);
+            g.BufferData<uint>(BufferTargetARB.ElementArrayBuffer, new ReadOnlySpan<uint>(p.Indices), BufferUsageARB.DynamicDraw);
+            g.DrawElements(PrimitiveType.Triangles, (uint)p.Indices.Length, DrawElementsType.UnsignedInt, (void*)0);
+        }
+
+        g.BindVertexArray(0);
+    }
+
+    private static void WriteMat4(float[] m, Matrix4x4 x)
+    {
+        m[0] = x.M11; m[1] = x.M12; m[2] = x.M13; m[3] = x.M14;
+        m[4] = x.M21; m[5] = x.M22; m[6] = x.M23; m[7] = x.M24;
+        m[8] = x.M31; m[9] = x.M32; m[10] = x.M33; m[11] = x.M34;
+        m[12] = x.M41; m[13] = x.M42; m[14] = x.M43; m[15] = x.M44;
+    }
+
+    private static void WriteMat3(float[] m, Matrix4x4 x)
+    {
+        m[0] = x.M11; m[1] = x.M12; m[2] = x.M13;
+        m[3] = x.M21; m[4] = x.M22; m[5] = x.M23;
+        m[6] = x.M31; m[7] = x.M32; m[8] = x.M33;
     }
 
     private void UploadTile(GL g, TerrainMesh3D tile)

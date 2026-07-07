@@ -71,6 +71,22 @@ public sealed class SkinnedModel
     /// <summary>Bone (armature node) names present in the rig — for wiring procedural animation to them.</summary>
     public IReadOnlyCollection<string> BoneNames => this.nodeByName.Keys;
 
+    /// <summary>Bind-pose axis-aligned bounds (model local space) — for scaling the model into world metres.</summary>
+    public Vector3 BoundsMin { get; private set; }
+
+    /// <summary>Bind-pose axis-aligned bounds (model local space).</summary>
+    public Vector3 BoundsMax { get; private set; }
+
+    /// <summary>Largest local extent (max bounds dimension) in the model's own units — a scale reference.</summary>
+    public float LocalExtent
+    {
+        get
+        {
+            Vector3 size = BoundsMax - BoundsMin;
+            return MathF.Max(size.X, MathF.Max(size.Y, size.Z));
+        }
+    }
+
     /// <summary>The drawable primitives (bind geometry + posed output).</summary>
     public IReadOnlyList<Primitive> Primitives { get; }
 
@@ -152,7 +168,29 @@ public sealed class SkinnedModel
         Scene scene = model.DefaultScene ?? model.LogicalScenes[0];
         SceneInstance instance = SceneTemplate.Create(scene).CreateInstance();
 
-        return new SkinnedModel(primitives, instance, animations, baseColor);
+        var result = new SkinnedModel(primitives, instance, animations, baseColor);
+
+        // Bounds must be measured from the SKINNED bind pose, not the raw POSITION accessors: on a rigged mesh
+        // the joint matrices carry the real scale/placement (bones sit metres from origin while the raw vertices
+        // are a fraction of a unit), so the raw bounds would give a wildly wrong size + centre for the rendered
+        // model. Pose to bind, skin, then measure what actually draws.
+        result.ResetPose();
+        result.Skin();
+
+        var min = new Vector3(float.PositiveInfinity);
+        var max = new Vector3(float.NegativeInfinity);
+        foreach (Primitive p in primitives)
+        {
+            foreach (Vector3 v in p.PosedPositions)
+            {
+                min = Vector3.Min(min, v);
+                max = Vector3.Max(max, v);
+            }
+        }
+
+        result.BoundsMin = primitives.Count > 0 ? min : Vector3.Zero;
+        result.BoundsMax = primitives.Count > 0 ? max : Vector3.Zero;
+        return result;
     }
 
     /// <summary>
