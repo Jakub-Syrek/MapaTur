@@ -3637,8 +3637,9 @@ public sealed partial class MapPageViewModel : ObservableObject
 
             // Live fill indicator: while the desired set is still loading (or stales are draining), show the
             // "Doczytywanie terenu… N/M" pill so mid-fill smoothness is visibly "still loading", not "done".
-            bool filling = bakedStreamManager.ResidentCount < update.Desired
-                || update.Loaded > 0
+            // Uses Loaded/StalePending (not ResidentCount < Desired) for the same reason as the self-kick above:
+            // stale off-desired residents inflate ResidentCount past Desired and would falsely read "done".
+            bool filling = update.Loaded > 0
                 || update.StalePending > 0;
             if (filling)
             {
@@ -3656,7 +3657,16 @@ public sealed partial class MapPageViewModel : ObservableObject
             // eviction grace window (Evicted / StalePending — without this they'd squat until the next camera
             // move: "stara grań 5 km dalej nie znika"). A no-progress round with nothing pending stops the loop
             // (unreadable tiles retry on the next real camera move instead of spinning on disk errors).
-            continueFill = (update.Loaded > 0 && bakedStreamManager.ResidentCount < update.Desired)
+            //
+            // FIX 2026-07-07 (half a near wall stuck on the coarse base while stationary): the old guard
+            // `ResidentCount < Desired` used the TOTAL resident count, which INCLUDES stale off-desired tiles
+            // still draining under the cap. After the budget was raised to 896 tiles (93f8046), stale tiles
+            // routinely inflate ResidentCount ABOVE Desired, so the guard went false and the self-kick STOPPED
+            // mid-fill even though `Loaded > 0` proved desired tiles were still streaming in — leaving half the
+            // wall on base forever. `Loaded > 0` alone is the correct "still making progress" signal (a
+            // no-progress tick with nothing pending stops; a permanently-unreadable tile keeps Loaded at 0 and
+            // retries on the next camera move rather than spinning).
+            continueFill = update.Loaded > 0
                 || update.Evicted > 0
                 || update.StalePending > 0;
         }
@@ -3910,9 +3920,16 @@ public sealed partial class MapPageViewModel : ObservableObject
     // 2026-07-05: desktop 448 → 896. At 448 the selector rode the cap (desired=439-448, clamped often true)
     // — one camera step back from a big face (Gerlach) and the clamp coarsened tiles right where the user
     // looked, on a 64 GB RAM / 16 GB VRAM machine where 896 × ~4 MB ≈ 3.6 GB of geometry is comfortable.
-    // Watch [PassTimes] sumGpu after this: more resident tiles = more draw calls (the known FPS ceiling).
+    // 2026-07-07: desktop 896 → 2400. The WHOLE baked pyramid is only 2.8 GB on disk (8741 tiles); as live
+    // meshes all of it ≈ 35 GB > 16 GB VRAM, so a cap is still needed — but 896 (~3.6 GB geometry) used only
+    // ~1/4 of the VRAM, so a session of panning around one massif kept EVICTING + RELOADING tiles there was
+    // ample room for (the user's "half the wall reloads forever" on 16 GB VRAM / 64 GB RAM). 2400 × ~4 MB ≈
+    // 9.6 GB geometry + ~2.8 GB ortho ≈ 12.4 GB VRAM, comfortably inside 16 GB; a local view (desired ~400-600)
+    // now sits with a 4-6× resident margin so nothing evicts until you fly clear across the range. Off-screen
+    // residents cost no draw calls (draw-time cull), so FPS is unaffected; RAM rises (CPU mesh copies) but 64 GB
+    // absorbs it. Watch [Mem] ws / VRAM if other GPU apps are running.
     private static readonly int BakedStreamMaxResidentTiles =
-        DeviceInfo.Platform == DevicePlatform.WinUI ? 896 : 256;
+        DeviceInfo.Platform == DevicePlatform.WinUI ? 2400 : 256;
     // Cull base tiles fully hidden behind resident hole-free baked tiles. SUPERSEDED (2026-07-03) by the
     // per-pixel surface-ownership mask (BaseCoverageMaskBuilder → shader discard of base-skin fragments):
     // whole-base-tile culling required FULL coverage of a large adaptive base tile and almost never fired in
@@ -3931,7 +3948,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     // limit. Trade-off: more resident geometry = more RAM/VRAM — watch [Mem] heap for OOM; base-occlusion culling
     // (BaseTileOcclusionPlanner) frees the covered base VBOs, reclaiming some of it.
     private static readonly long BakedStreamMaxResidentBytes =
-        DeviceInfo.Platform == DevicePlatform.WinUI ? 6144L * 1024 * 1024 : 1280L * 1024 * 1024; // 896 tiles × ~4 MB ≈ 3.6 GB; 6 GB leaves headroom so the byte cap never silently undercuts the count cap
+        DeviceInfo.Platform == DevicePlatform.WinUI ? 10240L * 1024 * 1024 : 1280L * 1024 * 1024; // 2400 tiles × ~4 MB ≈ 9.6 GB; 10 GB leaves headroom so the byte cap never silently undercuts the count cap (2026-07-07)
     // Desktop 8 → 24 (2026-07-05): BuildTiles now builds tiles in PARALLEL, so 24 per update costs close to
     // what 8 sequential did — a full ~450-tile refocus drops from ~40 s of visible fill to ~10 s. The phone
     // keeps 8 (fewer cores, and the old budget was tuned for its thermals).
