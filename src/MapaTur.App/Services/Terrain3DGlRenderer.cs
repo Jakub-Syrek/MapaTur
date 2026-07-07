@@ -676,9 +676,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // pulled DOWN (×0.65) for darker-but-still-blue shadows, and the direct-sun term is boosted (×1.4) so
         // lit slopes pop to bright white. The two knobs: floor down / sun up = more relief, but watch for grey.
         "  if (snowMix > 0.001) {\n" +
-        "    vec3 snowAlbedo = vec3(0.96, 0.98, 1.0);\n" +
-        "    vec3 snowLit = snowAlbedo * ((uSkyAmbient * 0.65) + (uSunColor * sunlit * 1.4));\n" +
-        "    snowLit = mix(snowLit, vec3(1.0), uNoonSnowLift * 0.5);\n" +   // intense midday → extra pop toward pure white
+        // 2026-07-07: at snow 100% the cover blew out to a flat white sheet — snow starts near-white (albedo
+        // ~1.0) so the ×1.4 sun boost + noon lift already clip it to 1.0, and the ACES exposure 1.15 (66bcb4a)
+        // then has no headroom left (dark terrain does, snow doesn't). Give snow headroom BELOW 1.0 pre-tonemap:
+        // lower albedo (0.96→0.88) + gentler sun boost (1.4→1.15) + smaller noon lift — the ACES roll-off keeps
+        // the highlight detail instead of a solid white clip. Still bright, still cool-blue in shadow.
+        "    vec3 snowAlbedo = vec3(0.80, 0.82, 0.86);\n" +
+        "    vec3 snowLit = snowAlbedo * ((uSkyAmbient * 0.45) + (uSunColor * sunlit * 1.15));\n" +   // ambient 0.65→0.45: deeper shadow = 3-D relief, not a flat white sheet
+        "    snowLit = mix(snowLit, vec3(0.92), uNoonSnowLift * 0.30);\n" +   // intense midday → pop toward bright (not pure) white
         "    lit = mix(lit, min(snowLit, vec3(1.0)), snowMix);\n" +
         "  }\n" +
         "  float dist = length(vWorldPos - uCameraPos);\n" +
@@ -686,7 +691,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Snow keeps NEAR detail crisp, but DISTANT snowfields pick up cool aerial perspective — they fade
         // into the horizon haze like the real range, instead of staying a hard white cut-out. Only a mild
         // reduction (was a near-full block), so close snow is still sharp while far snow reads as luminous distance.
-        "  fogAmount *= (1.0 - 0.35 * snowMix);\n" +
+        "  fogAmount *= (1.0 - 0.65 * snowMix);\n" +   // 0.35→0.65 (2026-07-07): snow was fading into the bright uFogColor = a milky white haze over the whole cover; let snow keep its own tone
         // Contour lines (warstwice): tint the surface near each iso-elevation level, computed from THIS
         // fragment's elevation so the line lies exactly on whatever LOD is drawn (coarse base OR 1 m detail) —
         // no float, no rock poke-through. fwidth keeps it a constant pixel width; applied pre-fog so it fades.
@@ -2127,7 +2132,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // Filmic look (C-package 2026-07-05): 1 = full ACES (0 = legacy linear, kept as the instant A/B
     // rollback); exposure is the pre-curve gain compensating ACES's mid-tone dip.
     private const float TonemapStrength = 1f;
-    private const float TonemapExposure = 1.15f;
+    // 2026-07-07: 1.15 → 1.0. The +15% pre-curve exposure (with the ×1.15 sun-colour boost = ~×1.32 on lit
+    // ground) pushed sunlit terrain and snow into ACES's shoulder and BLEW OUT the colour — the "wszystko
+    // przepalone, bez kolorów, za jasno" the user reported across BOTH ortho sources. Neutral 1.0 keeps the
+    // deep GUGiK/ZBGIS colour; ACES still rolls off genuine highlights.
+    private const float TonemapExposure = 1.0f;
     private int bloomCompGodrayLoc = -1, bloomCompGodrayIntensityLoc = -1;
     private bool bloomStageLogged;
     private bool godrayStageLogged;
@@ -3213,8 +3222,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             // Direct sun: lift toward white only a little (0.15) so the sun keeps more of its warmth —
             // golden-hour slopes (and the snow alpenglow that reuses uSunColor) read genuinely warm — while
-            // the small lift + ×1.15 still keep a deep-orange sunset luminous enough to light the slopes.
-            sunCol = Vector3.Lerp(atmosphere.SunColor, Vector3.One, 0.15f) * 1.15f;
+            // the small lift keeps a deep-orange sunset luminous enough to light the slopes. 2026-07-07: the
+            // ×1.15 sun boost is dropped (was compounding with the 1.15 exposure = ~×1.32 on lit ground →
+            // blown-out colour); neutral sun keeps the deep tones.
+            sunCol = Vector3.Lerp(atmosphere.SunColor, Vector3.One, 0.15f);
             // Ambient fill = a bright, desaturated version of the zenith sky tint so shadowed
             // faces pick up a soft cool cast that contrasts with the warm sun.
             skyAmbient = Vector3.Lerp(atmosphere.SkyZenithColor, Vector3.One, 0.55f);
