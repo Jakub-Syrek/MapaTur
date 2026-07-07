@@ -432,6 +432,52 @@ public sealed class BakedTileStreamingManagerTests
     }
 
     [Fact]
+    public void Invariant_RamCache_ServesReloadedTilesFromMemory_NeverReReadingDisk()
+    {
+        // The RAM-cache fix (2026-07-07): a tile evicted on a focus jump and re-requested when the camera comes
+        // back must return from RAM, not a second .bdt disk read — the "zwiedzanie całych Tatr bez reloadu z
+        // dysku" goal. The cache is unbounded here, so however many times the manager evicts and reloads a tile,
+        // its disk SOURCE is consulted exactly once. A counted wrapper proves the manager really did reload
+        // (total load attempts > distinct tiles), so the assertion isn't vacuously satisfied by "nothing evicted".
+        var diskReads = new Dictionary<DemTileKey, int>();
+        var diskLock = new object();
+        BakedDemTile? Disk(DemTileKey k)
+        {
+            lock (diskLock)
+            {
+                diskReads[k] = diskReads.TryGetValue(k, out int n) ? n + 1 : 1;
+            }
+
+            return FakeTile(k);
+        }
+
+        var cache = new BakedDemTileCache(Disk, maxBytes: long.MaxValue);
+        int loadAttempts = 0;
+        BakedDemTile? CountedLoad(DemTileKey k)
+        {
+            Interlocked.Increment(ref loadAttempts);
+            return cache.Load(k);
+        }
+
+        var mgr = NewManager(AllBaked, loader: CountedLoad, maxResidentTiles: 200, maxConcurrentLoads: 16);
+
+        DemTileKey root = RootTile();
+        var childA = new DemTileKey(MinZoom + 1, root.X * 2, root.Y * 2);             // NW quadrant
+        var childB = new DemTileKey(MinZoom + 1, (root.X * 2) + 1, (root.Y * 2) + 1); // SE quadrant — far from A
+        Camera3D cameraA = CameraAbove(childA, 800f);
+        Camera3D cameraB = CameraAbove(childB, 800f);
+
+        DriveToConvergence(mgr, cameraA, maxRounds: 300);
+        DriveToConvergence(mgr, cameraB, maxRounds: 300); // evicts A's now-stale detail
+        DriveToConvergence(mgr, cameraA, maxRounds: 300); // A's detail must reload — from RAM, not disk
+
+        loadAttempts.Should().BeGreaterThan(diskReads.Count,
+            "the manager reloaded tiles it had evicted (the scenario the cache exists to absorb)");
+        diskReads.Values.Should().OnlyContain(n => n == 1,
+            "a reloaded tile is re-meshed from the RAM-cached BakedDemTile, never re-read from disk");
+    }
+
+    [Fact]
     public void HoleFreeFinestWorldRects_ReturnsOnlyFinestHoleFreeTiles_AsWorldAabbs()
     {
         // The surface-ownership mask's input: world AABBs of the resident hole-free FINEST tiles only.

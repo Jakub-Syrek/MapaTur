@@ -3461,10 +3461,24 @@ public sealed partial class MapPageViewModel : ObservableObject
         };
 
         MapaTur.Application.Terrain.BakedTileAvailabilityIndex index = bakedTileIndex;
+
+        // RAM cache in front of the disk loader: a tile the manager evicts and later re-requests comes back from
+        // memory (re-meshed, zero disk I/O) instead of a fresh .bdt read — the "zwiedzanie całych Tatr bez reloadu
+        // z dysku" fix. Reuse it across LOD-session rebuilds (grids are anchor-independent); rebuild only when the
+        // baked index itself changed. The SAME cache also fronts the camera-floor sampler below.
+        if (bakedTileCache is null || !ReferenceEquals(bakedTileCacheIndex, index))
+        {
+            bakedTileCache = new MapaTur.Application.Terrain.BakedDemTileCache(index.Load, BakedTileCacheMaxBytes);
+            bakedTileCacheIndex = index;
+        }
+
+        Func<MapaTur.Application.Terrain.DemTileKey, MapaTur.Application.Terrain.BakedDemTile?> cachedLoad =
+            bakedTileCache.Load;
+
         bakedStreamManager = new MapaTur.Application.Terrain.BakedTileStreamingManager(
             index.Roots,
             index.IsBaked,
-            index.Load,
+            cachedLoad,
             lodAnchor,
             index.MinZoom,
             Math.Max(index.MinZoom, BakedStreamMaxZoom),
@@ -3482,7 +3496,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         // 1 m z16), because the coarse base raster it samples otherwise understates ridges by metres and the
         // eye clipped into the drawn terrain ("wjazd w powierzchnię mapy zdarza się często").
         var floorSampler = new MapaTur.Application.Terrain.BakedFineElevationSampler(
-            index.IsBaked, index.Load, Math.Max(index.MinZoom, BakedStreamMaxZoom));
+            index.IsBaked, cachedLoad, Math.Max(index.MinZoom, BakedStreamMaxZoom));
         FineElevationSampler = floorSampler.Sample;
 
         logger.LogInformation(
@@ -3617,11 +3631,17 @@ public sealed partial class MapPageViewModel : ObservableObject
                 // Keys + pose make churn diagnosable from the log alone: WHICH tiles flap (a ring edge shows
                 // adjacent x/y, a clamp cascade shows a parent/children mix) and whether the camera actually
                 // moved between ticks (a "still" camera that drifts is the churn's suspected driver).
+                // Cache stats prove the disk is idle on re-residency: with warm ground evicted/reloaded (out=…,
+                // in=…) but Misses NOT climbing, the reloaded tiles are served from RAM (the whole point of the
+                // cache). A rising Miss count while panning familiar ground = the byte budget is too small.
+                MapaTur.Application.Terrain.BakedDemTileCache? cache = bakedTileCache;
                 logger.LogInformation(
                     "[BakedStream] resident={Resident} loaded={Loaded} evicted={Evicted} desired={Desired} clamped={Clamped} "
+                    + "cache={Hits}h/{Misses}m/{CacheMB}MB "
                     + "eye=({EyeX:F1},{EyeY:F1},{EyeZ:F1}) target=({TgtX:F1},{TgtY:F1},{TgtZ:F1}) "
                     + "in=[{LoadedKeys}] out=[{EvictedKeys}]",
                     bakedStreamManager.ResidentCount, update.Loaded, update.Evicted, update.Desired, update.WasClampedByBudget,
+                    cache?.Hits ?? 0, cache?.Misses ?? 0, (cache?.ResidentBytes ?? 0) / (1024 * 1024),
                     camera.Position.X, camera.Position.Y, camera.Position.Z,
                     camera.Target.X, camera.Target.Y, camera.Target.Z,
                     FormatTileKeys(update.LoadedKeys), FormatTileKeys(update.EvictedKeys));
@@ -3954,11 +3974,25 @@ public sealed partial class MapPageViewModel : ObservableObject
     // keeps 8 (fewer cores, and the old budget was tuned for its thermals).
     private static readonly int BakedStreamMaxConcurrentLoads =
         DeviceInfo.Platform == DevicePlatform.WinUI ? 24 : 8;
+    // RAM cache of loaded baked tiles (BakedDemTileCache), by decompressed tile-grid BYTES. The streaming manager
+    // drops a tile's mesh on eviction, so re-residency re-read + re-deserialised its .bdt from disk every time —
+    // panning around the whole massif churned the same tiles off/on disk forever. Caching the loaded grid means a
+    // re-requested tile is re-meshed from RAM with zero disk I/O. The whole baked pyramid is ~2.8 GB on disk /
+    // ~5 GB decompressed, so DESKTOP 6 GB holds essentially all of it — after one sweep the disk is never touched
+    // again (64 GB RAM absorbs it easily). The PHONE keeps a small 512 MB budget (its RAM cannot take the pyramid,
+    // and its working set is one massif); over budget the cache evicts least-recently-used, so it never leaks.
+    private static readonly long BakedTileCacheMaxBytes =
+        DeviceInfo.Platform == DevicePlatform.WinUI ? 6144L * 1024 * 1024 : 512L * 1024 * 1024;
     private const double BakedStreamMaxErrorPixels = 2.5;  // screen-space pixel-error budget driving refinement
     private const int BakedStreamMaxZoom = NearDetailZoom; // finest baked zoom = the native 1 m level (z16)
     // The streaming manager for the current LOD scene (rebuilt per BuildLodSceneAsync; null when streaming is
     // inactive). Driven from OnDetailFocusAsync on every camera move.
     private MapaTur.Application.Terrain.BakedTileStreamingManager? bakedStreamManager;
+    // RAM cache in front of the baked-tile disk loader, shared by the streaming manager and the camera-floor
+    // sampler (both otherwise re-read .bdt on every re-request). Cached tile grids are anchor-/scene-independent,
+    // so the SAME cache survives LOD-session rebuilds — rebuilt only when the underlying baked index changes.
+    private MapaTur.Application.Terrain.BakedDemTileCache? bakedTileCache;
+    private MapaTur.Application.Terrain.BakedTileAvailabilityIndex? bakedTileCacheIndex;
     // True once BuildLodSceneAsync has wired a streaming manager for this scene — gates OnDetailFocusAsync onto
     // the baked path. Cleared with the manager when a new scene loads or streaming is unavailable.
     private bool bakedStreamActive;
