@@ -354,6 +354,8 @@
   <data name="ToggleSauronTowerHint" xml:space="preserve"><value>mroczna wieża ze świecącym okiem na Świnicy (easter egg)</value></data>
   <data name="ToggleEagles" xml:space="preserve"><value>Orły</value></data>
   <data name="ToggleEaglesHint" xml:space="preserve"><value>orły szybujące nad granią Orlej Perci (easter egg)</value></data>
+  <data name="ToggleAiDragons" xml:space="preserve"><value>Smoki AI</value></data>
+  <data name="ToggleAiDragonsHint" xml:space="preserve"><value>stado smoków krążących nad szczytami; nadlatują gdy lecisz smokiem (F7)</value></data>
   <data name="ToggleAtmosphereEffects" xml:space="preserve"><value>Efekty atmosfery</value></data>
   <data name="ToggleAtmosphereEffectsHint" xml:space="preserve"><value>animowane chmury, pioruny, orły, poświata — wyłącz, by oszczędzać baterię (zatrzymuje ciągły odrys)</value></data>
   <data name="TrailColoursHeader" xml:space="preserve"><value>KOLORY SZLAKÓW</value></data>

@@ -397,6 +397,10 @@ public static class AppStrings
     public static string ToggleEagles => Get(nameof(ToggleEagles));
     /// <summary>Caption under the "Eagles" toggle.</summary>
     public static string ToggleEaglesHint => Get(nameof(ToggleEaglesHint));
+    /// <summary>"AI dragons" flock toggle label.</summary>
+    public static string ToggleAiDragons => Get(nameof(ToggleAiDragons));
+    /// <summary>Caption under the "AI dragons" toggle.</summary>
+    public static string ToggleAiDragonsHint => Get(nameof(ToggleAiDragonsHint));
     /// <summary>"Atmosphere effects" toggle label (battery saver when off).</summary>
     public static string ToggleAtmosphereEffects => Get(nameof(ToggleAtmosphereEffects));
     /// <summary>Caption under the "Atmosphere effects" toggle.</summary>

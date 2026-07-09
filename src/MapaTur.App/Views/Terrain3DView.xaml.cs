@@ -265,6 +265,18 @@ public partial class Terrain3DView : ContentView
         set => SetValue(ShowDebugMarkersProperty, value);
     }
 
+    public static readonly BindableProperty ShowAiDragonsProperty = BindableProperty.Create(
+        nameof(ShowAiDragons), typeof(bool), typeof(Terrain3DView), false,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).OnShowAiDragonsChanged((bool)n));
+
+    /// <summary>Ambient flock of autonomous dragons circling the nearby peaks (and drifting toward the player's
+    /// dragon when it flies near). Off hides + stops them.</summary>
+    public bool ShowAiDragons
+    {
+        get => (bool)GetValue(ShowAiDragonsProperty);
+        set => SetValue(ShowAiDragonsProperty, value);
+    }
+
     public static readonly BindableProperty AtmosphereEffectsEnabledProperty = BindableProperty.Create(
         nameof(AtmosphereEffectsEnabled), typeof(bool), typeof(Terrain3DView), true,
         propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
@@ -1043,7 +1055,7 @@ public partial class Terrain3DView : ContentView
         // are enabled. With effects OFF the view stops auto-redrawing while the camera is still, so the GPU
         // idles instead of rendering ~15 heavy fps forever — the main battery saver on mobile. Gestures and
         // data changes still trigger their own InvalidateSurface, so the map stays responsive.
-        if (IsVisible && Atmosphere is not null && AtmosphereEffectsEnabled)
+        if (IsVisible && ((Atmosphere is not null && AtmosphereEffectsEnabled) || ShowAiDragons))
         {
             Canvas.InvalidateSurface();
         }
@@ -1931,6 +1943,12 @@ public partial class Terrain3DView : ContentView
     // Foot bones used to seat the perched dragon's SOLES on the summit (per variant; posed positions).
     private static readonly string[] DragonAnimatedFootBones = ["l_ball.163", "r_ball.175", "l_toeA.164", "r_toeA.176"];
     private static readonly string[] DragonClassicFootBones = ["Foot.L", "Foot.R"];
+
+    // Head/mouth bones — fire spawns from the POSED head (which the animation nods/scans), not a fixed body point.
+    private static readonly string[] DragonAnimatedMouthBones = ["head.25", "jaw_01.26"];
+    private static readonly string[] DragonClassicMouthBones = ["Head.001", "SkullControl"];
+    private const float DragonSnoutOffsetMeters = 5f;      // snout tip ahead of the head bone, along the aim
+    private Vector3? dragonMouthWorld;                     // posed head world position (exaggerated Z) for the fire muzzle
 #pragma warning disable CS0414 // KEPT for the next session's perch-seating work (see docs/HANDOFF-2026-07-09) — do NOT delete
     private float? dragonPerchGroundElev; // rendered-mesh elevation under the perch, sampled once (feet sit on the DRAWN rock)
 #pragma warning restore CS0414
@@ -1947,12 +1965,33 @@ public partial class Terrain3DView : ContentView
         public float VelocityZ;
         public float Age;
         public float Seed;
-        public bool Exploding;
-        public float ExplodeAge;
+        public int TargetDragon; // index into aiFlock this ball homes onto (−1 = unguided, flies straight)
+    }
+
+    // Fire billboard kind — matches the fragment-shader branch in Terrain3DGlRenderer.
+    private enum FireKind { Flame = 0, Flash = 1, Shock = 2, Ember = 3, Puff = 4, Smoke = 5, Steam = 6 }
+
+    // An explosion particle (flash / expanding fireball puff / shock ring / arcing ember). Real metres; Z is
+    // exaggerated only when the render sprite is built.
+    private struct FireParticle
+    {
+        public Vector3 Pos;
+        public Vector3 Vel;
+        public float Age;
+        public float Life;
+        public float Seed;
+        public float Size0; // start radius (m)
+        public float Size1; // end radius (m)
+        public FireKind Kind;
     }
 
     private readonly List<DragonFireball> dragonFireballs = [];
-    private readonly List<MapaTur.App.Services.Terrain3DGlRenderer.FireballSprite> dragonFireSprites = [];
+    private readonly List<FireParticle> dragonFireParticles = [];
+#pragma warning disable IDE0044 // mutated (dragonBurstCounter++); readonly would break the build (CS0191)
+    private int dragonBurstCounter;
+#pragma warning restore IDE0044
+    private readonly List<MapaTur.App.Services.Terrain3DGlRenderer.FireballSprite> dragonFireSprites = [];       // additive
+    private readonly List<MapaTur.App.Services.Terrain3DGlRenderer.FireballSprite> dragonFireSmokeSprites = []; // straight-alpha (2nd pass)
 
     // ── DRAGON-FOOT PLACEMENT PROBE (KNOWN OPEN ITEM, see docs/HANDOFF) ──────────────────────────────────────
     // Diagnostic markers drawn AFTER the final dragon transform, one per candidate anchor, so we can SEE on the
@@ -1960,6 +1999,55 @@ public partial class Terrain3DView : ContentView
     // centre (where the code plants worldPos), BLUE=posed foot-bone anchor (the drawn feet), YELLOW=target
     // rendered-mesh point (where the feet SHOULD land). Cleared when not perched.
     private readonly List<MapaTur.App.Services.Terrain3DGlRenderer.DebugMarker> dragonDebugMarkers = [];
+
+    // ── AI DRAGON FLOCK ── a small mixed-species flock that circles the nearby peaks (ambient) and drifts toward
+    // the player's dragon when it flies close. Each member owns its OWN posed model instance (independent pose),
+    // its DragonFlight body (same physics as the player) and a DragonAiPilot policy. Updated from the render.
+    // Kept to 3 (perf — more stutters). Three DIFFERENT species, each colour-tinted, for variety.
+    private const int AiFlockCount = 3;
+    private const float AiFlockOrbitRadiusMeters = 300f;
+    private const float AiFlockCruiseHeightMeters = 130f;      // orbit altitude above the home peak
+    private const float AiFlockReactRadiusMeters = 900f;       // player nearer than this → the orbit drifts onto him
+    private const float AiFlockModelSizeMeters = 30f;          // clearly visible dragons (bigger than the ridden 24 m)
+
+    private enum AiFlockKind { Animated, Prowler, Static }
+
+    private sealed class AiFlockDragon
+    {
+        public required MapaTur.Application.Terrain.DragonFlight Flight { get; init; }
+        public required MapaTur.Application.Terrain.DragonAiPilot Pilot { get; init; }
+        public required MapaTur.Application.Terrain.SkinnedModel Model { get; init; }
+        public required AiFlockKind Kind { get; init; }
+        public int AnimClip { get; init; } = -1;                                // Animated: baked "flying" clip
+        public MapaTur.Application.Terrain.ProwlerDragonRig? Rig { get; init; }  // Prowler: procedural wing beat
+        public byte[]? TextureBytes { get; init; }
+        public Vector3 Tint { get; init; } = Vector3.One;
+        public System.Numerics.Vector2 HomePeakXY { get; set; }
+        public float AnimTime { get; set; }
+        public float FlapPhase { get; set; }
+        public float TailPhase { get; set; }
+        public bool Alive { get; set; } = true; // a fireball hit kills it → skipped everywhere (kept in the list so ball target indices stay stable)
+    }
+
+    // Per-member colour tints (multiplied over the hide) — clearly distinct so the flock reads as different dragons.
+    private static readonly Vector3[] AiFlockTints =
+    {
+        new(0.55f, 0.75f, 1.25f), // icy blue
+        new(1.25f, 0.95f, 0.5f),  // gold
+        new(1.2f, 0.5f, 1.1f),    // violet
+    };
+
+    private readonly List<AiFlockDragon> aiFlock = [];
+    private readonly List<MapaTur.App.Services.Terrain3DGlRenderer.AiDragonInstance> aiFlockInstances = [];
+    // The three species, staged once on load; each becomes one flock member (own posed instance).
+    private MapaTur.Application.Terrain.SkinnedModel? aiModelAnimated;
+    private int aiClipAnimated = -1;
+    private MapaTur.Application.Terrain.SkinnedModel? aiModelProwler;
+    private MapaTur.Application.Terrain.SkinnedModel? aiModelRed;
+    private bool aiFlockModelsReady;
+    private bool aiFlockLoading;
+    private readonly System.Diagnostics.Stopwatch aiFlockClock = new();
+    private double aiFlockLastSeconds;
     private bool dragonFireHeld;
     // Mutated every frame in StepDragonFire (-= dt / ++ / =). IDE0044 misfires "make readonly" here, and obeying
     // it (as `dotnet format` did on this branch) makes the build fail CS0191 — the vicious cycle that left the
@@ -1968,12 +2056,17 @@ public partial class Terrain3DView : ContentView
     private float dragonFireCooldown; // stream-rate countdown while F is held
     private int dragonFireCounter;    // increments per spawned ball (flicker seed)
 #pragma warning restore IDE0044
-    private const float DragonFireCooldownSeconds = 0.16f;  // stream rate while F is held
+    private const float DragonFireCooldownSeconds = 0.045f; // very dense stream while F is held (balls FUSE into one jet)
+    private const int DragonFireMaxBalls = 72;              // hard cap so a held stream / point-blank burst can't flood fill
     private const float DragonFireSpeedMetersPerSecond = 75f; // muzzle speed on top of the dragon's own
     private const float DragonFireTtlSeconds = 2.4f;
     private const float DragonFireMuzzleOffsetMeters = 11f;  // roughly the head, ahead of the body centre
-    private const float DragonFireRadiusMeters = 1.7f;
-    private const float DragonFireExplodeSeconds = 0.3f;
+    private const float DragonFireRadiusMeters = 5f; // big — the dense stream fuses into one wide continuous jet
+    // Auto-aim: a fireball locks onto the AI dragon whose bearing is within this cone of the aim, then homes on
+    // it (steering toward its live position) and bursts on contact.
+    private static readonly float DragonFireLockConeCos = MathF.Cos(10f * MathF.PI / 180f); // ±10°
+    private const float DragonFireHomingPerSecond = 3.2f;   // how fast the ball re-aims onto a moving target
+    private const float DragonFireHitRadiusMeters = 14f;    // burst when this close to the locked dragon
     private MapaTur.Application.Terrain.DragonFlightPhase dragonPrevPhase = MapaTur.Application.Terrain.DragonFlightPhase.Flying;
     private Matrix4x4 dragonWorldMatrix = Matrix4x4.Identity;
     private Matrix4x4 dragonNormalMatrix = Matrix4x4.Identity;
@@ -2227,6 +2320,7 @@ public partial class Terrain3DView : ContentView
 
         dragonTimer.Start();
         LoadDragonModelAsync(); // fire-and-forget; the procedural Skia dragon shows until the 3D model is ready
+        FocusForKeyboard(); // pull keyboard focus onto the canvas so Space flaps and can't "click" a focused button
         Serilog.Log.Information("[Dragon] flight ON at ({X:F0},{Y:F0}) heading={H:F2}", startXY.X, startXY.Y, heading);
         Canvas.InvalidateSurface();
     }
@@ -2309,6 +2403,309 @@ public partial class Terrain3DView : ContentView
         {
             dragonModelLoading = false;
         }
+    }
+
+    // ── AI DRAGON FLOCK ─────────────────────────────────────────────────────────────────────────────────────
+    // The flock is UPDATED from inside the render (UpdateAiFlock, dt from aiFlockClock) and REPAINTED by the
+    // existing animationTimer / dragon-timer — it deliberately owns NO timer of its own. A third invalidation
+    // loop stacking on the dragon+atmosphere timers crashed the WinUI compositor (APPCRASH in Microsoft.UI.Xaml,
+    // 0xc0000005, only ever while flying with the flock on).
+    private void OnShowAiDragonsChanged(bool on)
+    {
+        if (on)
+        {
+            aiFlockClock.Restart();
+            aiFlockLastSeconds = 0.0;
+            if (aiFlock.Count == 0 && !aiFlockLoading)
+            {
+                LoadAiFlockAsync();
+            }
+        }
+        else
+        {
+            aiFlockInstances.Clear();
+        }
+
+        Canvas.InvalidateSurface();
+    }
+
+    // Loads the THREE flock species once (animated dragon, prowler, static red flyer), off the UI thread. The
+    // animated one plays its baked "flying" clip; the prowler flaps procedurally; the red one is a rigid glider.
+    // Spawn is deferred to the UI thread once the terrain frame is ready.
+    private async void LoadAiFlockAsync()
+    {
+        if (aiFlockLoading || aiFlockModelsReady)
+        {
+            return;
+        }
+
+        aiFlockLoading = true;
+        try
+        {
+            MapaTur.Application.Terrain.SkinnedModel animated = await LoadGlbAsync("dragon-animated.glb").ConfigureAwait(false);
+            MapaTur.Application.Terrain.SkinnedModel prowler = await LoadGlbAsync("prowler-dragon.glb").ConfigureAwait(false);
+            MapaTur.Application.Terrain.SkinnedModel red = await LoadGlbAsync("red-flying-dragon.glb").ConfigureAwait(false);
+
+            int flying = -1;
+            for (int i = 0; i < animated.Animations.Count; i++)
+            {
+                if (string.Equals(animated.Animations[i].Name, "flying", StringComparison.OrdinalIgnoreCase))
+                {
+                    flying = i;
+                }
+            }
+
+            if (flying < 0 && animated.Animations.Count > 0)
+            {
+                flying = 0;
+            }
+
+            MainThread.BeginInvokeOnMainThread(() =>
+            {
+                if (!ShowAiDragons)
+                {
+                    return; // toggled off mid-load
+                }
+
+                aiModelAnimated = animated;
+                aiClipAnimated = flying;
+                aiModelProwler = prowler;
+                aiModelRed = red;
+                aiFlockModelsReady = true;
+                Serilog.Log.Information(
+                    "[AiDragon] species loaded — animated(ext={A:F2},clip={C},tex={AT}) prowler(ext={P:F2},tex={PT}) red(ext={R:F2},tex={RT})",
+                    animated.LocalExtent, flying, animated.BaseColorImageBytes?.Length ?? 0,
+                    prowler.LocalExtent, prowler.BaseColorImageBytes?.Length ?? 0,
+                    red.LocalExtent, red.BaseColorImageBytes?.Length ?? 0);
+                TrySpawnAiFlock(); // spawns now if the terrain frame is ready, else on the next tick
+            });
+        }
+        catch (Exception ex)
+        {
+            Serilog.Log.Warning(ex, "[AiDragon] flock load failed");
+        }
+        finally
+        {
+            aiFlockLoading = false;
+        }
+    }
+
+    private static async Task<MapaTur.Application.Terrain.SkinnedModel> LoadGlbAsync(string asset)
+    {
+        await using Stream s = await Microsoft.Maui.Storage.FileSystem.OpenAppPackageFileAsync(asset).ConfigureAwait(false);
+        using var ms = new MemoryStream();
+        await s.CopyToAsync(ms).ConfigureAwait(false);
+        return MapaTur.Application.Terrain.SkinnedModel.LoadGlb(ms.ToArray());
+    }
+
+    // Places the 3-species flock over the nearest peaks. Deferred until BOTH the models are loaded and the
+    // terrain frame exists (peaks → world XY + ground sampling need it).
+    private void TrySpawnAiFlock()
+    {
+        if (!aiFlockModelsReady || aiModelAnimated is null || aiModelProwler is null || aiModelRed is null
+            || WorldFrame is not { } frame)
+        {
+            return;
+        }
+
+        aiFlock.Clear();
+        List<System.Numerics.Vector2> centers = PickFlockCenters(frame, AiFlockCount);
+        for (int i = 0; i < AiFlockCount; i++)
+        {
+            System.Numerics.Vector2 home = centers[i];
+            float ground = SampleWalkGround(home) ?? 0f;
+            int dir = (i % 2 == 0) ? 1 : -1;
+
+            var start = home + new System.Numerics.Vector2(AiFlockOrbitRadiusMeters, 0f);
+            float heading = dir > 0 ? MathF.PI / 2f : -MathF.PI / 2f;
+            var flight = new MapaTur.Application.Terrain.DragonFlight(start, heading, SampleWalkGround);
+            var pilot = new MapaTur.Application.Terrain.DragonAiPilot
+            {
+                CircleCenter = home,
+                CircleRadiusMeters = AiFlockOrbitRadiusMeters,
+                TargetAltitudeMeters = ground + AiFlockCruiseHeightMeters,
+                Direction = dir,
+            };
+
+            // One member per species (0 = animated, 1 = prowler, 2 = red glider), each colour-tinted.
+            AiFlockKind kind = i switch { 0 => AiFlockKind.Animated, 1 => AiFlockKind.Prowler, _ => AiFlockKind.Static };
+            MapaTur.Application.Terrain.SkinnedModel model = kind switch
+            {
+                AiFlockKind.Animated => aiModelAnimated,
+                AiFlockKind.Prowler => aiModelProwler,
+                _ => aiModelRed,
+            };
+            MapaTur.Application.Terrain.ProwlerDragonRig? rig = null;
+            if (kind == AiFlockKind.Prowler)
+            {
+                rig = new MapaTur.Application.Terrain.ProwlerDragonRig(model);
+                if (rig.MissingBones.Count > 0)
+                {
+                    Serilog.Log.Warning("[ProwlerRig] missing bones (won't animate): {Missing}", string.Join(", ", rig.MissingBones));
+                }
+            }
+            else if (kind == AiFlockKind.Static)
+            {
+                model.Skin(); // no per-frame posing — populate PosedPositions from bind once (else it draws collapsed)
+            }
+
+            aiFlock.Add(new AiFlockDragon
+            {
+                Flight = flight,
+                Pilot = pilot,
+                Model = model,
+                Kind = kind,
+                AnimClip = kind == AiFlockKind.Animated ? aiClipAnimated : -1,
+                Rig = rig,
+                TextureBytes = model.BaseColorImageBytes,
+                Tint = AiFlockTints[i % AiFlockTints.Length],
+                HomePeakXY = home,
+                AnimTime = i * 1.7f,
+                FlapPhase = i * 1.3f,
+                TailPhase = i * 0.7f,
+            });
+        }
+
+        Serilog.Log.Information("[AiDragon] flock spawned: {N} dragons (animated/prowler/red)", aiFlock.Count);
+        Canvas.InvalidateSurface();
+    }
+
+    // The nearest peaks to the camera target become orbit centres; if there aren't enough, pad with a ring
+    // around the target so the flock still appears on featureless terrain.
+    private List<System.Numerics.Vector2> PickFlockCenters(TerrainMesh3D frame, int count)
+    {
+        var target = new System.Numerics.Vector2(Camera.Target.X, Camera.Target.Y);
+        var centers = new List<System.Numerics.Vector2>();
+        if (Peaks is { Count: > 0 } peaks)
+        {
+            centers = peaks
+                .Select(p =>
+                {
+                    Vector3 w = frame.GeoToWorld(p.Location, 0f);
+                    return new System.Numerics.Vector2(w.X, w.Y);
+                })
+                .OrderBy(xy => System.Numerics.Vector2.DistanceSquared(xy, target))
+                .Take(count)
+                .ToList();
+        }
+
+        for (int i = centers.Count; i < count; i++)
+        {
+            float ang = i * (MathF.PI * 2f / count);
+            centers.Add(target + (new System.Numerics.Vector2(MathF.Cos(ang), MathF.Sin(ang)) * 1200f));
+        }
+
+        return centers;
+    }
+
+    private double aiFlockLogAccum;
+
+    // Advances + poses the flock. Called ONCE per rendered frame from the paint path (no timer of its own — see
+    // OnShowAiDragonsChanged); dt comes from aiFlockClock so it's correct at any repaint rate.
+    private void UpdateAiFlock()
+    {
+        if (!ShowAiDragons || WorldFrame is not { } frame)
+        {
+            aiFlockInstances.Clear();
+            return;
+        }
+
+        if (aiFlock.Count == 0)
+        {
+            TrySpawnAiFlock(); // waiting for the terrain frame / models
+            return;
+        }
+
+        double now = aiFlockClock.Elapsed.TotalSeconds;
+        var dt = (float)Math.Clamp(now - aiFlockLastSeconds, 0.0, 0.1);
+        aiFlockLastSeconds = now;
+        float exagg = frame.VerticalExaggeration;
+
+        // React to the player: when the ridden dragon (F7) flies near a member's home peak, its orbit centre
+        // drifts toward the player, so the flock swings over to circle him.
+        System.Numerics.Vector2? player = dragonActive && dragon is { } pd ? pd.PositionXY : null;
+
+        aiFlockLogAccum += dt;
+        bool logNow = aiFlockLogAccum >= 1.0;
+        if (logNow)
+        {
+            aiFlockLogAccum = 0.0;
+        }
+
+        aiFlockInstances.Clear();
+        foreach (AiFlockDragon m in aiFlock)
+        {
+            if (!m.Alive)
+            {
+                continue; // shot down — no update, no render
+            }
+
+            System.Numerics.Vector2 center = m.HomePeakXY;
+            if (player is { } pp)
+            {
+                float distToHome = System.Numerics.Vector2.Distance(pp, m.HomePeakXY);
+                if (distToHome < AiFlockReactRadiusMeters)
+                {
+                    float t = 1f - (distToHome / AiFlockReactRadiusMeters); // nearer → stronger pull
+                    center = System.Numerics.Vector2.Lerp(m.HomePeakXY, pp, t * 0.85f);
+                }
+            }
+
+            m.Pilot.CircleCenter = center;
+            (float yaw, float pitch, float throttle) = m.Pilot.Compute(
+                m.Flight.PositionXY, m.Flight.HeadingRadians, m.Flight.ElevationMeters, m.Flight.SpeedMetersPerSecond);
+            m.Flight.Step(dt, yaw, pitch, throttle);
+
+            // Pose this member by species: animated plays its baked "flying" clip; prowler flaps procedurally;
+            // the red flyer is a rigid glider (bind pose). Effort follows pitch (faster beat on a climb).
+            float pace = Math.Clamp(1f + (0.5f * m.Flight.PitchRadians), 0.6f, 1.7f);
+            switch (m.Kind)
+            {
+                case AiFlockKind.Animated when m.AnimClip >= 0 && m.AnimClip < m.Model.Animations.Count:
+                    m.AnimTime += dt * pace;
+                    float dur = m.Model.Animations[m.AnimClip].Duration;
+                    m.Model.SetFrame(m.AnimClip, dur > 0.01f ? m.AnimTime % dur : 0f);
+                    m.Model.Skin();
+                    break;
+                case AiFlockKind.Prowler when m.Rig is { } rig:
+                    m.FlapPhase += dt * 3.0f * pace;
+                    m.TailPhase += dt * 2.4f;
+                    rig.Pose(m.FlapPhase, m.TailPhase);
+                    break;
+                default:
+                    break; // Static: bind pose, no per-frame skinning
+            }
+
+            Matrix4x4 world = BuildAiDragonMatrix(m.Model, m.Flight, exagg, out Matrix4x4 normal);
+            aiFlockInstances.Add(new(m.Model, world, normal, m.Tint, m.TextureBytes));
+
+            if (logNow)
+            {
+                float distToCenter = System.Numerics.Vector2.Distance(m.Flight.PositionXY, m.Pilot.CircleCenter);
+                Serilog.Log.Information(
+                    "[AiFlock] {Kind} pos=({X:F0},{Y:F0}) elev={E:F0} target={T:F0} distCtr={D:F0} head={H:F2} speed={S:F0}",
+                    m.Kind, m.Flight.PositionXY.X, m.Flight.PositionXY.Y, m.Flight.ElevationMeters,
+                    m.Pilot.TargetAltitudeMeters, distToCenter, m.Flight.HeadingRadians, m.Flight.SpeedMetersPerSecond);
+            }
+        }
+    }
+
+    // Model→world matrix for an AI dragon, same convention as the ridden dragon (glTF Y-up→Z-up remap, yaw
+    // offset, pitch/roll signs), pivoting on the bind-bounds centre (flight framing; the flock never perches).
+    private Matrix4x4 BuildAiDragonMatrix(
+        MapaTur.Application.Terrain.SkinnedModel model, MapaTur.Application.Terrain.DragonFlight d, float exagg, out Matrix4x4 normal)
+    {
+        float scale = AiFlockModelSizeMeters / MathF.Max(0.001f, model.LocalExtent);
+        Vector3 boundsCenter = (model.BoundsMin + model.BoundsMax) * 0.5f;
+        Matrix4x4 center = Matrix4x4.CreateTranslation(-boundsCenter);
+        Matrix4x4 remap = Matrix4x4.CreateRotationX(MathF.PI / 2f);
+        Matrix4x4 bank = Matrix4x4.CreateRotationY(DragonRollSign * d.RollRadians);
+        Matrix4x4 climb = Matrix4x4.CreateRotationX(DragonPitchSign * d.PitchRadians);
+        Matrix4x4 yawRot = Matrix4x4.CreateRotationZ(d.HeadingRadians + DragonYawOffset);
+        Matrix4x4 rot = remap * bank * climb * yawRot;
+        normal = rot;
+        var worldPos = new Vector3(d.PositionXY.X, d.PositionXY.Y, d.ElevationMeters * exagg);
+        return center * Matrix4x4.CreateScale(scale) * rot * Matrix4x4.CreateTranslation(worldPos);
     }
 
     // Leaves dragon flight and frames its final spot from an orbit vantage.
@@ -2665,6 +3062,18 @@ public partial class Terrain3DView : ContentView
             Matrix4x4 center = Matrix4x4.CreateTranslation(-pivot);
             var worldPos = new Vector3(d.PositionXY.X, d.PositionXY.Y, worldZ);
             dragonWorldMatrix = center * Matrix4x4.CreateScale(scale) * rot * Matrix4x4.CreateTranslation(worldPos);
+
+            // Fire muzzle: the POSED head bone's world position, so fire streams from the mouth as the head nods/
+            // scans (not a fixed body-relative point). Null → StepDragonFire falls back to the old offset.
+            dragonMouthWorld = null;
+            foreach (string bone in dragonLoadedVariant == 1 ? DragonAnimatedMouthBones : DragonClassicMouthBones)
+            {
+                if (model3D.GetBonePosedPosition(bone) is { } bonePos)
+                {
+                    dragonMouthWorld = Vector3.Transform(bonePos, dragonWorldMatrix);
+                    break;
+                }
+            }
 
             // ── FOOT-PLACEMENT PROBE ── markers drawn AFTER the final transform (same matrix the GPU uses:
             // row-vector .NET uploaded un-transposed == GLSL uModel*vec4), so a CPU dot lands exactly where the
@@ -3774,6 +4183,7 @@ public partial class Terrain3DView : ContentView
             DrawStarLabelsOverScene(canvas, frame, e.Info.Width, e.Info.Height);
             DrawNightLights(canvas, projectedPois);
             DrawFlightMarker(canvas, e.Info.Width, e.Info.Height);
+            DrawAiDragonMarkers(canvas, e.Info.Width, e.Info.Height);
             DrawWalkViewmodel(canvas, e.Info.Width, e.Info.Height);
             DrawDragon(canvas, e.Info.Width, e.Info.Height);
             if (dbgSwapPaint)
@@ -4011,6 +4421,103 @@ public partial class Terrain3DView : ContentView
         canvas.DrawCircle(s.X, s.Y, r * 2.1f, halo);
         canvas.DrawCircle(s.X, s.Y, r, fill);
         canvas.DrawCircle(s.X, s.Y, r, ring);
+    }
+
+    // Locator markers for the AI flock (the dragons are small + wander, so they're hard to spot). ON screen: a
+    // little downward chevron floats over each dragon. OFF screen / behind the camera: an arrow pins to the
+    // screen edge pointing the way to it — same idea as the navigation "namierzanie" reticle. Colour = the
+    // dragon's tint, so a marker maps to its dragon.
+    private void DrawAiDragonMarkers(SKCanvas canvas, int width, int height)
+    {
+        if (!ShowAiDragons || aiFlock.Count == 0 || WorldFrame is not { } frame || width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        float exagg = frame.VerticalExaggeration;
+        Matrix4x4 vp = Camera.BuildViewProjection((float)width / Math.Max(1, height));
+        float cx = width * 0.5f, cy = height * 0.5f;
+        const float edgeMargin = 48f;
+
+        foreach (AiFlockDragon m in aiFlock)
+        {
+            if (!m.Alive)
+            {
+                continue; // shot down — no locator marker
+            }
+
+            var world = new Vector4(m.Flight.PositionXY.X, m.Flight.PositionXY.Y, m.Flight.ElevationMeters * exagg, 1f);
+            Vector4 clip = Vector4.Transform(world, vp);
+            SKColor color = TintToColor(m.Tint);
+
+            bool inFront = clip.W > 0.0001f;
+            if (inFront)
+            {
+                float sx = ((clip.X / clip.W) + 1f) * 0.5f * width;
+                float sy = (1f - (clip.Y / clip.W)) * 0.5f * height;
+                float ndcZ = clip.Z / clip.W;
+                if (sx >= 0f && sx <= width && sy >= 0f && sy <= height && ndcZ is >= 0f and <= 1f)
+                {
+                    DrawDragonOnScreenMarker(canvas, sx, sy, color);
+                    continue;
+                }
+            }
+
+            // Off-screen (or behind): screen-space direction from the centre. Behind the camera (W<0) the sign of
+            // X/Y flips, so mirror it to keep the arrow pointing the true way.
+            float dx = inFront ? clip.X / clip.W : -clip.X;
+            float dy = inFront ? clip.Y / clip.W : -clip.Y;
+            float vX = dx, vY = -dy; // NDC y-up → screen y-down
+            float len = MathF.Sqrt((vX * vX) + (vY * vY));
+            if (len < 1e-4f)
+            {
+                continue;
+            }
+
+            vX /= len;
+            vY /= len;
+            float halfW = (width * 0.5f) - edgeMargin, halfH = (height * 0.5f) - edgeMargin;
+            float reach = MathF.Min(halfW / MathF.Max(1e-4f, MathF.Abs(vX)), halfH / MathF.Max(1e-4f, MathF.Abs(vY)));
+            DrawDragonEdgeArrow(canvas, cx + (vX * reach), cy + (vY * reach), MathF.Atan2(vY, vX), color);
+        }
+    }
+
+    private static SKColor TintToColor(Vector3 tint) => new(
+        (byte)(Math.Clamp(tint.X, 0f, 1f) * 255f),
+        (byte)(Math.Clamp(tint.Y, 0f, 1f) * 255f),
+        (byte)(Math.Clamp(tint.Z, 0f, 1f) * 255f));
+
+    // A small downward chevron hovering just above the on-screen dragon.
+    private static void DrawDragonOnScreenMarker(SKCanvas canvas, float x, float y, SKColor color)
+    {
+        float topY = y - 34f; // float above the dragon
+        using var fill = new SKPaint { Color = color, IsAntialias = true, Style = SKPaintStyle.Fill };
+        using var outline = new SKPaint { Color = new SKColor(0x10, 0x10, 0x10, 0xCC), IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 2f };
+        using var path = new SKPath();
+        path.MoveTo(x - 9f, topY);
+        path.LineTo(x + 9f, topY);
+        path.LineTo(x, topY + 13f); // point down at the dragon
+        path.Close();
+        canvas.DrawPath(path, fill);
+        canvas.DrawPath(path, outline);
+    }
+
+    // A triangular arrow pinned to the screen edge, pointing (angle radians) toward an off-screen dragon.
+    private static void DrawDragonEdgeArrow(SKCanvas canvas, float x, float y, float angle, SKColor color)
+    {
+        using var fill = new SKPaint { Color = color, IsAntialias = true, Style = SKPaintStyle.Fill };
+        using var halo = new SKPaint { Color = new SKColor(0x10, 0x10, 0x10, 0x99), IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 3f };
+        canvas.Save();
+        canvas.Translate(x, y);
+        canvas.RotateRadians(angle);
+        using var path = new SKPath();
+        path.MoveTo(16f, 0f);    // tip points along +X (the rotation aims it)
+        path.LineTo(-10f, 9f);
+        path.LineTo(-10f, -9f);
+        path.Close();
+        canvas.DrawPath(path, fill);
+        canvas.DrawPath(path, halo);
+        canvas.Restore();
     }
 
     // GL star buffer, so each name sits on its dot.
@@ -5031,6 +5538,7 @@ public partial class Terrain3DView : ContentView
                 dragonFireHeld = true;
                 break;
             case Windows.System.VirtualKey.Space:
+                Serilog.Log.Information("[Dragon] Space (flap/takeoff)");
                 if (dragon is { } d2)
                 {
                     if (d2.BeginTakeoff())
@@ -5126,9 +5634,68 @@ public partial class Terrain3DView : ContentView
         return radians;
     }
 
+    // Picks the AI dragon whose bearing from the muzzle sits inside the ±10° lock cone AND is most aligned with
+    // the aim (so a fireball auto-homes onto it). Returns its aiFlock index, or −1 when the flock is off or
+    // nothing is in the cone. All in real metres.
+    private int AcquireFireballTarget(System.Numerics.Vector2 muzzleXY, float muzzleElev, Vector3 aimUnit)
+    {
+        if (!ShowAiDragons || aiFlock.Count == 0)
+        {
+            return -1;
+        }
+
+        float bestDot = DragonFireLockConeCos; // only a bearing inside the cone can beat this
+        int best = -1;
+        for (int i = 0; i < aiFlock.Count; i++)
+        {
+            AiFlockDragon t = aiFlock[i];
+            if (!t.Alive)
+            {
+                continue;
+            }
+
+            var to = new Vector3(
+                t.Flight.PositionXY.X - muzzleXY.X,
+                t.Flight.PositionXY.Y - muzzleXY.Y,
+                t.Flight.ElevationMeters - muzzleElev);
+            float len = to.Length();
+            if (len < 1f)
+            {
+                continue;
+            }
+
+            float dot = Vector3.Dot(aimUnit, to / len);
+            if (dot > bestDot)
+            {
+                bestDot = dot;
+                best = i;
+            }
+        }
+
+        return best;
+    }
+
+    // A fireball hit kills the dragon: flag it dead (skipped by update/render/markers/targeting) and throw a
+    // fat fireball burst at its spot for the kill flash. Kept in aiFlock so other in-flight balls' target
+    // indices don't shift under them.
+    private void KillAiDragon(int index)
+    {
+        if (index < 0 || index >= aiFlock.Count || !aiFlock[index].Alive)
+        {
+            return;
+        }
+
+        AiFlockDragon dead = aiFlock[index];
+        dead.Alive = false;
+        // The kill blast itself is spawned by the hitting ball via SpawnFireBurst(power 2.2) at the impact point.
+        Serilog.Log.Information(
+            "[DragonFire] killed dragon #{Idx} ({Kind}) at ({X:F0},{Y:F0}) — {Alive} left",
+            index, dead.Kind, dead.Flight.PositionXY.X, dead.Flight.PositionXY.Y, aiFlock.Count(a => a.Alive));
+    }
+
     // Advances the fire-breath simulation one tick: spawns a ball from the mouth while F is held, flies the
-    // balls forward with a touch of hot-gas buoyancy, bursts them on terrain contact, and rebuilds the render
-    // sprite list (world coords, Z exaggerated).
+    // balls forward (auto-homing onto a locked dragon, else a touch of hot-gas buoyancy), bursts on contact,
+    // and rebuilds the render sprite list (world coords, Z exaggerated).
     private void StepDragonFire(MapaTur.Application.Terrain.DragonFlight d, float dt, float exaggeration)
     {
         dragonFireCooldown -= dt;
@@ -5138,57 +5705,389 @@ public partial class Terrain3DView : ContentView
             float chh = MathF.Cos(d.HeadingRadians), shh = MathF.Sin(d.HeadingRadians);
             var fwdXY = new System.Numerics.Vector2(cp * chh, cp * shh);
             float speed = d.SpeedMetersPerSecond + DragonFireSpeedMetersPerSecond;
+            System.Numerics.Vector2 muzzleXY;
+            float muzzleElev;
+            if (dragonMouthWorld is { } mw)
+            {
+                // From the posed HEAD (follows the animation), + a snout offset along the aim.
+                muzzleXY = new System.Numerics.Vector2(mw.X, mw.Y) + (fwdXY * DragonSnoutOffsetMeters);
+                muzzleElev = (mw.Z / MathF.Max(0.001f, exaggeration)) + (sp * DragonSnoutOffsetMeters);
+            }
+            else
+            {
+                muzzleXY = d.PositionXY + (fwdXY * DragonFireMuzzleOffsetMeters);
+                muzzleElev = d.ElevationMeters + (sp * DragonFireMuzzleOffsetMeters) + 1f;
+            }
+
+            var aim = new Vector3(cp * chh, cp * shh, sp); // unit forward
+
+            // Muzzle cone (~3.5°) + per-shot speed scatter (deterministic golden-ratio hash, no state) so the jet
+            // is a pressurized SPRAY that separates along its length, not a laser of identical clones. The target
+            // LOCK still uses the clean aim, not the jittered direction.
+            int shot = dragonFireCounter++;
+            float hgr = shot * 0.61803399f;
+            float coneAngle = (hgr - MathF.Floor(hgr)) * (2f * MathF.PI);
+            float rj = MathF.Sqrt((hgr * 1.37f) - MathF.Floor(hgr * 1.37f));
+            var up0 = MathF.Abs(aim.Z) < 0.9f ? Vector3.UnitZ : Vector3.UnitX;
+            var ax = Vector3.Normalize(Vector3.Cross(aim, up0));
+            var ay = Vector3.Cross(aim, ax);
+            Vector3 dir = Vector3.Normalize(aim + (((ax * MathF.Cos(coneAngle)) + (ay * MathF.Sin(coneAngle))) * MathF.Tan(0.10f * rj)));
+            float spd = speed * (0.85f + (0.30f * rj)); // ±15% → balls string out along the jet
+
             dragonFireballs.Add(new DragonFireball
             {
-                XY = d.PositionXY + (fwdXY * DragonFireMuzzleOffsetMeters),
-                Elevation = d.ElevationMeters + (sp * DragonFireMuzzleOffsetMeters) + 1f,
-                VelocityXY = fwdXY * speed,
-                VelocityZ = sp * speed,
-                Seed = (dragonFireCounter++ * 0.731f) % 10f,
+                XY = muzzleXY,
+                Elevation = muzzleElev,
+                VelocityXY = new System.Numerics.Vector2(dir.X, dir.Y) * spd,
+                VelocityZ = dir.Z * spd,
+                Seed = (shot * 0.731f) % 10f,
+                TargetDragon = AcquireFireballTarget(muzzleXY, muzzleElev, aim), // lock onto a dragon in the ±10° cone
             });
             dragonFireCooldown = DragonFireCooldownSeconds;
         }
 
         dragonFireSprites.Clear();
+        dragonFireSmokeSprites.Clear();
+        if (dragonFireballs.Count > 0)
+        {
+            RebuildLakeCache(); // one conversion per tick; balls test it for a water hit → steam
+        }
+
+        // ── Stream balls (the jet from the mouth) ── fly forward, home onto a locked dragon, and on contact or
+        // terrain hand off to a staged explosion BURST (spawned into the particle pool; the ball itself is removed).
         for (int i = dragonFireballs.Count - 1; i >= 0; i--)
         {
             DragonFireball ball = dragonFireballs[i];
-            if (ball.Exploding)
+            ball.Age += dt;
+            bool explode = false;
+            float power = 1.1f;
+
+            if (ball.TargetDragon >= 0 && ball.TargetDragon < aiFlock.Count && aiFlock[ball.TargetDragon].Alive)
             {
-                ball.ExplodeAge += dt;
-                if (ball.ExplodeAge >= DragonFireExplodeSeconds)
+                AiFlockDragon t = aiFlock[ball.TargetDragon];
+                var to = new Vector3(
+                    t.Flight.PositionXY.X - ball.XY.X,
+                    t.Flight.PositionXY.Y - ball.XY.Y,
+                    t.Flight.ElevationMeters - ball.Elevation);
+                float dist = to.Length();
+                if (dist <= DragonFireHitRadiusMeters)
                 {
-                    dragonFireballs.RemoveAt(i);
-                    continue;
+                    explode = true;
+                    power = 2.2f; // a kill = a big blast
+                    KillAiDragon(ball.TargetDragon);
+                }
+                else
+                {
+                    var vel = new Vector3(ball.VelocityXY.X, ball.VelocityXY.Y, ball.VelocityZ);
+                    float ballSpeed = vel.Length();
+                    Vector3 curDir = ballSpeed > 1e-3f ? vel / ballSpeed : to / dist;
+                    Vector3 newDir = Vector3.Normalize(
+                        curDir + (((to / dist) - curDir) * Math.Clamp(DragonFireHomingPerSecond * dt, 0f, 1f)));
+                    ball.VelocityXY = new System.Numerics.Vector2(newDir.X, newDir.Y) * ballSpeed;
+                    ball.VelocityZ = newDir.Z * ballSpeed;
                 }
             }
             else
             {
-                ball.Age += dt;
-                ball.XY += ball.VelocityXY * dt;
-                ball.Elevation += ball.VelocityZ * dt;
-                ball.VelocityZ += 1.5f * dt; // hot gas drifts up a touch
-                if (ball.Age >= DragonFireTtlSeconds)
+                // Curl-writhe: an un-guided ball snakes instead of flying dead-straight, so the jet braids like
+                // a living flame. Deterministic per ball (age + seed), ramping in just past the muzzle.
+                float sp2 = ball.VelocityXY.Length();
+                if (sp2 > 1e-3f)
                 {
-                    dragonFireballs.RemoveAt(i);
-                    continue;
+                    var fwd2 = ball.VelocityXY / sp2;
+                    var perp = new System.Numerics.Vector2(-fwd2.Y, fwd2.X);
+                    float tt = ball.Age, sd = ball.Seed;
+                    float lat = (MathF.Sin((tt * 8.5f) + (sd * 6.283f)) * 0.65f) + (MathF.Sin((tt * 19f) + (sd * 2.7f)) * 0.35f);
+                    float ver = (MathF.Cos((tt * 7.0f) + (sd * 4.1f)) * 0.60f) + (MathF.Sin((tt * 23f) + (sd * 1.3f)) * 0.25f);
+                    float amp = 42f * MathF.Min(1f, tt * 4f);
+                    ball.VelocityXY += perp * (lat * amp * dt);
+                    ball.VelocityZ += ((ver * amp) + 2.5f) * dt;
                 }
+            }
 
-                if (SampleWalkGround(ball.XY) is { } ground && ball.Elevation <= ground + 0.5f)
+            ball.XY += ball.VelocityXY * dt;
+            ball.Elevation += ball.VelocityZ * dt;
+
+            bool hitWater = false;
+            if (!explode)
+            {
+                if (TryLakeWaterElevation(ball.XY) is { } waterElev && ball.Elevation <= waterElev + 1.5f)
                 {
-                    ball.Exploding = true;
+                    explode = true;
+                    hitWater = true; // quench on the lake surface → steam
+                    ball.Elevation = waterElev + 0.3f;
+                }
+                else if (SampleWalkGround(ball.XY) is { } ground && ball.Elevation <= ground + 0.5f)
+                {
+                    explode = true;
                     ball.Elevation = ground + 1f;
                 }
             }
 
+            if (explode)
+            {
+                var burstPos = new Vector3(ball.XY.X, ball.XY.Y, ball.Elevation);
+                if (hitWater)
+                {
+                    SpawnSteamBurst(burstPos, 1.4f);
+                }
+                else
+                {
+                    SpawnFireBurst(burstPos, power);
+                }
+
+                dragonFireballs.RemoveAt(i);
+                continue;
+            }
+
+            if (ball.Age >= DragonFireTtlSeconds)
+            {
+                dragonFireballs.RemoveAt(i);
+                continue;
+            }
+
             dragonFireballs[i] = ball;
 
-            float radius = DragonFireRadiusMeters + (ball.Age * 0.9f) + (ball.Exploding ? ball.ExplodeAge * 22f : 0f);
-            float intensity = ball.Exploding
-                ? 1f - (ball.ExplodeAge / DragonFireExplodeSeconds)
-                : MathF.Min(1f, ball.Age * 8f) * MathF.Min(1f, (DragonFireTtlSeconds - ball.Age) / 0.5f);
+            // Flame sprite (kind 0): tighter hot muzzle → wide blossom (a cone), velocity-stretched into a tongue.
+            // Per-ball size jitter (from the seed) so the jet isn't a string of identical blobs.
+            float life = ball.Age / DragonFireTtlSeconds;
+            float sizeJitter = 0.75f + (0.5f * Frac(ball.Seed * 1.7f));
+            float radius = DragonFireRadiusMeters * sizeJitter * (0.45f + (2.0f * life)) * (1f - (0.2f * life * life));
+            float attack = MathF.Min(1f, ball.Age * 30f);
+            float s = Math.Clamp((life - 0.6f) / 0.4f, 0f, 1f);
+            float intensity = attack * (1f - (s * s * (3f - (2f * s))));
+
+            var ballWorld = new Vector3(ball.XY.X, ball.XY.Y, ball.Elevation * exaggeration);
+            float distToCam = Vector3.Distance(Camera.Position, ballWorld);
+            if (distToCam < 8f)
+            {
+                intensity *= distToCam / 8f; // only extreme point-blank is dimmed (don't gut the stream at the mouth)
+            }
+
+            var ballVel = new Vector3(ball.VelocityXY.X, ball.VelocityXY.Y, ball.VelocityZ);
             dragonFireSprites.Add(new MapaTur.App.Services.Terrain3DGlRenderer.FireballSprite(
-                new Vector3(ball.XY.X, ball.XY.Y, ball.Elevation * exaggeration), radius, intensity, ball.Seed));
+                ballWorld, radius, intensity, ball.Seed, (float)FireKind.Flame, ballVel));
+        }
+
+        while (dragonFireballs.Count > DragonFireMaxBalls)
+        {
+            dragonFireballs.RemoveAt(0); // cap: drop the oldest
+        }
+
+        StepFireParticles(dt, exaggeration);
+    }
+
+    // Spawns a staged explosion at pos (real metres): a sub-frame FLASH, an expanding SHOCK ring, rolling
+    // fireball PUFFS, and arcing EMBERS — power scales stream(1.1) / dragon-kill(2.2). Pure additive kinds; the
+    // smoke + ground scorch layers are Phase 2b.
+    private void SpawnFireBurst(Vector3 pos, float power)
+    {
+        dragonFireParticles.Add(new FireParticle
+        {
+            Pos = pos, Kind = FireKind.Flash, Life = 0.10f, Size0 = 2f * power, Size1 = 9f * power,
+            Seed = (dragonBurstCounter++ * 0.731f) % 10f,
+        });
+        dragonFireParticles.Add(new FireParticle
+        {
+            Pos = pos, Kind = FireKind.Shock, Life = 0.30f, Size0 = 0.5f * power, Size1 = 15f * power,
+            Seed = (dragonBurstCounter++ * 0.731f) % 10f,
+        });
+        for (int k = 0; k < 2; k++)
+        {
+            float ang = k * 2.4f;
+            var off = new Vector3(MathF.Cos(ang), MathF.Sin(ang), 0f) * (1.5f * power);
+            dragonFireParticles.Add(new FireParticle
+            {
+                Pos = pos + off, Vel = new Vector3(0f, 0f, 4f), Kind = FireKind.Puff, Life = 0.55f,
+                Size0 = 3f * power, Size1 = 9f * power, Seed = (dragonBurstCounter++ * 0.731f) % 10f,
+            });
+        }
+
+        int embers = (int)MathF.Round(9f * power);
+        for (int j = 0; j < embers; j++)
+        {
+            float gi = j + 0.5f;
+            float phi = gi * 2.399963f;                        // golden angle
+            float y = 1f - ((gi / embers) * 0.85f);            // biased up (hemisphere)
+            float rad = MathF.Sqrt(MathF.Max(0f, 1f - (y * y)));
+            var dir = new Vector3(MathF.Cos(phi) * rad, MathF.Sin(phi) * rad, y);
+            float spd = 17f + (17f * Frac(gi * 0.618f));
+            dragonFireParticles.Add(new FireParticle
+            {
+                Pos = pos, Vel = dir * spd, Kind = FireKind.Ember, Life = 0.4f + (0.5f * Frac(gi * 0.31f)),
+                Size0 = 0.7f, Size1 = 0.25f, Seed = (dragonBurstCounter++ * 0.731f) % 10f,
+            });
+        }
+
+        // Rising SMOKE puffs that outlast the flame (straight-alpha, second pass).
+        int smoke = (int)MathF.Round(4f * power);
+        for (int m = 0; m < smoke; m++)
+        {
+            float sa = m * 1.7f;
+            var soff = new Vector3(MathF.Cos(sa), MathF.Sin(sa), 0f) * (1.2f * power);
+            dragonFireParticles.Add(new FireParticle
+            {
+                Pos = pos + soff,
+                Vel = new Vector3((Frac(sa) * 2f) - 1f, (Frac(sa * 1.7f) * 2f) - 1f, 3.5f),
+                Kind = FireKind.Smoke, Life = 1.6f + (0.8f * Frac(sa)),
+                Size0 = 4f * power, Size1 = 13f * power, Seed = (dragonBurstCounter++ * 0.731f) % 10f,
+            });
+        }
+    }
+
+    private static float Frac(float x) => x - MathF.Floor(x);
+
+    // A fireball quenched on water: a brief hiss FLASH + a fat cloud of rising white STEAM (routed to the alpha
+    // pass; billows bigger and lasts longer than soot smoke).
+    private void SpawnSteamBurst(Vector3 pos, float power)
+    {
+        dragonFireParticles.Add(new FireParticle
+        {
+            Pos = pos, Kind = FireKind.Flash, Life = 0.08f, Size0 = 2f * power, Size1 = 6f * power,
+            Seed = (dragonBurstCounter++ * 0.731f) % 10f,
+        });
+        int puffs = (int)MathF.Round(7f * power);
+        for (int m = 0; m < puffs; m++)
+        {
+            float sa = m * 1.3f;
+            var soff = new Vector3(MathF.Cos(sa), MathF.Sin(sa), 0f) * (2f * power);
+            dragonFireParticles.Add(new FireParticle
+            {
+                Pos = pos + soff,
+                Vel = new Vector3(((Frac(sa) * 2f) - 1f) * 2.5f, ((Frac(sa * 1.7f) * 2f) - 1f) * 2.5f, 7f), // rises fast
+                Kind = FireKind.Steam, Life = 1.8f + (1.0f * Frac(sa)),
+                Size0 = 3f * power, Size1 = 17f * power, Seed = (dragonBurstCounter++ * 0.731f) % 10f,
+            });
+        }
+    }
+
+    // In-frame lake outlines converted to world XY, cached once per fire tick (dragonLakeCache) so a flying ball
+    // can point-in-polygon test cheaply for a water hit.
+    private readonly List<(System.Numerics.Vector2[] Poly, float Elev)> dragonLakeCache = [];
+
+    private void RebuildLakeCache()
+    {
+        dragonLakeCache.Clear();
+        if (WorldFrame is not { } frame)
+        {
+            return;
+        }
+
+        foreach (MapaTur.Application.Terrain.MountainLake lake in MapaTur.Application.Terrain.MountainLakeData.WithinBounds(frame.Bounds))
+        {
+            int n = lake.Outline.Count;
+            if (n < 3)
+            {
+                continue;
+            }
+
+            var poly = new System.Numerics.Vector2[n];
+            for (int k = 0; k < n; k++)
+            {
+                Vector3 wp = frame.GeoToWorld(lake.Outline[k], 0f);
+                poly[k] = new System.Numerics.Vector2(wp.X, wp.Y);
+            }
+
+            dragonLakeCache.Add((poly, (float)lake.ElevationMeters));
+        }
+    }
+
+    // Water elevation (real metres) if worldXY is inside a cached lake outline, else null — a fireball reaching
+    // that height over the lake hisses into steam instead of a fire burst.
+    private float? TryLakeWaterElevation(System.Numerics.Vector2 p)
+    {
+        foreach ((System.Numerics.Vector2[] poly, float elev) in dragonLakeCache)
+        {
+            bool inside = false;
+            for (int i = 0, j = poly.Length - 1; i < poly.Length; j = i++)
+            {
+                if (((poly[i].Y > p.Y) != (poly[j].Y > p.Y))
+                    && (p.X < (((poly[j].X - poly[i].X) * (p.Y - poly[i].Y) / (poly[j].Y - poly[i].Y)) + poly[i].X)))
+                {
+                    inside = !inside;
+                }
+            }
+
+            if (inside)
+            {
+                return elev;
+            }
+        }
+
+        return null;
+    }
+
+    // Advances the explosion particle pool and builds its render sprites (kind-tagged for the shader).
+    private void StepFireParticles(float dt, float exaggeration)
+    {
+        for (int i = dragonFireParticles.Count - 1; i >= 0; i--)
+        {
+            FireParticle pt = dragonFireParticles[i];
+            pt.Age += dt;
+            if (pt.Age >= pt.Life)
+            {
+                dragonFireParticles.RemoveAt(i);
+                continue;
+            }
+
+            switch (pt.Kind)
+            {
+                case FireKind.Ember:
+                    pt.Vel.Z -= 22f * dt;                       // gravity
+                    pt.Vel *= MathF.Max(0f, 1f - (1.5f * dt));  // drag
+                    pt.Pos += pt.Vel * dt;
+                    break;
+                case FireKind.Puff:
+                    pt.Pos += pt.Vel * dt;
+                    break;
+                case FireKind.Smoke:
+                case FireKind.Steam:
+                    pt.Vel.Z *= MathF.Max(0f, 1f - (0.6f * dt)); // rise then stall
+                    pt.Vel.X *= MathF.Max(0f, 1f - (0.5f * dt));
+                    pt.Vel.Y *= MathF.Max(0f, 1f - (0.5f * dt));
+                    pt.Pos += pt.Vel * dt;
+                    break;
+                default:
+                    break; // Flash / Shock: fixed in place
+            }
+
+            dragonFireParticles[i] = pt;
+
+            float u = pt.Age / pt.Life;
+            var world = new Vector3(pt.Pos.X, pt.Pos.Y, pt.Pos.Z * exaggeration);
+            float distToCam = Vector3.Distance(Camera.Position, world);
+            float camClamp = distToCam < 8f ? distToCam / 8f : 1f;
+
+            if (pt.Kind is FireKind.Smoke or FireKind.Steam)
+            {
+                // Smoke/steam grow LINEARLY over their long life and fade in then out; routed to the alpha pass.
+                float radiusS = pt.Size0 + ((pt.Size1 - pt.Size0) * u);
+                float intensityS = MathF.Min(1f, u * 6f) * (1f - u) * camClamp;
+                dragonFireSmokeSprites.Add(new MapaTur.App.Services.Terrain3DGlRenderer.FireballSprite(
+                    world, radiusS, intensityS, pt.Seed, (float)pt.Kind, Vector3.Zero));
+                continue;
+            }
+
+            float ease = 1f - ((1f - u) * (1f - u) * (1f - u)); // ease-out-cubic expansion
+            float radius = pt.Size0 + ((pt.Size1 - pt.Size0) * ease);
+            float intensity = pt.Kind switch
+            {
+                FireKind.Flash => 1f - u,
+                FireKind.Shock => (1f - u) * (1f - u),
+                FireKind.Ember => 1f - (u * u),
+                FireKind.Puff => MathF.Min(1f, pt.Age * 15f) * (1f - (u * u)),
+                _ => 1f - u,
+            };
+            intensity *= camClamp;
+
+            Vector3 vel = pt.Kind == FireKind.Ember ? pt.Vel : Vector3.Zero;
+            dragonFireSprites.Add(new MapaTur.App.Services.Terrain3DGlRenderer.FireballSprite(
+                world, radius, intensity, pt.Seed, (float)pt.Kind, vel));
+        }
+
+        while (dragonFireParticles.Count > 256)
+        {
+            dragonFireParticles.RemoveAt(0);
         }
     }
 
@@ -5457,7 +6356,10 @@ public partial class Terrain3DView : ContentView
             Vector3 dragonLight = tiles.Count > 0 ? tiles[0].LightDirection : new Vector3(0.4f, 0.4f, 1f);
             glRenderer.SetDragon(dragonModel3D, dragonWorldMatrix, dragonNormalMatrix, dragonLight, dragon3DVisible);
             glRenderer.SetFireballs(dragonActive && dragonFireSprites.Count > 0 ? dragonFireSprites : null);
+            glRenderer.SetFireSmoke(dragonActive && dragonFireSmokeSprites.Count > 0 ? dragonFireSmokeSprites : null);
             glRenderer.SetDebugMarkers(dragonActive && dragonDebugMarkers.Count > 0 ? dragonDebugMarkers : null);
+            UpdateAiFlock(); // advance + pose the flock in step with this frame (no separate timer — WinUI-safe)
+            glRenderer.SetAiDragons(ShowAiDragons && aiFlockInstances.Count > 0 ? aiFlockInstances : null);
             double dbgPreRenderMs = dbgSwapPaintActive ? dbgPaintWatch.Elapsed.TotalMilliseconds : 0;
             uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere, forest, DetailElevation, ShowNightSky ? DateOnly.FromDateTime(DateTime.Now) : null, ExposedRoutes, ShowSauronTower, ShowEagles, AtmosphereEffectsEnabled, OffTrailTracks);
             if (dbgSwapPaintActive)

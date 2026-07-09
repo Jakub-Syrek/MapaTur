@@ -279,7 +279,11 @@ public sealed partial class MapPageViewModel : ObservableObject
     public bool ShowStreamingPill => IsStreamingDetail && !UiHidden;
 
     [RelayCommand]
-    private void ToggleUi() => UiHidden = !UiHidden;
+    private void ToggleUi()
+    {
+        Serilog.Log.Information("[UI] ToggleUi invoked (UiHidden {From}->{To})", UiHidden, !UiHidden);
+        UiHidden = !UiHidden;
+    }
 
     partial void OnUiHiddenChanged(bool value)
     {
@@ -1451,6 +1455,10 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <summary>Easter egg: eagles soaring on thermals over the Orla Perć ridge. Off by default. Persisted.</summary>
     [ObservableProperty] private bool showEagles;
 
+    /// <summary>A flock of autonomous dragons circling the nearby peaks (and drifting toward the ridden dragon
+    /// when it flies near). Off by default. Persisted.</summary>
+    [ObservableProperty] private bool showAiDragons;
+
     /// <summary>Which dragon F7 rides: 0 = classic (red, procedural flap), 1 = animated (textured, baked flying loop). Persisted.</summary>
     [ObservableProperty] private int dragonVariantIndex;
 
@@ -2217,6 +2225,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             [nameof(ShowPeakNames)] = (() => ShowPeakNames, v => ShowPeakNames = v),
             [nameof(ShowSauronTower)] = (() => ShowSauronTower, v => ShowSauronTower = v),
             [nameof(ShowEagles)] = (() => ShowEagles, v => ShowEagles = v),
+            [nameof(ShowAiDragons)] = (() => ShowAiDragons, v => ShowAiDragons = v),
             [nameof(AtmosphereEffectsEnabled)] = (() => AtmosphereEffectsEnabled, v => AtmosphereEffectsEnabled = v),
             [nameof(ShowNightSky)] = (() => ShowNightSky, v => ShowNightSky = v),
             [nameof(ShowContours)] = (() => ShowContours, v => ShowContours = v),
