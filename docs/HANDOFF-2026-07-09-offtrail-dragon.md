@@ -11,6 +11,11 @@
 - `dotnet format MapaTur.slnx --verify-no-changes` — **czysto.**
 - App build **0 Warning / 0 Error**.
 
+> ⚠️ SPROSTOWANIE (2026-07-09, następna sesja): powyższe „0 Error" było **nieprawdziwe** — HEAD tego branchu
+> faktycznie **nie kompilował się** (`CS0191`, `dragonFireCooldown`/`dragonFireCounter` `readonly` a mutowane),
+> więc bramka zmierzyła STARY exe. Naprawione w commicie `6be4849` (razem z §3). Teraz build/format/testy są
+> realnie zielone. Szczegóły w §3.
+
 ---
 
 ## 1. POZASZLAKI — panel GPX/TCX + warstwa 3D + routing (KOMPLET, potwierdzony przez usera)
@@ -129,49 +134,46 @@ nie na bind) + `BlendBoneTowardBind(bone, weight)` (tłumi klip na kości) + `Ge
 
 ---
 
-## 3. ⚠️ OTWARTY PUNKT — osadzenie łap smoka na widocznym szczycie (NIE ROZWIĄZANE)
+## 3. ✅ ROZWIĄZANE (2026-07-09, potwierdzone przez usera) — osadzenie łap smoka na widocznym szczycie
 
-**Objaw (potwierdzony przez usera, ~35 iteracji):** smok animowany na szczycie **nie stoi łapami na widocznej
-grani** — raz wisi kilka m nad skałą, raz jest w teksturze, i bywa **przesunięty względem punktu, w który kod
-go stawia**. User: „to LOKALIZACJA, nie poza/wysokość/perspektywa".
+**Był objaw:** smok animowany na szczycie nie stał łapami na widocznej grani — wisiał/tonął i bywał przesunięty
+względem punktu, w który kod go stawiał. User: „to LOKALIZACJA, nie poza/wysokość/perspektywa" — **potwierdzone
+liczbowo:** błąd był POZIOMY.
 
-**Stan kodu TERAZ:** osadzenie **cofnięte do prostej działającej wersji** — `Terrain3DView.OnDragonTick` blok
-`if (dragonModel3D is { } model3D)`: centr na **bind** `boundsCenter`, `worldPos = (PositionXY, (elev+seat)*exagg)`,
-seat = flightSeat↔perchSeat(feetY z najniższej kości stopy) blendowany `dragonLegsDown`. **Smok w locie i przy L
-jest widoczny i w dobrym kadrze.** Łapy mogą wisieć ~3 m na ostrych szczytach — ZAAKCEPTOWANE tymczasowo.
+**Diagnoza (metodą usera — kolorowe markery PO finalnej transformacji):** nowy pass `DrawDebugMarkers`/`DebugMarker`
+w `Terrain3DGlRenderer` (solidne dyski, **zawsze-na-wierzchu** — depth-test off) + wyliczenie 4 kandydatów w
+`OnDragonTick` tą samą macierzą co GPU (`Vector3.Transform` == GLSL `uModel*vec4`, bo row-vector .NET upload bez
+transpozycji). Legenda: 🔴 origin / 🟢 środek bind-bounds (=`worldPos`) / 🔵 anchor kości stóp (narysowane łapy) /
+🟡 punkt renderowanego mesha (cel). Log `[DragonSeat]` z pozycjami + `dXY/dZ`. **Werdykt z logu:**
+```
+feet=(14207.1,-8315.3,2428.5) target=(14203.0,-8317.6,2428.5)  dXY=4.71  dZ=0.02
+```
+→ pion był IDEALNY (0.02 m), rozjazd był **4.71 m w poziomie** (środek bind-bounds odsunięty w bok: ogon/skrzydła
+ciągną AABB; klip dokłada root motion).
 
-**Co ustalono (twarde fakty, nie teoria — NIE zaczynać od zera):**
-1. **`exagg=1.00`** na testowanych szczytach SK — przewyższenia NIE ma. Wszystkie moje teorie o „seat×exagg" były
-   nietrafione (choć fix jest poprawny na wypadek Pion>1).
-2. **Kości stóp = realne pazury** (sonda offline: `l_ball/r_ball/l_toeA/r_toeA` w pozie idle mają Y≈0.004, a
-   `posedMin.Y=-0.004` — czyli są przy samym dole). Nie trzeba szukać innych kości.
-3. **Debug-marker (kolumna fireballi w world-XY/Z smoka) UDOWODNIŁ rozjazd:** rysowany model NIE pokrywa się z
-   punktem, w który kod go stawia. To transform/lokalizacja.
-4. **`GetPosedBounds()` (środek POZY, nie bind) mocno zmniejszył rozjazd** — klip `idle`/`flying` **przesuwa siatkę
-   (root motion)**, więc centrowanie na bind-środku odsuwa model. ALE zastosowane w LOCIE psuje kadr kamery
-   (kamera celuje w worldPos=bind-środek) → smok poza kadrem. Musi być **tylko w perchu**.
-5. **Foot-pivot** (centr poziomo na centroidzie stóp zamiast środka boxa — długi ogon/skrzydła ciągną AABB-środek
-   w bok) zmniejszył dalej, ale **nadal została resztka** i też przesuwał smoka względem kamery (musi być perch-only).
-6. **`SampleRenderedMeshElevation(x,y)`** (próbkuje realny trójkąt narysowanego mesha — JEDYNE poprawne źródło
-   wysokości, `DetailElevation`/fine/base wszystkie się rozjeżdżały) + korekcja Z stóp działała w Z, ale problem
-   jest też w XY.
+**Fix (`Terrain3DView.OnDragonTick`, blok `if (dragonModel3D is { } model3D)`):** w perchu pivot = **anchor stóp**
+zamiast środka bind-bounds — poziomo centroid kości stóp (`footCentroidLocal`), pionowo najniższa kość (`feetY`) →
+`footPivotLocal`. `worldPos.Z` sadzany na **`SampleRenderedMeshElevation`** (realny narysowany mesh). Wszystko
+**blendowane `dragonLegsDown`** (0 w locie → pivot=`boundsCenter`, kadr kamery i lot NIETKNIĘTE; 1 w perchu →
+stopy na skale). Potwierdzone: `dXY 4.71 → 0.00, dZ 0.02` na **kilku szczytach** (wariant animowany).
 
-**Recepta na następną sesję (droga usera, słuszna):** narysować **kolorowe** markery PO finalnej transformacji na:
-(a) origin modelu, (b) `boundsCenter`, (c) kości stóp, (d) docelowy punkt mesha — zobaczyć **która kropka jest przy
-widocznych pazurach**. Potem przesunąć CAŁY model tak, żeby **foot-anchor (nie pivot)** wylądował na tym punkcie —
-XY **i** Z — **tylko w perchu**. Do tego: dodać kolor do `FireballSprite` (vertex-attribute tint) albo osobny
-mini-pass punktów.
+**Markery pod przełącznikiem:** `Terrain3DView.ShowDebugMarkers` ← binding `ShowLodDiagnostics` (Ustawienia →
+DEBUG). Markery + log `[DragonSeat]` pokazują się TYLKO z włączoną diagnostyką LOD — zostają w kodzie jako sonda.
 
-**Co ZOSTAWIONE w kodzie do reużycia (NIE KASOWAĆ — user wyraźnie prosił):**
-- `Terrain3DView.SampleRenderedMeshElevation(worldX, worldY)` — sampler realnego mesha (bbox-reject + trójkąt +
-  bary-interp, world Z ÷ exagg). To jest poprawne źródło „gdzie jest narysowana skała".
-- `SkinnedModel.GetPosedBounds()` / `GetLowestVertexYNear()` / `RotateBoneOverlay()` / `BlendBoneTowardBind()` /
-  `SetFrame()` — introspekcja/nakładki pozy.
-- Pola `dragonSeatLogAccum`, `dragonPerchGroundElev` (pragma-suppressed CS0169/CS0414/IDE0044 — komentarz „KEEP").
-- `DragonFootPadMeters`, `DragonAnimatedFootBones`/`DragonClassicFootBones`.
-- Technika **markera** (emit `FireballSprite` w punkcie świata = wizualizacja gdzie kod myśli że coś jest).
-- Diagnostyki logu: `[DragonSeat]`, `[DragonTrace]`, `[DragonKey]`, `[DragonStroke]` (do wyczyszczenia przed
-  finalnym mergem, ale przydatne w następnej sesji).
+**Przy okazji naprawiony build-break (był na branchu!):** `dragonFireCooldown`/`dragonFireCounter` były `readonly`
+a mutowane w `StepDragonFire` → `CS0191`, **HEAD `feat/walk-mode` się NIE kompilował** — „0 Error" z tego handoffu
+było zmierzone na STARYM exe (pułapka stale-exe). Zdjęte `readonly` + suppressed fałszywy `IDE0044` (`dotnet format`
+wymuszał `readonly` = ta sama pętla). Commit **`6be4849`** (bramki: build 0/0, format czysty, testy 1742 green),
+**niepushnięty**.
+
+**Do sprawdzenia później (nie blokuje):** przetestowany **animowany**; ten sam kod obsługuje **klasycznego** smoka
+(`DragonClassicFootBones = ["Foot.L","Foot.R"]`) — raz wylądować klasycznym z włączonym debugiem i sprawdzić czy
+🔵 też siada na 🟡.
+
+**Zostawione w kodzie (reużywalne):** `SampleRenderedMeshElevation` (JEDYNE dobre źródło wys. = realny mesh),
+`SkinnedModel.GetPosedBounds/GetLowestVertexYNear/RotateBoneOverlay/BlendBoneTowardBind/SetFrame`, `DrawDebugMarkers`
++ `[DragonSeat]` (za toggle'em), `DragonFootPadMeters`, `Dragon*FootBones`. Diagnostyki `[DragonTrace]/[DragonKey]/
+[DragonStroke]` — do wyczyszczenia przed finalnym mergem.
 
 ---
 
