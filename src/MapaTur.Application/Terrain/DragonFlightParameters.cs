@@ -22,7 +22,7 @@ public sealed record DragonFlightParameters
 
     /// <summary>Gravity's pull along the flight path, m/s²: diving picks up speed, climbing bleeds it — so a dive
     /// accelerates and a climb slows down without any throttle.</summary>
-    public float PitchGravityMetersPerSecondSquared { get; init; } = 22f;
+    public float PitchGravityMetersPerSecondSquared { get; init; } = 34f;
 
     /// <summary>Yaw (turn) rate at full steering input, rad/s.</summary>
     public float TurnRateRadiansPerSecond { get; init; } = 0.95f;
@@ -40,9 +40,87 @@ public sealed record DragonFlightParameters
     /// <summary>Minimum altitude the dragon holds above the terrain below it, metres (a swoop clearance).</summary>
     public float GroundClearanceMeters { get; init; } = 30f;
 
-    /// <summary>Peak visual bank (roll) into a full-rate turn, radians.</summary>
-    public float MaxRollRadians { get; init; } = 0.7f;
+    /// <summary>Bank (roll) limit, radians (~57 deg) - the turn is flown THROUGH this bank.</summary>
+    public float MaxRollRadians { get; init; } = 1.0f;
+
+    /// <summary>How fast the roll input banks the dragon, rad/s.</summary>
+    public float RollRatePerSecond { get; init; } = 1.8f;
+
+    /// <summary>How fast the dragon self-levels when the roll input releases, rad/s.</summary>
+    public float RollLevelRatePerSecond { get; init; } = 1.2f;
+
+    /// <summary>Coordinated-turn gain: heading rate = gain * tan(roll) / speed. At full bank and cruise this
+    /// yields ~0.7 rad/s; slower flight carves tighter, faster sweeps wider.</summary>
+    public float TurnFromBankGain { get; init; } = 26f;
 
     /// <summary>How quickly the visual roll chases its banked target (per second; higher = snappier).</summary>
     public float RollResponsePerSecond { get; init; } = 3.0f;
+
+    // ── Landing cycle ────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Autopilot approach speed toward the landing spot, m/s.</summary>
+    public float ApproachSpeedMetersPerSecond { get; init; } = 25f;
+
+    /// <summary>Distance from the target at which the approach hands over to the flare, metres.</summary>
+    public float FlareStartDistanceMeters { get; init; } = 35f;
+
+    /// <summary>Speed the flare bleeds down to before touching down, m/s.</summary>
+    public float FlareSpeedMetersPerSecond { get; init; } = 4f;
+
+    /// <summary>Nose-up attitude held through the flare (the wings braking), radians.</summary>
+    public float FlareNoseUpRadians { get; init; } = 0.4f;
+
+    /// <summary>Braking deceleration during flare/touchdown, m/s².</summary>
+    public float LandingDecelMetersPerSecondSquared { get; init; } = 14f;
+
+    /// <summary>Height held over the spot during the flare, metres.</summary>
+    public float FlareHoverMeters { get; init; } = 1.5f;
+
+    /// <summary>Vertical descent rate during the flare, m/s.</summary>
+    public float FlareDescentMetersPerSecond { get; init; } = 7f;
+
+    /// <summary>Distance from the target at which the flare settles into the touchdown, metres.</summary>
+    public float TouchdownDistanceMeters { get; init; } = 4f;
+
+    /// <summary>Duration of the final settling onto the spot, seconds.</summary>
+    public float TouchdownSeconds { get; init; } = 0.7f;
+
+    /// <summary>Vertical descent rate of the final settling, m/s.</summary>
+    public float TouchdownDescentMetersPerSecond { get; init; } = 3.5f;
+
+    /// <summary>Speed at which a takeoff hands back to free flight, m/s.</summary>
+    public float TakeoffSpeedMetersPerSecond { get; init; } = 20f;
+
+    /// <summary>Acceleration during takeoff, m/s² (harder than cruise throttle — powering off a summit).</summary>
+    public float TakeoffAccelMetersPerSecondSquared { get; init; } = 14f;
+
+    /// <summary>Climb attitude held during takeoff, radians.</summary>
+    public float TakeoffPitchRadians { get; init; } = 0.3f;
+
+    /// <summary>Peak upward rate of a FlapBoost wing-beat (Space in the air), m/s.</summary>
+    public float FlapBoostClimbMetersPerSecond { get; init; } = 56f;
+
+    /// <summary>How fast the FlapBoost lift decays, m/s2 (together with the peak rate this sets the beat's total hoist).</summary>
+    public float FlapBoostDecayMetersPerSecondSquared { get; init; } = 40f;
+
+    /// <summary>How fast the flight path chases the nose, per second (side-slip: lower = more drift through
+    /// the turn; the nose leads, the body carves after it).</summary>
+    public float VelocitySlipChasePerSecond { get; init; } = 2.2f;
+
+    /// <summary>Induced drag of a held bank, m/s2 at full roll - a tight carve bleeds speed.</summary>
+    public float TurnInducedDragMetersPerSecondSquared { get; init; } = 6f;
+
+    /// <summary>How sharply a TurnImpulse jerk lands, per second (exponential ease-out: ~63% of the angle in
+    /// 1/x s). Higher = snappier jump.</summary>
+    public float TurnImpulseSharpnessPerSecond { get; init; } = 3f;
+
+    /// <summary>Peak sideways speed of a turn stroke's shove, m/s (the visible jerk is this translation).</summary>
+    public float TurnStrokeLateralPushMetersPerSecond { get; init; } = 16f;
+
+    /// <summary>How fast the sideways shove decays, m/s2.</summary>
+    public float TurnStrokeLateralDecayMetersPerSecondSquared { get; init; } = 14f;
+
+    /// <summary>Distance over which the swoop clearance fades out on approach — the dragon must be allowed
+    /// to reach ground level AT the spot while still being kept off the terrain far from it, metres.</summary>
+    public float LandingClearanceFadeDistanceMeters { get; init; } = 150f;
 }

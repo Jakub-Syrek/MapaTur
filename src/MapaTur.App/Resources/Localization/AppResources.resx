@@ -133,6 +133,51 @@
   <data name="FilePickerTcx" xml:space="preserve">
     <value>Select TCX track</value>
   </data>
+  <data name="FilePickerTrack" xml:space="preserve">
+    <value>Select a GPX or TCX track</value>
+  </data>
+  <data name="OffTrailSectionHeader" xml:space="preserve">
+    <value>🥾  Off-trail tracks</value>
+  </data>
+  <data name="OffTrailAddButton" xml:space="preserve">
+    <value>➕  Add track (GPX / TCX)</value>
+  </data>
+  <data name="OffTrailShowLayer" xml:space="preserve">
+    <value>Show off-trail layer</value>
+  </data>
+  <data name="OffTrailUseInPlanning" xml:space="preserve">
+    <value>Use off-trail tracks in route planning</value>
+  </data>
+  <data name="OffTrailEmpty" xml:space="preserve">
+    <value>No imported tracks yet.</value>
+  </data>
+  <data name="OffTrailDelete" xml:space="preserve">
+    <value>Remove</value>
+  </data>
+  <data name="StatusTrackNoTracks" xml:space="preserve">
+    <value>The file contained no usable tracks.</value>
+  </data>
+  <data name="StatusTrackImportedFormat" xml:space="preserve">
+    <value>Imported {0} track(s). Off-trail total: {1}.</value>
+  </data>
+  <data name="StatusTrackUnsupportedFormat" xml:space="preserve">
+    <value>Unsupported track format: {0}</value>
+  </data>
+  <data name="StatusTrackParseFailedFormat" xml:space="preserve">
+    <value>Could not parse the track: {0}</value>
+  </data>
+  <data name="StatusTrackDeletedFormat" xml:space="preserve">
+    <value>Removed off-trail track “{0}”.</value>
+  </data>
+  <data name="DragonVariantHeader" xml:space="preserve">
+    <value>🐉  Dragon (F7)</value>
+  </data>
+  <data name="DragonVariantClassic" xml:space="preserve">
+    <value>Classic</value>
+  </data>
+  <data name="DragonVariantAnimated" xml:space="preserve">
+    <value>Animated</value>
+  </data>
   <data name="AccessibilityMapControl" xml:space="preserve">
     <value>Interactive map. Tap to set route waypoints.</value>
   </data>

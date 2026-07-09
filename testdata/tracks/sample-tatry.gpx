@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="MapaTur tests" xmlns="http://www.topografix.com/GPX/1/1">
+  <metadata>
+    <name>Sample off-trail export</name>
+  </metadata>
+  <trk>
+    <name>Grań pozaszlak</name>
+    <trkseg>
+      <trkpt lat="49.2326" lon="19.9819">
+        <ele>1985.0</ele>
+        <time>2026-03-12T07:30:00Z</time>
+      </trkpt>
+      <trkpt lat="49.2310" lon="19.9850">
+        <ele>2040.0</ele>
+        <time>2026-03-12T07:35:00Z</time>
+      </trkpt>
+      <trkpt lat="49.2290" lon="19.9880">
+        <ele>2095.0</ele>
+        <!-- Planned-route style point without <time>: must still be kept (unlike TCX). -->
+      </trkpt>
+    </trkseg>
+    <trkseg>
+      <trkpt lat="49.2280" lon="19.9900">
+        <!-- No <ele>: elevation must be null. -->
+        <time>2026-03-12T07:45:00Z</time>
+      </trkpt>
+    </trkseg>
+  </trk>
+  <rte>
+    <name>Podejscie rte</name>
+    <rtept lat="49.2200" lon="19.9700">
+      <ele>1500.0</ele>
+    </rtept>
+    <rtept lat="49.2210" lon="19.9710">
+      <ele>1520.0</ele>
+    </rtept>
+  </rte>
+</gpx>

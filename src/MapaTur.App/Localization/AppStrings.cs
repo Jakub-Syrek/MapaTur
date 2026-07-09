@@ -135,6 +135,51 @@ public static class AppStrings
     /// <summary>Title of the TCX file picker dialog.</summary>
     public static string FilePickerTcx => Get(nameof(FilePickerTcx));
 
+    /// <summary>Title of the GPX/TCX off-trail track file picker dialog.</summary>
+    public static string FilePickerTrack => Get(nameof(FilePickerTrack));
+
+    /// <summary>Off-trail ("pozaszlaki") panel header.</summary>
+    public static string OffTrailSectionHeader => Get(nameof(OffTrailSectionHeader));
+
+    /// <summary>"Add track (GPX/TCX)" button label in the off-trail panel.</summary>
+    public static string OffTrailAddButton => Get(nameof(OffTrailAddButton));
+
+    /// <summary>Label for the off-trail layer show/hide toggle.</summary>
+    public static string OffTrailShowLayer => Get(nameof(OffTrailShowLayer));
+
+    /// <summary>Label for the "use off-trail tracks in route planning" toggle.</summary>
+    public static string OffTrailUseInPlanning => Get(nameof(OffTrailUseInPlanning));
+
+    /// <summary>Empty-state text when no off-trail tracks are imported.</summary>
+    public static string OffTrailEmpty => Get(nameof(OffTrailEmpty));
+
+    /// <summary>Accessible label / tooltip for the per-track delete button.</summary>
+    public static string OffTrailDelete => Get(nameof(OffTrailDelete));
+
+    /// <summary>Status shown when an imported track file has no usable tracks.</summary>
+    public static string StatusTrackNoTracks => Get(nameof(StatusTrackNoTracks));
+
+    /// <summary>Status format after importing tracks: {0}=imported now, {1}=total off-trail tracks.</summary>
+    public static string StatusTrackImportedFormat => Get(nameof(StatusTrackImportedFormat));
+
+    /// <summary>Status format when the picked file has an unsupported extension: {0}=detail.</summary>
+    public static string StatusTrackUnsupportedFormat => Get(nameof(StatusTrackUnsupportedFormat));
+
+    /// <summary>Status format when a track file fails to parse: {0}=detail.</summary>
+    public static string StatusTrackParseFailedFormat => Get(nameof(StatusTrackParseFailedFormat));
+
+    /// <summary>Status format after deleting a track: {0}=track name.</summary>
+    public static string StatusTrackDeletedFormat => Get(nameof(StatusTrackDeletedFormat));
+
+    /// <summary>Header of the dragon-variant selector (Widok panel).</summary>
+    public static string DragonVariantHeader => Get(nameof(DragonVariantHeader));
+
+    /// <summary>Dragon variant chip: the classic red procedurally-flapped model.</summary>
+    public static string DragonVariantClassic => Get(nameof(DragonVariantClassic));
+
+    /// <summary>Dragon variant chip: the textured model with baked animation loops.</summary>
+    public static string DragonVariantAnimated => Get(nameof(DragonVariantAnimated));
+
     /// <summary>Screen reader description of the interactive map control.</summary>
     public static string AccessibilityMapControl => Get(nameof(AccessibilityMapControl));
 

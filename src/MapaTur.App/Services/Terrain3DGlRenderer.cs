@@ -1575,6 +1575,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private const byte RoadG = 0xE7;
     private const byte RoadB = 0xEB;
 
+    // User-imported off-trail ("pozaszlaki") track ribbon: a distinct hot magenta so it never reads as a PTTK
+    // trail (red/blue/green/yellow/black), the violet route, or the grey roads. Solid-ish with alpha so it
+    // softens the near-field z-fight the same way trails do; width sits between a trail thread and a road.
+    private const byte OffTrailR = 0xFF;
+    private const byte OffTrailG = 0x3D;
+    private const byte OffTrailB = 0xAE;
+    private const byte OffTrailAlpha = 0xE0;
+    private const float OffTrailHalfWidthPx = 1.5f;
+
     // Sky clear colour (matches the Skia renderer's lower gradient stop).
     private const float SkyR = 0x6C / 255f;
     private const float SkyG = 0x8E / 255f;
@@ -1590,6 +1599,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private const float TrailLiftMeters = 0.5f;           // basically on the surface now — overlays seat on the rendered mesh (step-aware) and the clip-space depth bias keeps them drawn on top, so the lift only needs to be a hair to avoid exact coplanarity. Was 2 m (read as ~1 m off the rock).
     private const float RouteLiftMeters = 0.8f;
     private const float RoadLiftMeters = 0.3f;
+    private const float OffTrailLiftMeters = 0.7f;        // a hair above trails so a coincident imported track sits on top
     private const float ExposedRouteLiftMeters = 1.0f;    // a touch above trails so the dots sit on a coincident trail line (Orla Perć is both a red trail and a demanding route)
 
     // Trail/route decal mask: a fine DISTANCE-FIELD texture over the near-field (detail) window. Square max
@@ -2251,6 +2261,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private TerrainMesh3D? lastRoadMesh;
     private DetailElevationField? lastRoadDetail;
 
+    private LineBuffers? offTrailLines;
+    private IReadOnlyList<Trail>? lastOffTrailTracks;
+    private DemRaster? lastOffTrailRaster;
+    private TerrainMesh3D? lastOffTrailMesh;
+    private DetailElevationField? lastOffTrailDetail;
+
     private LineBuffers? exposedLines;
     private IReadOnlyList<Trail>? lastExposed;
     private DemRaster? lastExposedRaster;
@@ -2502,7 +2518,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         IReadOnlyList<Trail>? exposedRoutes = null,
         bool showSauronTower = false,
         bool showEagles = false,
-        bool animateAtmosphere = true)
+        bool animateAtmosphere = true,
+        IReadOnlyList<Trail>? offTrailTracks = null)
     {
         // Watch restarts at the very ENTRY (not at swap detection below): the measured first-swap frame had
         // ~950 ms between Render() entry and the old restart point — the setup segment (PlatformGl, watchdog,
@@ -2554,6 +2571,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             lastRoadRaster = null;
             lastRoadMesh = null;
             lastRoadDetail = null;
+            offTrailLines = null;
+            lastOffTrailTracks = null;
+            lastOffTrailRaster = null;
+            lastOffTrailMesh = null;
+            lastOffTrailDetail = null;
             exposedLines = null;
             lastExposed = null;
             lastExposedRaster = null;
@@ -2647,6 +2669,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             starBufferReady = false;
             dragonProgram = 0; // context lost → rebuild the skinned-dragon program + buffers on next draw
             dragonVao = 0;
+            dragonTexture = 0; // texture id belongs to the dead context — re-decode/upload on next draw
+            dragonTextureModel = null;
+            fireProgram = 0; // fireball pass rebuilds with the dragon
+            fireVao = 0;
             moonProgram = 0;
             moonViewProjLocation = -1;
             moonDirLocation = -1;
@@ -3655,6 +3681,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // frame, so the terrain occludes it correctly. Its own program/uniforms, so it doesn't disturb the shared
         // `m` MVP buffer the line pass restores below.
         DrawDragon(gl, mvp);
+        DrawFireballs(gl, mvp, camera); // breath fire right after its dragon (additive, depth-tested)
 
         // Trails + route as depth-tested screen-space ribbons (occluded by the terrain). Switch to the line
         // program; it shares the depth state and the same MVP, plus the viewport for the pixel expansion.
@@ -3736,6 +3763,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         DrawTrailLines(gl, dedupedTrails, raster, frame, detail);
         DrawExposedRoutes(gl, exposedRoutes, raster, frame, detail);
         DrawRouteLine(gl, route, dedupedTrails, raster, frame, detail);
+        DrawOffTrailLines(gl, offTrailTracks, raster, frame, detail);
         DrawCableCar(gl, frame, raster, detail);
 
         gl.BindVertexArray(0);
@@ -6053,9 +6081,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private uint dragonProgram;
     private int dragonMvpLoc = -1, dragonModelLoc = -1, dragonNormalLoc = -1;
     private int dragonLightLoc = -1, dragonColorLoc = -1, dragonAmbientLoc = -1;
-    private uint dragonVao, dragonPosVbo, dragonNrmVbo, dragonEbo;
+    private int dragonTexLoc = -1, dragonHasTexLoc = -1;
+    private uint dragonVao, dragonPosVbo, dragonNrmVbo, dragonUvVbo, dragonEbo;
+    // Base-colour texture decoded from the ACTIVE model's embedded PNG. Cached against the model reference so
+    // switching dragon variants re-uploads once; a model without a texture falls back to the solid uColor.
+    private uint dragonTexture;
+    private MapaTur.Application.Terrain.SkinnedModel? dragonTextureModel;
     private float[] dragonPosScratch = Array.Empty<float>();
     private float[] dragonNrmScratch = Array.Empty<float>();
+    private float[] dragonUvScratch = Array.Empty<float>();
     private readonly float[] dragonMat4 = new float[16];
     private readonly float[] dragonMat3 = new float[9];
 
@@ -6092,21 +6126,33 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             "#version 300 es\n" +
             "layout(location=0) in vec3 aPos;\n" +
             "layout(location=1) in vec3 aNormal;\n" +
+            "layout(location=2) in vec2 aUv;\n" +
             "uniform mat4 uMvp;\n" +
             "uniform mat4 uModel;\n" +
             "uniform mat3 uNormal;\n" +
             "out vec3 vN;\n" +
-            "void main(){ vec4 wp = uModel * vec4(aPos, 1.0); vN = uNormal * aNormal; gl_Position = uMvp * wp; }\n";
+            "out vec2 vUv;\n" +
+            "void main(){ vec4 wp = uModel * vec4(aPos, 1.0); vN = uNormal * aNormal; vUv = aUv; gl_Position = uMvp * wp; }\n";
+        // Textured path (uHasTex=1): albedo from the model's base-colour texture with a MASK-style alpha cutout
+        // (the animated dragon's wing membranes are alpha-masked cutouts on double-sided quads). Untextured
+        // models keep the solid uColor look.
         const string fs =
             "#version 300 es\n" +
             "precision highp float;\n" +
             "in vec3 vN;\n" +
+            "in vec2 vUv;\n" +
             "uniform vec3 uLight;\n" +
             "uniform vec3 uColor;\n" +
             "uniform float uAmbient;\n" +
+            "uniform sampler2D uTex;\n" +
+            "uniform float uHasTex;\n" +
             "out vec4 frag;\n" +
             "void main(){ float d = max(0.0, dot(normalize(vN), normalize(uLight)));" +
-            " float sh = uAmbient + (1.0 - uAmbient) * d; frag = vec4(uColor * sh, 1.0); }\n";
+            " float sh = uAmbient + (1.0 - uAmbient) * d;" +
+            " vec4 tex = texture(uTex, vUv);" +
+            " if (uHasTex > 0.5 && tex.a < 0.45) discard;" +
+            " vec3 base = mix(uColor, tex.rgb, uHasTex);" +
+            " frag = vec4(base * sh, 1.0); }\n";
 
         uint v = CompileShader(g, ShaderType.VertexShader, vs);
         uint f = CompileShader(g, ShaderType.FragmentShader, fs);
@@ -6133,10 +6179,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         dragonLightLoc = g.GetUniformLocation(dragonProgram, "uLight");
         dragonColorLoc = g.GetUniformLocation(dragonProgram, "uColor");
         dragonAmbientLoc = g.GetUniformLocation(dragonProgram, "uAmbient");
+        dragonTexLoc = g.GetUniformLocation(dragonProgram, "uTex");
+        dragonHasTexLoc = g.GetUniformLocation(dragonProgram, "uHasTex");
 
         dragonVao = g.GenVertexArray();
         dragonPosVbo = g.GenBuffer();
         dragonNrmVbo = g.GenBuffer();
+        dragonUvVbo = g.GenBuffer();
         dragonEbo = g.GenBuffer();
         g.BindVertexArray(dragonVao);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, dragonPosVbo);
@@ -6145,7 +6194,248 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.BindBuffer(BufferTargetARB.ArrayBuffer, dragonNrmVbo);
         g.EnableVertexAttribArray(1);
         g.VertexAttribPointer(1, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, dragonUvVbo);
+        g.EnableVertexAttribArray(2);
+        g.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, 2 * sizeof(float), (void*)0);
         g.BindVertexArray(0);
+    }
+
+    /// <summary>Decodes + uploads the active model's embedded base-colour PNG once (cached per model reference).
+    /// Returns true when a texture is bound and ready on texture unit 9.</summary>
+    private bool EnsureDragonTexture(GL g, MapaTur.Application.Terrain.SkinnedModel model)
+    {
+        if (ReferenceEquals(dragonTextureModel, model))
+        {
+            return dragonTexture != 0;
+        }
+
+        // Model changed (variant switch): drop the previous texture before deciding the new path.
+        if (dragonTexture != 0)
+        {
+            g.DeleteTexture(dragonTexture);
+            dragonTexture = 0;
+        }
+
+        dragonTextureModel = model;
+        if (model.BaseColorImageBytes is not { Length: > 0 } bytes)
+        {
+            return false;
+        }
+
+        try
+        {
+            using var bitmap = SkiaSharp.SKBitmap.Decode(bytes);
+            if (bitmap is null)
+            {
+                return false;
+            }
+
+            using var rgba = bitmap.Copy(SkiaSharp.SKColorType.Rgba8888);
+            if (rgba is null)
+            {
+                return false;
+            }
+
+            dragonTexture = g.GenTexture();
+            g.ActiveTexture(TextureUnit.Texture9);
+            g.BindTexture(TextureTarget.Texture2D, dragonTexture);
+            unsafe
+            {
+                g.TexImage2D(
+                    TextureTarget.Texture2D, 0, (int)InternalFormat.Rgba8,
+                    (uint)rgba.Width, (uint)rgba.Height, 0,
+                    PixelFormat.Rgba, PixelType.UnsignedByte, (void*)rgba.GetPixels());
+            }
+
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.Repeat);
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.Repeat);
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+            g.GenerateMipmap(TextureTarget.Texture2D);
+            g.ActiveTexture(TextureUnit.Texture0);
+            Log.Information("[Dragon] base-colour texture uploaded ({W}x{H})", rgba.Width, rgba.Height);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "[Dragon] texture decode/upload failed — solid colour fallback");
+            dragonTexture = 0;
+            return false;
+        }
+    }
+
+    // ── DRAGON FIRE (procedural fireball billboards, additive) ──────────────────────────────────────────────
+    /// <summary>One fireball to draw this frame: world position (exaggerated Z), radius in world metres,
+    /// intensity 0..1 (fades out), and a per-ball seed decorrelating the flicker.</summary>
+    public readonly record struct FireballSprite(Vector3 WorldPos, float RadiusMeters, float Intensity, float Seed);
+
+    private uint fireProgram;
+    private int fireMvpLoc = -1, fireRightLoc = -1, fireUpLoc = -1, fireTimeLoc = -1;
+    private uint fireVao, fireVbo;
+    private IReadOnlyList<FireballSprite>? fireballs;
+    private float[] fireScratch = Array.Empty<float>();
+
+    /// <summary>Sets the fireballs drawn this frame (null/empty hides the pass).</summary>
+    public void SetFireballs(IReadOnlyList<FireballSprite>? balls) => fireballs = balls;
+
+    private void EnsureFireProgram(GL g)
+    {
+        if (fireProgram != 0 && g.IsProgram(fireProgram))
+        {
+            return;
+        }
+
+        // Camera-facing quads; the fragment paints a procedural fire ball: white-hot core → orange → red rim,
+        // edge licked by animated noise (flames), additive blend so overlapping balls glow hotter.
+        const string vs =
+            "#version 300 es\n" +
+            "layout(location=0) in vec3 aCenter;\n" +
+            "layout(location=1) in vec2 aCorner;\n" +
+            "layout(location=2) in float aRadius;\n" +
+            "layout(location=3) in float aIntensity;\n" +
+            "layout(location=4) in float aSeed;\n" +
+            "uniform mat4 uMvp;\n" +
+            "uniform vec3 uRight;\n" +
+            "uniform vec3 uUp;\n" +
+            "out vec2 vUv;\n" +
+            "out float vIntensity;\n" +
+            "out float vSeed;\n" +
+            "void main(){ vec3 wp = aCenter + ((uRight * aCorner.x) + (uUp * aCorner.y)) * aRadius;\n" +
+            "  vUv = aCorner; vIntensity = aIntensity; vSeed = aSeed; gl_Position = uMvp * vec4(wp, 1.0); }\n";
+        const string fs =
+            "#version 300 es\n" +
+            "precision highp float;\n" +
+            "in vec2 vUv;\n" +
+            "in float vIntensity;\n" +
+            "in float vSeed;\n" +
+            "uniform float uTime;\n" +
+            "out vec4 frag;\n" +
+            "void main(){\n" +
+            "  float r = length(vUv);\n" +
+            "  float ang = atan(vUv.y, vUv.x);\n" +
+            "  float lick = (0.14 * sin((ang * 5.0) + (uTime * 21.0) + (vSeed * 37.0)))\n" +
+            "             + (0.08 * sin((ang * 9.0) - (uTime * 33.0) + (vSeed * 17.0)));\n" +
+            "  float edge = 0.78 + lick;\n" +
+            "  float body = 1.0 - smoothstep(edge - 0.38, edge, r);\n" +
+            "  if (body <= 0.003) discard;\n" +
+            "  float flick = 0.85 + (0.15 * sin((uTime * 27.0) + (vSeed * 53.0)));\n" +
+            "  vec3 core = vec3(1.0, 0.97, 0.72);\n" +
+            "  vec3 mid  = vec3(1.0, 0.55, 0.12);\n" +
+            "  vec3 rim  = vec3(0.85, 0.16, 0.03);\n" +
+            "  vec3 col = mix(core, mid, smoothstep(0.0, 0.45, r));\n" +
+            "  col = mix(col, rim, smoothstep(0.4, 0.85, r));\n" +
+            "  frag = vec4(col * body * flick * vIntensity, body * vIntensity);\n" +
+            "}\n";
+
+        uint v = CompileShader(g, ShaderType.VertexShader, vs);
+        uint f = CompileShader(g, ShaderType.FragmentShader, fs);
+        fireProgram = g.CreateProgram();
+        g.AttachShader(fireProgram, v);
+        g.AttachShader(fireProgram, f);
+        g.LinkProgram(fireProgram);
+        g.GetProgram(fireProgram, ProgramPropertyARB.LinkStatus, out int linked);
+        g.DetachShader(fireProgram, v);
+        g.DetachShader(fireProgram, f);
+        g.DeleteShader(v);
+        g.DeleteShader(f);
+        if (linked == 0)
+        {
+            string log = g.GetProgramInfoLog(fireProgram);
+            g.DeleteProgram(fireProgram);
+            fireProgram = 0;
+            throw new InvalidOperationException("Fireball program link failed: " + log);
+        }
+
+        fireMvpLoc = g.GetUniformLocation(fireProgram, "uMvp");
+        fireRightLoc = g.GetUniformLocation(fireProgram, "uRight");
+        fireUpLoc = g.GetUniformLocation(fireProgram, "uUp");
+        fireTimeLoc = g.GetUniformLocation(fireProgram, "uTime");
+
+        fireVao = g.GenVertexArray();
+        fireVbo = g.GenBuffer();
+        g.BindVertexArray(fireVao);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, fireVbo);
+        const int stride = 8 * sizeof(float); // center3 + corner2 + radius + intensity + seed
+        g.EnableVertexAttribArray(0);
+        g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, stride, (void*)0);
+        g.EnableVertexAttribArray(1);
+        g.VertexAttribPointer(1, 2, VertexAttribPointerType.Float, false, stride, (void*)(3 * sizeof(float)));
+        g.EnableVertexAttribArray(2);
+        g.VertexAttribPointer(2, 1, VertexAttribPointerType.Float, false, stride, (void*)(5 * sizeof(float)));
+        g.EnableVertexAttribArray(3);
+        g.VertexAttribPointer(3, 1, VertexAttribPointerType.Float, false, stride, (void*)(6 * sizeof(float)));
+        g.EnableVertexAttribArray(4);
+        g.VertexAttribPointer(4, 1, VertexAttribPointerType.Float, false, stride, (void*)(7 * sizeof(float)));
+        g.BindVertexArray(0);
+    }
+
+    private void DrawFireballs(GL g, Matrix4x4 mvp, Camera3D camera)
+    {
+        if (fireballs is not { Count: > 0 } balls)
+        {
+            return;
+        }
+
+        EnsureFireProgram(g);
+
+        // Camera basis for the billboards.
+        Vector3 fwd = Vector3.Normalize(camera.Target - camera.Position);
+        Vector3 right = Vector3.Normalize(Vector3.Cross(fwd, Vector3.UnitZ));
+        if (!float.IsFinite(right.X))
+        {
+            right = Vector3.UnitX; // looking straight down — any horizontal right works
+        }
+
+        Vector3 up = Vector3.Cross(right, fwd);
+
+        // 6 verts (two triangles) per ball into one dynamic buffer.
+        int floats = balls.Count * 6 * 8;
+        if (fireScratch.Length < floats)
+        {
+            fireScratch = new float[floats];
+        }
+
+        Span<(float X, float Y)> corners = stackalloc (float, float)[6]
+        {
+            (-1f, -1f), (1f, -1f), (1f, 1f),
+            (-1f, -1f), (1f, 1f), (-1f, 1f),
+        };
+        int w = 0;
+        foreach (FireballSprite ball in balls)
+        {
+            foreach ((float cx, float cy) in corners)
+            {
+                fireScratch[w++] = ball.WorldPos.X;
+                fireScratch[w++] = ball.WorldPos.Y;
+                fireScratch[w++] = ball.WorldPos.Z;
+                fireScratch[w++] = cx;
+                fireScratch[w++] = cy;
+                fireScratch[w++] = ball.RadiusMeters;
+                fireScratch[w++] = ball.Intensity;
+                fireScratch[w++] = ball.Seed;
+            }
+        }
+
+        g.UseProgram(fireProgram);
+        WriteMat4(dragonMat4, mvp);
+        g.UniformMatrix4(fireMvpLoc, 1, false, dragonMat4);
+        g.Uniform3(fireRightLoc, right.X, right.Y, right.Z);
+        g.Uniform3(fireUpLoc, up.X, up.Y, up.Z);
+        g.Uniform1(fireTimeLoc, (float)(frameClock.ElapsedMilliseconds % 100_000) / 1000f);
+
+        // Additive glow: depth-TESTED (rocks occlude the fire) but no depth write (translucent).
+        g.Enable(EnableCap.DepthTest);
+        g.DepthMask(false);
+        g.Enable(EnableCap.Blend);
+        g.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.One);
+        g.Disable(EnableCap.CullFace);
+        g.BindVertexArray(fireVao);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, fireVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, new ReadOnlySpan<float>(fireScratch, 0, floats), BufferUsageARB.DynamicDraw);
+        g.DrawArrays(PrimitiveType.Triangles, 0, (uint)(balls.Count * 6));
+        g.BindVertexArray(0);
+        g.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+        g.DepthMask(true);
     }
 
     private void DrawDragon(GL g, Matrix4x4 mvp)
@@ -6164,8 +6454,20 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         WriteMat3(dragonMat3, dragonNormalRot);
         g.UniformMatrix3(dragonNormalLoc, 1, false, dragonMat3);
         g.Uniform3(dragonLightLoc, dragonLightDir.X, dragonLightDir.Y, dragonLightDir.Z);
-        g.Uniform3(dragonColorLoc, 0.34f, 0.09f, 0.09f); // dark blood-red hide
+        g.Uniform3(dragonColorLoc, 0.34f, 0.09f, 0.09f); // dark blood-red hide (untextured fallback)
         g.Uniform1(dragonAmbientLoc, 0.38f);
+
+        // Texture path: bind the model's base colour (unit 9 — 0-8 are owned by terrain/CSM/ghost passes).
+        bool hasTex = EnsureDragonTexture(g, model);
+        if (hasTex)
+        {
+            g.ActiveTexture(TextureUnit.Texture9);
+            g.BindTexture(TextureTarget.Texture2D, dragonTexture);
+            g.ActiveTexture(TextureUnit.Texture0);
+        }
+
+        g.Uniform1(dragonTexLoc, 9);
+        g.Uniform1(dragonHasTexLoc, hasTex ? 1f : 0f);
 
         g.Enable(EnableCap.DepthTest);
         g.DepthFunc(DepthFunction.Lequal);
@@ -6188,6 +6490,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 dragonNrmScratch = new float[n * 3];
             }
 
+            if (dragonUvScratch.Length < n * 2)
+            {
+                dragonUvScratch = new float[n * 2];
+            }
+
             for (int i = 0; i < n; i++)
             {
                 Vector3 pos = p.PosedPositions[i];
@@ -6199,12 +6506,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 dragonNrmScratch[b] = nrm.X;
                 dragonNrmScratch[b + 1] = nrm.Y;
                 dragonNrmScratch[b + 2] = nrm.Z;
+                int t = i * 2;
+                Vector2 uv = i < p.TexCoords.Length ? p.TexCoords[i] : Vector2.Zero;
+                dragonUvScratch[t] = uv.X;
+                dragonUvScratch[t + 1] = uv.Y;
             }
 
             g.BindBuffer(BufferTargetARB.ArrayBuffer, dragonPosVbo);
             g.BufferData<float>(BufferTargetARB.ArrayBuffer, new ReadOnlySpan<float>(dragonPosScratch, 0, n * 3), BufferUsageARB.DynamicDraw);
             g.BindBuffer(BufferTargetARB.ArrayBuffer, dragonNrmVbo);
             g.BufferData<float>(BufferTargetARB.ArrayBuffer, new ReadOnlySpan<float>(dragonNrmScratch, 0, n * 3), BufferUsageARB.DynamicDraw);
+            g.BindBuffer(BufferTargetARB.ArrayBuffer, dragonUvVbo);
+            g.BufferData<float>(BufferTargetARB.ArrayBuffer, new ReadOnlySpan<float>(dragonUvScratch, 0, n * 2), BufferUsageARB.DynamicDraw);
             g.BindBuffer(BufferTargetARB.ElementArrayBuffer, dragonEbo);
             g.BufferData<uint>(BufferTargetARB.ElementArrayBuffer, new ReadOnlySpan<uint>(p.Indices), BufferUsageARB.DynamicDraw);
             g.DrawElements(PrimitiveType.Triangles, (uint)p.Indices.Length, DrawElementsType.UnsignedInt, (void*)0);
@@ -6948,6 +7261,46 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         DrawLine(g, roadLines, RoadHalfWidthPx);
+    }
+
+    // User-imported off-trail ("pozaszlaki") tracks: GPX/TCX polylines the user added to their private layer.
+    // Same world-projection + ribbon machinery as roads/trails, but one distinct hot-magenta colour and drawn
+    // with alpha + depth-write-off (like the trail overlay) so a fragment losing the near-field z-fight softens
+    // instead of punching a hole. Depth-TEST stays on so real ridges in front still occlude the track.
+    private void DrawOffTrailLines(GL g, IReadOnlyList<Trail>? tracks, DemRaster? raster, TerrainMesh3D mesh, DetailElevationField? detail)
+    {
+        if (tracks is null || tracks.Count == 0 || raster is null)
+        {
+            return;
+        }
+
+        if (offTrailLines is null
+            || !ReferenceEquals(lastOffTrailTracks, tracks)
+            || !ReferenceEquals(lastOffTrailRaster, raster)
+            || !ReferenceEquals(lastOffTrailMesh, mesh)
+            || !ReferenceEquals(lastOffTrailDetail, detail))
+        {
+            DeleteLine(g, ref offTrailLines);
+            IReadOnlyList<TrailWorldLine> world = Trail3DWorldProjection.ToWorld(tracks, raster, mesh, OffTrailLiftMeters, detail, BakedElevationIndex);
+
+            var ribbon = new RibbonBuilder();
+            foreach (TrailWorldLine line in world)
+            {
+                ribbon.Append(line.World, OffTrailR, OffTrailG, OffTrailB, OffTrailAlpha);
+            }
+
+            offTrailLines = UploadLine(g, ribbon);
+            lastOffTrailTracks = tracks;
+            lastOffTrailRaster = raster;
+            lastOffTrailMesh = mesh;
+            lastOffTrailDetail = detail;
+        }
+
+        g.Enable(EnableCap.Blend);
+        g.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+        g.DepthMask(false);
+        DrawLine(g, offTrailLines, OffTrailHalfWidthPx);
+        g.DepthMask(true);
     }
 
     // FAR-FIELD FALLBACK for the route. The route is primarily painted INTO the surface decal now (dashed translucent
@@ -8570,6 +8923,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         DeleteLine(gl, ref trailLinesBlack);
         DeleteLine(gl, ref routeLines);
         DeleteLine(gl, ref roadLines);
+        DeleteLine(gl, ref offTrailLines);
         DeleteLine(gl, ref exposedLines);
         gl.DeleteFramebuffer(msaaFbo);
         gl.DeleteRenderbuffer(msaaColorRb);

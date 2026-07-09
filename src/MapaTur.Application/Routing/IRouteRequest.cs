@@ -20,4 +20,8 @@ public enum RouteProfile
 /// <param name="Start">Origin point in geographic coordinates.</param>
 /// <param name="End">Destination point in geographic coordinates.</param>
 /// <param name="Profile">Optimisation profile.</param>
-public sealed record RouteRequest(GeoPoint Start, GeoPoint End, RouteProfile Profile);
+/// <param name="IncludeOffTrailTracks">
+/// When true, the planner augments the trail graph with the user's imported off-trail ("pozaszlaki") tracks
+/// as penalised off-trail edges, so a route may use them. Off by default — the marked-trail graph is unchanged.
+/// </param>
+public sealed record RouteRequest(GeoPoint Start, GeoPoint End, RouteProfile Profile, bool IncludeOffTrailTracks = false);

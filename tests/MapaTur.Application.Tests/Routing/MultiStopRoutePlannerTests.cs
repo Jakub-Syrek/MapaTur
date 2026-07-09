@@ -119,4 +119,30 @@ public sealed class MultiStopRoutePlannerTests
 
         stub.Requests.Should().OnlyContain(r => r.Profile == RouteProfile.ShortestDistance);
     }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task PlanAsync_PropagatesIncludeOffTrailFlagToEachLeg(bool includeOffTrail)
+    {
+        var stub = new StubPlanner();
+        var planner = new MultiStopRoutePlanner(stub);
+        var stops = new[] { P(49.20, 20.00), P(49.21, 20.02), P(49.22, 20.04) };
+
+        await planner.PlanAsync(stops, RouteProfile.ShortestDistance, includeOffTrailTracks: includeOffTrail);
+
+        stub.Requests.Should().OnlyContain(r => r.IncludeOffTrailTracks == includeOffTrail);
+    }
+
+    [Fact]
+    public async Task PlanAsync_DefaultsToExcludingOffTrail()
+    {
+        var stub = new StubPlanner();
+        var planner = new MultiStopRoutePlanner(stub);
+        var stops = new[] { P(49.20, 20.00), P(49.21, 20.02) };
+
+        await planner.PlanAsync(stops, RouteProfile.ShortestDistance);
+
+        stub.Requests.Should().OnlyContain(r => !r.IncludeOffTrailTracks);
+    }
 }

@@ -36,11 +36,13 @@ public sealed class MultiStopRoutePlanner
     /// <param name="waypoints">Ordered stops; at least two (a start and an end).</param>
     /// <param name="profile">Cost profile applied to every leg.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
+    /// <param name="includeOffTrailTracks">When true, every leg may route over the user's imported off-trail tracks.</param>
     /// <exception cref="ArgumentException">Fewer than two waypoints.</exception>
     public async Task<MultiStopRouteResult> PlanAsync(
         IReadOnlyList<GeoPoint> waypoints,
         RouteProfile profile,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool includeOffTrailTracks = false)
     {
         ArgumentNullException.ThrowIfNull(waypoints);
         if (waypoints.Count < 2)
@@ -51,7 +53,7 @@ public sealed class MultiStopRoutePlanner
         var segments = new List<RouteSegment>();
         for (int leg = 0; leg < waypoints.Count - 1; leg++)
         {
-            var request = new RouteRequest(waypoints[leg], waypoints[leg + 1], profile);
+            var request = new RouteRequest(waypoints[leg], waypoints[leg + 1], profile, includeOffTrailTracks);
             Route? legRoute = await planner.PlanRouteAsync(request, cancellationToken).ConfigureAwait(false);
             if (legRoute is null)
             {
