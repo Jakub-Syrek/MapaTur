@@ -166,9 +166,8 @@ było zmierzone na STARYM exe (pułapka stale-exe). Zdjęte `readonly` + suppres
 wymuszał `readonly` = ta sama pętla). Commit **`6be4849`** (bramki: build 0/0, format czysty, testy 1742 green),
 **niepushnięty**.
 
-**Do sprawdzenia później (nie blokuje):** przetestowany **animowany**; ten sam kod obsługuje **klasycznego** smoka
-(`DragonClassicFootBones = ["Foot.L","Foot.R"]`) — raz wylądować klasycznym z włączonym debugiem i sprawdzić czy
-🔵 też siada na 🟡.
+**Oba warianty potwierdzone przez usera:** animowany ORAZ klasyczny (`DragonClassicFootBones = ["Foot.L","Foot.R"]`)
+— łapy siadają na widocznej grani. Zamknięte w całości.
 
 **Zostawione w kodzie (reużywalne):** `SampleRenderedMeshElevation` (JEDYNE dobre źródło wys. = realny mesh),
 `SkinnedModel.GetPosedBounds/GetLowestVertexYNear/RotateBoneOverlay/BlendBoneTowardBind/SetFrame`, `DrawDebugMarkers`
