@@ -71,6 +71,27 @@ public sealed class SkinnedModel
     /// <summary>Bone (armature node) names present in the rig — for wiring procedural animation to them.</summary>
     public IReadOnlyCollection<string> BoneNames => this.nodeByName.Keys;
 
+    /// <summary>
+    /// Axis-aligned bounds of the CURRENT posed vertices (not the bind pose). A baked clip can translate the
+    /// whole mesh (root motion), so the bind-pose centre no longer marks the visible model — centring on this
+    /// keeps the drawn dragon on its logical world position instead of drifting by the animation's offset.
+    /// </summary>
+    public (Vector3 Min, Vector3 Max) GetPosedBounds()
+    {
+        var min = new Vector3(float.PositiveInfinity);
+        var max = new Vector3(float.NegativeInfinity);
+        foreach (Primitive primitive in Primitives)
+        {
+            foreach (Vector3 vertex in primitive.PosedPositions)
+            {
+                min = Vector3.Min(min, vertex);
+                max = Vector3.Max(max, vertex);
+            }
+        }
+
+        return float.IsFinite(min.X) ? (min, max) : (BoundsMin, BoundsMax);
+    }
+
     /// <summary>Bind-pose axis-aligned bounds (model local space) — for scaling the model into world metres.</summary>
     public Vector3 BoundsMin { get; private set; }
 
@@ -96,14 +117,22 @@ public sealed class SkinnedModel
     /// <summary>Raw encoded (PNG/JPEG) bytes of the first material's base-colour texture, or null if none.</summary>
     public byte[]? BaseColorImageBytes { get; }
 
+    // Lenient loading: real-world Sketchfab-era exports fail SharpGLTF's STRICT validation on harmless issues
+    // (e.g. the animated dragon's skin weights don't sum exactly to 1). TryFix normalizes what it can instead
+    // of throwing, so those models load; genuinely broken files still throw.
+    private static readonly SharpGLTF.Schema2.ReadSettings LenientRead = new()
+    {
+        Validation = SharpGLTF.Validation.ValidationMode.TryFix,
+    };
+
     /// <summary>Loads a model from a glTF/GLB file path.</summary>
-    public static SkinnedModel Load(string path) => FromModel(ModelRoot.Load(path));
+    public static SkinnedModel Load(string path) => FromModel(ModelRoot.Load(path, LenientRead));
 
     /// <summary>Loads a model from GLB bytes.</summary>
     public static SkinnedModel LoadGlb(byte[] glb)
     {
         ArgumentNullException.ThrowIfNull(glb);
-        return FromModel(ModelRoot.ParseGLB(new ArraySegment<byte>(glb)));
+        return FromModel(ModelRoot.ParseGLB(new ArraySegment<byte>(glb), LenientRead));
     }
 
     private static SkinnedModel FromModel(ModelRoot model)
@@ -200,12 +229,130 @@ public sealed class SkinnedModel
     /// </summary>
     public void Pose(int animationIndex, float seconds)
     {
+        SetFrame(animationIndex, seconds);
+        Skin();
+    }
+
+    /// <summary>
+    /// Sets the armature to animation <paramref name="animationIndex"/> at <paramref name="seconds"/> WITHOUT
+    /// skinning — so the caller can layer procedural bone deltas on top (<see cref="RotateBoneOverlay"/>) and
+    /// then <see cref="Skin"/> once. <see cref="Pose"/> = SetFrame + Skin.
+    /// </summary>
+    public void SetFrame(int animationIndex, float seconds)
+    {
         if (Animations.Count > 0 && animationIndex >= 0 && animationIndex < Animations.Count)
         {
             this.armature.SetAnimationFrame(animationIndex, seconds);
         }
+    }
 
-        Skin();
+    /// <summary>
+    /// Composes a rotation onto a bone's CURRENT local transform — i.e. on top of whatever the animation frame
+    /// (or a prior overlay) put there — unlike <see cref="RotateBone"/>, which composes onto the BIND pose.
+    /// This is the hook for layering procedural motion (e.g. a turn wing-kick) over a baked clip.
+    /// No-op if the bone name isn't in the rig. Returns true if applied.
+    /// </summary>
+    public bool RotateBoneOverlay(string boneName, Quaternion localDelta)
+    {
+        if (!this.nodeByName.TryGetValue(boneName, out int idx))
+        {
+            return false;
+        }
+
+        NodeInstance node = this.armature.LogicalNodes[idx];
+        node.LocalMatrix = Matrix4x4.CreateFromQuaternion(localDelta) * node.LocalMatrix;
+        return true;
+    }
+
+    /// <summary>
+    /// Model-space position of a bone in the CURRENT pose (after <see cref="SetFrame"/>/<see cref="ResetPose"/>
+    /// and any overlays), or null when the rig has no such bone. Used e.g. to seat the perched dragon's FEET on
+    /// the ground (the bind bounds' lowest point may be its tail, not its feet).
+    /// </summary>
+    public Vector3? GetBonePosedPosition(string boneName)
+    {
+        if (!this.nodeByName.TryGetValue(boneName, out int idx))
+        {
+            return null;
+        }
+
+        return this.armature.LogicalNodes[idx].ModelMatrix.Translation;
+    }
+
+    /// <summary>
+    /// Lowest POSED-vertex height (model-space Y) within <paramref name="radiusXZ"/> (in the ground plane) of
+    /// any anchor point — i.e. the actual SOLE under a foot, where the foot bone's origin sits at joint height
+    /// (seating on the bone floated the feet). Null when no vertex is in range. Call after <see cref="Skin"/>.
+    /// </summary>
+    public float? GetLowestVertexYNear(ReadOnlySpan<Vector3> anchors, float radiusXZ)
+    {
+        float best = float.PositiveInfinity;
+        float radiusSquared = radiusXZ * radiusXZ;
+        foreach (Primitive primitive in Primitives)
+        {
+            foreach (Vector3 vertex in primitive.PosedPositions)
+            {
+                if (vertex.Y >= best)
+                {
+                    continue;
+                }
+
+                foreach (Vector3 anchor in anchors)
+                {
+                    float dx = vertex.X - anchor.X;
+                    float dz = vertex.Z - anchor.Z;
+                    if ((dx * dx) + (dz * dz) <= radiusSquared)
+                    {
+                        best = vertex.Y;
+                        break;
+                    }
+                }
+            }
+        }
+
+        return float.IsFinite(best) ? best : null;
+    }
+
+    /// <summary>
+    /// Blends a bone's CURRENT local transform toward its BIND pose (weight 0 = leave the animation frame,
+    /// 1 = fully bind). This SUPPRESSES a baked clip's motion on that bone — e.g. freezing the inner wing
+    /// spread-still during a turn while the clip keeps beating the outer one. Call after <see cref="SetFrame"/>,
+    /// before <see cref="Skin"/>. No-op if the bone name isn't in the rig. Returns true if applied.
+    /// </summary>
+    public bool BlendBoneTowardBind(string boneName, float weight)
+    {
+        if (!this.nodeByName.TryGetValue(boneName, out int idx))
+        {
+            return false;
+        }
+
+        NodeInstance node = this.armature.LogicalNodes[idx];
+        node.LocalMatrix = LerpTransform(node.LocalMatrix, this.bindLocals[idx], Math.Clamp(weight, 0f, 1f));
+        return true;
+    }
+
+    // TRS-decomposed lerp (slerped rotation) — a raw component-wise matrix lerp would shear mid-blend.
+    private static Matrix4x4 LerpTransform(Matrix4x4 a, Matrix4x4 b, float t)
+    {
+        if (t <= 0f)
+        {
+            return a;
+        }
+
+        if (t >= 1f)
+        {
+            return b;
+        }
+
+        if (Matrix4x4.Decompose(a, out Vector3 scaleA, out Quaternion rotA, out Vector3 posA)
+            && Matrix4x4.Decompose(b, out Vector3 scaleB, out Quaternion rotB, out Vector3 posB))
+        {
+            return Matrix4x4.CreateScale(Vector3.Lerp(scaleA, scaleB, t))
+                * Matrix4x4.CreateFromQuaternion(Quaternion.Slerp(rotA, rotB, t))
+                * Matrix4x4.CreateTranslation(Vector3.Lerp(posA, posB, t));
+        }
+
+        return t < 0.5f ? a : b;
     }
 
     /// <summary>Resets every bone to its bind-pose local transform — the start of a PROCEDURAL pose (no baked
@@ -267,9 +414,21 @@ public sealed class SkinnedModel
     {
         try
         {
-            MaterialChannel? channel = material?.FindChannel("BaseColor");
-            SharpGLTF.Memory.MemoryImage? image = channel?.Texture?.PrimaryImage?.Content;
-            return image?.Content.ToArray();
+            // Metallic-roughness carries the albedo as "BaseColor"; KHR_materials_pbrSpecularGlossiness
+            // (Sketchfab-era exports, e.g. the animated dragon) exposes it as "Diffuse" instead. NOTE: the
+            // "BaseColor" CHANNEL exists even on a spec-gloss material (just with no texture), so a
+            // FindChannel(...) ?? FindChannel(...) chain never falls through — probe each channel for an
+            // actual texture instead.
+            foreach (string channelName in new[] { "BaseColor", "Diffuse" })
+            {
+                SharpGLTF.Memory.MemoryImage? image = material?.FindChannel(channelName)?.Texture?.PrimaryImage?.Content;
+                if (image is { Content.Length: > 0 } found)
+                {
+                    return found.Content.ToArray();
+                }
+            }
+
+            return null;
         }
         catch (Exception)
         {

@@ -1,3 +1,5 @@
+using System.Collections.ObjectModel;
+
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 
@@ -17,6 +19,7 @@ using MapaTur.Application.Trails;
 using MapaTur.Domain.Geography;
 using MapaTur.Domain.Location;
 using MapaTur.Domain.Terrain;
+using MapaTur.Domain.Tracks;
 using MapaTur.Domain.Trails;
 using MapaTur.Infrastructure.Terrain;
 using MapaTur.Infrastructure.Trails.Overpass;
@@ -60,6 +63,8 @@ public sealed partial class MapPageViewModel : ObservableObject
     private readonly IRouteLayerRenderer routeRenderer;
     private readonly IClimbingLayerRenderer climbingRenderer;
     private readonly ImportTcxFileUseCase importTcxFileUseCase;
+    private readonly ImportTrackFileUseCase? importTrackFileUseCase;
+    private readonly ITrackRepository? trackRepository;
     private readonly IOverpassClient overpassClient;
     private readonly ITrailRepository trailRepository;
     private readonly IClimbingOverpassClient climbingOverpassClient;
@@ -274,7 +279,11 @@ public sealed partial class MapPageViewModel : ObservableObject
     public bool ShowStreamingPill => IsStreamingDetail && !UiHidden;
 
     [RelayCommand]
-    private void ToggleUi() => UiHidden = !UiHidden;
+    private void ToggleUi()
+    {
+        Serilog.Log.Information("[UI] ToggleUi invoked (UiHidden {From}->{To})", UiHidden, !UiHidden);
+        UiHidden = !UiHidden;
+    }
 
     partial void OnUiHiddenChanged(bool value)
     {
@@ -1261,6 +1270,178 @@ public sealed partial class MapPageViewModel : ObservableObject
         ExposedRoutes3DOverlay = (ShowExposedRoutes && rawExposedRoutes3D is not null) ? rawExposedRoutes3D : null;
     }
 
+    // ── User-imported off-trail ("pozaszlaki") tracks ───────────────────────────────────────────────────
+    // GPX/TCX polylines the user imports and manages from the Mapa/Dane panel. Persisted in mapatur-tracks.db
+    // (survive restarts), rendered as a distinct hot-magenta 3D layer, and — when the planning toggle is on —
+    // fed to the route planner as off-trail edges. importTrackFileUseCase / trackRepository are optional so the
+    // VM still constructs in tests that don't wire them (the add/delete commands then no-op).
+
+    /// <summary>Off-trail tracks overlay for the 3D view (imported GPX/TCX), or null when hidden/empty.</summary>
+    [ObservableProperty]
+    private IReadOnlyList<Trail>? offTrailTracks3DOverlay;
+
+    /// <summary>Panel list (enumeration) of imported off-trail tracks.</summary>
+    public ObservableCollection<OffTrailTrackItem> OffTrailTrackItems { get; } = [];
+
+    /// <summary>Whether any off-trail tracks are imported — drives the panel's empty-state.</summary>
+    public bool HasOffTrailTracks => OffTrailTrackItems.Count > 0;
+
+    // Domain tracks currently loaded from the repository — the single source for both the render overlay and
+    // (Phase 3) the routing off-trail edges. Converted to Trail polylines on demand.
+    private IReadOnlyList<Track> loadedOffTrailTracks = [];
+
+    /// <summary>Master show/hide for the off-trail layer (persisted).</summary>
+    [ObservableProperty]
+    private bool showOffTrailTracks = true;
+
+    partial void OnShowOffTrailTracksChanged(bool value) => ApplyOffTrailTracks();
+
+    /// <summary>
+    /// Whether the route planner may route over the imported off-trail tracks (persisted). On by default —
+    /// the user asked for off-trail-aware planning with an opt-OUT. Purely a planning input: it does not
+    /// affect the layer's visibility (that's <see cref="ShowOffTrailTracks"/>).
+    /// </summary>
+    [ObservableProperty]
+    private bool useOffTrailInPlanning = true;
+
+    /// <summary>Trail polylines converted from the loaded off-trail tracks (source for overlay + routing).</summary>
+    private List<Trail> OffTrailTrailPolylines()
+    {
+        var trails = new List<Trail>(loadedOffTrailTracks.Count);
+        foreach (Track track in loadedOffTrailTracks)
+        {
+            if (TryTrackToTrail(track, out Trail trail))
+            {
+                trails.Add(trail);
+            }
+        }
+        return trails;
+    }
+
+    private void ApplyOffTrailTracks()
+    {
+        OffTrailTracks3DOverlay = (ShowOffTrailTracks && loadedOffTrailTracks.Count > 0)
+            ? SimplifyForOverlay3D(OffTrailTrailPolylines())
+            : null;
+    }
+
+    /// <summary>Loads the persisted off-trail tracks and refreshes the panel list + 3D overlay. Safe to call repeatedly.</summary>
+    public async Task LoadOffTrailTracksAsync()
+    {
+        if (trackRepository is null)
+        {
+            return;
+        }
+        try
+        {
+            loadedOffTrailTracks = await trackRepository.GetAllAsync().ConfigureAwait(true);
+            RebuildOffTrailTrackItems();
+            ApplyOffTrailTracks();
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to load off-trail tracks");
+        }
+    }
+
+    /// <summary>Prompts for a GPX/TCX file, imports its tracks, persists them, and refreshes the layer.</summary>
+    [RelayCommand]
+    public async Task AddOffTrailTrackAsync()
+    {
+        if (importTrackFileUseCase is null || trackRepository is null)
+        {
+            return;
+        }
+        try
+        {
+            string? path = await filePicker.PickFileAsync(Localization.AppStrings.FilePickerTrack);
+            if (path is null)
+            {
+                return;
+            }
+
+            IReadOnlyList<Track> tracks = await importTrackFileUseCase.HandleAsync(path);
+            if (tracks.Count == 0)
+            {
+                StatusMessage = Localization.AppStrings.StatusTrackNoTracks;
+                return;
+            }
+
+            foreach (Track track in tracks)
+            {
+                await trackRepository.AddAsync(track);
+            }
+
+            await LoadOffTrailTracksAsync();
+            StatusMessage = Fmt(Localization.AppStrings.StatusTrackImportedFormat, tracks.Count, OffTrailTrackItems.Count);
+            logger.LogInformation("Imported {Count} off-trail track(s) from {Path}", tracks.Count, path);
+        }
+        catch (FileNotFoundException ex)
+        {
+            StatusMessage = Localization.AppStrings.StatusFileNotFound;
+            logger.LogWarning(ex, "Off-trail track file not found");
+        }
+        catch (NotSupportedException ex)
+        {
+            StatusMessage = Fmt(Localization.AppStrings.StatusTrackUnsupportedFormat, ex.Message);
+            logger.LogWarning(ex, "Unsupported off-trail track format");
+        }
+        catch (InvalidDataException ex)
+        {
+            StatusMessage = Fmt(Localization.AppStrings.StatusTrackParseFailedFormat, ex.Message);
+            logger.LogError(ex, "Failed to parse off-trail track file");
+        }
+    }
+
+    /// <summary>Deletes an imported off-trail track and refreshes the layer.</summary>
+    [RelayCommand]
+    public async Task DeleteOffTrailTrackAsync(OffTrailTrackItem? item)
+    {
+        if (item is null || trackRepository is null)
+        {
+            return;
+        }
+        try
+        {
+            await trackRepository.DeleteAsync(item.Id);
+            await LoadOffTrailTracksAsync();
+            StatusMessage = Fmt(Localization.AppStrings.StatusTrackDeletedFormat, item.Name);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to delete off-trail track {Id}", item.Id);
+        }
+    }
+
+    private void RebuildOffTrailTrackItems()
+    {
+        OffTrailTrackItems.Clear();
+        foreach (Track track in loadedOffTrailTracks)
+        {
+            double distanceKm = track.ComputeDistanceMeters() / 1000.0;
+            OffTrailTrackItems.Add(new OffTrailTrackItem(track.Id, track.Name, distanceKm, track.Points.Count));
+        }
+        OnPropertyChanged(nameof(HasOffTrailTracks));
+    }
+
+    private static bool TryTrackToTrail(Track track, out Trail trail)
+    {
+        var geometry = new List<GeoPoint>(track.Points.Count);
+        foreach (TrackPoint point in track.Points)
+        {
+            geometry.Add(point.Position);
+        }
+        if (geometry.Count < 2)
+        {
+            trail = null!;
+            return false;
+        }
+        // Trail.Id is only used to dedup OSM trails; off-trail tracks aren't deduped, so a stable hash of the
+        // Guid suffices. Markings empty — the colour comes from the dedicated off-trail render constants.
+        trail = new Trail(unchecked((long)track.Id.GetHashCode()), track.Name, Array.Empty<TrailMarking>(), geometry);
+        return true;
+    }
+
     /// <summary>Master show/hide for all trails; when off, no trail renders regardless of the colour/region filter.</summary>
     /// <summary>Whether the orthophoto drape is shown on the 3D terrain (else hypsometric shading).</summary>
     [ObservableProperty] private bool showOrtho = true;
@@ -1273,6 +1454,23 @@ public sealed partial class MapPageViewModel : ObservableObject
 
     /// <summary>Easter egg: eagles soaring on thermals over the Orla Perć ridge. Off by default. Persisted.</summary>
     [ObservableProperty] private bool showEagles;
+
+    /// <summary>A flock of autonomous dragons circling the nearby peaks (and drifting toward the ridden dragon
+    /// when it flies near). Off by default. Persisted.</summary>
+    [ObservableProperty] private bool showAiDragons;
+
+    /// <summary>Which dragon F7 rides: 0 = classic (red, procedural flap), 1 = animated (textured, baked flying loop). Persisted.</summary>
+    [ObservableProperty] private int dragonVariantIndex;
+
+    /// <summary>Selects the dragon variant from the chip pair in the Widok panel.</summary>
+    [RelayCommand]
+    private void SetDragonVariant(string? index)
+    {
+        if (int.TryParse(index, out int variant))
+        {
+            DragonVariantIndex = variant;
+        }
+    }
 
     /// <summary>
     /// Animated atmosphere effects (drifting clouds, lightning, eagles, bloom/god-rays + the continuous repaint
@@ -1806,6 +2004,8 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <param name="elevationSource">Optional routing elevation source; the base DEM is handed to it on load so "fastest time" routing sees real slopes; null disables elevation-aware routing.</param>
     /// <param name="bakedTileIndex">Optional scanned baked-DEM-pyramid index (Stage 2c); backs the baked-tile streaming path. Null/empty falls back to the runtime-build detail path.</param>
     /// <param name="waterwayClient">Optional Overpass client for watercourses (streams/rivers + waterfalls); null disables the water layer download.</param>
+    /// <param name="importTrackFileUseCase">Optional unified GPX/TCX import use case for off-trail tracks; null disables the off-trail add command.</param>
+    /// <param name="trackRepository">Optional persistence for imported off-trail tracks; null disables the off-trail layer.</param>
     public MapPageViewModel(
         IFilePickerService filePicker,
         IFileSaverService fileSaver,
@@ -1840,7 +2040,9 @@ public sealed partial class MapPageViewModel : ObservableObject
         OfflinePackageService? packageService = null,
         DemElevationSource? elevationSource = null,
         MapaTur.Application.Terrain.BakedTileAvailabilityIndex? bakedTileIndex = null,
-        MapaTur.Application.Waterways.IWaterwayOverpassClient? waterwayClient = null)
+        MapaTur.Application.Waterways.IWaterwayOverpassClient? waterwayClient = null,
+        ImportTrackFileUseCase? importTrackFileUseCase = null,
+        ITrackRepository? trackRepository = null)
     {
         ArgumentNullException.ThrowIfNull(filePicker);
         ArgumentNullException.ThrowIfNull(fileSaver);
@@ -1882,6 +2084,8 @@ public sealed partial class MapPageViewModel : ObservableObject
         this.detailTileCached = gugikDemSource is null ? null : gugikDemSource.IsCached;
         this.bakedTileIndex = bakedTileIndex;
         this.waterwayClient = waterwayClient;
+        this.importTrackFileUseCase = importTrackFileUseCase;
+        this.trackRepository = trackRepository;
 
         // Subscribe to the location feed once at construction. The service stays silent until the
         // user opts in via ToggleLocationTracking; we just need to be listening so the first fix
@@ -2011,6 +2215,8 @@ public sealed partial class MapPageViewModel : ObservableObject
             [nameof(ShowTrails)] = (() => ShowTrails, v => ShowTrails = v),
             [nameof(ShowRoads)] = (() => ShowRoads, v => ShowRoads = v),
             [nameof(ShowExposedRoutes)] = (() => ShowExposedRoutes, v => ShowExposedRoutes = v),
+            [nameof(ShowOffTrailTracks)] = (() => ShowOffTrailTracks, v => ShowOffTrailTracks = v),
+            [nameof(UseOffTrailInPlanning)] = (() => UseOffTrailInPlanning, v => UseOffTrailInPlanning = v),
             [nameof(TrailColourRedEnabled)] = (() => TrailColourRedEnabled, v => TrailColourRedEnabled = v),
             [nameof(TrailColourBlueEnabled)] = (() => TrailColourBlueEnabled, v => TrailColourBlueEnabled = v),
             [nameof(TrailColourGreenEnabled)] = (() => TrailColourGreenEnabled, v => TrailColourGreenEnabled = v),
@@ -2019,6 +2225,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             [nameof(ShowPeakNames)] = (() => ShowPeakNames, v => ShowPeakNames = v),
             [nameof(ShowSauronTower)] = (() => ShowSauronTower, v => ShowSauronTower = v),
             [nameof(ShowEagles)] = (() => ShowEagles, v => ShowEagles = v),
+            [nameof(ShowAiDragons)] = (() => ShowAiDragons, v => ShowAiDragons = v),
             [nameof(AtmosphereEffectsEnabled)] = (() => AtmosphereEffectsEnabled, v => AtmosphereEffectsEnabled = v),
             [nameof(ShowNightSky)] = (() => ShowNightSky, v => ShowNightSky = v),
             [nameof(ShowContours)] = (() => ShowContours, v => ShowContours = v),
@@ -2040,6 +2247,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         try
         {
             RenderQuality = settingsStore.GetChoice(nameof(RenderQuality), RenderQuality);
+            DragonVariantIndex = settingsStore.GetChoice(nameof(DragonVariantIndex), DragonVariantIndex);
             foreach (var (name, fns) in PersistedFlags)
             {
                 fns.Set(settingsStore.GetFlag(name, fns.Get()));
@@ -2063,6 +2271,10 @@ public sealed partial class MapPageViewModel : ObservableObject
         if (name == nameof(RenderQuality))
         {
             settingsStore.SetChoice(name, RenderQuality);
+        }
+        else if (name == nameof(DragonVariantIndex))
+        {
+            settingsStore.SetChoice(name, DragonVariantIndex);
         }
         else if (PersistedFlags.TryGetValue(name, out (Func<bool> Get, Action<bool> Set) fns))
         {
@@ -2732,7 +2944,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             // hard it detours AROUND the żleb (2 km instead of 0.9 m) — turning a stop on it into a spur. The
             // direct on-trail route is what a walker following the markings actually wants.
             MultiStopRouteResult result = await Task.Run(
-                () => multiStopPlanner.PlanAsync(stops, RouteProfile.ShortestDistance)).ConfigureAwait(true);
+                () => multiStopPlanner.PlanAsync(stops, RouteProfile.ShortestDistance, includeOffTrailTracks: UseOffTrailInPlanning)).ConfigureAwait(true);
 
             if (result.Route is null)
             {
@@ -4908,6 +5120,10 @@ public sealed partial class MapPageViewModel : ObservableObject
 
         try
         {
+            // User-imported off-trail ("pozaszlaki") tracks are global (not tied to the loaded map footprint),
+            // so restore them once at startup — they then render as soon as the terrain raster is available.
+            await LoadOffTrailTracksAsync().ConfigureAwait(true);
+
             // Global online orthophoto base (Esri) at the very bottom — gives the whole voivodeship
             // satellite imagery even where there's no offline basemap; tiles cache locally on view.
             // The detailed Tatry MBTiles (loaded below) stacks on top where it exists.

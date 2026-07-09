@@ -165,7 +165,9 @@ public static class MauiProgram
         services.AddSingleton<IPoiLayerRenderer, MapsuiPoiLayerRenderer>();
         services.AddSingleton<IRoadLayerRenderer, MapsuiRoadLayerRenderer>();
         services.AddSingleton<ITcxParser, TcxParser>();
+        services.AddSingleton<IGpxParser, GpxParser>();
         services.AddTransient<ImportTcxFileUseCase>();
+        services.AddTransient<ImportTrackFileUseCase>();
 
         // Store trails at FULL geometry (no store-time simplification). Simplifying on store silently dropped
         // junction vertices that two trails SHARE in OSM (e.g. where the Żleb Kulczyńskiego meets the green
@@ -197,6 +199,9 @@ public static class MauiProgram
             new SqliteClimbingRepository(Path.Combine(FileSystem.AppDataDirectory, "mapatur-climbing.db")));
         services.AddSingleton<IPoiRepository>(_ =>
             new SqlitePoiRepository(Path.Combine(FileSystem.AppDataDirectory, "mapatur-pois.db")));
+        // User-imported off-trail ("pozaszlaki") GPX/TCX tracks, persisted separately so they survive restarts.
+        services.AddSingleton<ITrackRepository>(_ =>
+            new SqliteTrackRepository(Path.Combine(FileSystem.AppDataDirectory, "mapatur-tracks.db")));
         services.AddHttpClient<IClimbingOverpassClient, OverpassClimbingHttpClient>(client =>
         {
             client.Timeout = TimeSpan.FromSeconds(90);

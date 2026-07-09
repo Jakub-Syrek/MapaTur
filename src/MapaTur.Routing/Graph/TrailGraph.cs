@@ -42,14 +42,44 @@ public sealed class TrailGraph
     /// <param name="snapToleranceMeters">Snapping tolerance in meters.</param>
     /// <returns>A new graph instance.</returns>
     public static TrailGraph Build(IEnumerable<Trail> trails, double snapToleranceMeters = DefaultSnapToleranceMeters)
+        => Build(trails, Array.Empty<Trail>(), snapToleranceMeters);
+
+    /// <summary>
+    /// Builds a routing graph from marked trails PLUS user-imported off-trail ("pozaszlaki") polylines.
+    /// Trail edges are on-trail; off-trail edges are flagged <see cref="GraphEdge.IsOffTrail"/> so the cost
+    /// functions penalise them. Both sets share the same snap index, so an off-trail track that starts or
+    /// ends near a trail connects to it — a route can leave the marked trail onto the imported line and
+    /// rejoin. Passing an empty off-trail set is identical to the single-argument overload.
+    /// </summary>
+    /// <param name="trails">Marked trails to ingest (on-trail edges).</param>
+    /// <param name="offTrailTracks">User-imported off-trail polylines (off-trail edges).</param>
+    /// <param name="snapToleranceMeters">Snapping tolerance in meters.</param>
+    /// <returns>A new graph instance.</returns>
+    public static TrailGraph Build(IEnumerable<Trail> trails, IEnumerable<Trail> offTrailTracks, double snapToleranceMeters = DefaultSnapToleranceMeters)
     {
         ArgumentNullException.ThrowIfNull(trails);
+        ArgumentNullException.ThrowIfNull(offTrailTracks);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(snapToleranceMeters);
 
         var nodes = new List<GeoPoint>();
         var adjacency = new List<List<GraphEdge>>();
         var index = new SpatialNodeIndex(snapToleranceMeters);
 
+        // Order matters only for node numbering: trails first keeps existing graphs byte-identical when no
+        // off-trail tracks are supplied (the single-arg path). Off-trail lines then snap onto trail nodes.
+        Ingest(trails, isOffTrail: false, nodes, adjacency, index);
+        Ingest(offTrailTracks, isOffTrail: true, nodes, adjacency, index);
+
+        return new TrailGraph(nodes, adjacency);
+    }
+
+    private static void Ingest(
+        IEnumerable<Trail> trails,
+        bool isOffTrail,
+        List<GeoPoint> nodes,
+        List<List<GraphEdge>> adjacency,
+        SpatialNodeIndex index)
+    {
         foreach (var trail in trails)
         {
             var nodeIds = new List<NodeId>(trail.Geometry.Count);
@@ -60,11 +90,9 @@ public sealed class TrailGraph
 
             for (int i = 0; i < nodeIds.Count - 1; i++)
             {
-                AddBidirectionalEdge(adjacency, nodes, nodeIds[i], nodeIds[i + 1], isOffTrail: false);
+                AddBidirectionalEdge(adjacency, nodes, nodeIds[i], nodeIds[i + 1], isOffTrail);
             }
         }
-
-        return new TrailGraph(nodes, adjacency);
     }
 
     /// <summary>Returns the geographic position of a node.</summary>

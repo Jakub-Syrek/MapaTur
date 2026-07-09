@@ -143,6 +143,19 @@ public partial class Terrain3DView : ContentView
         set => SetValue(WaterfallsProperty, value);
     }
 
+    /// <summary>Bindable user-imported off-trail ("pozaszlaki") tracks drawn as distinct hot-magenta ribbons.</summary>
+    public static readonly BindableProperty OffTrailTracksProperty = BindableProperty.Create(
+        nameof(OffTrailTracks),
+        typeof(IReadOnlyList<Trail>),
+        typeof(Terrain3DView),
+        propertyChanged: OnOverlayDataChanged);
+
+    public IReadOnlyList<Trail>? OffTrailTracks
+    {
+        get => (IReadOnlyList<Trail>?)GetValue(OffTrailTracksProperty);
+        set => SetValue(OffTrailTracksProperty, value);
+    }
+
     /// <summary>Bindable exposed/guide routes (Trail polylines) drawn as dotted lines, distinct from marked trails.</summary>
     public static readonly BindableProperty ExposedRoutesProperty = BindableProperty.Create(
         nameof(ExposedRoutes),
@@ -239,6 +252,29 @@ public partial class Terrain3DView : ContentView
     {
         get => (bool)GetValue(ShowEaglesProperty);
         set => SetValue(ShowEaglesProperty, value);
+    }
+
+    public static readonly BindableProperty ShowDebugMarkersProperty = BindableProperty.Create(
+        nameof(ShowDebugMarkers), typeof(bool), typeof(Terrain3DView), false);
+
+    /// <summary>When on (bound to the "LOD diagnostics" DEBUG toggle), draws the dragon foot-placement probe
+    /// markers (RED origin / GREEN bind-centre / BLUE foot anchor / YELLOW target rock) + the [DragonSeat] log.</summary>
+    public bool ShowDebugMarkers
+    {
+        get => (bool)GetValue(ShowDebugMarkersProperty);
+        set => SetValue(ShowDebugMarkersProperty, value);
+    }
+
+    public static readonly BindableProperty ShowAiDragonsProperty = BindableProperty.Create(
+        nameof(ShowAiDragons), typeof(bool), typeof(Terrain3DView), false,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).OnShowAiDragonsChanged((bool)n));
+
+    /// <summary>Ambient flock of autonomous dragons circling the nearby peaks (and drifting toward the player's
+    /// dragon when it flies near). Off hides + stops them.</summary>
+    public bool ShowAiDragons
+    {
+        get => (bool)GetValue(ShowAiDragonsProperty);
+        set => SetValue(ShowAiDragonsProperty, value);
     }
 
     public static readonly BindableProperty AtmosphereEffectsEnabledProperty = BindableProperty.Create(
@@ -722,6 +758,37 @@ public partial class Terrain3DView : ContentView
         }
     }
 
+    /// <summary>Which dragon model F7 rides: 0 = classic (solid red, procedural wing rig), 1 = animated
+    /// (textured, baked idle/running/flying loops). Switching while airborne swaps the model in place.</summary>
+    public static readonly BindableProperty DragonVariantProperty = BindableProperty.Create(
+        nameof(DragonVariant),
+        typeof(int),
+        typeof(Terrain3DView),
+        0,
+        propertyChanged: OnDragonVariantChanged);
+
+    public int DragonVariant
+    {
+        get => (int)GetValue(DragonVariantProperty);
+        set => SetValue(DragonVariantProperty, value);
+    }
+
+    private static void OnDragonVariantChanged(BindableObject bindable, object oldValue, object newValue)
+    {
+        if (bindable is Terrain3DView view && (int)newValue != (int)oldValue)
+        {
+            // Drop the loaded model so the next need (or the active flight, right now) loads the new variant.
+            // The procedural Skia dragon covers the gap while the GLB streams in.
+            view.dragonModel3D = null;
+            view.dragonRig = null;
+            view.dragonLoadedVariant = -1;
+            if (view.dragonActive)
+            {
+                view.LoadDragonModelAsync();
+            }
+        }
+    }
+
     /// <summary>When true (LOD Etap 3), the view reports the camera's ground focus as it moves so the host
     /// can stream the 1 m DETAIL tiles to follow it. The coarse base stays static and framed — only the
     /// detail layer swaps — so a detail reload must NOT reframe the camera.</summary>
@@ -988,7 +1055,7 @@ public partial class Terrain3DView : ContentView
         // are enabled. With effects OFF the view stops auto-redrawing while the camera is still, so the GPU
         // idles instead of rendering ~15 heavy fps forever — the main battery saver on mobile. Gestures and
         // data changes still trigger their own InvalidateSurface, so the map stays responsive.
-        if (IsVisible && Atmosphere is not null && AtmosphereEffectsEnabled)
+        if (IsVisible && ((Atmosphere is not null && AtmosphereEffectsEnabled) || ShowAiDragons))
         {
             Canvas.InvalidateSurface();
         }
@@ -1831,13 +1898,176 @@ public partial class Terrain3DView : ContentView
     private bool dragonYawLeft, dragonYawRight;              // ←/→ arrows steer yaw (turn)
     private bool dragonRmbHeld;                              // right button held → hold the steered attitude (no auto-level)
 
-    // 3D rigged dragon model (loaded once from Resources/Raw/dragon.glb) + its procedural wing-flap rig. Until it
-    // loads, the procedural Skia dragon is drawn as a fallback. The posed model + its world/normal matrices are
-    // computed in the flight tick and pushed to the GL renderer in OnPaintSurface.
+    // 3D rigged dragon model (loaded per variant from Resources/Raw) + its animation driver. The classic
+    // variant (dragon.glb) has no baked clips, so a procedural DragonRig flaps it; the animated variant
+    // (dragon-animated.glb) carries baked idle/running/flying loops and plays "flying" via SkinnedModel.Pose.
+    // Until a model loads, the procedural Skia dragon is drawn as a fallback. The posed model + its world/
+    // normal matrices are computed in the flight tick and pushed to the GL renderer in OnPaintSurface.
     private MapaTur.Application.Terrain.SkinnedModel? dragonModel3D;
-    private MapaTur.Application.Terrain.DragonRig? dragonRig;
+    private MapaTur.Application.Terrain.DragonRig? dragonRig; // classic variant only (procedural flap)
     private bool dragonModelLoading;
+    private int dragonLoadedVariant = -1;      // which DragonVariant the loaded model belongs to (−1 = none)
+    private int dragonFlyingAnimIndex = -1;    // baked "flying" clip index in the animated variant (−1 = none)
+    private int dragonIdleAnimIndex = -1;      // baked "idle" clip index (perched loop) in the animated variant
+    private float dragonAnimTime;              // playback clock for the baked loop (wrapped by its duration)
     private float dragonTailPhase;
+
+    // Landing-cycle animation state (smoothed toward per-phase targets each tick).
+    private float dragonLegsDown;              // 0 = flight tuck … 1 = standing (flare/perch)
+    private float dragonWingBrake;             // 0..1 air-brake spread during the flare
+    private float dragonBreathePhase;          // chest breathing clock while perched
+    private float dragonPerchOrbitAz;          // cinematic orbit azimuth around the perched dragon
+    private float dragonFlapBurst;             // 1 → 0 visual overdrive after a Space flap-boost
+    private float dragonFlapSprintRemaining;   // radians of the CURRENT stroke to whip through instantly (turn onset)
+    private bool dragonArrowWasHeld;           // previous tick's ←→ state — the entry stroke fires on the rising edge
+    private float dragonTurnStrokeDir;         // ±1 while a single-stroke turn is in flight (0 = none; CLASSIC rig)
+    private float dragonPrevCyclePos;          // previous tick's flap-cycle position — detects the stroke's end
+    private const float DragonTurnStrokeImpulseRadians = 0.5f; // heading JUMP delivered by one wing stroke (~29°)
+
+    // ANIMATED variant's single-stroke turn: the baked clip's wings ignore dragonFlapPhase entirely, so its
+    // stroke is a timed sequence instead — both wings FINISH the clip's current motion for a beat, then the
+    // OUTER wing plays one big procedural flap (clip suppressed on that wing only) and the shove fires with
+    // the slam. Timer < 0 = idle.
+    private float dragonAnimStrokeTimer = -1f;
+    private float dragonAnimStrokeDir;         // ±1 (arrow direction; + = left turn)
+    private bool dragonAnimStrokeFired;        // physics impulse fired for this stroke
+    private float dragonTraceAccum;            // ~10 Hz trajectory trace throttle
+    private bool dragonPerchStreamSent;        // the landing cycle reports its FIXED streaming camera exactly once
+    private float dragonSeatLogAccum;          // ~1 Hz throttle for the [DragonSeat] probe diagnostic
+    private const float DragonAnimStrokeDelaySeconds = 0.15f; // "dokończenie ruchu oboma"
+    private const float DragonAnimStrokeFlapSeconds = 0.45f;  // the single outer-wing beat
+    private const float DragonAnimStrokeRaiseDeg = 26f;       // wing lifts…
+    private const float DragonAnimStrokeSlamDeg = 78f;        // …then slams down through level
+    private const float DragonAnimStrokeInnerScale = 0.32f;   // the INNER wing echoes the beat lightly (natural asymmetry)
+
+    // Foot bones used to seat the perched dragon's SOLES on the summit (per variant; posed positions).
+    private static readonly string[] DragonAnimatedFootBones = ["l_ball.163", "r_ball.175", "l_toeA.164", "r_toeA.176"];
+    private static readonly string[] DragonClassicFootBones = ["Foot.L", "Foot.R"];
+
+    // Head/mouth bones — fire spawns from the POSED head (which the animation nods/scans), not a fixed body point.
+    private static readonly string[] DragonAnimatedMouthBones = ["head.25", "jaw_01.26"];
+    private static readonly string[] DragonClassicMouthBones = ["Head.001", "SkullControl"];
+    private const float DragonSnoutOffsetMeters = 5f;      // snout tip ahead of the head bone, along the aim
+    private Vector3? dragonMouthWorld;                     // posed head world position (exaggerated Z) for the fire muzzle
+#pragma warning disable CS0414 // KEPT for the next session's perch-seating work (see docs/HANDOFF-2026-07-09) — do NOT delete
+    private float? dragonPerchGroundElev; // rendered-mesh elevation under the perch, sampled once (feet sit on the DRAWN rock)
+#pragma warning restore CS0414
+    private const float DragonFootPadMeters = 0.5f; // sink the measured foot bones this far so soles/claws touch (tune)
+
+    // ── Fire breath (F held = stream of fireballs from the mouth) ──────────────────────────────────────────
+    // Balls simulate in REAL metres (like the flight body): position/velocity real, Z exaggerated only when
+    // building the render sprites. A ball dies on TTL or bursts (short expanding flash) on terrain contact.
+    private struct DragonFireball
+    {
+        public System.Numerics.Vector2 XY;
+        public float Elevation;
+        public System.Numerics.Vector2 VelocityXY;
+        public float VelocityZ;
+        public float Age;
+        public float Seed;
+        public int TargetDragon; // index into aiFlock this ball homes onto (−1 = unguided, flies straight)
+    }
+
+    // Fire billboard kind — matches the fragment-shader branch in Terrain3DGlRenderer.
+    private enum FireKind { Flame = 0, Flash = 1, Shock = 2, Ember = 3, Puff = 4, Smoke = 5, Steam = 6 }
+
+    // An explosion particle (flash / expanding fireball puff / shock ring / arcing ember). Real metres; Z is
+    // exaggerated only when the render sprite is built.
+    private struct FireParticle
+    {
+        public Vector3 Pos;
+        public Vector3 Vel;
+        public float Age;
+        public float Life;
+        public float Seed;
+        public float Size0; // start radius (m)
+        public float Size1; // end radius (m)
+        public FireKind Kind;
+    }
+
+    private readonly List<DragonFireball> dragonFireballs = [];
+    private readonly List<FireParticle> dragonFireParticles = [];
+#pragma warning disable IDE0044 // mutated (dragonBurstCounter++); readonly would break the build (CS0191)
+    private int dragonBurstCounter;
+#pragma warning restore IDE0044
+    private readonly List<MapaTur.App.Services.Terrain3DGlRenderer.FireballSprite> dragonFireSprites = [];       // additive
+    private readonly List<MapaTur.App.Services.Terrain3DGlRenderer.FireballSprite> dragonFireSmokeSprites = []; // straight-alpha (2nd pass)
+
+    // ── DRAGON-FOOT PLACEMENT PROBE (KNOWN OPEN ITEM, see docs/HANDOFF) ──────────────────────────────────────
+    // Diagnostic markers drawn AFTER the final dragon transform, one per candidate anchor, so we can SEE on the
+    // rendered rock which point actually sits at the visible claws. Legend: RED=model origin, GREEN=bind-bounds
+    // centre (where the code plants worldPos), BLUE=posed foot-bone anchor (the drawn feet), YELLOW=target
+    // rendered-mesh point (where the feet SHOULD land). Cleared when not perched.
+    private readonly List<MapaTur.App.Services.Terrain3DGlRenderer.DebugMarker> dragonDebugMarkers = [];
+
+    // ── AI DRAGON FLOCK ── a small mixed-species flock that circles the nearby peaks (ambient) and drifts toward
+    // the player's dragon when it flies close. Each member owns its OWN posed model instance (independent pose),
+    // its DragonFlight body (same physics as the player) and a DragonAiPilot policy. Updated from the render.
+    // Kept to 3 (perf — more stutters). Three DIFFERENT species, each colour-tinted, for variety.
+    private const int AiFlockCount = 3;
+    private const float AiFlockOrbitRadiusMeters = 300f;
+    private const float AiFlockCruiseHeightMeters = 130f;      // orbit altitude above the home peak
+    private const float AiFlockReactRadiusMeters = 900f;       // player nearer than this → the orbit drifts onto him
+    private const float AiFlockModelSizeMeters = 30f;          // clearly visible dragons (bigger than the ridden 24 m)
+
+    private enum AiFlockKind { Animated, Prowler, Static }
+
+    private sealed class AiFlockDragon
+    {
+        public required MapaTur.Application.Terrain.DragonFlight Flight { get; init; }
+        public required MapaTur.Application.Terrain.DragonAiPilot Pilot { get; init; }
+        public required MapaTur.Application.Terrain.SkinnedModel Model { get; init; }
+        public required AiFlockKind Kind { get; init; }
+        public int AnimClip { get; init; } = -1;                                // Animated: baked "flying" clip
+        public MapaTur.Application.Terrain.ProwlerDragonRig? Rig { get; init; }  // Prowler: procedural wing beat
+        public byte[]? TextureBytes { get; init; }
+        public Vector3 Tint { get; init; } = Vector3.One;
+        public System.Numerics.Vector2 HomePeakXY { get; set; }
+        public float AnimTime { get; set; }
+        public float FlapPhase { get; set; }
+        public float TailPhase { get; set; }
+        public bool Alive { get; set; } = true; // a fireball hit kills it → skipped everywhere (kept in the list so ball target indices stay stable)
+    }
+
+    // Per-member colour tints (multiplied over the hide) — clearly distinct so the flock reads as different dragons.
+    private static readonly Vector3[] AiFlockTints =
+    {
+        new(0.55f, 0.75f, 1.25f), // icy blue
+        new(1.25f, 0.95f, 0.5f),  // gold
+        new(1.2f, 0.5f, 1.1f),    // violet
+    };
+
+    private readonly List<AiFlockDragon> aiFlock = [];
+    private readonly List<MapaTur.App.Services.Terrain3DGlRenderer.AiDragonInstance> aiFlockInstances = [];
+    // The three species, staged once on load; each becomes one flock member (own posed instance).
+    private MapaTur.Application.Terrain.SkinnedModel? aiModelAnimated;
+    private int aiClipAnimated = -1;
+    private MapaTur.Application.Terrain.SkinnedModel? aiModelProwler;
+    private MapaTur.Application.Terrain.SkinnedModel? aiModelRed;
+    private bool aiFlockModelsReady;
+    private bool aiFlockLoading;
+    private readonly System.Diagnostics.Stopwatch aiFlockClock = new();
+    private double aiFlockLastSeconds;
+    private bool dragonFireHeld;
+    // Mutated every frame in StepDragonFire (-= dt / ++ / =). IDE0044 misfires "make readonly" here, and obeying
+    // it (as `dotnet format` did on this branch) makes the build fail CS0191 — the vicious cycle that left the
+    // committed branch un-buildable and running a stale exe. Keep them mutable; suppress the false positive.
+#pragma warning disable IDE0044
+    private float dragonFireCooldown; // stream-rate countdown while F is held
+    private int dragonFireCounter;    // increments per spawned ball (flicker seed)
+#pragma warning restore IDE0044
+    private const float DragonFireCooldownSeconds = 0.045f; // very dense stream while F is held (balls FUSE into one jet)
+    private const int DragonFireMaxBalls = 72;              // hard cap so a held stream / point-blank burst can't flood fill
+    private const float DragonFireSpeedMetersPerSecond = 75f; // muzzle speed on top of the dragon's own
+    private const float DragonFireTtlSeconds = 2.4f;
+    private const float DragonFireMuzzleOffsetMeters = 11f;  // roughly the head, ahead of the body centre
+    private const float DragonFireRadiusMeters = 5f; // big — the dense stream fuses into one wide continuous jet
+    // Auto-aim: a fireball locks onto the AI dragon whose bearing is within this cone of the aim, then homes on
+    // it (steering toward its live position) and bursts on contact.
+    private static readonly float DragonFireLockConeCos = MathF.Cos(10f * MathF.PI / 180f); // ±10°
+    private const float DragonFireHomingPerSecond = 3.2f;   // how fast the ball re-aims onto a moving target
+    private const float DragonFireHitRadiusMeters = 14f;    // burst when this close to the locked dragon
+    private MapaTur.Application.Terrain.DragonFlightPhase dragonPrevPhase = MapaTur.Application.Terrain.DragonFlightPhase.Flying;
     private Matrix4x4 dragonWorldMatrix = Matrix4x4.Identity;
     private Matrix4x4 dragonNormalMatrix = Matrix4x4.Identity;
     private const float DragonModelSizeMeters = 24f; // target max extent of the dragon in world metres
@@ -1845,13 +2075,38 @@ public partial class Terrain3DView : ContentView
     // Model-orientation tuning (glTF bone/axis frames vary — adjusted by eye):
     private static readonly float DragonYawOffset = MathF.PI / 2f; // model head is +Z; after Y-up→Z-up remap, +90° aims it along +X (head forward)
     private const float DragonDropMeters = 1f; // slight seat below the flight point (centring now does the heavy lifting)
+    // The ANIMATED model's bind bounds are pulled DOWN by its long legs/tail, so bounds-centring leaves the
+    // BODY well above the flight point ("jest 10 m nade mną") — seat that variant much lower. Per-variant,
+    // because the classic model's centring is already right.
+    private const float DragonAnimatedDropMeters = 11f;
     private const float DragonPitchSign = -1f; // model noses DOWN when descending (↑ = dive), matched to the flight
     private const float DragonRollSign = 1f;
     private float dragonCamPitch;              // camera pitch LAGS the dragon's (dragon responds first, camera catches up)
-    private const float DragonCamPitchFollow = 2.4f; // per-second lerp of the camera toward the dragon's pitch
+    private const float DragonCamPitchFollow = 2.4f; // per-second lerp of the camera toward the dragon's pitch (diving — the lag looks great)
+    private const float DragonCamPitchFollowClimb = 11f; // CLIMBING: near-immediate — with the lag the rising dragon flew INTO the camera
+    // Camera YAW also lags (a lazy-tracking chase cam): welded to the heading, a turn spun the WORLD while the
+    // dragon sat pinned mid-frame — the artificial look. With the lag the dragon visibly banks and yaws in the
+    // frame and the camera swings around after it.
+    private float dragonCamAzimuth;
+    private const float DragonCamYawFollow = 2.2f;
 
-    private const float DragonChaseDistanceMeters = 20f; // camera behind the dragon (world units)
-    private const float DragonChaseHeightMeters = 6f;    // and above it
+    private const float DragonChaseDistanceMeters = 13f; // camera behind the dragon (world units) — close, so the beast fills the frame
+    private const float DragonChaseHeightMeters = 4.5f;  // and above it (the classic framing the user accepted)
+    private const float DragonChaseLookAheadMeters = 30f;
+    // CLIMB pull-back: 13 m behind the CENTRE of a 24 m dragon leaves the tail metres from the lens — when the
+    // body pitches up it sweeps INTO the camera. Nose-up immediately pushes the eye back + up (per radian of
+    // climb pitch), keyed off the dragon's RAW pitch so it reacts the same frame, not after the camera catches up.
+    private const float DragonChaseClimbPullbackMeters = 16f;
+    private const float DragonChaseClimbRaiseMeters = 6f;
+
+    // Cinematic orbit around the PERCHED dragon (slow pan of the summit + panorama; steering nudges it).
+    private const float DragonPerchOrbitRadPerSec = 0.2f; // brisk showcase spin (0.06 crawled — "kamera szybciej")
+    private const float DragonPerchOrbitDistanceMeters = 26f;
+    private const float DragonPerchOrbitHeightMeters = 7f;
+
+    // Which model wing is the OUTER one for the ANIMATED dragon's turn stroke (l_*/r_* bone naming vs the
+    // world was checked in-app): −1 = turn LEFT beats the RIGHT wing, as it must.
+    private const float DragonAnimatedTurnMirror = -1f;
     private const float DragonMouseSteerPerPixel = 0.05f; // right-drag pixels → yaw steer input
     private const float DragonMousePitchPerPixel = 0.11f;  // right-drag pixels → pitch steer (stronger, so the mouse climbs/dives clearly)
 
@@ -2050,6 +2305,7 @@ public partial class Terrain3DView : ContentView
         dragonPitchUp = dragonPitchDown = dragonYawLeft = dragonYawRight = false;
         dragonRmbHeld = false;
         dragonCamPitch = 0f;
+        dragonCamAzimuth = heading; // start the lazy chase cam in sync (no entry swing)
         dragonFlapPhase = 0f;
         dragonDetailTick = 0;
         dragonActive = true;
@@ -2064,35 +2320,80 @@ public partial class Terrain3DView : ContentView
 
         dragonTimer.Start();
         LoadDragonModelAsync(); // fire-and-forget; the procedural Skia dragon shows until the 3D model is ready
+        FocusForKeyboard(); // pull keyboard focus onto the canvas so Space flaps and can't "click" a focused button
         Serilog.Log.Information("[Dragon] flight ON at ({X:F0},{Y:F0}) heading={H:F2}", startXY.X, startXY.Y, heading);
         Canvas.InvalidateSurface();
     }
 
-    // Loads the bundled rigged dragon (Resources/Raw/dragon.glb) once, off the UI thread, and builds its rig.
+    // Loads the selected dragon variant's GLB once, off the UI thread. Classic gets the procedural DragonRig;
+    // the animated variant instead resolves its baked "flying" clip and is driven by SkinnedModel.Pose.
     private async void LoadDragonModelAsync()
     {
-        if (dragonModel3D is not null || dragonModelLoading)
+        if ((dragonModel3D is not null && dragonLoadedVariant == DragonVariant) || dragonModelLoading)
         {
             return;
         }
 
         dragonModelLoading = true;
+        int variant = DragonVariant;
         try
         {
-            await using Stream s = await Microsoft.Maui.Storage.FileSystem.OpenAppPackageFileAsync("dragon.glb").ConfigureAwait(false);
+            string asset = variant == 1 ? "dragon-animated.glb" : "dragon.glb";
+            await using Stream s = await Microsoft.Maui.Storage.FileSystem.OpenAppPackageFileAsync(asset).ConfigureAwait(false);
             using var ms = new MemoryStream();
             await s.CopyToAsync(ms).ConfigureAwait(false);
             var model = MapaTur.Application.Terrain.SkinnedModel.LoadGlb(ms.ToArray());
-            var rig = new MapaTur.Application.Terrain.DragonRig(model);
+
+            // Animated variant: play the baked "flying" loop (fall back to clip 0 if unnamed) and remember
+            // "idle" for the perched state. Classic (no clips) flaps procedurally via DragonRig.
+            int flyingIndex = -1;
+            int idleIndex = -1;
+            MapaTur.Application.Terrain.DragonRig? rig = null;
+            if (model.Animations.Count > 0)
+            {
+                for (int i = 0; i < model.Animations.Count; i++)
+                {
+                    if (string.Equals(model.Animations[i].Name, "flying", StringComparison.OrdinalIgnoreCase))
+                    {
+                        flyingIndex = i;
+                    }
+                    else if (string.Equals(model.Animations[i].Name, "idle", StringComparison.OrdinalIgnoreCase))
+                    {
+                        idleIndex = i;
+                    }
+                }
+
+                if (flyingIndex < 0)
+                {
+                    flyingIndex = 0;
+                }
+            }
+            else
+            {
+                rig = new MapaTur.Application.Terrain.DragonRig(model);
+            }
+
             MainThread.BeginInvokeOnMainThread(() =>
             {
+                // The user may have flipped the selector during the load — only install a still-wanted model.
+                if (DragonVariant != variant)
+                {
+                    return;
+                }
+
                 dragonModel3D = model;
                 dragonRig = rig;
+                dragonLoadedVariant = variant;
+                dragonFlyingAnimIndex = flyingIndex;
+                dragonIdleAnimIndex = idleIndex;
+                dragonAnimTime = 0f;
                 Canvas.InvalidateSurface();
             });
             Serilog.Log.Information(
-                "[Dragon] 3D model loaded: {Prims} prims, extent={Ext:F2}, bones={Bones}",
-                model.Primitives.Count, model.LocalExtent, model.BoneNames.Count);
+                "[Dragon] 3D model loaded ({Asset}): {Prims} prims, extent={Ext:F2}, bones={Bones}, anims=[{Anims}], tex={Tex}",
+                asset, model.Primitives.Count, model.LocalExtent, model.BoneNames.Count,
+                string.Join(", ", model.Animations.Select(a => $"{a.Name}:{a.Duration:F1}s")),
+                model.BaseColorImageBytes is { Length: > 0 } bytes ? $"{bytes.Length / 1024}kB" : "none");
         }
         catch (Exception ex)
         {
@@ -2102,6 +2403,309 @@ public partial class Terrain3DView : ContentView
         {
             dragonModelLoading = false;
         }
+    }
+
+    // ── AI DRAGON FLOCK ─────────────────────────────────────────────────────────────────────────────────────
+    // The flock is UPDATED from inside the render (UpdateAiFlock, dt from aiFlockClock) and REPAINTED by the
+    // existing animationTimer / dragon-timer — it deliberately owns NO timer of its own. A third invalidation
+    // loop stacking on the dragon+atmosphere timers crashed the WinUI compositor (APPCRASH in Microsoft.UI.Xaml,
+    // 0xc0000005, only ever while flying with the flock on).
+    private void OnShowAiDragonsChanged(bool on)
+    {
+        if (on)
+        {
+            aiFlockClock.Restart();
+            aiFlockLastSeconds = 0.0;
+            if (aiFlock.Count == 0 && !aiFlockLoading)
+            {
+                LoadAiFlockAsync();
+            }
+        }
+        else
+        {
+            aiFlockInstances.Clear();
+        }
+
+        Canvas.InvalidateSurface();
+    }
+
+    // Loads the THREE flock species once (animated dragon, prowler, static red flyer), off the UI thread. The
+    // animated one plays its baked "flying" clip; the prowler flaps procedurally; the red one is a rigid glider.
+    // Spawn is deferred to the UI thread once the terrain frame is ready.
+    private async void LoadAiFlockAsync()
+    {
+        if (aiFlockLoading || aiFlockModelsReady)
+        {
+            return;
+        }
+
+        aiFlockLoading = true;
+        try
+        {
+            MapaTur.Application.Terrain.SkinnedModel animated = await LoadGlbAsync("dragon-animated.glb").ConfigureAwait(false);
+            MapaTur.Application.Terrain.SkinnedModel prowler = await LoadGlbAsync("prowler-dragon.glb").ConfigureAwait(false);
+            MapaTur.Application.Terrain.SkinnedModel red = await LoadGlbAsync("red-flying-dragon.glb").ConfigureAwait(false);
+
+            int flying = -1;
+            for (int i = 0; i < animated.Animations.Count; i++)
+            {
+                if (string.Equals(animated.Animations[i].Name, "flying", StringComparison.OrdinalIgnoreCase))
+                {
+                    flying = i;
+                }
+            }
+
+            if (flying < 0 && animated.Animations.Count > 0)
+            {
+                flying = 0;
+            }
+
+            MainThread.BeginInvokeOnMainThread(() =>
+            {
+                if (!ShowAiDragons)
+                {
+                    return; // toggled off mid-load
+                }
+
+                aiModelAnimated = animated;
+                aiClipAnimated = flying;
+                aiModelProwler = prowler;
+                aiModelRed = red;
+                aiFlockModelsReady = true;
+                Serilog.Log.Information(
+                    "[AiDragon] species loaded — animated(ext={A:F2},clip={C},tex={AT}) prowler(ext={P:F2},tex={PT}) red(ext={R:F2},tex={RT})",
+                    animated.LocalExtent, flying, animated.BaseColorImageBytes?.Length ?? 0,
+                    prowler.LocalExtent, prowler.BaseColorImageBytes?.Length ?? 0,
+                    red.LocalExtent, red.BaseColorImageBytes?.Length ?? 0);
+                TrySpawnAiFlock(); // spawns now if the terrain frame is ready, else on the next tick
+            });
+        }
+        catch (Exception ex)
+        {
+            Serilog.Log.Warning(ex, "[AiDragon] flock load failed");
+        }
+        finally
+        {
+            aiFlockLoading = false;
+        }
+    }
+
+    private static async Task<MapaTur.Application.Terrain.SkinnedModel> LoadGlbAsync(string asset)
+    {
+        await using Stream s = await Microsoft.Maui.Storage.FileSystem.OpenAppPackageFileAsync(asset).ConfigureAwait(false);
+        using var ms = new MemoryStream();
+        await s.CopyToAsync(ms).ConfigureAwait(false);
+        return MapaTur.Application.Terrain.SkinnedModel.LoadGlb(ms.ToArray());
+    }
+
+    // Places the 3-species flock over the nearest peaks. Deferred until BOTH the models are loaded and the
+    // terrain frame exists (peaks → world XY + ground sampling need it).
+    private void TrySpawnAiFlock()
+    {
+        if (!aiFlockModelsReady || aiModelAnimated is null || aiModelProwler is null || aiModelRed is null
+            || WorldFrame is not { } frame)
+        {
+            return;
+        }
+
+        aiFlock.Clear();
+        List<System.Numerics.Vector2> centers = PickFlockCenters(frame, AiFlockCount);
+        for (int i = 0; i < AiFlockCount; i++)
+        {
+            System.Numerics.Vector2 home = centers[i];
+            float ground = SampleWalkGround(home) ?? 0f;
+            int dir = (i % 2 == 0) ? 1 : -1;
+
+            var start = home + new System.Numerics.Vector2(AiFlockOrbitRadiusMeters, 0f);
+            float heading = dir > 0 ? MathF.PI / 2f : -MathF.PI / 2f;
+            var flight = new MapaTur.Application.Terrain.DragonFlight(start, heading, SampleWalkGround);
+            var pilot = new MapaTur.Application.Terrain.DragonAiPilot
+            {
+                CircleCenter = home,
+                CircleRadiusMeters = AiFlockOrbitRadiusMeters,
+                TargetAltitudeMeters = ground + AiFlockCruiseHeightMeters,
+                Direction = dir,
+            };
+
+            // One member per species (0 = animated, 1 = prowler, 2 = red glider), each colour-tinted.
+            AiFlockKind kind = i switch { 0 => AiFlockKind.Animated, 1 => AiFlockKind.Prowler, _ => AiFlockKind.Static };
+            MapaTur.Application.Terrain.SkinnedModel model = kind switch
+            {
+                AiFlockKind.Animated => aiModelAnimated,
+                AiFlockKind.Prowler => aiModelProwler,
+                _ => aiModelRed,
+            };
+            MapaTur.Application.Terrain.ProwlerDragonRig? rig = null;
+            if (kind == AiFlockKind.Prowler)
+            {
+                rig = new MapaTur.Application.Terrain.ProwlerDragonRig(model);
+                if (rig.MissingBones.Count > 0)
+                {
+                    Serilog.Log.Warning("[ProwlerRig] missing bones (won't animate): {Missing}", string.Join(", ", rig.MissingBones));
+                }
+            }
+            else if (kind == AiFlockKind.Static)
+            {
+                model.Skin(); // no per-frame posing — populate PosedPositions from bind once (else it draws collapsed)
+            }
+
+            aiFlock.Add(new AiFlockDragon
+            {
+                Flight = flight,
+                Pilot = pilot,
+                Model = model,
+                Kind = kind,
+                AnimClip = kind == AiFlockKind.Animated ? aiClipAnimated : -1,
+                Rig = rig,
+                TextureBytes = model.BaseColorImageBytes,
+                Tint = AiFlockTints[i % AiFlockTints.Length],
+                HomePeakXY = home,
+                AnimTime = i * 1.7f,
+                FlapPhase = i * 1.3f,
+                TailPhase = i * 0.7f,
+            });
+        }
+
+        Serilog.Log.Information("[AiDragon] flock spawned: {N} dragons (animated/prowler/red)", aiFlock.Count);
+        Canvas.InvalidateSurface();
+    }
+
+    // The nearest peaks to the camera target become orbit centres; if there aren't enough, pad with a ring
+    // around the target so the flock still appears on featureless terrain.
+    private List<System.Numerics.Vector2> PickFlockCenters(TerrainMesh3D frame, int count)
+    {
+        var target = new System.Numerics.Vector2(Camera.Target.X, Camera.Target.Y);
+        var centers = new List<System.Numerics.Vector2>();
+        if (Peaks is { Count: > 0 } peaks)
+        {
+            centers = peaks
+                .Select(p =>
+                {
+                    Vector3 w = frame.GeoToWorld(p.Location, 0f);
+                    return new System.Numerics.Vector2(w.X, w.Y);
+                })
+                .OrderBy(xy => System.Numerics.Vector2.DistanceSquared(xy, target))
+                .Take(count)
+                .ToList();
+        }
+
+        for (int i = centers.Count; i < count; i++)
+        {
+            float ang = i * (MathF.PI * 2f / count);
+            centers.Add(target + (new System.Numerics.Vector2(MathF.Cos(ang), MathF.Sin(ang)) * 1200f));
+        }
+
+        return centers;
+    }
+
+    private double aiFlockLogAccum;
+
+    // Advances + poses the flock. Called ONCE per rendered frame from the paint path (no timer of its own — see
+    // OnShowAiDragonsChanged); dt comes from aiFlockClock so it's correct at any repaint rate.
+    private void UpdateAiFlock()
+    {
+        if (!ShowAiDragons || WorldFrame is not { } frame)
+        {
+            aiFlockInstances.Clear();
+            return;
+        }
+
+        if (aiFlock.Count == 0)
+        {
+            TrySpawnAiFlock(); // waiting for the terrain frame / models
+            return;
+        }
+
+        double now = aiFlockClock.Elapsed.TotalSeconds;
+        var dt = (float)Math.Clamp(now - aiFlockLastSeconds, 0.0, 0.1);
+        aiFlockLastSeconds = now;
+        float exagg = frame.VerticalExaggeration;
+
+        // React to the player: when the ridden dragon (F7) flies near a member's home peak, its orbit centre
+        // drifts toward the player, so the flock swings over to circle him.
+        System.Numerics.Vector2? player = dragonActive && dragon is { } pd ? pd.PositionXY : null;
+
+        aiFlockLogAccum += dt;
+        bool logNow = aiFlockLogAccum >= 1.0;
+        if (logNow)
+        {
+            aiFlockLogAccum = 0.0;
+        }
+
+        aiFlockInstances.Clear();
+        foreach (AiFlockDragon m in aiFlock)
+        {
+            if (!m.Alive)
+            {
+                continue; // shot down — no update, no render
+            }
+
+            System.Numerics.Vector2 center = m.HomePeakXY;
+            if (player is { } pp)
+            {
+                float distToHome = System.Numerics.Vector2.Distance(pp, m.HomePeakXY);
+                if (distToHome < AiFlockReactRadiusMeters)
+                {
+                    float t = 1f - (distToHome / AiFlockReactRadiusMeters); // nearer → stronger pull
+                    center = System.Numerics.Vector2.Lerp(m.HomePeakXY, pp, t * 0.85f);
+                }
+            }
+
+            m.Pilot.CircleCenter = center;
+            (float yaw, float pitch, float throttle) = m.Pilot.Compute(
+                m.Flight.PositionXY, m.Flight.HeadingRadians, m.Flight.ElevationMeters, m.Flight.SpeedMetersPerSecond);
+            m.Flight.Step(dt, yaw, pitch, throttle);
+
+            // Pose this member by species: animated plays its baked "flying" clip; prowler flaps procedurally;
+            // the red flyer is a rigid glider (bind pose). Effort follows pitch (faster beat on a climb).
+            float pace = Math.Clamp(1f + (0.5f * m.Flight.PitchRadians), 0.6f, 1.7f);
+            switch (m.Kind)
+            {
+                case AiFlockKind.Animated when m.AnimClip >= 0 && m.AnimClip < m.Model.Animations.Count:
+                    m.AnimTime += dt * pace;
+                    float dur = m.Model.Animations[m.AnimClip].Duration;
+                    m.Model.SetFrame(m.AnimClip, dur > 0.01f ? m.AnimTime % dur : 0f);
+                    m.Model.Skin();
+                    break;
+                case AiFlockKind.Prowler when m.Rig is { } rig:
+                    m.FlapPhase += dt * 3.0f * pace;
+                    m.TailPhase += dt * 2.4f;
+                    rig.Pose(m.FlapPhase, m.TailPhase);
+                    break;
+                default:
+                    break; // Static: bind pose, no per-frame skinning
+            }
+
+            Matrix4x4 world = BuildAiDragonMatrix(m.Model, m.Flight, exagg, out Matrix4x4 normal);
+            aiFlockInstances.Add(new(m.Model, world, normal, m.Tint, m.TextureBytes));
+
+            if (logNow)
+            {
+                float distToCenter = System.Numerics.Vector2.Distance(m.Flight.PositionXY, m.Pilot.CircleCenter);
+                Serilog.Log.Information(
+                    "[AiFlock] {Kind} pos=({X:F0},{Y:F0}) elev={E:F0} target={T:F0} distCtr={D:F0} head={H:F2} speed={S:F0}",
+                    m.Kind, m.Flight.PositionXY.X, m.Flight.PositionXY.Y, m.Flight.ElevationMeters,
+                    m.Pilot.TargetAltitudeMeters, distToCenter, m.Flight.HeadingRadians, m.Flight.SpeedMetersPerSecond);
+            }
+        }
+    }
+
+    // Model→world matrix for an AI dragon, same convention as the ridden dragon (glTF Y-up→Z-up remap, yaw
+    // offset, pitch/roll signs), pivoting on the bind-bounds centre (flight framing; the flock never perches).
+    private Matrix4x4 BuildAiDragonMatrix(
+        MapaTur.Application.Terrain.SkinnedModel model, MapaTur.Application.Terrain.DragonFlight d, float exagg, out Matrix4x4 normal)
+    {
+        float scale = AiFlockModelSizeMeters / MathF.Max(0.001f, model.LocalExtent);
+        Vector3 boundsCenter = (model.BoundsMin + model.BoundsMax) * 0.5f;
+        Matrix4x4 center = Matrix4x4.CreateTranslation(-boundsCenter);
+        Matrix4x4 remap = Matrix4x4.CreateRotationX(MathF.PI / 2f);
+        Matrix4x4 bank = Matrix4x4.CreateRotationY(DragonRollSign * d.RollRadians);
+        Matrix4x4 climb = Matrix4x4.CreateRotationX(DragonPitchSign * d.PitchRadians);
+        Matrix4x4 yawRot = Matrix4x4.CreateRotationZ(d.HeadingRadians + DragonYawOffset);
+        Matrix4x4 rot = remap * bank * climb * yawRot;
+        normal = rot;
+        var worldPos = new Vector3(d.PositionXY.X, d.PositionXY.Y, d.ElevationMeters * exagg);
+        return center * Matrix4x4.CreateScale(scale) * rot * Matrix4x4.CreateTranslation(worldPos);
     }
 
     // Leaves dragon flight and frames its final spot from an orbit vantage.
@@ -2118,6 +2722,10 @@ public partial class Terrain3DView : ContentView
         dragonPitchUp = dragonPitchDown = dragonYawLeft = dragonYawRight = false;
         dragonRmbHeld = false;
         dragonCamPitch = 0f;
+        dragonFireHeld = false;
+        dragonPerchGroundElev = null;
+        dragonFireballs.Clear();
+        dragonFireSprites.Clear();
 
         if (dragon is { } d && WorldFrame is { } frame)
         {
@@ -2143,82 +2751,465 @@ public partial class Terrain3DView : ContentView
         var dt = (float)Math.Clamp(now - dragonLastSeconds, 0.0, 0.1);
         dragonLastSeconds = now;
 
-        // Steer: right-drag (accumulated this tick) + arrows (↑↓ pitch, ←→ yaw) + A/D bank; W/S throttle.
-        // Arrow yaw is inverted from the naive sign so → turns right and ← turns left (the intuitive directional feel).
-        float yaw = Math.Clamp(
-            (dragonMouseDx * DragonMouseSteerPerPixel)
-            + (dragonD ? 1f : 0f) - (dragonA ? 1f : 0f)
-            - (dragonYawRight ? 1f : 0f) + (dragonYawLeft ? 1f : 0f),
-            -1f, 1f);
+        // Steer: right-drag/A,D/←→ are the ROLL command — the physics banks the dragon and flies the turn
+        // THROUGH the bank (tan(roll)/speed; released = self-levels). ↑↓ pitch; W/S throttle. The ←→ PRESS
+        // additionally fires a turn-entry wing stroke (below).
         // Pitch is inverted from the naive sign: ↑ climbs (dragon noses up, camera drops behind-below), ↓ dives.
         float pitch = Math.Clamp(
             (dragonMouseDy * DragonMousePitchPerPixel)
             - (dragonPitchUp ? 1f : 0f) + (dragonPitchDown ? 1f : 0f),
             -1f, 1f);
         float throttle = (dragonW ? 1f : 0f) - (dragonS ? 1f : 0f);
+
+        // ── TURN-ENTRY STROKE (←→ rising edge): the moment a turn STARTS, one hard beat of the outer wing
+        // shoves the body in (TurnImpulse: lateral push + bank kick). The SUSTAINED turn is then pure banking —
+        // no chained strokes; release and press again for another entry beat.
+        const float TwoPi = 2f * MathF.PI;
+        const float DownStart = MathF.PI / 2f;
+        const float DownEnd = 3f * MathF.PI / 2f;
+        float cyclePos = ((dragonFlapPhase % TwoPi) + TwoPi) % TwoPi;
+        bool arrowHeld = dragonYawLeft ^ dragonYawRight;
+        bool arrowPressed = arrowHeld && !dragonArrowWasHeld;
+        dragonArrowWasHeld = arrowHeld;
+        bool animatedStroke = dragonRig is null && dragonModel3D is not null && dragonFlyingAnimIndex >= 0;
+
+        // ANIMATED variant: timed stroke — a short "finish the current motion with both wings" beat, then the
+        // outer wing's single big flap (posed in the render block) with the shove fired at its slam.
+        if (animatedStroke)
+        {
+            if (dragonAnimStrokeTimer < 0f && arrowPressed
+                && d.Phase == MapaTur.Application.Terrain.DragonFlightPhase.Flying)
+            {
+                dragonAnimStrokeTimer = 0f;
+                dragonAnimStrokeDir = dragonYawLeft ? 1f : -1f;
+                dragonAnimStrokeFired = false;
+                Serilog.Log.Information("[DragonStroke] START dir={Dir} (outer wing={Wing})",
+                    dragonAnimStrokeDir, (dragonAnimStrokeDir * DragonAnimatedTurnMirror) > 0f ? "LEFT" : "RIGHT");
+            }
+
+            if (dragonAnimStrokeTimer >= 0f)
+            {
+                dragonAnimStrokeTimer += dt;
+                float strokeU = (dragonAnimStrokeTimer - DragonAnimStrokeDelaySeconds) / DragonAnimStrokeFlapSeconds;
+                if (!dragonAnimStrokeFired && strokeU >= 0.35f)
+                {
+                    // The slam begins — shove the body with it.
+                    d.TurnImpulse(dragonAnimStrokeDir * DragonTurnStrokeImpulseRadians);
+                    dragonAnimStrokeFired = true;
+                    Serilog.Log.Information("[DragonStroke] SLAM impulse dir={Dir} u={U:F2}", dragonAnimStrokeDir, strokeU);
+                }
+
+                if (strokeU >= 1f)
+                {
+                    // One beat per press — the sustained turn is flown on the bank, not on chained strokes.
+                    dragonAnimStrokeTimer = -1f;
+                    Serilog.Log.Information("[DragonStroke] END");
+                }
+            }
+        }
+
+        if (!animatedStroke && dragonTurnStrokeDir == 0f && arrowPressed
+            && d.Phase == MapaTur.Application.Terrain.DragonFlightPhase.Flying)
+        {
+            dragonTurnStrokeDir = dragonYawLeft ? 1f : -1f; // matches the old arrow mapping (← = +yaw = left turn)
+            if (cyclePos is < DownStart or >= DownEnd)
+            {
+                // Not in a down-stroke: whip what's left of the recovery instantly so the kick starts NOW.
+                dragonFlapSprintRemaining = ((DownStart - cyclePos) + TwoPi) % TwoPi;
+            }
+            else
+            {
+                // Pressed mid-down-stroke: the jerk fires immediately off the stroke already in flight.
+                d.TurnImpulse(dragonTurnStrokeDir * DragonTurnStrokeImpulseRadians);
+            }
+
+            dragonFlapBurst = MathF.Max(dragonFlapBurst, 0.85f);
+        }
+
+        if (dragonTurnStrokeDir != 0f)
+        {
+            bool inDownStroke = cyclePos is >= DownStart and < DownEnd;
+            bool prevInDown = dragonPrevCyclePos is >= DownStart and < DownEnd;
+
+            // The instant the wing snaps into its down-stroke, the WHOLE turn lands as one jerk — a heading
+            // JUMP with a hard bank (exponential ease-out in the physics), not a rotation smeared over the
+            // stroke. The stroke is spent when the wing reaches the bottom of its beat.
+            if (inDownStroke && !prevInDown)
+            {
+                d.TurnImpulse(dragonTurnStrokeDir * DragonTurnStrokeImpulseRadians);
+            }
+
+            if (prevInDown && !inDownStroke)
+            {
+                dragonTurnStrokeDir = 0f;
+            }
+        }
+
+        dragonPrevCyclePos = cyclePos;
+
+        float yaw = Math.Clamp(
+            (dragonMouseDx * DragonMouseSteerPerPixel)
+            + (dragonD ? 1f : 0f) - (dragonA ? 1f : 0f)
+            + (dragonYawLeft ? 1f : 0f) - (dragonYawRight ? 1f : 0f),
+            -1f, 1f);
         dragonMouseDx = dragonMouseDy = 0f;
 
         // Hold the steered attitude while the right button is down, so a climb/dive set by the mouse doesn't
-        // auto-level the instant the mouse stops moving.
+        // auto-level the instant the mouse stops moving. The yaw input is the ROLL command (banked turns).
         d.Step(dt, yaw, pitch, throttle, holdPitch: dragonRmbHeld);
 
-        // Wing dynamics from pitch: climbing → beat faster; diving → beat fades and the wings fold in (a glide).
+        // Wing dynamics: in free flight they follow pitch (climb = beat very fast, dive = fold and glide);
+        // the landing cycle overrides them per phase (approach glide → braking flare → settle → perched idle).
+        var phase = d.Phase;
         float climbFactor = Math.Clamp(d.PitchRadians / 1.2f, -1f, 1f); // + climbing, − diving
-        float flapActivity = Math.Clamp(1f + climbFactor, 0f, 1.8f);
-        float dragonFold = Math.Clamp(-climbFactor, 0f, 1f);
-        dragonFlapPhase += dt * 3.2f * flapActivity;
-        dragonTailPhase += dt * 3.0f;
-
-        // Drive the 3D rig (once loaded) and build its world/normal matrices from the flight pose.
-        if (dragonModel3D is { } model3D && dragonRig is { } rig)
+        (float flapActivity, float dragonFold) = phase switch
         {
-            rig.Pose(dragonFlapPhase, dragonTailPhase, d.RollRadians, d.PitchRadians, dragonFold);
+            MapaTur.Application.Terrain.DragonFlightPhase.Approach => (0.7f, 0f),
+            MapaTur.Application.Terrain.DragonFlightPhase.Flare => (0.55f, 0f),   // slow DEEP strokes (brake boosts amplitude)
+            MapaTur.Application.Terrain.DragonFlightPhase.Touchdown => (0.25f, 0.4f),
+            MapaTur.Application.Terrain.DragonFlightPhase.Perched => (0f, 1f),    // wings folded on the body
+            MapaTur.Application.Terrain.DragonFlightPhase.Takeoff => (2.7f, 0f),  // powering off the summit
+            _ => (Math.Clamp(1f + (1.9f * climbFactor), 0f, 2.9f), Math.Clamp(-d.PitchRadians / 0.55f, 0f, 1f)),
+        };
+
+        // Space flap-boost: overdrive the beat briefly so the physics hoist reads as one mighty stroke.
+        if (dragonFlapBurst > 0f && phase == MapaTur.Application.Terrain.DragonFlightPhase.Flying)
+        {
+            flapActivity += 2.4f * dragonFlapBurst;
+        }
+
+        dragonFlapBurst = MathF.Max(0f, dragonFlapBurst - (dt / 0.7f));
+
+        // Turn-onset sprint: whip through the queued remainder of the up-stroke at ~22 rad/s (≤0.3 s worst
+        // case) so the kicking down-stroke starts effectively NOW, then the normal beat takes over.
+        if (dragonFlapSprintRemaining > 0f)
+        {
+            float sprint = MathF.Min(dragonFlapSprintRemaining, dt * 22f);
+            dragonFlapPhase += sprint;
+            dragonFlapSprintRemaining -= sprint;
+        }
+
+        dragonFlapPhase += dt * 3.2f * flapActivity;
+        dragonTailPhase += dt * (phase == MapaTur.Application.Terrain.DragonFlightPhase.Perched ? 1.1f : 3.0f);
+
+        // Smoothed landing blends: legs come out of the tuck through the flare, the air-brake spread fades in
+        // and out, the chest breathes on the perch. Entering the perch seeds the cinematic orbit at the current
+        // camera azimuth so the hand-off doesn't jump.
+        float legsTarget = phase switch
+        {
+            MapaTur.Application.Terrain.DragonFlightPhase.Approach => 0.3f,
+            MapaTur.Application.Terrain.DragonFlightPhase.Flare => 1f,
+            MapaTur.Application.Terrain.DragonFlightPhase.Touchdown => 1f,
+            MapaTur.Application.Terrain.DragonFlightPhase.Perched => 1f,
+            _ => 0f,
+        };
+        dragonLegsDown += (legsTarget - dragonLegsDown) * Math.Clamp(4f * dt, 0f, 1f);
+        float brakeTarget = phase == MapaTur.Application.Terrain.DragonFlightPhase.Flare ? 1f : 0f;
+        dragonWingBrake += (brakeTarget - dragonWingBrake) * Math.Clamp(5f * dt, 0f, 1f);
+        if (phase == MapaTur.Application.Terrain.DragonFlightPhase.Perched)
+        {
+            dragonBreathePhase += dt * 1.9f;
+            if (dragonPrevPhase != MapaTur.Application.Terrain.DragonFlightPhase.Perched)
+            {
+                dragonPerchOrbitAz = Camera.AzimuthRadians;
+            }
+        }
+
+        dragonPrevPhase = phase;
+
+        // Drive the 3D model (once loaded) and build its world/normal matrices from the flight pose. The classic
+        // variant flaps via the procedural DragonRig; the animated one plays its baked "flying" loop, with the
+        // playback speed following the wing effort (climb = beat faster, dive = glide slower).
+        if (dragonModel3D is { } model3D)
+        {
+            float flapLift = 0f;
+            if (dragonRig is { } rig)
+            {
+                rig.Pose(
+                    dragonFlapPhase, dragonTailPhase, d.RollRadians, d.PitchRadians, dragonFold,
+                    dragonLegsDown, dragonWingBrake,
+                    phase == MapaTur.Application.Terrain.DragonFlightPhase.Perched ? dragonBreathePhase : -1f);
+                // Flap lift: rise on the down-stroke (flap → −1), sink on the up-stroke (flap → +1).
+                // Free flight only — a landing/perched dragon must sit EXACTLY on its spot.
+                if (phase == MapaTur.Application.Terrain.DragonFlightPhase.Flying)
+                {
+                    flapLift = -MathF.Sin(dragonFlapPhase) * DragonFlapLiftMeters;
+                }
+            }
+            else if (dragonFlyingAnimIndex >= 0 && dragonFlyingAnimIndex < model3D.Animations.Count)
+            {
+                // Animated variant: perched/settling plays the baked "idle" loop, everything else "flying"
+                // (a hard cut, masked by the touchdown moment). Playback pace follows the phase.
+                bool idlePhase = phase is MapaTur.Application.Terrain.DragonFlightPhase.Perched
+                    or MapaTur.Application.Terrain.DragonFlightPhase.Touchdown;
+                int clip = idlePhase && dragonIdleAnimIndex >= 0 ? dragonIdleAnimIndex : dragonFlyingAnimIndex;
+                float pace = phase switch
+                {
+                    MapaTur.Application.Terrain.DragonFlightPhase.Approach => 0.85f,
+                    MapaTur.Application.Terrain.DragonFlightPhase.Flare => 0.6f,
+                    MapaTur.Application.Terrain.DragonFlightPhase.Touchdown => 1f,
+                    MapaTur.Application.Terrain.DragonFlightPhase.Perched => 1f,
+                    MapaTur.Application.Terrain.DragonFlightPhase.Takeoff => 1.6f,
+                    _ => Math.Clamp(1f + (0.45f * climbFactor), 0.55f, 1.6f),
+                };
+                if (phase == MapaTur.Application.Terrain.DragonFlightPhase.Flying)
+                {
+                    pace += 1.5f * dragonFlapBurst; // Space flap-boost quickens the baked beat too
+                }
+
+                float duration = model3D.Animations[clip].Duration;
+                dragonAnimTime += dt * pace;
+                model3D.SetFrame(clip, duration > 0.01f ? dragonAnimTime % duration : 0f);
+
+                // SINGLE-STROKE TURN, animated variant: during the stroke window BOTH wings are taken away
+                // from the clip and play the same synced procedural beat — a lift, then a slam down through
+                // level — the OUTER wing at full force, the inner one just lightly, so the move reads as one
+                // natural asymmetric stroke. ← = right wing slams hard, left barely; → mirrored.
+                float strokeWindowU = (dragonAnimStrokeTimer - DragonAnimStrokeDelaySeconds) / DragonAnimStrokeFlapSeconds;
+                if (dragonAnimStrokeTimer >= 0f && strokeWindowU > 0f && strokeWindowU < 1f
+                    && phase == MapaTur.Application.Terrain.DragonFlightPhase.Flying)
+                {
+                    bool leftIsOuter = (dragonAnimStrokeDir * DragonAnimatedTurnMirror) > 0f;
+                    static float SmoothStep(float a, float b, float x)
+                    {
+                        float t = Math.Clamp((x - a) / (b - a), 0f, 1f);
+                        return t * t * (3f - (2f * t));
+                    }
+
+                    // Lift first, then the decisive down-slam (probe: local +Z raises the wing on both sides).
+                    float angleDeg = (DragonAnimStrokeRaiseDeg * MathF.Sin(MathF.PI * Math.Clamp(strokeWindowU / 0.7f, 0f, 1f)))
+                        - (DragonAnimStrokeSlamDeg * SmoothStep(0.35f, 1f, strokeWindowU));
+                    static Quaternion Rz(float deg) => Quaternion.CreateFromAxisAngle(Vector3.UnitZ, deg * MathF.PI / 180f);
+                    void Beat(bool left, float amplitude)
+                    {
+                        string shoulder = left ? "l_shoulder.73" : "r_shoulder.114";
+                        string clavicle = left ? "l_clavicle.72" : "r_clavicle.113";
+                        string forearm = left ? "l_forearm.74" : "r_forearm.115";
+                        model3D.BlendBoneTowardBind(clavicle, 1f);
+                        model3D.BlendBoneTowardBind(shoulder, 1f);
+                        model3D.BlendBoneTowardBind(forearm, 1f);
+                        model3D.RotateBoneOverlay(shoulder, Rz(angleDeg * amplitude));
+                        model3D.RotateBoneOverlay(clavicle, Rz(angleDeg * 0.5f * amplitude));
+                        model3D.RotateBoneOverlay(forearm, Rz(angleDeg * 0.6f * amplitude));
+                    }
+
+                    Beat(leftIsOuter, 1f);
+                    Beat(!leftIsOuter, DragonAnimStrokeInnerScale);
+
+                    // The slam also HOISTS the torso — same body-bob as a normal wing-beat, keyed to how far
+                    // the wing has swung below level ("podnieś tułów tak jak przy ruchu normalnym").
+                    flapLift = MathF.Max(0f, -angleDeg) / DragonAnimStrokeSlamDeg * DragonFlapLiftMeters * 1.5f;
+                }
+
+                model3D.Skin();
+            }
 
             float exaggeration3D = frame.VerticalExaggeration;
             float scale = DragonModelSizeMeters / MathF.Max(0.001f, model3D.LocalExtent);
             Vector3 boundsCenter = (model3D.BoundsMin + model3D.BoundsMax) * 0.5f;
-            Matrix4x4 center = Matrix4x4.CreateTranslation(-boundsCenter); // pivot on the model centre, not its rig root
             Matrix4x4 remap = Matrix4x4.CreateRotationX(MathF.PI / 2f); // glTF Y-up → world Z-up
             Matrix4x4 bank = Matrix4x4.CreateRotationY(DragonRollSign * d.RollRadians);
             Matrix4x4 climb = Matrix4x4.CreateRotationX(DragonPitchSign * d.PitchRadians);
             Matrix4x4 yawRot = Matrix4x4.CreateRotationZ(d.HeadingRadians + DragonYawOffset);
             Matrix4x4 rot = remap * bank * climb * yawRot;
             dragonNormalMatrix = rot;
-            // Flap lift: rise on the down-stroke (flap → −1), sink on the up-stroke (flap → +1).
-            float flapLift = -MathF.Sin(dragonFlapPhase) * DragonFlapLiftMeters;
-            var worldPos = new Vector3(
-                d.PositionXY.X, d.PositionXY.Y, (d.ElevationMeters - DragonDropMeters + flapLift) * exaggeration3D);
+            float drop = dragonLoadedVariant == 1 ? DragonAnimatedDropMeters : DragonDropMeters;
+
+            // Posed foot anchor (model-local): horizontal = centroid of the foot bones, vertical = the LOWEST
+            // foot bone (the sole). Measured: pivoting on the bind-bounds centre planted the feet ~4.7 m off in
+            // XY (the tail/wings bias the AABB sideways; the baked clip adds root motion), while Z was already
+            // fine. On the ground we pivot on THIS point instead, so the soles sit on the target rock.
+            Vector3 footSum = Vector3.Zero;
+            int footN = 0;
+            float feetY = float.PositiveInfinity;
+            foreach (string bone in dragonLoadedVariant == 1 ? DragonAnimatedFootBones : DragonClassicFootBones)
+            {
+                if (model3D.GetBonePosedPosition(bone) is { } footPos)
+                {
+                    footSum += footPos;
+                    footN++;
+                    if (footPos.Y < feetY)
+                    {
+                        feetY = footPos.Y;
+                    }
+                }
+            }
+
+            Vector3 footCentroidLocal = footN > 0 ? footSum / footN : boundsCenter;
+            if (!float.IsFinite(feetY))
+            {
+                feetY = model3D.BoundsMin.Y;
+            }
+
+            var footPivotLocal = new Vector3(footCentroidLocal.X, feetY, footCentroidLocal.Z);
+
+            // Flight: body hangs at the flight point, pivot on the bind centre (camera frames the body — do NOT
+            // disturb). Perched: pivot on the foot anchor and drop the sole onto the DRAWN rock
+            // (SampleRenderedMeshElevation — the only height that matches what's on screen). Blend by the legs so
+            // the touchdown slides smoothly and free flight / the chase camera stay exactly as before.
+            float flightZ = (d.ElevationMeters - drop + flapLift) * exaggeration3D;
+            Vector3 pivot = boundsCenter;
+            float worldZ = flightZ;
+            float rockZWorld = flightZ;
+            if (dragonLegsDown > 0.001f)
+            {
+                rockZWorld = (SampleRenderedMeshElevation(d.PositionXY.X, d.PositionXY.Y) ?? d.ElevationMeters)
+                    * exaggeration3D;
+                pivot = Vector3.Lerp(boundsCenter, footPivotLocal, dragonLegsDown);
+                worldZ = flightZ + ((rockZWorld - flightZ) * dragonLegsDown);
+            }
+
+            Matrix4x4 center = Matrix4x4.CreateTranslation(-pivot);
+            var worldPos = new Vector3(d.PositionXY.X, d.PositionXY.Y, worldZ);
             dragonWorldMatrix = center * Matrix4x4.CreateScale(scale) * rot * Matrix4x4.CreateTranslation(worldPos);
+
+            // Fire muzzle: the POSED head bone's world position, so fire streams from the mouth as the head nods/
+            // scans (not a fixed body-relative point). Null → StepDragonFire falls back to the old offset.
+            dragonMouthWorld = null;
+            foreach (string bone in dragonLoadedVariant == 1 ? DragonAnimatedMouthBones : DragonClassicMouthBones)
+            {
+                if (model3D.GetBonePosedPosition(bone) is { } bonePos)
+                {
+                    dragonMouthWorld = Vector3.Transform(bonePos, dragonWorldMatrix);
+                    break;
+                }
+            }
+
+            // ── FOOT-PLACEMENT PROBE ── markers drawn AFTER the final transform (same matrix the GPU uses:
+            // row-vector .NET uploaded un-transposed == GLSL uModel*vec4), so a CPU dot lands exactly where the
+            // GPU draws that model point. After the foot-pivot fix, BLUE (foot anchor) should sit on YELLOW
+            // (target rock). Only while landing/perched, so free flight isn't cluttered.
+            dragonDebugMarkers.Clear();
+            if (ShowDebugMarkers
+                && phase is MapaTur.Application.Terrain.DragonFlightPhase.Flare
+                or MapaTur.Application.Terrain.DragonFlightPhase.Touchdown
+                or MapaTur.Application.Terrain.DragonFlightPhase.Perched)
+            {
+                Vector3 mOrigin = Vector3.Transform(Vector3.Zero, dragonWorldMatrix);
+                Vector3 mCenter = Vector3.Transform(boundsCenter, dragonWorldMatrix);
+                Vector3 mFeet = Vector3.Transform(footCentroidLocal, dragonWorldMatrix);
+                var mTarget = new Vector3(d.PositionXY.X, d.PositionXY.Y, rockZWorld);
+
+                const float markerRadius = 1.1f;
+                dragonDebugMarkers.Add(new(mOrigin, new Vector3(1f, 0.15f, 0.15f), markerRadius));  // RED    model origin
+                dragonDebugMarkers.Add(new(mCenter, new Vector3(0.2f, 1f, 0.2f), markerRadius));    // GREEN  bind centre (= worldPos)
+                dragonDebugMarkers.Add(new(mFeet, new Vector3(0.3f, 0.55f, 1f), markerRadius));     // BLUE   posed foot anchor (drawn feet)
+                dragonDebugMarkers.Add(new(mTarget, new Vector3(1f, 0.9f, 0.15f), markerRadius));   // YELLOW target rendered rock
+
+                dragonSeatLogAccum += dt;
+                if (dragonSeatLogAccum >= 1f)
+                {
+                    dragonSeatLogAccum = 0f;
+                    float feetTargetDxy = MathF.Sqrt(
+                        ((mFeet.X - mTarget.X) * (mFeet.X - mTarget.X)) + ((mFeet.Y - mTarget.Y) * (mFeet.Y - mTarget.Y)));
+                    Serilog.Log.Information(
+                        "[DragonSeat] phase={Ph} feetN={N} exagg={Ex:F2} origin=({OX:F1},{OY:F1},{OZ:F1}) center=({CX:F1},{CY:F1},{CZ:F1}) feet=({FX:F1},{FY:F1},{FZ:F1}) target=({TX:F1},{TY:F1},{TZ:F1}) feet↔target dXY={DXY:F2} dZ={DZ:F2}",
+                        phase, footN, exaggeration3D, mOrigin.X, mOrigin.Y, mOrigin.Z, mCenter.X, mCenter.Y, mCenter.Z,
+                        mFeet.X, mFeet.Y, mFeet.Z, mTarget.X, mTarget.Y, mTarget.Z, feetTargetDxy, mFeet.Z - mTarget.Z);
+                }
+            }
+        }
+        else
+        {
+            dragonDebugMarkers.Clear();
         }
 
-        // Chase camera: behind + above the dragon along the (world) flight vector, looking ahead of it. The
-        // camera pitch LAGS the dragon's, so a held climb/dive moves the dragon first and the camera catches up.
-        dragonCamPitch += (d.PitchRadians - dragonCamPitch) * Math.Clamp(DragonCamPitchFollow * dt, 0f, 1f);
+        // ── Fire breath ── spawn while F is held (streamed on a cooldown), fly the balls forward, burst on
+        // terrain, and build this frame's render sprites (Z exaggerated only here).
+        StepDragonFire(d, dt, frame.VerticalExaggeration);
+
+        // Trajectory trace (~10 Hz in flight; perched barely changes, so ~0.5 Hz there — no log flooding).
+        dragonTraceAccum += dt;
+        if (dragonTraceAccum >= (phase == MapaTur.Application.Terrain.DragonFlightPhase.Perched ? 2f : 0.1f))
+        {
+            dragonTraceAccum = 0f;
+            Serilog.Log.Information(
+                "[DragonTrace] pos=({X:F0},{Y:F0}) elev={E:F0} head={H:F2} roll={R:F2} speed={S:F0} yawIn={Yaw:F2} strokeT={St:F2} phase={Ph}",
+                d.PositionXY.X, d.PositionXY.Y, d.ElevationMeters, d.HeadingRadians, d.RollRadians,
+                d.SpeedMetersPerSecond, yaw, dragonAnimStrokeTimer, d.Phase);
+        }
+
+        // Camera. Perched: a slow CINEMATIC ORBIT around the dragon on its summit (the panorama showcase);
+        // steering input (right-drag / ←→) nudges the orbit by hand. Every other phase: the chase camera
+        // behind + above the dragon along the (world) flight vector, looking ahead of it — its pitch LAGS
+        // the dragon's, so a held climb/dive moves the dragon first and the camera catches up.
         float exagg = frame.VerticalExaggeration;
         var dragonWorld = new Vector3(d.PositionXY.X, d.PositionXY.Y, d.ElevationMeters * exagg);
-        float ch = MathF.Cos(d.HeadingRadians), sh = MathF.Sin(d.HeadingRadians);
+
+        // 1 m detail streaming. Landing cycle: report ONE FIXED synthetic camera at the landing spot — when the
+        // report followed the live orbit, the swinging azimuth flapped the LOD selector z15↔z16 every few
+        // seconds (log: the same 4 z16 tiles loaded/evicted in a loop), z16 residency under the perch never
+        // settled, the base-ring culling never engaged and the summit stayed a pale coarse hypso spike. A
+        // constant report = a stable desired set = z16 fills in and stays. Free flight: lead the dragon as before.
+        if (DetailStreamingEnabled)
+        {
+            bool landingCycle = phase is not MapaTur.Application.Terrain.DragonFlightPhase.Flying;
+            if (landingCycle)
+            {
+                if (!dragonPerchStreamSent)
+                {
+                    dragonPerchStreamSent = true;
+                    CameraFocusMoved?.Invoke(this, new MapaTur.Application.Terrain.Camera3D
+                    {
+                        Target = new Vector3(d.LandingTargetXY.X, d.LandingTargetXY.Y, d.LandingTargetElevation * exagg),
+                        Distance = 140f,
+                        AzimuthRadians = d.HeadingRadians + MathF.PI,
+                        PitchRadians = 0.5f,
+                        FieldOfViewYRadians = Camera.FieldOfViewYRadians,
+                        NearPlane = Camera.NearPlane,
+                        FarPlane = Camera.FarPlane,
+                    });
+                }
+            }
+            else
+            {
+                dragonPerchStreamSent = false;
+                if (dragonDetailTick++ % 45 == 0)
+                {
+                    Vector3 streamFocus = dragonWorld
+                        + (new Vector3(MathF.Cos(d.HeadingRadians), MathF.Sin(d.HeadingRadians), 0f) * 200f);
+                    Vector3 streamOff = Camera.Position - streamFocus;
+                    float streamDist = MathF.Max(1f, streamOff.Length());
+                    CameraFocusMoved?.Invoke(this, new MapaTur.Application.Terrain.Camera3D
+                    {
+                        Target = streamFocus,
+                        Distance = streamDist,
+                        AzimuthRadians = MathF.Atan2(streamOff.Y, streamOff.X),
+                        PitchRadians = MathF.Asin(Math.Clamp(streamOff.Z / streamDist, -1f, 1f)),
+                        FieldOfViewYRadians = Camera.FieldOfViewYRadians,
+                        NearPlane = Camera.NearPlane,
+                        FarPlane = Camera.FarPlane,
+                    });
+                }
+            }
+        }
+        if (phase == MapaTur.Application.Terrain.DragonFlightPhase.Perched)
+        {
+            dragonPerchOrbitAz += dt * (DragonPerchOrbitRadPerSec + (yaw * 1.2f));
+            var orbitEye = dragonWorld
+                + (new Vector3(MathF.Cos(dragonPerchOrbitAz), MathF.Sin(dragonPerchOrbitAz), 0f) * DragonPerchOrbitDistanceMeters)
+                + new Vector3(0f, 0f, DragonPerchOrbitHeightMeters * exagg);
+            ApplyFreeCamera(orbitEye, dragonWorld + new Vector3(0f, 0f, 3f * exagg));
+            Canvas.InvalidateSurface();
+            return;
+        }
+
+        // Asymmetric follow: climbing snaps the camera up with the dragon (it would otherwise rise into the
+        // lens); diving keeps the cinematic lag (dragon drops away first, camera catches up). The camera YAW
+        // chases the heading lazily too — in a turn the dragon banks/yaws visibly in frame first.
+        float pitchFollow = d.PitchRadians > dragonCamPitch ? DragonCamPitchFollowClimb : DragonCamPitchFollow;
+        dragonCamPitch += (d.PitchRadians - dragonCamPitch) * Math.Clamp(pitchFollow * dt, 0f, 1f);
+        dragonCamAzimuth += WrapAngleRad(d.HeadingRadians - dragonCamAzimuth) * Math.Clamp(DragonCamYawFollow * dt, 0f, 1f);
+        float ch = MathF.Cos(dragonCamAzimuth), sh = MathF.Sin(dragonCamAzimuth);
         float cp = MathF.Cos(dragonCamPitch), sp = MathF.Sin(dragonCamPitch);
         Vector3 worldFwd = Vector3.Normalize(new Vector3(cp * ch, cp * sh, sp * exagg));
-        Vector3 eye = dragonWorld - (worldFwd * DragonChaseDistanceMeters) + new Vector3(0f, 0f, DragonChaseHeightMeters * exagg);
-        Vector3 lookAt = dragonWorld + (worldFwd * 30f);
+        // Nose-up shoves the eye back + up THE SAME FRAME (raw pitch, no smoothing) — see the consts above.
+        float climbPitch = MathF.Max(0f, d.PitchRadians);
+        float chaseDistance = DragonChaseDistanceMeters + (climbPitch * DragonChaseClimbPullbackMeters);
+        float chaseHeight = DragonChaseHeightMeters + (climbPitch * DragonChaseClimbRaiseMeters);
+        Vector3 eye = dragonWorld - (worldFwd * chaseDistance) + new Vector3(0f, 0f, chaseHeight * exagg);
+        Vector3 lookAt = dragonWorld + (worldFwd * DragonChaseLookAheadMeters);
         ApplyFreeCamera(eye, lookAt);
-
-        if (DetailStreamingEnabled && dragonDetailTick++ % 45 == 0)
-        {
-            Vector3 focus = dragonWorld + (worldFwd * 200f);
-            Vector3 off = eye - focus;
-            float dist = MathF.Max(1f, off.Length());
-            CameraFocusMoved?.Invoke(this, new MapaTur.Application.Terrain.Camera3D
-            {
-                Target = focus,
-                Distance = dist,
-                AzimuthRadians = MathF.Atan2(off.Y, off.X),
-                PitchRadians = MathF.Asin(Math.Clamp(off.Z / dist, -1f, 1f)),
-                FieldOfViewYRadians = Camera.FieldOfViewYRadians,
-                NearPlane = Camera.NearPlane,
-                FarPlane = Camera.FarPlane,
-            });
-        }
 
         Canvas.InvalidateSurface();
     }
@@ -3041,8 +4032,11 @@ public partial class Terrain3DView : ContentView
         // from both sides"). Re-applying the limit here, after the floor is sampled for the current eye
         // position, keeps the eye above the map however it got there (orbit, a restored stale camera, …), so
         // the camera can never see the inside of the terrain and there is nothing in there to render.
-        // Skipped in walk mode, where the walk tick's ground-clamp is the authority on the eye's height.
-        if (!walkActive)
+        // Skipped in walk mode, where the walk tick's ground-clamp is the authority on the eye's height —
+        // AND in dragon flight: the chase camera sits ~13 m behind the dragon, far under the orbit
+        // controller's MinDistance (150 m), so this clamp silently shoved the eye out to 150 m every frame
+        // ("smok zawsze daleko"). The dragon keeps its own 30 m swoop clearance above terrain.
+        if (!walkActive && !dragonActive)
         {
             controller.ClampToBounds();
         }
@@ -3189,6 +4183,7 @@ public partial class Terrain3DView : ContentView
             DrawStarLabelsOverScene(canvas, frame, e.Info.Width, e.Info.Height);
             DrawNightLights(canvas, projectedPois);
             DrawFlightMarker(canvas, e.Info.Width, e.Info.Height);
+            DrawAiDragonMarkers(canvas, e.Info.Width, e.Info.Height);
             DrawWalkViewmodel(canvas, e.Info.Width, e.Info.Height);
             DrawDragon(canvas, e.Info.Width, e.Info.Height);
             if (dbgSwapPaint)
@@ -3426,6 +4421,103 @@ public partial class Terrain3DView : ContentView
         canvas.DrawCircle(s.X, s.Y, r * 2.1f, halo);
         canvas.DrawCircle(s.X, s.Y, r, fill);
         canvas.DrawCircle(s.X, s.Y, r, ring);
+    }
+
+    // Locator markers for the AI flock (the dragons are small + wander, so they're hard to spot). ON screen: a
+    // little downward chevron floats over each dragon. OFF screen / behind the camera: an arrow pins to the
+    // screen edge pointing the way to it — same idea as the navigation "namierzanie" reticle. Colour = the
+    // dragon's tint, so a marker maps to its dragon.
+    private void DrawAiDragonMarkers(SKCanvas canvas, int width, int height)
+    {
+        if (!ShowAiDragons || aiFlock.Count == 0 || WorldFrame is not { } frame || width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        float exagg = frame.VerticalExaggeration;
+        Matrix4x4 vp = Camera.BuildViewProjection((float)width / Math.Max(1, height));
+        float cx = width * 0.5f, cy = height * 0.5f;
+        const float edgeMargin = 48f;
+
+        foreach (AiFlockDragon m in aiFlock)
+        {
+            if (!m.Alive)
+            {
+                continue; // shot down — no locator marker
+            }
+
+            var world = new Vector4(m.Flight.PositionXY.X, m.Flight.PositionXY.Y, m.Flight.ElevationMeters * exagg, 1f);
+            Vector4 clip = Vector4.Transform(world, vp);
+            SKColor color = TintToColor(m.Tint);
+
+            bool inFront = clip.W > 0.0001f;
+            if (inFront)
+            {
+                float sx = ((clip.X / clip.W) + 1f) * 0.5f * width;
+                float sy = (1f - (clip.Y / clip.W)) * 0.5f * height;
+                float ndcZ = clip.Z / clip.W;
+                if (sx >= 0f && sx <= width && sy >= 0f && sy <= height && ndcZ is >= 0f and <= 1f)
+                {
+                    DrawDragonOnScreenMarker(canvas, sx, sy, color);
+                    continue;
+                }
+            }
+
+            // Off-screen (or behind): screen-space direction from the centre. Behind the camera (W<0) the sign of
+            // X/Y flips, so mirror it to keep the arrow pointing the true way.
+            float dx = inFront ? clip.X / clip.W : -clip.X;
+            float dy = inFront ? clip.Y / clip.W : -clip.Y;
+            float vX = dx, vY = -dy; // NDC y-up → screen y-down
+            float len = MathF.Sqrt((vX * vX) + (vY * vY));
+            if (len < 1e-4f)
+            {
+                continue;
+            }
+
+            vX /= len;
+            vY /= len;
+            float halfW = (width * 0.5f) - edgeMargin, halfH = (height * 0.5f) - edgeMargin;
+            float reach = MathF.Min(halfW / MathF.Max(1e-4f, MathF.Abs(vX)), halfH / MathF.Max(1e-4f, MathF.Abs(vY)));
+            DrawDragonEdgeArrow(canvas, cx + (vX * reach), cy + (vY * reach), MathF.Atan2(vY, vX), color);
+        }
+    }
+
+    private static SKColor TintToColor(Vector3 tint) => new(
+        (byte)(Math.Clamp(tint.X, 0f, 1f) * 255f),
+        (byte)(Math.Clamp(tint.Y, 0f, 1f) * 255f),
+        (byte)(Math.Clamp(tint.Z, 0f, 1f) * 255f));
+
+    // A small downward chevron hovering just above the on-screen dragon.
+    private static void DrawDragonOnScreenMarker(SKCanvas canvas, float x, float y, SKColor color)
+    {
+        float topY = y - 34f; // float above the dragon
+        using var fill = new SKPaint { Color = color, IsAntialias = true, Style = SKPaintStyle.Fill };
+        using var outline = new SKPaint { Color = new SKColor(0x10, 0x10, 0x10, 0xCC), IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 2f };
+        using var path = new SKPath();
+        path.MoveTo(x - 9f, topY);
+        path.LineTo(x + 9f, topY);
+        path.LineTo(x, topY + 13f); // point down at the dragon
+        path.Close();
+        canvas.DrawPath(path, fill);
+        canvas.DrawPath(path, outline);
+    }
+
+    // A triangular arrow pinned to the screen edge, pointing (angle radians) toward an off-screen dragon.
+    private static void DrawDragonEdgeArrow(SKCanvas canvas, float x, float y, float angle, SKColor color)
+    {
+        using var fill = new SKPaint { Color = color, IsAntialias = true, Style = SKPaintStyle.Fill };
+        using var halo = new SKPaint { Color = new SKColor(0x10, 0x10, 0x10, 0x99), IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 3f };
+        canvas.Save();
+        canvas.Translate(x, y);
+        canvas.RotateRadians(angle);
+        using var path = new SKPath();
+        path.MoveTo(16f, 0f);    // tip points along +X (the rotation aims it)
+        path.LineTo(-10f, 9f);
+        path.LineTo(-10f, -9f);
+        path.Close();
+        canvas.DrawPath(path, fill);
+        canvas.DrawPath(path, halo);
+        canvas.Restore();
     }
 
     // GL star buffer, so each name sits on its dot.
@@ -4413,14 +5505,662 @@ public partial class Terrain3DView : ContentView
                 dragonPitchDown = true;
                 break;
             case Windows.System.VirtualKey.Left:
+                if (!dragonYawLeft)
+                {
+                    Serilog.Log.Information("[DragonKey] DOWN Left");
+                }
+
                 dragonYawLeft = true;
                 break;
             case Windows.System.VirtualKey.Right:
+                if (!dragonYawRight)
+                {
+                    Serilog.Log.Information("[DragonKey] DOWN Right");
+                }
+
                 dragonYawRight = true;
+                break;
+
+            // L = land on the nearest summit (or the terrain ahead); Space = take off from the perch,
+            // or — in the air — one hard wing-beat that hoists the dragon upward. F breathes fire.
+            case Windows.System.VirtualKey.L:
+                // L toggles the landing cycle: perched → take off, airborne → land.
+                if (dragon is { } dl && dl.BeginTakeoff())
+                {
+                    Serilog.Log.Information("[Dragon] takeoff from perch (L)");
+                }
+                else
+                {
+                    BeginDragonLanding();
+                }
+                break;
+            case Windows.System.VirtualKey.F:
+                dragonFireHeld = true;
+                break;
+            case Windows.System.VirtualKey.Space:
+                Serilog.Log.Information("[Dragon] Space (flap/takeoff)");
+                if (dragon is { } d2)
+                {
+                    if (d2.BeginTakeoff())
+                    {
+                        Serilog.Log.Information("[Dragon] takeoff from perch");
+                    }
+                    else if (d2.FlapBoost())
+                    {
+                        // Visual burst: restart the stroke from the wings-up top so the boost reads as ONE
+                        // powerful down-beat, and briefly overdrive the beat rate.
+                        dragonFlapPhase = MathF.PI / 2f;
+                        dragonFlapBurst = 1f;
+                    }
+                }
                 break;
         }
 
         e.Handled = true;
+    }
+
+    // Elevation (real metres) of the actual DRAWN terrain under a world-XY point: finds the rendered mesh
+    // triangle containing the point and barycentric-interpolates its world Z (÷ exaggeration). This is what's
+    // on screen regardless of LOD, so the perched dragon's feet land on the visible rock. O(triangles), but
+    // a bbox reject leaves only the 1-few tiles under the point — call once when perched and cache.
+    private float? SampleRenderedMeshElevation(float worldX, float worldY)
+    {
+        if (Tiles is not { Count: > 0 } tiles)
+        {
+            return null;
+        }
+
+        float bestZ = float.NaN;
+        foreach (TerrainMesh3D tile in tiles)
+        {
+            if (worldX < tile.WorldMin.X || worldX > tile.WorldMax.X
+                || worldY < tile.WorldMin.Y || worldY > tile.WorldMax.Y)
+            {
+                continue;
+            }
+
+            Vector3[] verts = tile.Vertices;
+            uint[] indices = tile.Indices;
+            for (int i = 0; i + 2 < indices.Length; i += 3)
+            {
+                Vector3 a = verts[indices[i]];
+                Vector3 b = verts[indices[i + 1]];
+                Vector3 c = verts[indices[i + 2]];
+
+                float den = ((b.Y - c.Y) * (a.X - c.X)) + ((c.X - b.X) * (a.Y - c.Y));
+                if (MathF.Abs(den) < 1e-9f)
+                {
+                    continue;
+                }
+
+                float u = (((b.Y - c.Y) * (worldX - c.X)) + ((c.X - b.X) * (worldY - c.Y))) / den;
+                float v = (((c.Y - a.Y) * (worldX - c.X)) + ((a.X - c.X) * (worldY - c.Y))) / den;
+                float w = 1f - u - v;
+                if (u < -0.001f || v < -0.001f || w < -0.001f)
+                {
+                    continue;
+                }
+
+                float z = (u * a.Z) + (v * b.Z) + (w * c.Z);
+                if (float.IsNaN(bestZ) || z > bestZ)
+                {
+                    bestZ = z; // highest surface where tiles overlap = the top one drawn
+                }
+            }
+        }
+
+        if (float.IsNaN(bestZ))
+        {
+            return null;
+        }
+
+        float exagg = WorldFrame?.VerticalExaggeration ?? 1f;
+        return bestZ / MathF.Max(0.001f, exagg);
+    }
+
+    /// <summary>Wraps an angle to (−π, π] — for shortest-way angular chasing (the lazy chase cam).</summary>
+    private static float WrapAngleRad(float radians)
+    {
+        while (radians <= -MathF.PI)
+        {
+            radians += 2f * MathF.PI;
+        }
+
+        while (radians > MathF.PI)
+        {
+            radians -= 2f * MathF.PI;
+        }
+
+        return radians;
+    }
+
+    // Picks the AI dragon whose bearing from the muzzle sits inside the ±10° lock cone AND is most aligned with
+    // the aim (so a fireball auto-homes onto it). Returns its aiFlock index, or −1 when the flock is off or
+    // nothing is in the cone. All in real metres.
+    private int AcquireFireballTarget(System.Numerics.Vector2 muzzleXY, float muzzleElev, Vector3 aimUnit)
+    {
+        if (!ShowAiDragons || aiFlock.Count == 0)
+        {
+            return -1;
+        }
+
+        float bestDot = DragonFireLockConeCos; // only a bearing inside the cone can beat this
+        int best = -1;
+        for (int i = 0; i < aiFlock.Count; i++)
+        {
+            AiFlockDragon t = aiFlock[i];
+            if (!t.Alive)
+            {
+                continue;
+            }
+
+            var to = new Vector3(
+                t.Flight.PositionXY.X - muzzleXY.X,
+                t.Flight.PositionXY.Y - muzzleXY.Y,
+                t.Flight.ElevationMeters - muzzleElev);
+            float len = to.Length();
+            if (len < 1f)
+            {
+                continue;
+            }
+
+            float dot = Vector3.Dot(aimUnit, to / len);
+            if (dot > bestDot)
+            {
+                bestDot = dot;
+                best = i;
+            }
+        }
+
+        return best;
+    }
+
+    // A fireball hit kills the dragon: flag it dead (skipped by update/render/markers/targeting) and throw a
+    // fat fireball burst at its spot for the kill flash. Kept in aiFlock so other in-flight balls' target
+    // indices don't shift under them.
+    private void KillAiDragon(int index)
+    {
+        if (index < 0 || index >= aiFlock.Count || !aiFlock[index].Alive)
+        {
+            return;
+        }
+
+        AiFlockDragon dead = aiFlock[index];
+        dead.Alive = false;
+        // The kill blast itself is spawned by the hitting ball via SpawnFireBurst(power 2.2) at the impact point.
+        Serilog.Log.Information(
+            "[DragonFire] killed dragon #{Idx} ({Kind}) at ({X:F0},{Y:F0}) — {Alive} left",
+            index, dead.Kind, dead.Flight.PositionXY.X, dead.Flight.PositionXY.Y, aiFlock.Count(a => a.Alive));
+    }
+
+    // Advances the fire-breath simulation one tick: spawns a ball from the mouth while F is held, flies the
+    // balls forward (auto-homing onto a locked dragon, else a touch of hot-gas buoyancy), bursts on contact,
+    // and rebuilds the render sprite list (world coords, Z exaggerated).
+    private void StepDragonFire(MapaTur.Application.Terrain.DragonFlight d, float dt, float exaggeration)
+    {
+        dragonFireCooldown -= dt;
+        if (dragonFireHeld && dragonFireCooldown <= 0f)
+        {
+            float cp = MathF.Cos(d.PitchRadians), sp = MathF.Sin(d.PitchRadians);
+            float chh = MathF.Cos(d.HeadingRadians), shh = MathF.Sin(d.HeadingRadians);
+            var fwdXY = new System.Numerics.Vector2(cp * chh, cp * shh);
+            float speed = d.SpeedMetersPerSecond + DragonFireSpeedMetersPerSecond;
+            System.Numerics.Vector2 muzzleXY;
+            float muzzleElev;
+            if (dragonMouthWorld is { } mw)
+            {
+                // From the posed HEAD (follows the animation), + a snout offset along the aim.
+                muzzleXY = new System.Numerics.Vector2(mw.X, mw.Y) + (fwdXY * DragonSnoutOffsetMeters);
+                muzzleElev = (mw.Z / MathF.Max(0.001f, exaggeration)) + (sp * DragonSnoutOffsetMeters);
+            }
+            else
+            {
+                muzzleXY = d.PositionXY + (fwdXY * DragonFireMuzzleOffsetMeters);
+                muzzleElev = d.ElevationMeters + (sp * DragonFireMuzzleOffsetMeters) + 1f;
+            }
+
+            var aim = new Vector3(cp * chh, cp * shh, sp); // unit forward
+
+            // Muzzle cone (~3.5°) + per-shot speed scatter (deterministic golden-ratio hash, no state) so the jet
+            // is a pressurized SPRAY that separates along its length, not a laser of identical clones. The target
+            // LOCK still uses the clean aim, not the jittered direction.
+            int shot = dragonFireCounter++;
+            float hgr = shot * 0.61803399f;
+            float coneAngle = (hgr - MathF.Floor(hgr)) * (2f * MathF.PI);
+            float rj = MathF.Sqrt((hgr * 1.37f) - MathF.Floor(hgr * 1.37f));
+            var up0 = MathF.Abs(aim.Z) < 0.9f ? Vector3.UnitZ : Vector3.UnitX;
+            var ax = Vector3.Normalize(Vector3.Cross(aim, up0));
+            var ay = Vector3.Cross(aim, ax);
+            Vector3 dir = Vector3.Normalize(aim + (((ax * MathF.Cos(coneAngle)) + (ay * MathF.Sin(coneAngle))) * MathF.Tan(0.10f * rj)));
+            float spd = speed * (0.85f + (0.30f * rj)); // ±15% → balls string out along the jet
+
+            dragonFireballs.Add(new DragonFireball
+            {
+                XY = muzzleXY,
+                Elevation = muzzleElev,
+                VelocityXY = new System.Numerics.Vector2(dir.X, dir.Y) * spd,
+                VelocityZ = dir.Z * spd,
+                Seed = (shot * 0.731f) % 10f,
+                TargetDragon = AcquireFireballTarget(muzzleXY, muzzleElev, aim), // lock onto a dragon in the ±10° cone
+            });
+            dragonFireCooldown = DragonFireCooldownSeconds;
+        }
+
+        dragonFireSprites.Clear();
+        dragonFireSmokeSprites.Clear();
+        if (dragonFireballs.Count > 0)
+        {
+            RebuildLakeCache(); // one conversion per tick; balls test it for a water hit → steam
+        }
+
+        // ── Stream balls (the jet from the mouth) ── fly forward, home onto a locked dragon, and on contact or
+        // terrain hand off to a staged explosion BURST (spawned into the particle pool; the ball itself is removed).
+        for (int i = dragonFireballs.Count - 1; i >= 0; i--)
+        {
+            DragonFireball ball = dragonFireballs[i];
+            ball.Age += dt;
+            bool explode = false;
+            float power = 1.1f;
+
+            if (ball.TargetDragon >= 0 && ball.TargetDragon < aiFlock.Count && aiFlock[ball.TargetDragon].Alive)
+            {
+                AiFlockDragon t = aiFlock[ball.TargetDragon];
+                var to = new Vector3(
+                    t.Flight.PositionXY.X - ball.XY.X,
+                    t.Flight.PositionXY.Y - ball.XY.Y,
+                    t.Flight.ElevationMeters - ball.Elevation);
+                float dist = to.Length();
+                if (dist <= DragonFireHitRadiusMeters)
+                {
+                    explode = true;
+                    power = 2.2f; // a kill = a big blast
+                    KillAiDragon(ball.TargetDragon);
+                }
+                else
+                {
+                    var vel = new Vector3(ball.VelocityXY.X, ball.VelocityXY.Y, ball.VelocityZ);
+                    float ballSpeed = vel.Length();
+                    Vector3 curDir = ballSpeed > 1e-3f ? vel / ballSpeed : to / dist;
+                    Vector3 newDir = Vector3.Normalize(
+                        curDir + (((to / dist) - curDir) * Math.Clamp(DragonFireHomingPerSecond * dt, 0f, 1f)));
+                    ball.VelocityXY = new System.Numerics.Vector2(newDir.X, newDir.Y) * ballSpeed;
+                    ball.VelocityZ = newDir.Z * ballSpeed;
+                }
+            }
+            else
+            {
+                // Curl-writhe: an un-guided ball snakes instead of flying dead-straight, so the jet braids like
+                // a living flame. Deterministic per ball (age + seed), ramping in just past the muzzle.
+                float sp2 = ball.VelocityXY.Length();
+                if (sp2 > 1e-3f)
+                {
+                    var fwd2 = ball.VelocityXY / sp2;
+                    var perp = new System.Numerics.Vector2(-fwd2.Y, fwd2.X);
+                    float tt = ball.Age, sd = ball.Seed;
+                    float lat = (MathF.Sin((tt * 8.5f) + (sd * 6.283f)) * 0.65f) + (MathF.Sin((tt * 19f) + (sd * 2.7f)) * 0.35f);
+                    float ver = (MathF.Cos((tt * 7.0f) + (sd * 4.1f)) * 0.60f) + (MathF.Sin((tt * 23f) + (sd * 1.3f)) * 0.25f);
+                    float amp = 42f * MathF.Min(1f, tt * 4f);
+                    ball.VelocityXY += perp * (lat * amp * dt);
+                    ball.VelocityZ += ((ver * amp) + 2.5f) * dt;
+                }
+            }
+
+            ball.XY += ball.VelocityXY * dt;
+            ball.Elevation += ball.VelocityZ * dt;
+
+            bool hitWater = false;
+            if (!explode)
+            {
+                if (TryLakeWaterElevation(ball.XY) is { } waterElev && ball.Elevation <= waterElev + 1.5f)
+                {
+                    explode = true;
+                    hitWater = true; // quench on the lake surface → steam
+                    ball.Elevation = waterElev + 0.3f;
+                }
+                else if (SampleWalkGround(ball.XY) is { } ground && ball.Elevation <= ground + 0.5f)
+                {
+                    explode = true;
+                    ball.Elevation = ground + 1f;
+                }
+            }
+
+            if (explode)
+            {
+                var burstPos = new Vector3(ball.XY.X, ball.XY.Y, ball.Elevation);
+                if (hitWater)
+                {
+                    SpawnSteamBurst(burstPos, 1.4f);
+                }
+                else
+                {
+                    SpawnFireBurst(burstPos, power);
+                }
+
+                dragonFireballs.RemoveAt(i);
+                continue;
+            }
+
+            if (ball.Age >= DragonFireTtlSeconds)
+            {
+                dragonFireballs.RemoveAt(i);
+                continue;
+            }
+
+            dragonFireballs[i] = ball;
+
+            // Flame sprite (kind 0): tighter hot muzzle → wide blossom (a cone), velocity-stretched into a tongue.
+            // Per-ball size jitter (from the seed) so the jet isn't a string of identical blobs.
+            float life = ball.Age / DragonFireTtlSeconds;
+            float sizeJitter = 0.75f + (0.5f * Frac(ball.Seed * 1.7f));
+            float radius = DragonFireRadiusMeters * sizeJitter * (0.45f + (2.0f * life)) * (1f - (0.2f * life * life));
+            float attack = MathF.Min(1f, ball.Age * 30f);
+            float s = Math.Clamp((life - 0.6f) / 0.4f, 0f, 1f);
+            float intensity = attack * (1f - (s * s * (3f - (2f * s))));
+
+            var ballWorld = new Vector3(ball.XY.X, ball.XY.Y, ball.Elevation * exaggeration);
+            float distToCam = Vector3.Distance(Camera.Position, ballWorld);
+            if (distToCam < 8f)
+            {
+                intensity *= distToCam / 8f; // only extreme point-blank is dimmed (don't gut the stream at the mouth)
+            }
+
+            var ballVel = new Vector3(ball.VelocityXY.X, ball.VelocityXY.Y, ball.VelocityZ);
+            dragonFireSprites.Add(new MapaTur.App.Services.Terrain3DGlRenderer.FireballSprite(
+                ballWorld, radius, intensity, ball.Seed, (float)FireKind.Flame, ballVel));
+        }
+
+        while (dragonFireballs.Count > DragonFireMaxBalls)
+        {
+            dragonFireballs.RemoveAt(0); // cap: drop the oldest
+        }
+
+        StepFireParticles(dt, exaggeration);
+    }
+
+    // Spawns a staged explosion at pos (real metres): a sub-frame FLASH, an expanding SHOCK ring, rolling
+    // fireball PUFFS, and arcing EMBERS — power scales stream(1.1) / dragon-kill(2.2). Pure additive kinds; the
+    // smoke + ground scorch layers are Phase 2b.
+    private void SpawnFireBurst(Vector3 pos, float power)
+    {
+        dragonFireParticles.Add(new FireParticle
+        {
+            Pos = pos, Kind = FireKind.Flash, Life = 0.10f, Size0 = 2f * power, Size1 = 9f * power,
+            Seed = (dragonBurstCounter++ * 0.731f) % 10f,
+        });
+        dragonFireParticles.Add(new FireParticle
+        {
+            Pos = pos, Kind = FireKind.Shock, Life = 0.30f, Size0 = 0.5f * power, Size1 = 15f * power,
+            Seed = (dragonBurstCounter++ * 0.731f) % 10f,
+        });
+        for (int k = 0; k < 2; k++)
+        {
+            float ang = k * 2.4f;
+            var off = new Vector3(MathF.Cos(ang), MathF.Sin(ang), 0f) * (1.5f * power);
+            dragonFireParticles.Add(new FireParticle
+            {
+                Pos = pos + off, Vel = new Vector3(0f, 0f, 4f), Kind = FireKind.Puff, Life = 0.55f,
+                Size0 = 3f * power, Size1 = 9f * power, Seed = (dragonBurstCounter++ * 0.731f) % 10f,
+            });
+        }
+
+        int embers = (int)MathF.Round(9f * power);
+        for (int j = 0; j < embers; j++)
+        {
+            float gi = j + 0.5f;
+            float phi = gi * 2.399963f;                        // golden angle
+            float y = 1f - ((gi / embers) * 0.85f);            // biased up (hemisphere)
+            float rad = MathF.Sqrt(MathF.Max(0f, 1f - (y * y)));
+            var dir = new Vector3(MathF.Cos(phi) * rad, MathF.Sin(phi) * rad, y);
+            float spd = 17f + (17f * Frac(gi * 0.618f));
+            dragonFireParticles.Add(new FireParticle
+            {
+                Pos = pos, Vel = dir * spd, Kind = FireKind.Ember, Life = 0.4f + (0.5f * Frac(gi * 0.31f)),
+                Size0 = 0.7f, Size1 = 0.25f, Seed = (dragonBurstCounter++ * 0.731f) % 10f,
+            });
+        }
+
+        // Rising SMOKE puffs that outlast the flame (straight-alpha, second pass).
+        int smoke = (int)MathF.Round(4f * power);
+        for (int m = 0; m < smoke; m++)
+        {
+            float sa = m * 1.7f;
+            var soff = new Vector3(MathF.Cos(sa), MathF.Sin(sa), 0f) * (1.2f * power);
+            dragonFireParticles.Add(new FireParticle
+            {
+                Pos = pos + soff,
+                Vel = new Vector3((Frac(sa) * 2f) - 1f, (Frac(sa * 1.7f) * 2f) - 1f, 3.5f),
+                Kind = FireKind.Smoke, Life = 1.6f + (0.8f * Frac(sa)),
+                Size0 = 4f * power, Size1 = 13f * power, Seed = (dragonBurstCounter++ * 0.731f) % 10f,
+            });
+        }
+    }
+
+    private static float Frac(float x) => x - MathF.Floor(x);
+
+    // A fireball quenched on water: a brief hiss FLASH + a fat cloud of rising white STEAM (routed to the alpha
+    // pass; billows bigger and lasts longer than soot smoke).
+    private void SpawnSteamBurst(Vector3 pos, float power)
+    {
+        dragonFireParticles.Add(new FireParticle
+        {
+            Pos = pos, Kind = FireKind.Flash, Life = 0.08f, Size0 = 2f * power, Size1 = 6f * power,
+            Seed = (dragonBurstCounter++ * 0.731f) % 10f,
+        });
+        int puffs = (int)MathF.Round(7f * power);
+        for (int m = 0; m < puffs; m++)
+        {
+            float sa = m * 1.3f;
+            var soff = new Vector3(MathF.Cos(sa), MathF.Sin(sa), 0f) * (2f * power);
+            dragonFireParticles.Add(new FireParticle
+            {
+                Pos = pos + soff,
+                Vel = new Vector3(((Frac(sa) * 2f) - 1f) * 2.5f, ((Frac(sa * 1.7f) * 2f) - 1f) * 2.5f, 7f), // rises fast
+                Kind = FireKind.Steam, Life = 1.8f + (1.0f * Frac(sa)),
+                Size0 = 3f * power, Size1 = 17f * power, Seed = (dragonBurstCounter++ * 0.731f) % 10f,
+            });
+        }
+    }
+
+    // In-frame lake outlines converted to world XY, cached once per fire tick (dragonLakeCache) so a flying ball
+    // can point-in-polygon test cheaply for a water hit.
+    private readonly List<(System.Numerics.Vector2[] Poly, float Elev)> dragonLakeCache = [];
+
+    private void RebuildLakeCache()
+    {
+        dragonLakeCache.Clear();
+        if (WorldFrame is not { } frame)
+        {
+            return;
+        }
+
+        foreach (MapaTur.Application.Terrain.MountainLake lake in MapaTur.Application.Terrain.MountainLakeData.WithinBounds(frame.Bounds))
+        {
+            int n = lake.Outline.Count;
+            if (n < 3)
+            {
+                continue;
+            }
+
+            var poly = new System.Numerics.Vector2[n];
+            for (int k = 0; k < n; k++)
+            {
+                Vector3 wp = frame.GeoToWorld(lake.Outline[k], 0f);
+                poly[k] = new System.Numerics.Vector2(wp.X, wp.Y);
+            }
+
+            dragonLakeCache.Add((poly, (float)lake.ElevationMeters));
+        }
+    }
+
+    // Water elevation (real metres) if worldXY is inside a cached lake outline, else null — a fireball reaching
+    // that height over the lake hisses into steam instead of a fire burst.
+    private float? TryLakeWaterElevation(System.Numerics.Vector2 p)
+    {
+        foreach ((System.Numerics.Vector2[] poly, float elev) in dragonLakeCache)
+        {
+            bool inside = false;
+            for (int i = 0, j = poly.Length - 1; i < poly.Length; j = i++)
+            {
+                if (((poly[i].Y > p.Y) != (poly[j].Y > p.Y))
+                    && (p.X < (((poly[j].X - poly[i].X) * (p.Y - poly[i].Y) / (poly[j].Y - poly[i].Y)) + poly[i].X)))
+                {
+                    inside = !inside;
+                }
+            }
+
+            if (inside)
+            {
+                return elev;
+            }
+        }
+
+        return null;
+    }
+
+    // Advances the explosion particle pool and builds its render sprites (kind-tagged for the shader).
+    private void StepFireParticles(float dt, float exaggeration)
+    {
+        for (int i = dragonFireParticles.Count - 1; i >= 0; i--)
+        {
+            FireParticle pt = dragonFireParticles[i];
+            pt.Age += dt;
+            if (pt.Age >= pt.Life)
+            {
+                dragonFireParticles.RemoveAt(i);
+                continue;
+            }
+
+            switch (pt.Kind)
+            {
+                case FireKind.Ember:
+                    pt.Vel.Z -= 22f * dt;                       // gravity
+                    pt.Vel *= MathF.Max(0f, 1f - (1.5f * dt));  // drag
+                    pt.Pos += pt.Vel * dt;
+                    break;
+                case FireKind.Puff:
+                    pt.Pos += pt.Vel * dt;
+                    break;
+                case FireKind.Smoke:
+                case FireKind.Steam:
+                    pt.Vel.Z *= MathF.Max(0f, 1f - (0.6f * dt)); // rise then stall
+                    pt.Vel.X *= MathF.Max(0f, 1f - (0.5f * dt));
+                    pt.Vel.Y *= MathF.Max(0f, 1f - (0.5f * dt));
+                    pt.Pos += pt.Vel * dt;
+                    break;
+                default:
+                    break; // Flash / Shock: fixed in place
+            }
+
+            dragonFireParticles[i] = pt;
+
+            float u = pt.Age / pt.Life;
+            var world = new Vector3(pt.Pos.X, pt.Pos.Y, pt.Pos.Z * exaggeration);
+            float distToCam = Vector3.Distance(Camera.Position, world);
+            float camClamp = distToCam < 8f ? distToCam / 8f : 1f;
+
+            if (pt.Kind is FireKind.Smoke or FireKind.Steam)
+            {
+                // Smoke/steam grow LINEARLY over their long life and fade in then out; routed to the alpha pass.
+                float radiusS = pt.Size0 + ((pt.Size1 - pt.Size0) * u);
+                float intensityS = MathF.Min(1f, u * 6f) * (1f - u) * camClamp;
+                dragonFireSmokeSprites.Add(new MapaTur.App.Services.Terrain3DGlRenderer.FireballSprite(
+                    world, radiusS, intensityS, pt.Seed, (float)pt.Kind, Vector3.Zero));
+                continue;
+            }
+
+            float ease = 1f - ((1f - u) * (1f - u) * (1f - u)); // ease-out-cubic expansion
+            float radius = pt.Size0 + ((pt.Size1 - pt.Size0) * ease);
+            float intensity = pt.Kind switch
+            {
+                FireKind.Flash => 1f - u,
+                FireKind.Shock => (1f - u) * (1f - u),
+                FireKind.Ember => 1f - (u * u),
+                FireKind.Puff => MathF.Min(1f, pt.Age * 15f) * (1f - (u * u)),
+                _ => 1f - u,
+            };
+            intensity *= camClamp;
+
+            Vector3 vel = pt.Kind == FireKind.Ember ? pt.Vel : Vector3.Zero;
+            dragonFireSprites.Add(new MapaTur.App.Services.Terrain3DGlRenderer.FireballSprite(
+                world, radius, intensity, pt.Seed, (float)pt.Kind, vel));
+        }
+
+        while (dragonFireParticles.Count > 256)
+        {
+            dragonFireParticles.RemoveAt(0);
+        }
+    }
+
+    // Picks the landing spot — the nearest OSM summit within range, else the terrain straight ahead — seats it
+    // on the TRUE rendered surface (fine sampler → base DEM) and starts the autopilot landing cycle.
+    private void BeginDragonLanding()
+    {
+        if (dragon is not { Phase: MapaTur.Application.Terrain.DragonFlightPhase.Flying } d
+            || WorldFrame is not { } frame)
+        {
+            return;
+        }
+
+        const float PeakSearchRadiusMeters = 800f;
+        const float FallbackAheadMeters = 150f;
+
+        var pos = d.PositionXY;
+        System.Numerics.Vector2? target = null;
+        string? name = null;
+        float bestDistance = PeakSearchRadiusMeters;
+        if (Peaks is { Count: > 0 } peaks)
+        {
+            foreach (MapaTur.Application.Terrain.TerrainPeak peak in peaks)
+            {
+                Vector3 world = frame.GeoToWorld(peak.Location, 0f);
+                var xy = new System.Numerics.Vector2(world.X, world.Y);
+                float distance = System.Numerics.Vector2.Distance(pos, xy);
+                if (distance < bestDistance)
+                {
+                    bestDistance = distance;
+                    target = xy;
+                    name = peak.Name;
+                }
+            }
+        }
+
+        if (target is null)
+        {
+            float ch = MathF.Cos(d.HeadingRadians), sh = MathF.Sin(d.HeadingRadians);
+            target = pos + (new System.Numerics.Vector2(ch, sh) * FallbackAheadMeters);
+            name = null;
+        }
+
+        // The dragon must stand ON the rendered 1 m rock, so the surface sample wins over any tagged elevation.
+        if (SampleWalkGround(target.Value) is not { } groundElevation)
+        {
+            Serilog.Log.Information("[Dragon] landing refused — no terrain under the target");
+            return;
+        }
+
+        // Snap to the LOCAL HIGHEST point: the OSM peak node (or the ahead-fallback) often sits a few metres
+        // off the true rendered summit, which read as "landing below the top". Scan a small grid around the
+        // spot on the fine surface and perch on its highest sample.
+        for (float dx = -12f; dx <= 12f; dx += 4f)
+        {
+            for (float dy = -12f; dy <= 12f; dy += 4f)
+            {
+                var probe = new System.Numerics.Vector2(target.Value.X + dx, target.Value.Y + dy);
+                if (SampleWalkGround(probe) is { } probeElevation && probeElevation > groundElevation)
+                {
+                    groundElevation = probeElevation;
+                    target = probe;
+                }
+            }
+        }
+
+        if (d.BeginLanding(target.Value, groundElevation))
+        {
+            Serilog.Log.Information(
+                "[Dragon] landing → {Name} ({X:F0},{Y:F0}) elev={Elev:F0} dist={Dist:F0}m",
+                name ?? "terrain ahead", target.Value.X, target.Value.Y, groundElevation,
+                System.Numerics.Vector2.Distance(pos, target.Value));
+        }
     }
 
     private void OnPlatformKeyUp(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
@@ -4448,10 +6188,15 @@ public partial class Terrain3DView : ContentView
                     dragonPitchDown = false;
                     break;
                 case Windows.System.VirtualKey.Left:
+                    Serilog.Log.Information("[DragonKey] UP Left");
                     dragonYawLeft = false;
                     break;
                 case Windows.System.VirtualKey.Right:
+                    Serilog.Log.Information("[DragonKey] UP Right");
                     dragonYawRight = false;
+                    break;
+                case Windows.System.VirtualKey.F:
+                    dragonFireHeld = false;
                     break;
             }
 
@@ -4610,8 +6355,13 @@ public partial class Terrain3DView : ContentView
             bool dragon3DVisible = dragonActive && dragonModel3D is not null;
             Vector3 dragonLight = tiles.Count > 0 ? tiles[0].LightDirection : new Vector3(0.4f, 0.4f, 1f);
             glRenderer.SetDragon(dragonModel3D, dragonWorldMatrix, dragonNormalMatrix, dragonLight, dragon3DVisible);
+            glRenderer.SetFireballs(dragonActive && dragonFireSprites.Count > 0 ? dragonFireSprites : null);
+            glRenderer.SetFireSmoke(dragonActive && dragonFireSmokeSprites.Count > 0 ? dragonFireSmokeSprites : null);
+            glRenderer.SetDebugMarkers(dragonActive && dragonDebugMarkers.Count > 0 ? dragonDebugMarkers : null);
+            UpdateAiFlock(); // advance + pose the flock in step with this frame (no separate timer — WinUI-safe)
+            glRenderer.SetAiDragons(ShowAiDragons && aiFlockInstances.Count > 0 ? aiFlockInstances : null);
             double dbgPreRenderMs = dbgSwapPaintActive ? dbgPaintWatch.Elapsed.TotalMilliseconds : 0;
-            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere, forest, DetailElevation, ShowNightSky ? DateOnly.FromDateTime(DateTime.Now) : null, ExposedRoutes, ShowSauronTower, ShowEagles, AtmosphereEffectsEnabled);
+            uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere, forest, DetailElevation, ShowNightSky ? DateOnly.FromDateTime(DateTime.Now) : null, ExposedRoutes, ShowSauronTower, ShowEagles, AtmosphereEffectsEnabled, OffTrailTracks);
             if (dbgSwapPaintActive)
             {
                 double afterRenderMs = dbgPaintWatch.Elapsed.TotalMilliseconds;

@@ -90,6 +90,23 @@ public partial class MapPage : ContentPage
         // 3D → 2D no longer drags the flat map either; the two views are independent.
     }
 
+    // A pointer-only overlay button (e.g. the 📷 screenshot toggle): drop it from the keyboard tab order so the
+    // Space/Enter key can't "click" it. Without this, pressing Space to flap the dragon ALSO invoked the focused
+    // button (hiding the panels) — the window-root key handler flaps AND the focused button fires. Pointer/tap
+    // still works.
+    private void OnPointerOnlyButtonHandlerChanged(object? sender, EventArgs e)
+    {
+#if WINDOWS
+        if (sender is Button { Handler.PlatformView: Microsoft.UI.Xaml.Controls.Control control })
+        {
+            control.IsTabStop = false;                  // out of the keyboard tab order
+            control.AllowFocusOnInteraction = false;    // a tap invokes the Command but does NOT steal focus
+            control.UseSystemFocusVisuals = false;
+            Serilog.Log.Information("[UI] pointer-only button focus disabled ({Type})", control.GetType().Name);
+        }
+#endif
+    }
+
     // 2D → 3D: point the camera at whatever the flat map is centred on, matching its zoom AND its
     // rotation (bearing) so the heading carries over. Pitch is left untouched.
     private void SyncCameraToMap()

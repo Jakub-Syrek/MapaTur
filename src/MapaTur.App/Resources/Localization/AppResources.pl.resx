@@ -133,6 +133,51 @@
   <data name="FilePickerTcx" xml:space="preserve">
     <value>Wybierz ślad TCX</value>
   </data>
+  <data name="FilePickerTrack" xml:space="preserve">
+    <value>Wybierz ślad GPX lub TCX</value>
+  </data>
+  <data name="OffTrailSectionHeader" xml:space="preserve">
+    <value>🥾  Pozaszlaki</value>
+  </data>
+  <data name="OffTrailAddButton" xml:space="preserve">
+    <value>➕  Dodaj ślad (GPX / TCX)</value>
+  </data>
+  <data name="OffTrailShowLayer" xml:space="preserve">
+    <value>Pokaż warstwę pozaszlaków</value>
+  </data>
+  <data name="OffTrailUseInPlanning" xml:space="preserve">
+    <value>Uwzględniaj pozaszlaki w planowaniu tras</value>
+  </data>
+  <data name="OffTrailEmpty" xml:space="preserve">
+    <value>Brak zaimportowanych śladów.</value>
+  </data>
+  <data name="OffTrailDelete" xml:space="preserve">
+    <value>Usuń</value>
+  </data>
+  <data name="StatusTrackNoTracks" xml:space="preserve">
+    <value>Plik nie zawierał żadnych użytecznych śladów.</value>
+  </data>
+  <data name="StatusTrackImportedFormat" xml:space="preserve">
+    <value>Zaimportowano {0} ślad(y). Pozaszlaków łącznie: {1}.</value>
+  </data>
+  <data name="StatusTrackUnsupportedFormat" xml:space="preserve">
+    <value>Nieobsługiwany format śladu: {0}</value>
+  </data>
+  <data name="StatusTrackParseFailedFormat" xml:space="preserve">
+    <value>Nie udało się wczytać śladu: {0}</value>
+  </data>
+  <data name="StatusTrackDeletedFormat" xml:space="preserve">
+    <value>Usunięto pozaszlak „{0}”.</value>
+  </data>
+  <data name="DragonVariantHeader" xml:space="preserve">
+    <value>🐉  Smok (F7)</value>
+  </data>
+  <data name="DragonVariantClassic" xml:space="preserve">
+    <value>Klasyczny</value>
+  </data>
+  <data name="DragonVariantAnimated" xml:space="preserve">
+    <value>Animowany</value>
+  </data>
   <data name="AccessibilityMapControl" xml:space="preserve">
     <value>Interaktywna mapa. Dotknij, aby ustawić punkty trasy.</value>
   </data>
@@ -309,6 +354,8 @@
   <data name="ToggleSauronTowerHint" xml:space="preserve"><value>mroczna wieża ze świecącym okiem na Świnicy (easter egg)</value></data>
   <data name="ToggleEagles" xml:space="preserve"><value>Orły</value></data>
   <data name="ToggleEaglesHint" xml:space="preserve"><value>orły szybujące nad granią Orlej Perci (easter egg)</value></data>
+  <data name="ToggleAiDragons" xml:space="preserve"><value>Smoki AI</value></data>
+  <data name="ToggleAiDragonsHint" xml:space="preserve"><value>stado smoków krążących nad szczytami; nadlatują gdy lecisz smokiem (F7)</value></data>
   <data name="ToggleAtmosphereEffects" xml:space="preserve"><value>Efekty atmosfery</value></data>
   <data name="ToggleAtmosphereEffectsHint" xml:space="preserve"><value>animowane chmury, pioruny, orły, poświata — wyłącz, by oszczędzać baterię (zatrzymuje ciągły odrys)</value></data>
   <data name="TrailColoursHeader" xml:space="preserve"><value>KOLORY SZLAKÓW</value></data>

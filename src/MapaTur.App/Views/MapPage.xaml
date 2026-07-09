@@ -33,6 +33,7 @@
                              Waterways="{Binding Waterways3DOverlay}"
                              Waterfalls="{Binding Waterfalls3DOverlay}"
                              ExposedRoutes="{Binding ExposedRoutes3DOverlay}"
+                             OffTrailTracks="{Binding OffTrailTracks3DOverlay}"
                              Route="{Binding Route3DOverlay}"
                              ClimbingAreas="{Binding Climbing3DOverlay}"
                              Pois="{Binding Pois3DOverlay}"
@@ -51,6 +52,9 @@
                              ShowNightSky="{Binding ShowNightSky}"
                              ShowSauronTower="{Binding ShowSauronTower}"
                              ShowEagles="{Binding ShowEagles}"
+                             ShowAiDragons="{Binding ShowAiDragons}"
+                             ShowDebugMarkers="{Binding ShowLodDiagnostics}"
+                             DragonVariant="{Binding DragonVariantIndex}"
                              UserLocationFreshness="{Binding LocationFreshness}"
                              ShowContours="{Binding ShowContours}"
                              PeakLabelRadiusMeters="{Binding PeakLabelRadiusMeters}"
@@ -619,6 +623,39 @@
                         </VerticalStackLayout>
                         <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowEagles}" />
                     </Grid>
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <VerticalStackLayout Grid.Column="0" Spacing="0">
+                            <Label Text="{x:Static loc:AppStrings.ToggleAiDragons}" Style="{StaticResource GlassLabel}" />
+                            <Label Text="{x:Static loc:AppStrings.ToggleAiDragonsHint}" Style="{StaticResource GlassCaption}" FontSize="10" />
+                        </VerticalStackLayout>
+                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding ShowAiDragons}" />
+                    </Grid>
+
+                    <!-- 🐉 Dragon variant for the F7 flight: classic (red, procedural flap) or animated
+                         (textured, baked flying loop). Chip pair mirroring the RenderQuality selector. -->
+                    <Label Text="{x:Static loc:AppStrings.DragonVariantHeader}" Style="{StaticResource GlassCaption}" />
+                    <FlexLayout Wrap="Wrap" JustifyContent="Start" AlignItems="Center">
+                        <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
+                                Background="#14FFFFFF">
+                            <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
+                            <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding SetDragonVariantCommand}" CommandParameter="0" /></Border.GestureRecognizers>
+                            <HorizontalStackLayout Spacing="5">
+                                <Label Text="{x:Static loc:AppStrings.DragonVariantClassic}" Style="{StaticResource GlassLabel}" FontSize="12" />
+                                <Label Text="✓" Style="{StaticResource GlassLabel}" FontSize="12"
+                                       IsVisible="{Binding DragonVariantIndex, Converter={StaticResource IntEquals}, ConverterParameter=0}" />
+                            </HorizontalStackLayout>
+                        </Border>
+                        <Border Padding="11,6" StrokeThickness="1" Stroke="#22FFFFFF" Margin="0,0,6,6"
+                                Background="#14FFFFFF">
+                            <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
+                            <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding SetDragonVariantCommand}" CommandParameter="1" /></Border.GestureRecognizers>
+                            <HorizontalStackLayout Spacing="5">
+                                <Label Text="{x:Static loc:AppStrings.DragonVariantAnimated}" Style="{StaticResource GlassLabel}" FontSize="12" />
+                                <Label Text="✓" Style="{StaticResource GlassLabel}" FontSize="12"
+                                       IsVisible="{Binding DragonVariantIndex, Converter={StaticResource IntEquals}, ConverterParameter=1}" />
+                            </HorizontalStackLayout>
+                        </Border>
+                    </FlexLayout>
                 </VerticalStackLayout>
                 </ScrollView>
             </Border>
@@ -701,6 +738,61 @@
                         <Button Grid.Row="2" Grid.Column="0" Style="{StaticResource GlassButton}" Text="{x:Static loc:AppStrings.DownloadWaterways}"
                                 Command="{Binding DownloadWaterwaysForViewportCommand}" IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
                     </Grid>
+
+                    <!-- 🥾 POZASZLAKI: import + zarządzanie własnymi śladami GPX/TCX jako osobną warstwą.
+                         Add → picker → import → zapis (mapatur-tracks.db) → warstwa 3D (hot-magenta). Lista
+                         z per-wierszowym usuwaniem. Przełącznik chowa/pokazuje całą warstwę (persist). -->
+                    <Label Text="{x:Static loc:AppStrings.OffTrailSectionHeader}" Style="{StaticResource GlassCaption}" />
+
+                    <Border Padding="12,9" StrokeThickness="1" Stroke="#40FF3DAE" Margin="0,2,0,0" Background="#26FF3DAE">
+                        <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
+                        <Border.GestureRecognizers><TapGestureRecognizer Command="{Binding AddOffTrailTrackCommand}" /></Border.GestureRecognizers>
+                        <Label Text="{x:Static loc:AppStrings.OffTrailAddButton}" Style="{StaticResource GlassLabel}"
+                               FontSize="13" HorizontalOptions="Center" />
+                    </Border>
+
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8" Margin="2,0">
+                        <Label Grid.Column="0" Text="{x:Static loc:AppStrings.OffTrailShowLayer}" Style="{StaticResource GlassLabel}"
+                               FontSize="13" VerticalOptions="Center" />
+                        <Switch Grid.Column="1" IsToggled="{Binding ShowOffTrailTracks}" VerticalOptions="Center" />
+                    </Grid>
+
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8" Margin="2,0">
+                        <Label Grid.Column="0" Text="{x:Static loc:AppStrings.OffTrailUseInPlanning}" Style="{StaticResource GlassLabel}"
+                               FontSize="13" VerticalOptions="Center" />
+                        <Switch Grid.Column="1" IsToggled="{Binding UseOffTrailInPlanning}" VerticalOptions="Center" />
+                    </Grid>
+
+                    <VerticalStackLayout BindableLayout.ItemsSource="{Binding OffTrailTrackItems}" Spacing="0">
+                        <BindableLayout.EmptyView>
+                            <Label Text="{x:Static loc:AppStrings.OffTrailEmpty}" Style="{StaticResource GlassCaption}"
+                                   FontSize="11" Padding="4,6" />
+                        </BindableLayout.EmptyView>
+                        <BindableLayout.ItemTemplate>
+                            <DataTemplate x:DataType="vm:OffTrailTrackItem">
+                                <Border Padding="11,9" Margin="0,0,0,6" StrokeThickness="1" Stroke="#30FF3DAE" Background="#1FFF3DAE">
+                                    <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
+                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="11">
+                                        <VerticalStackLayout Grid.Column="0" Spacing="0" VerticalOptions="Center">
+                                            <Label Text="{Binding Name}" Style="{StaticResource GlassLabel}"
+                                                   FontSize="14" LineBreakMode="TailTruncation" />
+                                            <Label Text="{Binding Summary}" Style="{StaticResource GlassCaption}" FontSize="10" />
+                                        </VerticalStackLayout>
+                                        <Border Grid.Column="1" Padding="9,4" StrokeThickness="1" Stroke="#33FF6B7A"
+                                                Background="#22FF6B7A" VerticalOptions="Center">
+                                            <Border.StrokeShape><RoundRectangle CornerRadius="10" /></Border.StrokeShape>
+                                            <Label Text="{x:Static loc:AppStrings.OffTrailDelete}" FontSize="12" TextColor="#FFC0C8" />
+                                            <Border.GestureRecognizers>
+                                                <TapGestureRecognizer
+                                                    Command="{Binding Source={x:Reference PageRoot}, Path=BindingContext.DeleteOffTrailTrackCommand}"
+                                                    CommandParameter="{Binding .}" />
+                                            </Border.GestureRecognizers>
+                                        </Border>
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </BindableLayout.ItemTemplate>
+                    </VerticalStackLayout>
 
                     <!-- Route actions live ONLY under Trasa now (this was a duplicated block).
                          The whole data LIFECYCLE ends here: cache summary + clear, moved from Ustawienia. -->
@@ -883,10 +975,11 @@
         <!-- Screenshot-mode toggle: the ONLY element that survives UiHidden — hides every floating UI piece
              for a clean shot, second tap brings the chrome back ("przycisk do chowania UI, zostaje tylko
              przycisk"). Top-right so it crops away easily. -->
-        <Button Text="📷" FontSize="16" Padding="0"
+        <Button x:Name="ScreenshotToggleButton" Text="📷" FontSize="16" Padding="0"
                 WidthRequest="40" HeightRequest="40" CornerRadius="20"
                 BackgroundColor="#33101418" TextColor="{StaticResource GlassInk}"
                 HorizontalOptions="End" VerticalOptions="Start" Margin="0,10,10,0"
+                HandlerChanged="OnPointerOnlyButtonHandlerChanged"
                 Command="{Binding ToggleUiCommand}" />
 
         <!-- STARTUP loading overlay: from launch until the initial terrain scene is built. The stage label
