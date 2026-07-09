@@ -254,6 +254,17 @@ public partial class Terrain3DView : ContentView
         set => SetValue(ShowEaglesProperty, value);
     }
 
+    public static readonly BindableProperty ShowDebugMarkersProperty = BindableProperty.Create(
+        nameof(ShowDebugMarkers), typeof(bool), typeof(Terrain3DView), false);
+
+    /// <summary>When on (bound to the "LOD diagnostics" DEBUG toggle), draws the dragon foot-placement probe
+    /// markers (RED origin / GREEN bind-centre / BLUE foot anchor / YELLOW target rock) + the [DragonSeat] log.</summary>
+    public bool ShowDebugMarkers
+    {
+        get => (bool)GetValue(ShowDebugMarkersProperty);
+        set => SetValue(ShowDebugMarkersProperty, value);
+    }
+
     public static readonly BindableProperty AtmosphereEffectsEnabledProperty = BindableProperty.Create(
         nameof(AtmosphereEffectsEnabled), typeof(bool), typeof(Terrain3DView), true,
         propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
@@ -1910,9 +1921,7 @@ public partial class Terrain3DView : ContentView
     private bool dragonAnimStrokeFired;        // physics impulse fired for this stroke
     private float dragonTraceAccum;            // ~10 Hz trajectory trace throttle
     private bool dragonPerchStreamSent;        // the landing cycle reports its FIXED streaming camera exactly once
-#pragma warning disable CS0169, IDE0044 // KEPT for the next session's perch-seating work (see docs/HANDOFF-2026-07-09) — do NOT delete
-    private float dragonSeatLogAccum;          // ~1 Hz throttle for the seat diagnostic
-#pragma warning restore CS0169, IDE0044
+    private float dragonSeatLogAccum;          // ~1 Hz throttle for the [DragonSeat] probe diagnostic
     private const float DragonAnimStrokeDelaySeconds = 0.15f; // "dokończenie ruchu oboma"
     private const float DragonAnimStrokeFlapSeconds = 0.45f;  // the single outer-wing beat
     private const float DragonAnimStrokeRaiseDeg = 26f;       // wing lifts…
@@ -1944,9 +1953,21 @@ public partial class Terrain3DView : ContentView
 
     private readonly List<DragonFireball> dragonFireballs = [];
     private readonly List<MapaTur.App.Services.Terrain3DGlRenderer.FireballSprite> dragonFireSprites = [];
+
+    // ── DRAGON-FOOT PLACEMENT PROBE (KNOWN OPEN ITEM, see docs/HANDOFF) ──────────────────────────────────────
+    // Diagnostic markers drawn AFTER the final dragon transform, one per candidate anchor, so we can SEE on the
+    // rendered rock which point actually sits at the visible claws. Legend: RED=model origin, GREEN=bind-bounds
+    // centre (where the code plants worldPos), BLUE=posed foot-bone anchor (the drawn feet), YELLOW=target
+    // rendered-mesh point (where the feet SHOULD land). Cleared when not perched.
+    private readonly List<MapaTur.App.Services.Terrain3DGlRenderer.DebugMarker> dragonDebugMarkers = [];
     private bool dragonFireHeld;
-    private readonly float dragonFireCooldown;
-    private readonly int dragonFireCounter;
+    // Mutated every frame in StepDragonFire (-= dt / ++ / =). IDE0044 misfires "make readonly" here, and obeying
+    // it (as `dotnet format` did on this branch) makes the build fail CS0191 — the vicious cycle that left the
+    // committed branch un-buildable and running a stale exe. Keep them mutable; suppress the false positive.
+#pragma warning disable IDE0044
+    private float dragonFireCooldown; // stream-rate countdown while F is held
+    private int dragonFireCounter;    // increments per spawned ball (flicker seed)
+#pragma warning restore IDE0044
     private const float DragonFireCooldownSeconds = 0.16f;  // stream rate while F is held
     private const float DragonFireSpeedMetersPerSecond = 75f; // muzzle speed on top of the dragon's own
     private const float DragonFireTtlSeconds = 2.4f;
@@ -2589,7 +2610,6 @@ public partial class Terrain3DView : ContentView
             float exaggeration3D = frame.VerticalExaggeration;
             float scale = DragonModelSizeMeters / MathF.Max(0.001f, model3D.LocalExtent);
             Vector3 boundsCenter = (model3D.BoundsMin + model3D.BoundsMax) * 0.5f;
-            Matrix4x4 center = Matrix4x4.CreateTranslation(-boundsCenter); // pivot on the model centre, not its rig root
             Matrix4x4 remap = Matrix4x4.CreateRotationX(MathF.PI / 2f); // glTF Y-up → world Z-up
             Matrix4x4 bank = Matrix4x4.CreateRotationY(DragonRollSign * d.RollRadians);
             Matrix4x4 climb = Matrix4x4.CreateRotationX(DragonPitchSign * d.PitchRadians);
@@ -2598,30 +2618,91 @@ public partial class Terrain3DView : ContentView
             dragonNormalMatrix = rot;
             float drop = dragonLoadedVariant == 1 ? DragonAnimatedDropMeters : DragonDropMeters;
 
-            // Vertical seat: in flight the body hangs at the flight point; on the ground the feet stand on the
-            // spot (the lowest foot bone, blended in via the legs). NOTE — exact "feet planted on the rendered
-            // summit" is a KNOWN OPEN ITEM (see docs/HANDOFF): on sharp peaks the feet still read a few metres
-            // off because the render mesh / sampler / animation root offset don't reconcile cleanly here.
-            float flightSeat = -drop + flapLift;
+            // Posed foot anchor (model-local): horizontal = centroid of the foot bones, vertical = the LOWEST
+            // foot bone (the sole). Measured: pivoting on the bind-bounds centre planted the feet ~4.7 m off in
+            // XY (the tail/wings bias the AABB sideways; the baked clip adds root motion), while Z was already
+            // fine. On the ground we pivot on THIS point instead, so the soles sit on the target rock.
+            Vector3 footSum = Vector3.Zero;
+            int footN = 0;
             float feetY = float.PositiveInfinity;
             foreach (string bone in dragonLoadedVariant == 1 ? DragonAnimatedFootBones : DragonClassicFootBones)
             {
-                if (model3D.GetBonePosedPosition(bone) is { } footPos && footPos.Y < feetY)
+                if (model3D.GetBonePosedPosition(bone) is { } footPos)
                 {
-                    feetY = footPos.Y;
+                    footSum += footPos;
+                    footN++;
+                    if (footPos.Y < feetY)
+                    {
+                        feetY = footPos.Y;
+                    }
                 }
             }
 
+            Vector3 footCentroidLocal = footN > 0 ? footSum / footN : boundsCenter;
             if (!float.IsFinite(feetY))
             {
                 feetY = model3D.BoundsMin.Y;
             }
 
-            float perchSeat = (boundsCenter.Y - feetY) * scale;
-            float seat = flightSeat + ((perchSeat - flightSeat) * dragonLegsDown);
-            var worldPos = new Vector3(
-                d.PositionXY.X, d.PositionXY.Y, (d.ElevationMeters + seat) * exaggeration3D);
+            var footPivotLocal = new Vector3(footCentroidLocal.X, feetY, footCentroidLocal.Z);
+
+            // Flight: body hangs at the flight point, pivot on the bind centre (camera frames the body — do NOT
+            // disturb). Perched: pivot on the foot anchor and drop the sole onto the DRAWN rock
+            // (SampleRenderedMeshElevation — the only height that matches what's on screen). Blend by the legs so
+            // the touchdown slides smoothly and free flight / the chase camera stay exactly as before.
+            float flightZ = (d.ElevationMeters - drop + flapLift) * exaggeration3D;
+            Vector3 pivot = boundsCenter;
+            float worldZ = flightZ;
+            float rockZWorld = flightZ;
+            if (dragonLegsDown > 0.001f)
+            {
+                rockZWorld = (SampleRenderedMeshElevation(d.PositionXY.X, d.PositionXY.Y) ?? d.ElevationMeters)
+                    * exaggeration3D;
+                pivot = Vector3.Lerp(boundsCenter, footPivotLocal, dragonLegsDown);
+                worldZ = flightZ + ((rockZWorld - flightZ) * dragonLegsDown);
+            }
+
+            Matrix4x4 center = Matrix4x4.CreateTranslation(-pivot);
+            var worldPos = new Vector3(d.PositionXY.X, d.PositionXY.Y, worldZ);
             dragonWorldMatrix = center * Matrix4x4.CreateScale(scale) * rot * Matrix4x4.CreateTranslation(worldPos);
+
+            // ── FOOT-PLACEMENT PROBE ── markers drawn AFTER the final transform (same matrix the GPU uses:
+            // row-vector .NET uploaded un-transposed == GLSL uModel*vec4), so a CPU dot lands exactly where the
+            // GPU draws that model point. After the foot-pivot fix, BLUE (foot anchor) should sit on YELLOW
+            // (target rock). Only while landing/perched, so free flight isn't cluttered.
+            dragonDebugMarkers.Clear();
+            if (ShowDebugMarkers
+                && phase is MapaTur.Application.Terrain.DragonFlightPhase.Flare
+                or MapaTur.Application.Terrain.DragonFlightPhase.Touchdown
+                or MapaTur.Application.Terrain.DragonFlightPhase.Perched)
+            {
+                Vector3 mOrigin = Vector3.Transform(Vector3.Zero, dragonWorldMatrix);
+                Vector3 mCenter = Vector3.Transform(boundsCenter, dragonWorldMatrix);
+                Vector3 mFeet = Vector3.Transform(footCentroidLocal, dragonWorldMatrix);
+                var mTarget = new Vector3(d.PositionXY.X, d.PositionXY.Y, rockZWorld);
+
+                const float markerRadius = 1.1f;
+                dragonDebugMarkers.Add(new(mOrigin, new Vector3(1f, 0.15f, 0.15f), markerRadius));  // RED    model origin
+                dragonDebugMarkers.Add(new(mCenter, new Vector3(0.2f, 1f, 0.2f), markerRadius));    // GREEN  bind centre (= worldPos)
+                dragonDebugMarkers.Add(new(mFeet, new Vector3(0.3f, 0.55f, 1f), markerRadius));     // BLUE   posed foot anchor (drawn feet)
+                dragonDebugMarkers.Add(new(mTarget, new Vector3(1f, 0.9f, 0.15f), markerRadius));   // YELLOW target rendered rock
+
+                dragonSeatLogAccum += dt;
+                if (dragonSeatLogAccum >= 1f)
+                {
+                    dragonSeatLogAccum = 0f;
+                    float feetTargetDxy = MathF.Sqrt(
+                        ((mFeet.X - mTarget.X) * (mFeet.X - mTarget.X)) + ((mFeet.Y - mTarget.Y) * (mFeet.Y - mTarget.Y)));
+                    Serilog.Log.Information(
+                        "[DragonSeat] phase={Ph} feetN={N} exagg={Ex:F2} origin=({OX:F1},{OY:F1},{OZ:F1}) center=({CX:F1},{CY:F1},{CZ:F1}) feet=({FX:F1},{FY:F1},{FZ:F1}) target=({TX:F1},{TY:F1},{TZ:F1}) feet↔target dXY={DXY:F2} dZ={DZ:F2}",
+                        phase, footN, exaggeration3D, mOrigin.X, mOrigin.Y, mOrigin.Z, mCenter.X, mCenter.Y, mCenter.Z,
+                        mFeet.X, mFeet.Y, mFeet.Z, mTarget.X, mTarget.Y, mTarget.Z, feetTargetDxy, mFeet.Z - mTarget.Z);
+                }
+            }
+        }
+        else
+        {
+            dragonDebugMarkers.Clear();
         }
 
         // ── Fire breath ── spawn while F is held (streamed on a cooldown), fly the balls forward, burst on
@@ -5376,6 +5457,7 @@ public partial class Terrain3DView : ContentView
             Vector3 dragonLight = tiles.Count > 0 ? tiles[0].LightDirection : new Vector3(0.4f, 0.4f, 1f);
             glRenderer.SetDragon(dragonModel3D, dragonWorldMatrix, dragonNormalMatrix, dragonLight, dragon3DVisible);
             glRenderer.SetFireballs(dragonActive && dragonFireSprites.Count > 0 ? dragonFireSprites : null);
+            glRenderer.SetDebugMarkers(dragonActive && dragonDebugMarkers.Count > 0 ? dragonDebugMarkers : null);
             double dbgPreRenderMs = dbgSwapPaintActive ? dbgPaintWatch.Elapsed.TotalMilliseconds : 0;
             uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere, forest, DetailElevation, ShowNightSky ? DateOnly.FromDateTime(DateTime.Now) : null, ExposedRoutes, ShowSauronTower, ShowEagles, AtmosphereEffectsEnabled, OffTrailTracks);
             if (dbgSwapPaintActive)

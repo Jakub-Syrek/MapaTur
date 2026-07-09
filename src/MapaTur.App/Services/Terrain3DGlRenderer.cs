@@ -2673,6 +2673,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             dragonTextureModel = null;
             fireProgram = 0; // fireball pass rebuilds with the dragon
             fireVao = 0;
+            markerProgram = 0; // debug-marker pass rebuilds with the dragon
+            markerVao = 0;
             moonProgram = 0;
             moonViewProjLocation = -1;
             moonDirLocation = -1;
@@ -3682,6 +3684,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // `m` MVP buffer the line pass restores below.
         DrawDragon(gl, mvp);
         DrawFireballs(gl, mvp, camera); // breath fire right after its dragon (additive, depth-tested)
+        DrawDebugMarkers(gl, mvp, camera); // diagnostic dots (always-on-top) — dragon-foot placement probe
 
         // Trails + route as depth-tested screen-space ribbons (occluded by the terrain). Switch to the line
         // program; it shares the depth state and the same MVP, plus the viewport for the pixel expansion.
@@ -6438,6 +6441,160 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.DepthMask(true);
     }
 
+    // ── DEBUG MARKERS (diagnostic solid discs, always-on-top) ───────────────────────────────────────────────
+    /// <summary>One diagnostic marker to draw this frame: world position (exaggerated Z), flat RGB colour, and
+    /// radius in world metres. Drawn as a camera-facing opaque disc with depth-test OFF, so every marker is
+    /// visible regardless of what occludes it — a positional probe (e.g. dragon-foot vs rendered rock).</summary>
+    public readonly record struct DebugMarker(Vector3 WorldPos, Vector3 Color, float RadiusMeters);
+
+    private uint markerProgram;
+    private int markerMvpLoc = -1, markerRightLoc = -1, markerUpLoc = -1;
+    private uint markerVao, markerVbo;
+    private IReadOnlyList<DebugMarker>? debugMarkers;
+    private float[] markerScratch = Array.Empty<float>();
+
+    /// <summary>Sets the diagnostic markers drawn this frame (null/empty hides the pass).</summary>
+    public void SetDebugMarkers(IReadOnlyList<DebugMarker>? markers) => debugMarkers = markers;
+
+    private void EnsureMarkerProgram(GL g)
+    {
+        if (markerProgram != 0 && g.IsProgram(markerProgram))
+        {
+            return;
+        }
+
+        const string vs =
+            "#version 300 es\n" +
+            "layout(location=0) in vec3 aCenter;\n" +
+            "layout(location=1) in vec2 aCorner;\n" +
+            "layout(location=2) in float aRadius;\n" +
+            "layout(location=3) in vec3 aColor;\n" +
+            "uniform mat4 uMvp;\n" +
+            "uniform vec3 uRight;\n" +
+            "uniform vec3 uUp;\n" +
+            "out vec2 vUv;\n" +
+            "out vec3 vColor;\n" +
+            "void main(){ vec3 wp = aCenter + ((uRight * aCorner.x) + (uUp * aCorner.y)) * aRadius;\n" +
+            "  vUv = aCorner; vColor = aColor; gl_Position = uMvp * vec4(wp, 1.0); }\n";
+        const string fs =
+            "#version 300 es\n" +
+            "precision highp float;\n" +
+            "in vec2 vUv;\n" +
+            "in vec3 vColor;\n" +
+            "out vec4 frag;\n" +
+            "void main(){\n" +
+            "  float r = length(vUv);\n" +
+            "  if (r > 1.0) discard;\n" +
+            "  float ring = smoothstep(0.72, 0.82, r) * (1.0 - smoothstep(0.92, 1.0, r));\n" + // dark outline
+            "  vec3 col = mix(vColor, vec3(0.04), ring);\n" +
+            "  frag = vec4(col, 1.0);\n" +
+            "}\n";
+
+        uint v = CompileShader(g, ShaderType.VertexShader, vs);
+        uint f = CompileShader(g, ShaderType.FragmentShader, fs);
+        markerProgram = g.CreateProgram();
+        g.AttachShader(markerProgram, v);
+        g.AttachShader(markerProgram, f);
+        g.LinkProgram(markerProgram);
+        g.GetProgram(markerProgram, ProgramPropertyARB.LinkStatus, out int linked);
+        g.DetachShader(markerProgram, v);
+        g.DetachShader(markerProgram, f);
+        g.DeleteShader(v);
+        g.DeleteShader(f);
+        if (linked == 0)
+        {
+            string log = g.GetProgramInfoLog(markerProgram);
+            g.DeleteProgram(markerProgram);
+            markerProgram = 0;
+            throw new InvalidOperationException("Marker program link failed: " + log);
+        }
+
+        markerMvpLoc = g.GetUniformLocation(markerProgram, "uMvp");
+        markerRightLoc = g.GetUniformLocation(markerProgram, "uRight");
+        markerUpLoc = g.GetUniformLocation(markerProgram, "uUp");
+
+        markerVao = g.GenVertexArray();
+        markerVbo = g.GenBuffer();
+        g.BindVertexArray(markerVao);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, markerVbo);
+        const int stride = 9 * sizeof(float); // center3 + corner2 + radius + color3
+        g.EnableVertexAttribArray(0);
+        g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, stride, (void*)0);
+        g.EnableVertexAttribArray(1);
+        g.VertexAttribPointer(1, 2, VertexAttribPointerType.Float, false, stride, (void*)(3 * sizeof(float)));
+        g.EnableVertexAttribArray(2);
+        g.VertexAttribPointer(2, 1, VertexAttribPointerType.Float, false, stride, (void*)(5 * sizeof(float)));
+        g.EnableVertexAttribArray(3);
+        g.VertexAttribPointer(3, 3, VertexAttribPointerType.Float, false, stride, (void*)(6 * sizeof(float)));
+        g.BindVertexArray(0);
+    }
+
+    private void DrawDebugMarkers(GL g, Matrix4x4 mvp, Camera3D camera)
+    {
+        if (debugMarkers is not { Count: > 0 } markers)
+        {
+            return;
+        }
+
+        EnsureMarkerProgram(g);
+
+        Vector3 fwd = Vector3.Normalize(camera.Target - camera.Position);
+        Vector3 right = Vector3.Normalize(Vector3.Cross(fwd, Vector3.UnitZ));
+        if (!float.IsFinite(right.X))
+        {
+            right = Vector3.UnitX;
+        }
+
+        Vector3 up = Vector3.Cross(right, fwd);
+
+        int floats = markers.Count * 6 * 9;
+        if (markerScratch.Length < floats)
+        {
+            markerScratch = new float[floats];
+        }
+
+        Span<(float X, float Y)> corners = stackalloc (float, float)[6]
+        {
+            (-1f, -1f), (1f, -1f), (1f, 1f),
+            (-1f, -1f), (1f, 1f), (-1f, 1f),
+        };
+        int w = 0;
+        foreach (DebugMarker mk in markers)
+        {
+            foreach ((float cx, float cy) in corners)
+            {
+                markerScratch[w++] = mk.WorldPos.X;
+                markerScratch[w++] = mk.WorldPos.Y;
+                markerScratch[w++] = mk.WorldPos.Z;
+                markerScratch[w++] = cx;
+                markerScratch[w++] = cy;
+                markerScratch[w++] = mk.RadiusMeters;
+                markerScratch[w++] = mk.Color.X;
+                markerScratch[w++] = mk.Color.Y;
+                markerScratch[w++] = mk.Color.Z;
+            }
+        }
+
+        g.UseProgram(markerProgram);
+        WriteMat4(dragonMat4, mvp);
+        g.UniformMatrix4(markerMvpLoc, 1, false, dragonMat4);
+        g.Uniform3(markerRightLoc, right.X, right.Y, right.Z);
+        g.Uniform3(markerUpLoc, up.X, up.Y, up.Z);
+
+        // Opaque, but always-on-top: depth-test OFF so every probe dot is visible regardless of occluders.
+        g.Disable(EnableCap.DepthTest);
+        g.DepthMask(false);
+        g.Disable(EnableCap.Blend);
+        g.Disable(EnableCap.CullFace);
+        g.BindVertexArray(markerVao);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, markerVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, new ReadOnlySpan<float>(markerScratch, 0, floats), BufferUsageARB.DynamicDraw);
+        g.DrawArrays(PrimitiveType.Triangles, 0, (uint)(markers.Count * 6));
+        g.BindVertexArray(0);
+        g.Enable(EnableCap.DepthTest);
+        g.DepthMask(true);
+    }
+
     private void DrawDragon(GL g, Matrix4x4 mvp)
     {
         if (!dragonVisible || dragonModel is not { } model)
@@ -9096,6 +9253,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             forestImpostorProgram = 0;
             forestImpostorVao = 0;
             forestImpostorQuadVbo = 0;
+        }
+        if (markerProgram != 0)
+        {
+            gl.DeleteProgram(markerProgram);
+            gl.DeleteVertexArray(markerVao);
+            gl.DeleteBuffer(markerVbo);
+            markerProgram = 0;
+            markerVao = 0;
+            markerVbo = 0;
         }
     }
 }

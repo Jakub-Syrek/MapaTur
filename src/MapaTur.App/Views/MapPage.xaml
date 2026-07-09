@@ -52,6 +52,7 @@
                              ShowNightSky="{Binding ShowNightSky}"
                              ShowSauronTower="{Binding ShowSauronTower}"
                              ShowEagles="{Binding ShowEagles}"
+                             ShowDebugMarkers="{Binding ShowLodDiagnostics}"
                              DragonVariant="{Binding DragonVariantIndex}"
                              UserLocationFreshness="{Binding LocationFreshness}"
                              ShowContours="{Binding ShowContours}"
