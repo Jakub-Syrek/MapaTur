@@ -53,7 +53,15 @@ drobnej korekty kursu to armata na muchę: tap = impuls + pełna prędkość rol
 Źródła wzorców: rates/expo (Betaflight/FPV): oscarliang.com/rates, blog.uavmodel.com (2026 guide);
 krytycznie tłumione 2. rzędu / input shaping: embeddedrelated.com/showarticle/671.php.
 
-## EPIC 2 — AUDIO 2.0 („teraz jest basic minimum")
+## EPIC 2 — AUDIO 2.0 — ✅ FAZA 1+SAMPLE ZROBIONE (12.07.10 po południu)
+Zrobione: (1) **flight bed** — 3 pętle sterowane stanem lotu (wiatr ∝ prędkość+bank ‹v2: dwa pasma, bez
+„pociągu"›, trzepot ∝ flapActivity, rush przelotu ∝ AGL×V), miękki fader, pauza przy zerze; (2) **prawdziwe
+sample** (Pixabay „Dragon Studio", MauiAsset `Resources/Raw/dragon-audio/`, fallback=synteza): epic roar
+(wejście/kill) + 2 growle naprzemienne (szybowanie) + fire-breath loop + wings-flapping bed; licencja w
+`THIRD-PARTY-ASSETS.md`; (3) świst machnięć SYNC z kości (wcześniej). Zostało z listy niżej: pkt 4 (świst
+nisko nad ziemią — JEST), doppler AI / echo dolin / tłumienie kierunkowe — na kiedyś.
+
+## (oryginalny plan) EPIC 2 — AUDIO 2.0 („teraz jest basic minimum")
 
 Cel: naturalny dźwięk bestii. Warstwy (wszystko desktop-only, architektura DragonAudioService zostaje):
 1. **Ryk naturalny** — decyzja: (a) syntezę rozbudować (formanty/warstwy, pitch-drift, pre-growl wdech) —

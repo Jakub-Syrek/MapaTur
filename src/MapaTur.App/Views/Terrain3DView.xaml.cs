@@ -1901,6 +1901,7 @@ public partial class Terrain3DView : ContentView
     private bool dragonActive;
     private float dragonFlapPhase;      // wing-flap phase, advanced each tick (faster at speed)
     private float dragonFlapCyclePrev;  // last tick's wrapped flap cycle — detects the down-stroke crossing for the whoosh
+    private float dragonLastFlapActivity; // pose-side flap activity stashed for the flight-bed wing-flutter level
     private float dragonClipTimePrev;   // last tick's wrapped clip time (animated variant) — fallback whoosh cue
     private string? dragonWingBoneName; // wing TIP bone (largest posed horizontal reach) — the synced whoosh tracker
     private bool dragonWingBoneSearched;
@@ -2785,6 +2786,7 @@ public partial class Terrain3DView : ContentView
         dragonCamPitch = 0f;
         dragonFireHeld = false;
         dragonAudio.SetFireActive(false); // the roar must not outlive the flight (the fire tick stops with it)
+        dragonAudio.SetFlightBed(0f, 0f, 0f); // wind/wing/rush loops pause with the mode
         dragonFireHoldSeconds = 0f;
         dragonFireOrbitAngle = 0f;
         dragonPerchGroundElev = null;
@@ -3042,6 +3044,7 @@ public partial class Terrain3DView : ContentView
             dragonFlapSprintRemaining -= sprint;
         }
 
+        dragonLastFlapActivity = flapActivity; // the flight-bed audio (wing flutter) rides this next tick
         dragonFlapPhase += dt * 3.2f * flapActivity;
         // One whoosh per wing-beat, fired at the down-stroke's fastest sweep (sin crossing zero downward =
         // the wrapped cycle passing π). Compared on the wrapped cycle so the ever-growing phase can't
@@ -3346,6 +3349,23 @@ public partial class Terrain3DView : ContentView
         // terrain, and build this frame's render sprites (Z exaggerated only here).
 #if WINDOWS // fire-breath sim is desktop-only (the whole F7 mode never activates on mobile)
         StepDragonFire(d, dt, frame.VerticalExaggeration);
+
+        // Audio 2.0 flight bed: wind ∝ speed (boosted in a bank), wing flutter ∝ flap activity, ground rush ∝
+        // low-pass proximity × speed. Zeroed outside free flight, so the perch and the landing glide go quiet.
+        if (d.Phase == MapaTur.Application.Terrain.DragonFlightPhase.Flying)
+        {
+            float bedSpeed = d.SpeedMetersPerSecond;
+            float bedWind = MathF.Pow(Math.Clamp((bedSpeed - 22f) / 100f, 0f, 1f), 1.4f)
+                * (1f + (0.35f * MathF.Abs(MathF.Sin(d.RollRadians))));
+            float bedWing = Math.Clamp(dragonLastFlapActivity / 1.4f, 0f, 1f);
+            float bedAgl = SampleWalkGround(d.PositionXY) is float bedGround ? d.ElevationMeters - bedGround : 999f;
+            float bedRush = Math.Clamp(1f - ((bedAgl - 24f) / 36f), 0f, 1f) * Math.Clamp(bedSpeed / 70f, 0f, 1f);
+            dragonAudio.SetFlightBed(bedWind, bedWing, bedRush);
+        }
+        else
+        {
+            dragonAudio.SetFlightBed(0f, 0f, 0f);
+        }
 #endif
 
         // Trajectory trace (~10 Hz in flight; perched barely changes, so ~0.5 Hz there — no log flooding).

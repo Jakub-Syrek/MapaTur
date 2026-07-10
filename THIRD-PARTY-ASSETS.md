@@ -28,6 +28,18 @@ the F7 flight plays the `flying` loop through `SkinnedModel.Pose`. Base colour c
 - Note: the GLB is ~35 MB (embedded textures + three clips) — fine for the desktop build; revisit
   (decimate/re-encode textures) before bundling into the mobile package.
 
+## Sound effects
+
+### `src/MapaTur.App/Resources/Raw/dragon-audio/*.mp3` — dragon voice + wings (F7 flight, desktop)
+
+Five recorded effects layered over the procedural audio (which remains the fallback when an asset is
+missing): `roar-epic.mp3` (flight entry / kill cry), `growl-long.mp3` + `growl-short.mp3` (soaring calls),
+`fire-breath.mp3` (held-F fire loop), `wings-flapping.mp3` (wing-flutter bed).
+
+- **License:** Pixabay Content License — free for commercial use, no attribution required, don't resell as-is.
+- **Source / author:** Pixabay sound effects, uploader "Dragon Studio" (original file names
+  `dragon-studio-*-{364475,364481,364483,364612,478385}.mp3`).
+
 ### `tests/MapaTur.Application.Tests/TestData/Fox.glb` — skinning-engine test model (tests only)
 
 The Khronos "Fox" glTF sample asset, used only by the `SkinnedModel` unit tests (never shipped in the app).

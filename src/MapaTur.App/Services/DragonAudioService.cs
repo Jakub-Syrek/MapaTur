@@ -24,6 +24,14 @@ public sealed partial class DragonAudioService
     /// <summary>A deep dragon roar (entry cry, kill scream, occasional soar call). Volume 0..1.</summary>
     public void PlayRoar(float volume) => PlayRoarImpl(volume);
 
+    /// <summary>
+    /// Continuous flight bed — three looping layers whose levels (0..1) ride the flight state each tick:
+    /// speed wind, wing-membrane flutter, and the ground-proximity rush of a low pass. All zeros pauses the
+    /// loops. Levels are smoothed inside the implementation, so callers can pass raw values every tick.
+    /// </summary>
+    public void SetFlightBed(float windLevel, float wingLevel, float groundLevel)
+        => SetFlightBedImpl(windLevel, wingLevel, groundLevel);
+
     partial void SetFireActiveImpl(bool active);
 
     partial void PlayExplosionImpl(float power, float distanceMeters);
@@ -33,4 +41,6 @@ public sealed partial class DragonAudioService
     partial void PlayFlapImpl(float vigor);
 
     partial void PlayRoarImpl(float volume);
+
+    partial void SetFlightBedImpl(float windLevel, float wingLevel, float groundLevel);
 }
