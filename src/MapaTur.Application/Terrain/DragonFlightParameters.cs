@@ -43,11 +43,20 @@ public sealed record DragonFlightParameters
     /// <summary>Bank (roll) limit, radians (~57 deg) - the turn is flown THROUGH this bank.</summary>
     public float MaxRollRadians { get; init; } = 1.0f;
 
-    /// <summary>How fast the roll input banks the dragon, rad/s.</summary>
-    public float RollRatePerSecond { get; init; } = 1.8f;
+    /// <summary>Seconds a held ±1 input takes to CHARGE the yaw command to full — a tap charges only a
+    /// fraction, which is what makes small corrections precise (keys arrive as a hard 0/1).</summary>
+    public float YawCommandAttackSeconds { get; init; } = 0.28f;
 
-    /// <summary>How fast the dragon self-levels when the roll input releases, rad/s.</summary>
-    public float RollLevelRatePerSecond { get; init; } = 1.2f;
+    /// <summary>Seconds a released yaw command takes to discharge back to zero.</summary>
+    public float YawCommandReleaseSeconds { get; init; } = 0.18f;
+
+    /// <summary>Expo exponent on the yaw command (cmd·|cmd|^(expo−1)): flat near centre for precision, full
+    /// authority at the edge — the RC-transmitter classic.</summary>
+    public float YawExpo { get; init; } = 1.3f;
+
+    /// <summary>Natural frequency ωn (rad/s) of the CRITICALLY damped spring the roll uses to track its bank
+    /// target — ζ=1 means no overshoot and no oscillation by construction; ~6 settles a full bank in ~0.8 s.</summary>
+    public float RollSpringOmegaPerSecond { get; init; } = 6f;
 
     /// <summary>Coordinated-turn gain: heading rate = gain * tan(roll) / speed. At full bank and cruise this
     /// yields ~0.7 rad/s; slower flight carves tighter, faster sweeps wider.</summary>

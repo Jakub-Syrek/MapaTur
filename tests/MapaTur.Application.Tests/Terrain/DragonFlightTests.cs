@@ -374,4 +374,124 @@ public sealed class DragonFlightTests
         dragon.FlapBoost().Should().BeFalse();
         dragon.ElevationMeters.Should().BeApproximately(PeakElevation, 1f);
     }
+
+    // ── Precision steering (2026-07-10): shaped command + critically damped bank ────────────────────────────
+    // "Duże skręty OK, małe bardzo nieprecyzyjne": a raw ±1 key press must NOT slam the bank. The input CHARGES
+    // a command (attack ramp + expo), the command sets a bank TARGET, and the roll tracks it critically damped
+    // (ζ=1) — so a tap is a nudge, a hold is a full carve, and nothing ever overshoots or oscillates.
+
+    [Fact]
+    public void ShortTap_MakesASmallPreciseHeadingCorrection()
+    {
+        var dragon = NewDragon(heading: 0f);
+        for (int i = 0; i < 10; i++)
+        {
+            dragon.Step(0.05f, 0f, 0f, 0f); // settle
+        }
+
+        dragon.Step(0.05f, yawInput: 1f, pitchInput: 0f, throttleInput: 0f); // a 100 ms tap
+        dragon.Step(0.05f, yawInput: 1f, pitchInput: 0f, throttleInput: 0f);
+        for (int i = 0; i < 60; i++)
+        {
+            dragon.Step(0.05f, 0f, 0f, 0f); // coast 3 s — everything must settle
+        }
+
+        dragon.HeadingRadians.Should().BeGreaterThan(0.004f, "a tap must still DO something");
+        dragon.HeadingRadians.Should().BeLessThan(0.12f, "a tap is a ≤7° nudge, not a lurch");
+        dragon.RollRadians.Should().BeApproximately(0f, 0.02f, "the wings settle level after the nudge");
+    }
+
+    [Fact]
+    public void HeldInput_ReachesFullBank_Monotonically_WithoutOscillation()
+    {
+        var dragon = NewDragon(heading: 0f);
+
+        float previous = 0f;
+        for (int i = 0; i < 60; i++)
+        {
+            dragon.Step(0.05f, yawInput: 1f, pitchInput: 0f, throttleInput: 0f); // hold 3 s
+            dragon.RollRadians.Should().BeGreaterThanOrEqualTo(previous - 1e-4f, "critical damping never oscillates on the way up");
+            dragon.RollRadians.Should().BeLessThanOrEqualTo(Params.MaxRollRadians + 1e-3f);
+            previous = dragon.RollRadians;
+        }
+
+        dragon.RollRadians.Should().BeApproximately(Params.MaxRollRadians, 0.05f, "a held command carves at the full bank");
+    }
+
+    [Fact]
+    public void ReleasedBank_ReturnsToLevel_WithoutCrossingPastZero()
+    {
+        var dragon = NewDragon(heading: 0f);
+        for (int i = 0; i < 30; i++)
+        {
+            dragon.Step(0.05f, yawInput: 1f, pitchInput: 0f, throttleInput: 0f); // 1.5 s held bank
+        }
+
+        for (int i = 0; i < 60; i++)
+        {
+            dragon.Step(0.05f, 0f, 0f, 0f); // release 3 s
+            dragon.RollRadians.Should().BeGreaterThanOrEqualTo(-0.02f, "self-levelling must not overshoot to the other side");
+        }
+
+        dragon.RollRadians.Should().BeApproximately(0f, 0.02f);
+    }
+
+    [Fact]
+    public void SmallAnalogInput_BanksProportionallyLess_ThanFullInput()
+    {
+        // Mouse steering feeds fractional yaw — expo must keep a 30 % stick well under 30 % of the full bank.
+        var gentle = NewDragon(heading: 0f);
+        var full = NewDragon(heading: 0f);
+        for (int i = 0; i < 60; i++)
+        {
+            gentle.Step(0.05f, yawInput: 0.3f, pitchInput: 0f, throttleInput: 0f);
+            full.Step(0.05f, yawInput: 1f, pitchInput: 0f, throttleInput: 0f);
+        }
+
+        gentle.RollRadians.Should().BeGreaterThan(0.02f, "a small analog input still steers");
+        gentle.RollRadians.Should().BeLessThan(full.RollRadians * 0.3f, "expo flattens the centre of the stick");
+    }
+
+    [Fact]
+    public void YawCommand_DischargesQuickly_AfterRelease()
+    {
+        var dragon = NewDragon(heading: 0f);
+        for (int i = 0; i < 12; i++)
+        {
+            dragon.Step(0.05f, yawInput: 1f, pitchInput: 0f, throttleInput: 0f); // charge fully (0.6 s)
+        }
+
+        MathF.Abs(dragon.YawCommand).Should().BeGreaterThan(0.9f);
+
+        for (int i = 0; i < 6; i++)
+        {
+            dragon.Step(0.05f, 0f, 0f, 0f); // 0.3 s of release ≫ the 0.18 s discharge time
+        }
+
+        MathF.Abs(dragon.YawCommand).Should().BeLessThan(0.05f, "the command must not linger past the release time");
+    }
+
+    [Fact]
+    public void YawCommand_TapStaysBelowTheStrokeGate_HoldCommitsAboveIt()
+    {
+        var dragon = NewDragon(heading: 0f);
+
+        dragon.Step(0.05f, yawInput: 1f, pitchInput: 0f, throttleInput: 0f); // a 100 ms tap...
+        dragon.Step(0.05f, yawInput: 1f, pitchInput: 0f, throttleInput: 0f);
+        float tapPeak = MathF.Abs(dragon.YawCommand);
+        for (int i = 0; i < 20; i++)
+        {
+            dragon.Step(0.05f, 0f, 0f, 0f);
+            tapPeak = MathF.Max(tapPeak, MathF.Abs(dragon.YawCommand));
+        }
+
+        tapPeak.Should().BeLessThan(0.6f, "a tap must never arm the turn-entry stroke");
+
+        for (int i = 0; i < 12; i++)
+        {
+            dragon.Step(0.05f, yawInput: 1f, pitchInput: 0f, throttleInput: 0f); // hold 600 ms
+        }
+
+        MathF.Abs(dragon.YawCommand).Should().BeGreaterThan(0.9f, "a committed hold charges the command fully");
+    }
 }

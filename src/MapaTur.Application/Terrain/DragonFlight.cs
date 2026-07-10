@@ -114,6 +114,17 @@ public sealed class DragonFlight
     // (the visible "jerk" is translation, not a heading snap — the torso comes around gently after it).
     private float turnLateralRate;
 
+    // Precision steering (2026-07-10): the raw ±1 key input charges this command over the attack time (a tap
+    // = a fraction), and the roll tracks the shaped command's bank target through a critically damped spring.
+    private float yawCommand;
+    private float rollVelocity;
+
+    /// <summary>
+    /// The SHAPED yaw command in [-1,1] — the raw input filtered through the attack/release ramp. The view
+    /// gates the theatrical turn-entry stroke on this crossing a threshold (a tap never arms it).
+    /// </summary>
+    public float YawCommand => this.yawCommand;
+
     /// <summary>
     /// Starts the landing sequence onto the given spot (typically a summit). Only accepted in free flight —
     /// returns false when a landing is already in progress or the dragon is perched/taking off.
@@ -174,10 +185,9 @@ public sealed class DragonFlight
 
         this.turnImpulseRemaining += signedRadians;
         this.turnLateralRate = MathF.Sign(signedRadians) * this.p.TurnStrokeLateralPushMetersPerSecond;
-        RollRadians = Math.Clamp(
-            RollRadians + (MathF.Sign(signedRadians) * this.p.MaxRollRadians * 0.5f),
-            -this.p.MaxRollRadians,
-            this.p.MaxRollRadians);
+        // NOTE: no instant bank kick here any more — the old +50%-of-max-roll snap on every arrow press was
+        // the "szarpanie". The critically damped bank (fed by the held command that ARMED this stroke)
+        // supplies the visual roll; the stroke keeps only the heading jerk + the sideways shove.
         return true;
     }
 
@@ -215,19 +225,41 @@ public sealed class DragonFlight
                 return;
         }
 
-        // BANKED TURN: the input ROLLS the dragon (released, it self-levels — unless the rider holds the
-        // attitude); the HEADING follows the bank like a real coordinated turn — tan(bank) over speed, so a
-        // slow dragon carves tight and a fast one sweeps wide. No direct heading steering in free flight.
-        if (MathF.Abs(yawInput) > 1e-3f)
+        // COMMAND SHAPING: the raw input (keys arrive as a hard ±1) CHARGES the yaw command over the attack
+        // time and discharges faster on release — a tap yields a fraction of the command, a hold commits it.
+        // Expo flattens the centre, so small commands bank gently while the edge keeps full authority.
+        float yawTarget = Math.Clamp(yawInput, -1f, 1f);
+        float commandRate = MathF.Abs(yawTarget) > 1e-3f
+            ? dt / MathF.Max(0.01f, this.p.YawCommandAttackSeconds)
+            : dt / MathF.Max(0.01f, this.p.YawCommandReleaseSeconds);
+        this.yawCommand = MoveToward(this.yawCommand, yawTarget, commandRate);
+        float shapedCommand = MathF.Sign(this.yawCommand) * MathF.Pow(MathF.Abs(this.yawCommand), this.p.YawExpo);
+
+        // BANKED TURN: the shaped command sets a bank TARGET and the roll tracks it through a CRITICALLY
+        // damped spring (ζ=1) — no overshoot, no oscillation, jerk-free entry AND exit by construction.
+        // (This replaced raw rate integration + an instant half-bank kick on every arrow press, which made
+        // small corrections lurch: "duże skręty OK, małe bardzo nieprecyzyjne".) The HEADING then follows the
+        // bank like a real coordinated turn — tan(bank)/speed — so nothing about the carve itself changed.
+        // holdPitch with no input keeps the attitude (a mouse-held carve); otherwise release self-levels
+        // through the same spring.
+        bool hasYawInput = MathF.Abs(yawTarget) > 1e-3f || MathF.Abs(this.yawCommand) > 0.02f;
+        if (hasYawInput || !holdPitch)
         {
-            RollRadians = Math.Clamp(
-                RollRadians + (yawInput * this.p.RollRatePerSecond * dt),
-                -this.p.MaxRollRadians,
-                this.p.MaxRollRadians);
+            float bankTarget = shapedCommand * this.p.MaxRollRadians;
+            float wn = this.p.RollSpringOmegaPerSecond;
+            this.rollVelocity += (((bankTarget - RollRadians) * wn * wn) - (2f * wn * this.rollVelocity)) * dt;
+            float newRoll = RollRadians + (this.rollVelocity * dt);
+            if (MathF.Abs(newRoll) >= this.p.MaxRollRadians)
+            {
+                newRoll = Math.Clamp(newRoll, -this.p.MaxRollRadians, this.p.MaxRollRadians);
+                this.rollVelocity = 0f; // anti-windup at the stop
+            }
+
+            RollRadians = newRoll;
         }
-        else if (!holdPitch)
+        else
         {
-            RollRadians = MoveToward(RollRadians, 0f, this.p.RollLevelRatePerSecond * dt);
+            this.rollVelocity = 0f; // attitude hold — freeze the spring so nothing kicks when it resumes
         }
 
         HeadingRadians += this.p.TurnFromBankGain * MathF.Tan(RollRadians)
