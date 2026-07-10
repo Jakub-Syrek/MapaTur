@@ -6046,6 +6046,14 @@ public partial class Terrain3DView : ContentView
     private readonly Vector3[] fireLightColOut = new Vector3[8];
     private readonly float[] fireLightInvR2Out = new float[8];
 
+    // B4: session-persistent scorch splats (charred ground under fireball hits). A ring of 24 — the oldest
+    // mark is simply overwritten. Param = (radius², strength) as the terrain shader consumes it.
+    private readonly System.Numerics.Vector2[] dragonScorchPos = new System.Numerics.Vector2[24];
+    private readonly System.Numerics.Vector2[] dragonScorchParam = new System.Numerics.Vector2[24];
+    private int dragonScorchNext;
+    private int dragonScorchCount;
+    private bool dragonScorchDirty;
+
     private void PushFireLights(float timeSeconds)
     {
         if (glRenderer is not { } renderer)
@@ -6109,6 +6117,11 @@ public partial class Terrain3DView : ContentView
         }
 
         renderer.SetFireLights(count, fireLightPosOut, fireLightColOut, fireLightInvR2Out);
+        if (dragonScorchDirty)
+        {
+            renderer.SetScorchMarks(dragonScorchCount, dragonScorchPos, dragonScorchParam);
+            dragonScorchDirty = false;
+        }
     }
 
     // Advances the fire-breath simulation one tick: spawns a ball from the mouth while F is held, flies the
@@ -6272,6 +6285,13 @@ public partial class Terrain3DView : ContentView
                 {
                     SpawnFireBurst(burstPos, power);
                     dragonAudio.PlayExplosion(power, burstDist);
+                    // B4: a permanent charred splat under the blast (kills = bigger craters).
+                    float scorchR = 6f + (4f * power);
+                    dragonScorchPos[dragonScorchNext] = ball.XY;
+                    dragonScorchParam[dragonScorchNext] = new System.Numerics.Vector2(scorchR * scorchR, 0.75f);
+                    dragonScorchNext = (dragonScorchNext + 1) % dragonScorchPos.Length;
+                    dragonScorchCount = Math.Min(dragonScorchCount + 1, dragonScorchPos.Length);
+                    dragonScorchDirty = true;
                 }
 
                 dragonFireballs.RemoveAt(i);

@@ -79,6 +79,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform vec3 uFirePos[8];\n" +
         "uniform vec3 uFireColor[8];\n" +  // colour × intensity × flicker, premultiplied
         "uniform float uFireInvR2[8];\n" + // 1/(3R)² per light
+                                           // B4 scorch splats (fireball ground hits): xy = world XY, param.x = radius², param.y = strength.
+        "uniform float uScorchCount;\n" +
+        "uniform vec2 uScorchPos[24];\n" +
+        "uniform vec2 uScorchParam[24];\n" +
         "uniform vec3 uSkyAmbient;\n" +  // ambient sky-fill colour for shadowed slopes
         "uniform sampler2D uOrtho;\n" +
         "uniform int uUseOrtho;\n" +
@@ -688,6 +692,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "      snowMix = max(snowMix, smoothstep(0.45, 0.72, fAlt * fShelter) * fHold * fSite * fCap * uFirnStrength);\n" +
         "    }\n" +
         "  }\n" +
+        // B4 scorch: charred splats where fireballs hit the ground — an ALBEDO burn (light still plays over
+        // it), session-persistent, ≤24 uniform splats (no texture plumbing; both terrain paths + the water
+        // reflection get them for free). d² vs r² smoothstep = no sqrt; the char never goes pure black.
+        "  float scorch = 0.0;\n" +
+        "  for (int si = 0; si < 24; si++) {\n" +
+        "    if (float(si) >= uScorchCount) { break; }\n" +
+        "    vec2 dS = uScorchPos[si] - vStableWorldPos.xy;\n" +
+        "    float d2S = dot(dS, dS);\n" +
+        "    scorch += uScorchParam[si].y * (1.0 - smoothstep(uScorchParam[si].x * 0.2, uScorchParam[si].x, d2S));\n" +
+        "  }\n" +
+        "  base = mix(base, base * vec3(0.16, 0.14, 0.13), clamp(scorch, 0.0, 0.85));\n" +
         "  vec3 lit = base * lightSum;\n" +
         // Snow shading (dedicated): high albedo + sky/multiple scattering keeps snow BRIGHT and COOL-BLUE in
         // shadow (real snow shadows are blue, not grey), driven by the sun (not the camera) so orbiting never
@@ -3380,6 +3395,23 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // B2 fire lights — uploaded BEFORE the reflection pre-pass, so the mirrored terrain in the water
         // glows from the same fire for free (same program, same uniforms).
         UploadFireLights(gl, terrainFireCountLoc, terrainFirePosLoc, terrainFireColorLoc, terrainFireInvR2Loc);
+        // B4 scorch splats — same deal: albedo burns show in the reflection too.
+        if (terrainScorchCountLoc >= 0)
+        {
+            gl.Uniform1(terrainScorchCountLoc, (float)scorchCount);
+            if (scorchCount > 0)
+            {
+                if (terrainScorchPosLoc >= 0)
+                {
+                    gl.Uniform2(terrainScorchPosLoc, (uint)scorchCount, scorchPosFlat.AsSpan(0, scorchCount * 2));
+                }
+
+                if (terrainScorchParamLoc >= 0)
+                {
+                    gl.Uniform2(terrainScorchParamLoc, (uint)scorchCount, scorchParamFlat.AsSpan(0, scorchCount * 2));
+                }
+            }
+        }
 
         // Cloud-shadow uniforms: feed the terrain the same cloud field the layer draws so moving
         // clouds throw moving shadows. Coverage 0 (or no atmosphere) disables it via the shader guard.
@@ -6118,6 +6150,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         terrainFirePosLoc = g.GetUniformLocation(program, "uFirePos[0]");
         terrainFireColorLoc = g.GetUniformLocation(program, "uFireColor[0]");
         terrainFireInvR2Loc = g.GetUniformLocation(program, "uFireInvR2[0]");
+        terrainScorchCountLoc = g.GetUniformLocation(program, "uScorchCount");
+        terrainScorchPosLoc = g.GetUniformLocation(program, "uScorchPos[0]");
+        terrainScorchParamLoc = g.GetUniformLocation(program, "uScorchParam[0]");
         orthoSamplerLocation = g.GetUniformLocation(program, "uOrtho");
         useOrthoLocation = g.GetUniformLocation(program, "uUseOrtho");
         orthoGlobalFadeLocation = g.GetUniformLocation(program, "uOrthoGlobalFade");
@@ -6737,6 +6772,26 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private readonly float[] fireLightColorFlat = new float[24];
     private readonly float[] fireLightInvR2Flat = new float[8];
     private int terrainFireCountLoc = -1, terrainFirePosLoc = -1, terrainFireColorLoc = -1, terrainFireInvR2Loc = -1;
+
+    // B4 scorch splats: session-persistent charred marks where fireballs hit the ground (≤24, ring-evicted
+    // by the view). Flattened for Uniform2(count, span); uploaded with the fire lights each frame.
+    private int scorchCount;
+    private readonly float[] scorchPosFlat = new float[48];
+    private readonly float[] scorchParamFlat = new float[48];
+    private int terrainScorchCountLoc = -1, terrainScorchPosLoc = -1, terrainScorchParamLoc = -1;
+
+    /// <summary>Sets the persistent fire-scorch splats (world XY + radius²/strength pairs). Count 0 clears.</summary>
+    public void SetScorchMarks(int count, ReadOnlySpan<Vector2> positions, ReadOnlySpan<Vector2> radius2Strength)
+    {
+        scorchCount = Math.Clamp(count, 0, 24);
+        for (int i = 0; i < scorchCount; i++)
+        {
+            scorchPosFlat[i * 2] = positions[i].X;
+            scorchPosFlat[(i * 2) + 1] = positions[i].Y;
+            scorchParamFlat[i * 2] = radius2Strength[i].X;
+            scorchParamFlat[(i * 2) + 1] = radius2Strength[i].Y;
+        }
+    }
     private int dragonFireCountLoc = -1, dragonFirePosLoc = -1, dragonFireColorLoc = -1, dragonFireInvR2Loc = -1;
     private int fireLightsCountLoc = -1, fireLightsPosLoc = -1, fireLightsColorLoc = -1, fireLightsInvR2Loc = -1;
 

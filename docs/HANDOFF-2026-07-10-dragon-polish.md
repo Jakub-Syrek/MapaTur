@@ -13,9 +13,12 @@
 | B1 soft particles (1 resolve głębi/klatkę współdzielony z bramką x-ray linii; zakresy ember 1.5/flame 6/puff 10/dym 40 m) | ✅ | „ładny" |
 | B2 ogień świeci (≤8 świateł: teren przed podłogą ambientu + śnieg + odbicie wody gratis + smok + dym; redukcja zachłanna score=i·r², merge 2.5R/18 m, invR2=1/(3R)²) | ✅ | „jest ok" |
 | A2 world-space volumetric raymarch (elipsoida po prędkości, STEPS=20, jitter, erozja −0.35, 1-tap self-shadow) + A3 swirl/wypór (GPU) + makro-wir dymu (CPU) | ✅ wdrożone | **czeka na werdykt** |
-| B3 heat-haze (refrakcja) | ⏳ | — |
-| B4 scorch + bounce-flash przy trafieniu | ⏳ | — |
+| B3 heat-haze (maska half-res z bramką głębi + refrakcja przed bloomem + rozszczep chromatyczny) | ✅ | „super" |
+| B4 scorch (≤24 splatów-uniformów w albedo, pierścień, odbicie wodne gratis; bounce-flash = puffy B2 same świecą) | ✅ | „działa" |
 | C1 bloom pyramid (Karis), C2 dithering | ⏳ opcjonalne | — |
+
+**PLAN OGNIA A0→B4 DOMKNIĘTY (2026-07-10 ~12:45).** Strojenie strumienia po werdyktach: prędkość 105 m/s,
+TTL 2.2 s, cooldown 34 ms ±35%, rozrzuty ±22%/0.65–1.4×, młode kule 0.58×, obwiednia raymarczu od 0.42.
 
 Obok planu weszły: dym z wypalających się kul (burnout), orbit kamery przy trzymanym F (2 s opóźnienia,
 0.45 rad/s, powrót najkrótszą drogą), dźwięki proceduralne v1 (ryk-pętla ognia, świst skrzydeł z kości,
