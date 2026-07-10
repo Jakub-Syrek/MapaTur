@@ -72,6 +72,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform vec3 uSnowSun;\n" + // sun used for the SNOW-line sun-melt; pinned during a film so the cover holds while lighting sweeps
         "uniform float uAmbient;\n" +
         "uniform vec3 uSunColor;\n" +    // direct-sun colour (warm at sunset, white at noon)
+                                         // Dragon-fire dynamic lights (B2): ≤8 point lights reduced CPU-side from the fire sprites. Positions
+                                         // are ABSOLUTE world with exaggerated Z (the sprites' frame). uFireCount is a FLOAT on purpose —
+                                         // Uniform1(loc, int) against a GLSL float is a silent no-op on this stack (see silknet lesson).
+        "uniform float uFireCount;\n" +
+        "uniform vec3 uFirePos[8];\n" +
+        "uniform vec3 uFireColor[8];\n" +  // colour × intensity × flicker, premultiplied
+        "uniform float uFireInvR2[8];\n" + // 1/(3R)² per light
         "uniform vec3 uSkyAmbient;\n" +  // ambient sky-fill colour for shadowed slopes
         "uniform sampler2D uOrtho;\n" +
         "uniform int uUseOrtho;\n" +
@@ -474,6 +481,19 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // up-ness keeps the facets differentiating surfaces even with zero direct sun.
         "  float skyVis = 0.55 + (0.45 * clamp(shN.z, 0.0, 1.0));\n" +
         "  vec3 lightSum = (uSkyAmbient * uAmbient * skyVis) + (uSunColor * sunlit);\n" +
+        // Dragon-fire glow (B2): additive point-light loop, injected BEFORE the ambient floor so the floor
+        // still guards against black. Squared soft attenuation + a wrap-diffuse (floor 0.25) so the glow
+        // licks around edges instead of cutting off at the terminator. Constant loop bound + break = ANGLE-safe.
+        "  vec3 fireGlow = vec3(0.0);\n" +
+        "  for (int fi = 0; fi < 8; fi++) {\n" +
+        "    if (float(fi) >= uFireCount) { break; }\n" +
+        "    vec3 dF = uFirePos[fi] - vStableWorldPos;\n" +
+        "    float attF = 1.0 / (1.0 + (dot(dF, dF) * uFireInvR2[fi]));\n" +
+        "    attF *= attF;\n" +
+        "    float wrapF = max((dot(shN, normalize(dF)) + 0.25) / 1.25, 0.0);\n" +
+        "    fireGlow += uFireColor[fi] * (attF * wrapF);\n" +
+        "  }\n" +
+        "  lightSum += fireGlow;\n" +
         // Ambient FLOOR: steep faces turned from the sun (lambert=0) otherwise collapse to lightSum≈0 → near-BLACK
         // (the "czarne dziury/kropki" — proven: an unlit render has 0 black px). max() lifts ONLY the deepest
         // shadows to a cool sky-fill minimum. The floor is hemispheric too (0.30–0.50 by up-ness instead of a
@@ -683,6 +703,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // the highlight detail instead of a solid white clip. Still bright, still cool-blue in shadow.
         "    vec3 snowAlbedo = vec3(0.80, 0.82, 0.86);\n" +
         "    vec3 snowLit = snowAlbedo * ((uSkyAmbient * 0.45) + (uSunColor * sunlit * 1.15));\n" +   // ambient 0.65→0.45: deeper shadow = 3-D relief, not a flat white sheet
+        "    snowLit += snowAlbedo * fireGlow * 0.8;\n" + // snow has its own lighting path — the fire glow must reach it too
         "    snowLit = mix(snowLit, vec3(0.92), uNoonSnowLift * 0.30);\n" +   // intense midday → pop toward bright (not pure) white
         "    lit = mix(lit, min(snowLit, vec3(1.0)), snowMix);\n" +
         "  }\n" +
@@ -1078,6 +1099,35 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    decay *= 0.93;\n" +
         "  }\n" +
         "  fragColor = vec4(col * 0.5, 1.0);\n" + // exposure
+        "}\n";
+
+    // B3 heat haze: refract the resolved scene wherever the half-res heat mask says hot air rises — a
+    // noise-gradient offset scrolling UP (convection) scaled by local heat, with a slight chromatic split.
+    // Runs FIRST in the post chain so the bloom blooms the already-distorted image. Reuses PostVertexShaderSource.
+    private const string HazeFragmentShaderSource =
+        "#version 300 es\n" +
+        "precision highp float;\n" +
+        "in vec2 vUv;\n" +
+        "uniform sampler2D uScene;\n" +
+        "uniform sampler2D uHeat;\n" +
+        "uniform float uTime;\n" +
+        "uniform float uHazeStrength;\n" +
+        "out vec4 fragColor;\n" +
+        "float hz(vec2 p){ vec3 p3=fract(vec3(p.xyx)*0.1031); p3+=dot(p3,p3.yzx+33.33); return fract((p3.x+p3.y)*p3.z); }\n" +
+        "float vnz(vec2 p){ vec2 i=floor(p),f=fract(p); vec2 u=f*f*(3.0-2.0*f);\n" +
+        "  return mix(mix(hz(i),hz(i+vec2(1,0)),u.x), mix(hz(i+vec2(0,1)),hz(i+vec2(1,1)),u.x), u.y); }\n" +
+        "void main(){\n" +
+        "  float heat = texture(uHeat, vUv).r;\n" +
+        "  if (heat < 0.004) { fragColor = vec4(texture(uScene, vUv).rgb, 1.0); return; }\n" +
+        "  vec2 q = vUv * vec2(64.0, 40.0);\n" +
+        "  q.y -= uTime * 3.0;\n" + // the ripple pattern climbs — hot air convects upward
+        "  vec2 grad = vec2(vnz(q) - vnz(q + vec2(1.3, 0.0)), vnz(q + 5.7) - vnz(q + vec2(0.0, 1.3) + 5.7));\n" +
+        "  vec2 offs = grad * (uHazeStrength * min(heat, 1.6));\n" +
+        "  vec3 col;\n" +
+        "  col.g = texture(uScene, vUv + offs).g;\n" +
+        "  col.r = texture(uScene, vUv + (offs * 1.15)).r;\n" + // slight chromatic split sells the refraction
+        "  col.b = texture(uScene, vUv + (offs * 0.85)).b;\n" +
+        "  fragColor = vec4(col, 1.0);\n" +
         "}\n";
 
     // Shadow depth pass: transform the terrain vertex (absolute world aPos) by a cascade's light
@@ -1667,12 +1717,20 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // frames LATE so the CPU never stalls on the GPU. Desktop/ANGLE only (GL_EXT_disjoint_timer_query); on mobile
     // GLES the extension is absent so this fails safe to a no-op (matching the cumulus/sauron/msaa "unsupported"
     // pattern). Emits a throttled "[GL3D] [PassTimes]" line so we can see WHERE a heavy frame's time actually goes.
-    private enum GpuPass { Shadow, Reflection, Terrain, LakesForest, Lines, Clouds, Post, Count }
+    private enum GpuPass { Shadow, Reflection, Terrain, LakesForest, Dragons, Lines, Clouds, Post, Count }
     private const int GpuFramesInFlight = 3;
     private const QueryTarget GlTimeElapsedExt = (QueryTarget)0x88BF; // GL_TIME_ELAPSED_EXT
     private const GLEnum GlGpuDisjointExt = (GLEnum)0x8FBB;           // GL_GPU_DISJOINT_EXT
     private uint[]? gpuQueries;                                       // [(int)GpuPass.Count * GpuFramesInFlight]
     private readonly double[] lastPassMs = new double[(int)GpuPass.Count];
+    // CPU wall-time twins of the GPU pass timers (command-recording cost) + the pre-pass "setup" bucket
+    // (uploads / Ensure* work between Render() entry and the first GpuBegin). Always on — cheap timestamps.
+    private readonly double[] lastPassCpuMs = new double[(int)GpuPass.Count];
+    private GpuPass cpuPassActive;
+    private long passCpuStartTs;
+    private long renderStartTs;
+    private bool renderFirstPassSeen;
+    private double renderSetupCpuMs;
     private bool gpuTimersSupported;
     private bool gpuTimersProbed;
     private int gpuFrameSlot = -1;
@@ -1706,6 +1764,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
     /// <summary>When <c>true</c>, lakes get a real planar reflection of the terrain (else a cheap gradient).</summary>
     public bool ReflectionEnabled { get; set; } = true;
+
+    /// <summary>
+    /// When <c>true</c> (the view sets it during the continuous walk/dragon modes), the mirrored-terrain
+    /// reflection pre-pass runs every SECOND frame and the water samples the previous frame's texture in
+    /// between. Measured cost of the pass: ~8–12 ms GPU + ~5–7 ms CPU per frame; the ripple-distorted lake
+    /// reflection reads perfectly well one frame stale at 20–60 fps.
+    /// </summary>
+    public bool ThrottleReflection { get; set; }
+
+    private bool reflectionValidLastFrame; // last frame left a valid reflection texture (reuse gate)
 
     // Wider-coverage P0 step 6: render the terrain + lake water in a camera-relative frame (origin = the look-at
     // target) so vertices and the view translation stay small (float precision for far/streamed scene origins).
@@ -2107,6 +2175,20 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int presentHeight;
     private bool presentUnsupported;
     private byte[]? flipRow; // scratch row for the vertical flip during framebuffer readback
+
+    // HDR scene targets (desktop, A0 of the hyper-real fire plan): with GL_EXT_color_buffer_float the
+    // scene/resolve/present chain is RGBA16F and the bloom mips are R11F_G11F_B10F, so emission > 1 (the
+    // white-hot fire core, T⁴ energy) survives to the bloom bright-pass and the ACES composite instead of
+    // clipping to flat white in an 8-bit buffer. postColorTex STAYS Rgba8 — it is the LDR hand-off the view
+    // wraps as a GL_RGBA8 SKImage, and the composite/pass-through (both run ACES) is the only HDR→LDR step.
+    // hdrUnsupported latches on a missing extension OR any incomplete HDR framebuffer; every Ensure* then
+    // retries/reallocs the plain Rgba8 layout, so the worst case is exactly the pre-HDR pipeline.
+    private bool hdrProbed;          // extension probed once per context
+    private bool hdrUnsupported;     // latched: stay on the LDR Rgba8 pipeline for this context
+    private bool presentIsHdr;       // format of the CURRENT allocation (realloc when the want changes)
+    private bool msaaIsHdr;
+    private bool bloomIsHdr;
+    private uint lastPresentedFbo;   // FBO holding the frame Render() returned (postFbo when post ran) — the recorder reads THIS, always LDR
 
     // Post-process target: a second colour TEXTURE + FBO. After the scene is resolved into presentColorTex,
     // the post stage runs fullscreen passes (currently a pass-through; bloom / god rays build on this) that
@@ -2526,6 +2608,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // BeginGpuFrame query readback, EnsureProgram) was invisible to the breakdown. Unconditional restart
         // is a few ns; the segments are only ever read on swap frames.
         dbgSwapWatch.Restart();
+        renderStartTs = System.Diagnostics.Stopwatch.GetTimestamp(); // "setup" CPU bucket runs until the first GpuBegin
+        renderFirstPassSeen = false;
+        ghostDepthFrameValid = false; // last frame's depth resolve is stale the moment we start drawing
+        hazeMaskValidThisFrame = false; // no fire this frame → no haze (a stale mask must never shimmer)
 
         gl ??= PlatformGl.Get();
 
@@ -2674,6 +2760,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             aiDragonTextures.Clear(); // AI-flock texture ids belong to the dead context — re-decode on next draw
             fireProgram = 0; // fireball pass rebuilds with the dragon
             fireVao = 0;
+            // Heat-haze resources belonged to the dead context — drop handles, re-probe fresh.
+            fireHeatProgram = 0;
+            hazeProgram = 0;
+            hazeMaskFbo = hazeMaskTex = 0;
+            hazeMaskW = hazeMaskH = 0;
+            hazeColorFbo = hazeColorTex = 0;
+            hazeColorW = hazeColorH = 0;
+            hazeUnsupported = false;
+            hazeMaskValidThisFrame = false;
+            hazeStageLogged = false;
+            sceneFboThisFrame = 0;
             markerProgram = 0; // debug-marker pass rebuilds with the dragon
             markerVao = 0;
             moonProgram = 0;
@@ -2773,6 +2870,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             presentWidth = 0;
             presentHeight = 0;
             presentUnsupported = false;
+            // HDR state belongs to the dead context — re-probe the extension and re-pick formats fresh.
+            hdrProbed = false;
+            hdrUnsupported = false;
+            presentIsHdr = false;
+            msaaIsHdr = false;
+            bloomIsHdr = false;
+            lastPresentedFbo = 0;
             // Ghost-depth FBO / texture (x-ray rock-thickness gate) — same context-loss handling.
             ghostDepthFbo = 0;
             ghostDepthTex = 0;
@@ -2831,6 +2935,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             reflectionTexW = 0;
             reflectionTexH = 0;
             reflectionUnsupported = false;
+            reflectionValidLastFrame = false;
             // The trail-decal mask texture belonged to the dead context; drop the handle and clear the cache keys
             // so EnsureTrailMask rebuilds + re-uploads it against the fresh context on the next frame. (The scratch
             // CPU buffers survive the context loss and are reused — only the GL texture is gone.)
@@ -2898,7 +3003,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // present FBO (which has its own depth RB). We never bind FBO 0 here: on Android that *is* the on-screen
         // surface and Skia's compositor would paint over anything we drew there.
         bool useMsaa = EnsureMsaaTarget(gl, vpWidth, vpHeight);
+        // The MSAA probe can be the first to discover float RTs don't work (latching hdrUnsupported) — the
+        // present target allocated a moment ago would still be RGBA16F, and the resolve blit requires both
+        // sides to match. Re-ensure so the whole chain drops to Rgba8 together, before anything is drawn.
+        if (presentIsHdr != WantHdrTargets(gl) && !EnsurePresentTarget(gl, vpWidth, vpHeight))
+        {
+            return 0;
+        }
+
         gl.BindFramebuffer(FramebufferTarget.Framebuffer, useMsaa ? msaaFbo : presentFbo);
+        sceneFboThisFrame = useMsaa ? msaaFbo : presentFbo; // mid-scene side passes (heat mask) restore THIS
 
         // Take full ownership of the GL state we rely on. SkiaSharp shares this context and leaves its own
         // clip/raster state behind — notably it enables GL_STENCIL_TEST (and blend/scissor/colour-mask) for
@@ -3263,6 +3377,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
         gl.Uniform3(sunColorLocation, sunCol.X, sunCol.Y, sunCol.Z);
         gl.Uniform3(skyAmbientLocation, skyAmbient.X, skyAmbient.Y, skyAmbient.Z);
+        // B2 fire lights — uploaded BEFORE the reflection pre-pass, so the mirrored terrain in the water
+        // glows from the same fire for free (same program, same uniforms).
+        UploadFireLights(gl, terrainFireCountLoc, terrainFirePosLoc, terrainFireColorLoc, terrainFireInvR2Loc);
 
         // Cloud-shadow uniforms: feed the terrain the same cloud field the layer draws so moving
         // clouds throw moving shadows. Coverage 0 (or no atmosphere) disables it via the shader guard.
@@ -3377,7 +3494,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform1(reflectionEnabledLocation, 0f);
         bool reflectionDrawn = false;
         GpuBegin(gl, GpuPass.Reflection);
-        if (ReflectionEnabled && tiles.Count > 0 && EnsureReflectionTarget(gl, vpWidth, vpHeight))
+        // Alternate-frame reflection (ThrottleReflection): on odd frames reuse the previous frame's texture
+        // instead of re-rendering the whole mirrored terrain. Only when the target survived at the same size
+        // — a resize, context loss or a disabled frame forces a fresh render first.
+        if (ThrottleReflection && reflectionValidLastFrame && (gpuFrameCount & 1) == 1
+            && reflectionFbo != 0
+            && reflectionTexW == Math.Max(16, vpWidth / 2) && reflectionTexH == Math.Max(16, vpHeight / 2))
+        {
+            reflectionDrawn = true; // water samples last frame's reflection — no pre-pass this frame
+        }
+        else if (ReflectionEnabled && tiles.Count > 0 && EnsureReflectionTarget(gl, vpWidth, vpHeight))
         {
             float reflExaggeration = tiles[0].VerticalExaggeration;
             float waterZ = ReflectionLakeElevationM * reflExaggeration;
@@ -3448,6 +3574,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             reflectionDrawn = true;
         }
         GpuEnd(gl); // Reflection
+        reflectionValidLastFrame = reflectionDrawn;
 
         if (reflectionDrawn)
         {
@@ -3683,10 +3810,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // The ridden dragon (F7): a rigged, CPU-skinned model drawn opaque + depth-tested in the ABSOLUTE world
         // frame, so the terrain occludes it correctly. Its own program/uniforms, so it doesn't disturb the shared
         // `m` MVP buffer the line pass restores below.
+        GpuBegin(gl, GpuPass.Dragons); // 4 CPU-skinned models + fire — was the UNTIMED gap between passes
         DrawDragon(gl, mvp);
         DrawAiDragons(gl, mvp); // autonomous flock, same depth-tested scene
+        // Soft particles (B1): resolve the scene depth NOW — terrain AND both dragons are in, so the fire
+        // fades into rock and dragon bellies instead of a hard sprite cut. The x-ray line gate below reuses
+        // this same resolve (fire writes no depth, so it stays valid).
+        ResolveSceneDepthToGhost(gl, useMsaa ? msaaFbo : presentFbo, vpWidth, vpHeight);
         DrawFireballs(gl, mvp, camera); // breath fire right after its dragon (additive, depth-tested)
         DrawDebugMarkers(gl, mvp, camera); // diagnostic dots (always-on-top) — dragon-foot placement probe
+        GpuEnd(gl);
 
         // Trails + route as depth-tested screen-space ribbons (occluded by the terrain). Switch to the line
         // program; it shares the depth state and the same MVP, plus the viewport for the pixel expansion.
@@ -3726,18 +3859,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // massifs as dotted twins ("jakby były dwa szlaki" — the 2026-07-03 saga), so no depth ⇒ NO ghost.
         // Depth writes off (ghosts must not pollute the depth buffer); blending on for the fade.
         uint sceneFbo = useMsaa ? msaaFbo : presentFbo;
-        bool ghostDepthOk = sceneFbo != 0 && EnsureGhostDepthTarget(gl, Math.Max(1, width), Math.Max(1, height));
+        // Usually already resolved this frame (the fire's soft-particle fade runs first and nothing since
+        // writes depth); the call is then a no-op returning true. Draws fresh only when fire skipped it.
+        bool ghostDepthOk = ResolveSceneDepthToGhost(gl, sceneFbo, width, height);
         gl.Uniform1(lineSceneDepthOnLocation, ghostDepthOk ? 1f : 0f);
         if (ghostDepthOk)
         {
-            // MSAA path: BlitFramebuffer resolves the multisampled depth to the single-sample texture
-            // (formats match: DepthComponent24 → DepthComponent24, NEAREST — both blit requirements).
-            gl.BindFramebuffer(FramebufferTarget.ReadFramebuffer, sceneFbo);
-            gl.BindFramebuffer(FramebufferTarget.DrawFramebuffer, ghostDepthFbo);
-            gl.BlitFramebuffer(
-                0, 0, width, height, 0, 0, width, height,
-                (uint)ClearBufferMask.DepthBufferBit, BlitFramebufferFilter.Nearest);
-            gl.BindFramebuffer(FramebufferTarget.Framebuffer, sceneFbo);
             gl.ActiveTexture(TextureUnit.Texture7);
             gl.BindTexture(TextureTarget.Texture2D, ghostDepthTex);
             gl.ActiveTexture(TextureUnit.Texture0);
@@ -3922,12 +4049,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         float godrayIntensity = (animateAtmosphere && sunVisible && atmosphere is not null) ? atmosphere.SunGlowIntensity * 1.3f : 0f;
         float bloomIntensity = animateAtmosphere ? (atmosphere?.BloomIntensity ?? 0f) : 0f;
         float bloomThreshold = atmosphere?.BloomThreshold ?? 1f;
-        // Dragon fire must glow — force bloom on (day OR night, where it's normally gated off) and drop the bright
-        // threshold so the boosted white-hot core clears it in the LDR buffer while the orange body does not.
+        // Dragon fire must glow — force bloom on (day OR night, where it's normally gated off). On the HDR
+        // chain the white-hot core carries real > 1 energy, so it clears the atmosphere's own threshold
+        // honestly; only the LDR fallback (core clamped at 1.0) still needs the threshold dropped under it.
         if (fireballs is { Count: > 0 })
         {
             bloomIntensity = MathF.Max(bloomIntensity, 0.6f);
-            bloomThreshold = MathF.Min(bloomThreshold, 0.72f);
+            if (!presentIsHdr)
+            {
+                bloomThreshold = MathF.Min(bloomThreshold, 0.72f);
+            }
         }
 
         GpuBegin(gl, GpuPass.Post);
@@ -3936,6 +4067,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             bloomThreshold, bloomIntensity,
             sunUv.X, sunUv.Y, godrayIntensity);
         GpuEnd(gl);
+
+        // Where the frame we just returned actually lives — the recorder reads THIS (post-processed, and
+        // always LDR; the raw present FBO is RGBA16F under HDR, which UNSIGNED_BYTE ReadPixels can't read).
+        lastPresentedFbo = finalTex == postColorTex && postFbo != 0 ? postFbo : presentFbo;
 
         // Unbind everything before returning. The caller will re-establish whatever framebuffer Skia
         // expects (via GRContext.ResetContext) before sampling the texture we just produced.
@@ -4054,11 +4189,22 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     sum += lastPassMs[p];
                 }
 
+                double sumCpu = renderSetupCpuMs;
+                for (int p = 0; p < (int)GpuPass.Count; p++)
+                {
+                    sumCpu += lastPassCpuMs[p];
+                }
+
                 Log.Information(
-                    "[GL3D] [PassTimes] shadow={Shadow:F2} refl={Refl:F2} terrain={Terrain:F2} lakeforest={Lake:F2} lines={Lines:F2} clouds={Clouds:F2} post={Post:F2} sumGpu={Sum:F2}ms",
+                    "[GL3D] [PassTimes] shadow={Shadow:F2} refl={Refl:F2} terrain={Terrain:F2} lakeforest={Lake:F2} dragons={Dragons:F2} lines={Lines:F2} clouds={Clouds:F2} post={Post:F2} sumGpu={Sum:F2}ms "
+                    + "| cpu setup={CSet:F1} sh={CSh:F1} rf={CRf:F1} tr={CTr:F1} lf={CLf:F1} dr={CDr:F1} ln={CLn:F1} cl={CCl:F1} po={CPo:F1} sumCpu={CSum:F1}ms",
                     lastPassMs[(int)GpuPass.Shadow], lastPassMs[(int)GpuPass.Reflection], lastPassMs[(int)GpuPass.Terrain],
-                    lastPassMs[(int)GpuPass.LakesForest], lastPassMs[(int)GpuPass.Lines], lastPassMs[(int)GpuPass.Clouds],
-                    lastPassMs[(int)GpuPass.Post], sum);
+                    lastPassMs[(int)GpuPass.LakesForest], lastPassMs[(int)GpuPass.Dragons], lastPassMs[(int)GpuPass.Lines], lastPassMs[(int)GpuPass.Clouds],
+                    lastPassMs[(int)GpuPass.Post], sum,
+                    renderSetupCpuMs,
+                    lastPassCpuMs[(int)GpuPass.Shadow], lastPassCpuMs[(int)GpuPass.Reflection], lastPassCpuMs[(int)GpuPass.Terrain],
+                    lastPassCpuMs[(int)GpuPass.LakesForest], lastPassCpuMs[(int)GpuPass.Dragons], lastPassCpuMs[(int)GpuPass.Lines],
+                    lastPassCpuMs[(int)GpuPass.Clouds], lastPassCpuMs[(int)GpuPass.Post], sumCpu);
             }
         }
 
@@ -4067,8 +4213,19 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
     // Begin a pass's GPU timer (into this frame's ring slot). Only ONE GL_TIME_ELAPSED query may be active at a
     // time, so GpuBegin/GpuEnd must bracket SEQUENTIAL, non-nesting passes — which every pass below is.
+    // Also stamps CPU wall-time per pass (command-recording cost — GPU numbers alone hid a 30 ms CPU wall),
+    // and the first GpuBegin of a frame closes the "setup" bucket (uploads/ensure work before any pass).
     private void GpuBegin(GL g, GpuPass pass)
     {
+        long ts = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (!renderFirstPassSeen)
+        {
+            renderFirstPassSeen = true;
+            renderSetupCpuMs = (ts - renderStartTs) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        }
+
+        cpuPassActive = pass;
+        passCpuStartTs = ts;
         if (gpuTimersSupported && gpuQueries is not null)
         {
             g.BeginQuery(GlTimeElapsedExt, gpuQueries[((int)pass * GpuFramesInFlight) + gpuFrameSlot]);
@@ -4077,6 +4234,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
     private void GpuEnd(GL g)
     {
+        lastPassCpuMs[(int)cpuPassActive] =
+            (System.Diagnostics.Stopwatch.GetTimestamp() - passCpuStartTs) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
         if (gpuTimersSupported && gpuQueries is not null)
         {
             g.EndQuery(GlTimeElapsedExt);
@@ -4093,16 +4252,27 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// Reads back the freshly-rendered frame (the MSAA-resolved, single-sample present FBO) into
     /// <paramref name="dst"/> as tightly-packed top-row-first RGBA8 of <paramref name="width"/> ×
     /// <paramref name="height"/>. Use this — not a Skia surface snapshot — to capture frames for video:
-    /// it reads the exact GL output, sidestepping the SKGLView back-buffer staleness that returned a
-    /// cleared buffer for every frame after the first. Must be called on the GL thread with the context
-    /// current and the present FBO still allocated (i.e. right after <see cref="Render"/>). GL's origin is
-    /// bottom-left, so rows are flipped to top-first here. Returns false when readback isn't possible.
+    /// it reads the exact GL output (the post-processed frame when the post chain ran), sidestepping the
+    /// SKGLView back-buffer staleness that returned a cleared buffer for every frame after the first. Must
+    /// be called on the GL thread with the context current, right after <see cref="Render"/> (it reads the
+    /// FBO that produced the returned texture). GL's origin is bottom-left, so rows are flipped to
+    /// top-first here. Returns false when readback isn't possible.
     /// </summary>
     public bool TryReadPresentFrame(byte[] dst, int width, int height)
     {
         ArgumentNullException.ThrowIfNull(dst);
         GL? g = gl;
-        if (g is null || presentFbo == 0 || presentColorTex == 0 || width <= 0 || height <= 0)
+        // Read the FBO holding the frame Render() actually returned — the post FBO when the post chain ran
+        // (so the capture includes bloom/tonemap), else the present FBO. Under HDR the raw present FBO is
+        // RGBA16F, which this UNSIGNED_BYTE readback can't read — but then the post chain is guaranteed on,
+        // so lastPresentedFbo is the Rgba8 post target.
+        uint readFbo = lastPresentedFbo;
+        if (readFbo == presentFbo && presentIsHdr)
+        {
+            return false;
+        }
+
+        if (g is null || readFbo == 0 || width <= 0 || height <= 0)
         {
             return false;
         }
@@ -4114,7 +4284,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             return false;
         }
 
-        g.BindFramebuffer(FramebufferTarget.ReadFramebuffer, presentFbo);
+        g.BindFramebuffer(FramebufferTarget.ReadFramebuffer, readFbo);
         g.ReadBuffer(ReadBufferMode.ColorAttachment0);
         g.PixelStore(PixelStoreParameter.PackAlignment, 1);
         g.ReadPixels<byte>(0, 0, (uint)width, (uint)height, PixelFormat.Rgba, PixelType.UnsignedByte, dst.AsSpan(0, needed));
@@ -4208,10 +4378,32 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     }
 
     /// <summary>
+    /// Probes GL_EXT_color_buffer_float once per context and answers whether the scene targets should be
+    /// HDR this frame. HDR additionally requires a live post chain: the view wraps whatever Render()
+    /// returns as a GL_RGBA8 SKImage, so a float texture may only ever reach it through the ACES
+    /// composite/pass-through into the Rgba8 <see cref="postColorTex"/>.
+    /// </summary>
+    private bool WantHdrTargets(GL g)
+    {
+        if (!hdrProbed)
+        {
+            hdrProbed = true;
+            hdrUnsupported = !g.IsExtensionPresent("GL_EXT_color_buffer_float");
+            Log.Information(
+                hdrUnsupported
+                    ? "[GL3D] HDR scene targets OFF (no GL_EXT_color_buffer_float) — staying on the Rgba8 pipeline"
+                    : "[GL3D] HDR scene targets ON (RGBA16F scene/present, R11F_G11F_B10F bloom mips)");
+        }
+
+        return !hdrUnsupported && postProcessEnabled && postProgram != 0 && !postUnsupported;
+    }
+
+    /// <summary>
     /// Creates / resizes the single-sampled colour-texture FBO we return to the caller. Returns false (and
     /// sets <see cref="presentUnsupported"/> for the session) when the framebuffer is incomplete — the
-    /// caller then falls back to Skia. Texture is RGBA8, linear filtering, clamp-to-edge — matching what
-    /// SkiaSharp expects when wrapping it as an SKImage.
+    /// caller then falls back to Skia. RGBA16F when HDR is active (an incomplete HDR attempt latches
+    /// <see cref="hdrUnsupported"/> and retries as Rgba8), else RGBA8; linear filtering, clamp-to-edge.
+    /// Under HDR the caller-facing texture is postColorTex (Rgba8) — Skia never sees the float texture.
     /// </summary>
     private bool EnsurePresentTarget(GL g, int width, int height)
     {
@@ -4220,7 +4412,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             return false;
         }
 
-        if (presentFbo != 0 && presentWidth == width && presentHeight == height)
+        bool hdr = WantHdrTargets(g);
+        if (presentFbo != 0 && presentWidth == width && presentHeight == height && presentIsHdr == hdr)
         {
             return true;
         }
@@ -4233,9 +4426,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         presentColorTex = g.GenTexture();
         g.BindTexture(TextureTarget.Texture2D, presentColorTex);
         g.TexImage2D(
-            TextureTarget.Texture2D, 0, (int)InternalFormat.Rgba8,
+            TextureTarget.Texture2D, 0, (int)(hdr ? InternalFormat.Rgba16f : InternalFormat.Rgba8),
             (uint)width, (uint)height, 0,
-            PixelFormat.Rgba, PixelType.UnsignedByte, null);
+            PixelFormat.Rgba, hdr ? PixelType.HalfFloat : PixelType.UnsignedByte, null);
         g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
         g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
         g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
@@ -4258,19 +4451,28 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
         if (status != GLEnum.FramebufferComplete)
         {
-            Log.Information("[GL3D] present framebuffer incomplete ({Status}) — falling back to Skia", status);
             g.DeleteFramebuffer(presentFbo);
             g.DeleteTexture(presentColorTex);
             g.DeleteRenderbuffer(presentDepthRb);
             presentFbo = 0;
             presentColorTex = 0;
             presentDepthRb = 0;
+            if (hdr)
+            {
+                // The float target is the experiment — drop to the proven Rgba8 layout, don't kill GL.
+                Log.Information("[GL3D] HDR present framebuffer incomplete ({Status}) — falling back to Rgba8 targets", status);
+                hdrUnsupported = true;
+                return EnsurePresentTarget(g, width, height);
+            }
+
+            Log.Information("[GL3D] present framebuffer incomplete ({Status}) — falling back to Skia", status);
             presentUnsupported = true;
             return false;
         }
 
         presentWidth = width;
         presentHeight = height;
+        presentIsHdr = hdr;
         return true;
     }
 
@@ -4315,6 +4517,37 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.BindTexture(TextureTarget.Texture2D, 0);
         gl.ActiveTexture(TextureUnit.Texture0);
         this.uploadedBaseCoverageMask = mask;
+    }
+
+    /// <summary>
+    /// Resolves (blits) the scene depth into <see cref="ghostDepthTex"/> ONCE per frame and leaves the scene
+    /// FBO bound. Two consumers share the single resolve: the fire's soft-particle fade (called right after
+    /// the dragons, BEFORE DrawFireballs, so fire fades against rock AND dragon bodies) and the x-ray line
+    /// gate later (fire doesn't write depth, so the resolve stays valid). Returns false when depth is
+    /// unavailable — consumers then fall back to their hard-edged behaviour.
+    /// </summary>
+    private bool ResolveSceneDepthToGhost(GL g, uint sceneFbo, int width, int height)
+    {
+        if (ghostDepthFrameValid)
+        {
+            return true;
+        }
+
+        if (sceneFbo == 0 || !EnsureGhostDepthTarget(g, Math.Max(1, width), Math.Max(1, height)))
+        {
+            return false;
+        }
+
+        // MSAA path: BlitFramebuffer resolves the multisampled depth to the single-sample texture
+        // (formats match: DepthComponent24 → DepthComponent24, NEAREST — both blit requirements).
+        g.BindFramebuffer(FramebufferTarget.ReadFramebuffer, sceneFbo);
+        g.BindFramebuffer(FramebufferTarget.DrawFramebuffer, ghostDepthFbo);
+        g.BlitFramebuffer(
+            0, 0, width, height, 0, 0, width, height,
+            (uint)ClearBufferMask.DepthBufferBit, BlitFramebufferFilter.Nearest);
+        g.BindFramebuffer(FramebufferTarget.Framebuffer, sceneFbo);
+        ghostDepthFrameValid = true;
+        return true;
     }
 
     /// <summary>
@@ -4452,20 +4685,114 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.UniformMatrix4(location, 1, false, a);
     }
 
-    /// <summary>Creates a clamped, linear-filtered RGBA8 colour texture of the given size.</summary>
-    private static uint MakeColorTexture(GL g, int w, int h)
+    /// <summary>
+    /// Creates a clamped, linear-filtered colour texture of the given size — RGBA8, or the alpha-less
+    /// R11F_G11F_B10F when <paramref name="hdr"/> (the bloom/god-ray mips: cheaper than RGBA16F, and every
+    /// reader only ever samples .rgb; they are render-target-only, never blitted, so the missing alpha is safe).
+    /// </summary>
+    private static uint MakeColorTexture(GL g, int w, int h, bool hdr = false)
     {
         uint tex = g.GenTexture();
         g.BindTexture(TextureTarget.Texture2D, tex);
         g.TexImage2D(
-            TextureTarget.Texture2D, 0, (int)InternalFormat.Rgba8,
-            (uint)w, (uint)h, 0, PixelFormat.Rgba, PixelType.UnsignedByte, null);
+            TextureTarget.Texture2D, 0, (int)(hdr ? InternalFormat.R11fG11fB10f : InternalFormat.Rgba8),
+            (uint)w, (uint)h, 0,
+            hdr ? PixelFormat.Rgb : PixelFormat.Rgba,
+            hdr ? PixelType.UnsignedInt10f11f11fRev : PixelType.UnsignedByte, null);
         g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
         g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
         g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
         g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
         g.BindTexture(TextureTarget.Texture2D, 0);
         return tex;
+    }
+
+    /// <summary>Half-res R-channel heat mask for the haze (R16F on the HDR chain — heat sums past 1 — else R8).</summary>
+    private bool EnsureHazeMask(GL g, int w, int h)
+    {
+        if (hazeUnsupported)
+        {
+            return false;
+        }
+
+        bool hdr = WantHdrTargets(g);
+        if (hazeMaskFbo != 0 && hazeMaskW == w && hazeMaskH == h && hazeMaskIsHdr == hdr)
+        {
+            return true;
+        }
+
+        g.DeleteFramebuffer(hazeMaskFbo);
+        g.DeleteTexture(hazeMaskTex);
+        hazeMaskTex = g.GenTexture();
+        g.BindTexture(TextureTarget.Texture2D, hazeMaskTex);
+        g.TexImage2D(
+            TextureTarget.Texture2D, 0, (int)(hdr ? InternalFormat.R16f : InternalFormat.R8),
+            (uint)w, (uint)h, 0, PixelFormat.Red, hdr ? PixelType.HalfFloat : PixelType.UnsignedByte, null);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+        g.BindTexture(TextureTarget.Texture2D, 0);
+        hazeMaskFbo = MakeColorFbo(g, hazeMaskTex, out GLEnum maskStatus);
+        g.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+        if (maskStatus != GLEnum.FramebufferComplete)
+        {
+            Log.Information("[GL3D] haze mask framebuffer incomplete ({Status}) — heat haze off this session", maskStatus);
+            g.DeleteFramebuffer(hazeMaskFbo);
+            g.DeleteTexture(hazeMaskTex);
+            hazeMaskFbo = hazeMaskTex = 0;
+            hazeUnsupported = true;
+            return false;
+        }
+
+        hazeMaskW = w;
+        hazeMaskH = h;
+        hazeMaskIsHdr = hdr;
+        return true;
+    }
+
+    /// <summary>Full-res haze output — the distorted scene the rest of the post chain reads. Format matches present.</summary>
+    private bool EnsureHazeColor(GL g, int w, int h)
+    {
+        if (hazeUnsupported)
+        {
+            return false;
+        }
+
+        bool hdr = WantHdrTargets(g);
+        if (hazeColorFbo != 0 && hazeColorW == w && hazeColorH == h && hazeColorIsHdr == hdr)
+        {
+            return true;
+        }
+
+        g.DeleteFramebuffer(hazeColorFbo);
+        g.DeleteTexture(hazeColorTex);
+        hazeColorTex = g.GenTexture();
+        g.BindTexture(TextureTarget.Texture2D, hazeColorTex);
+        g.TexImage2D(
+            TextureTarget.Texture2D, 0, (int)(hdr ? InternalFormat.Rgba16f : InternalFormat.Rgba8),
+            (uint)w, (uint)h, 0, PixelFormat.Rgba, hdr ? PixelType.HalfFloat : PixelType.UnsignedByte, null);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+        g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+        g.BindTexture(TextureTarget.Texture2D, 0);
+        hazeColorFbo = MakeColorFbo(g, hazeColorTex, out GLEnum colStatus);
+        g.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+        if (colStatus != GLEnum.FramebufferComplete)
+        {
+            Log.Information("[GL3D] haze colour framebuffer incomplete ({Status}) — heat haze off this session", colStatus);
+            g.DeleteFramebuffer(hazeColorFbo);
+            g.DeleteTexture(hazeColorTex);
+            hazeColorFbo = hazeColorTex = 0;
+            hazeUnsupported = true;
+            return false;
+        }
+
+        hazeColorW = w;
+        hazeColorH = h;
+        hazeColorIsHdr = hdr;
+        return true;
     }
 
     /// <summary>Creates a colour-only FBO wrapping <paramref name="colorTex"/> and returns its completeness status.</summary>
@@ -4511,8 +4838,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             return false;
         }
+        bool hdr = WantHdrTargets(g);
         (int bw, int bh) = PostProcessBufferSizing.Downsample(fullWidth, fullHeight, 2);
-        if (bloomBrightFbo != 0 && bloomWidth == bw && bloomHeight == bh)
+        if (bloomBrightFbo != 0 && bloomWidth == bw && bloomHeight == bh && bloomIsHdr == hdr)
         {
             return true;
         }
@@ -4526,20 +4854,19 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.DeleteFramebuffer(godrayFbo);
         g.DeleteTexture(godrayTex);
 
-        bloomBrightTex = MakeColorTexture(g, bw, bh);
+        bloomBrightTex = MakeColorTexture(g, bw, bh, hdr);
         bloomBrightFbo = MakeColorFbo(g, bloomBrightTex, out GLEnum statusBright);
-        bloomTexA = MakeColorTexture(g, bw, bh);
+        bloomTexA = MakeColorTexture(g, bw, bh, hdr);
         bloomFboA = MakeColorFbo(g, bloomTexA, out GLEnum statusA);
-        bloomTexB = MakeColorTexture(g, bw, bh);
+        bloomTexB = MakeColorTexture(g, bw, bh, hdr);
         bloomFboB = MakeColorFbo(g, bloomTexB, out GLEnum statusB);
-        godrayTex = MakeColorTexture(g, bw, bh);
+        godrayTex = MakeColorTexture(g, bw, bh, hdr);
         godrayFbo = MakeColorFbo(g, godrayTex, out GLEnum statusGod);
         g.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
 
         if (statusBright != GLEnum.FramebufferComplete || statusA != GLEnum.FramebufferComplete
             || statusB != GLEnum.FramebufferComplete || statusGod != GLEnum.FramebufferComplete)
         {
-            Log.Information("[GL3D] post-effect framebuffer incomplete (bright={Br}, A={A}, B={B}, god={G}) — bloom/god-rays off this session", statusBright, statusA, statusB, statusGod);
             g.DeleteFramebuffer(bloomBrightFbo);
             g.DeleteTexture(bloomBrightTex);
             g.DeleteFramebuffer(bloomFboA);
@@ -4549,12 +4876,23 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             g.DeleteFramebuffer(godrayFbo);
             g.DeleteTexture(godrayTex);
             bloomBrightFbo = bloomBrightTex = bloomFboA = bloomTexA = bloomFboB = bloomTexB = godrayFbo = godrayTex = 0;
+            if (hdr)
+            {
+                // Float bloom mips failed → this frame runs the tonemapped pass-through (no bloom), and the
+                // whole chain reallocates as Rgba8 next frame. Bloom itself stays available.
+                Log.Information("[GL3D] HDR bloom mips incomplete (bright={Br}, A={A}, B={B}, god={G}) — falling back to Rgba8 targets", statusBright, statusA, statusB, statusGod);
+                hdrUnsupported = true;
+                return false;
+            }
+
+            Log.Information("[GL3D] post-effect framebuffer incomplete (bright={Br}, A={A}, B={B}, god={G}) — bloom/god-rays off this session", statusBright, statusA, statusB, statusGod);
             bloomUnsupported = true;
             return false;
         }
 
         bloomWidth = bw;
         bloomHeight = bh;
+        bloomIsHdr = hdr;
         return true;
     }
 
@@ -4574,6 +4912,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
         if (!EnsurePostBuffers(g, width, height))
         {
+            if (presentIsHdr)
+            {
+                // No LDR hand-off exists, yet the scene texture is float — Skia's GL_RGBA8 wrap of it will
+                // fail for this one frame. Latch LDR and force the scene chain to reallocate next frame.
+                Log.Information("[GL3D] post buffers unavailable while present is HDR — reverting to Rgba8 targets");
+                hdrUnsupported = true;
+                presentWidth = 0;
+                msaaWidth = 0;
+            }
+
             return sourceTex;
         }
 
@@ -4581,6 +4929,31 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.DepthMask(false);
         g.Disable(EnableCap.Blend);
         g.BindVertexArray(skyVao); // reuse the sky pass's fullscreen triangle for every post pass
+
+        // B3 heat haze FIRST: distort the resolved scene by the heat mask, then let the whole chain below
+        // (bright pass, blur, composite) read the DISTORTED image — the bloom shimmers with the air.
+        if (hazeMaskValidThisFrame && hazeProgram != 0 && !hazeUnsupported && EnsureHazeColor(g, width, height))
+        {
+            g.BindFramebuffer(FramebufferTarget.Framebuffer, hazeColorFbo);
+            g.Viewport(0, 0, (uint)width, (uint)height);
+            g.UseProgram(hazeProgram);
+            g.ActiveTexture(TextureUnit.Texture0);
+            g.BindTexture(TextureTarget.Texture2D, sourceTex);
+            g.Uniform1(hazeSceneLoc, 0);
+            g.ActiveTexture(TextureUnit.Texture1);
+            g.BindTexture(TextureTarget.Texture2D, hazeMaskTex);
+            g.Uniform1(hazeHeatLoc, 1);
+            g.ActiveTexture(TextureUnit.Texture0);
+            g.Uniform1(hazeTimeLoc, (float)(frameClock.ElapsedMilliseconds % 100_000) / 1000f);
+            g.Uniform1(hazeStrengthLoc, HazeStrength);
+            g.DrawArrays(PrimitiveType.Triangles, 0, 3);
+            sourceTex = hazeColorTex;
+            if (!hazeStageLogged)
+            {
+                hazeStageLogged = true;
+                Log.Information("[GL3D] post-process: heat haze active {W}x{H} (mask {MW}x{MH})", width, height, hazeMaskW, hazeMaskH);
+            }
+        }
 
         bool buffersReady = bloomBrightProgram != 0 && bloomBlurProgram != 0 && godrayProgram != 0
             && bloomCompositeProgram != 0 && EnsureBloomBuffers(g, width, height);
@@ -4884,7 +5257,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             }
         }
 
-        if (msaaFbo != 0 && msaaWidth == width && msaaHeight == height)
+        // The resolve blit requires the multisampled colour format to match the present texture exactly,
+        // so the MSAA renderbuffer follows the same HDR want as the present target.
+        bool hdr = WantHdrTargets(g);
+        if (msaaFbo != 0 && msaaWidth == width && msaaHeight == height && msaaIsHdr == hdr)
         {
             return true;
         }
@@ -4896,7 +5272,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         msaaColorRb = g.GenRenderbuffer();
         g.BindRenderbuffer(RenderbufferTarget.Renderbuffer, msaaColorRb);
-        g.RenderbufferStorageMultisample(RenderbufferTarget.Renderbuffer, (uint)msaaSamples, InternalFormat.Rgba8, (uint)width, (uint)height);
+        g.RenderbufferStorageMultisample(RenderbufferTarget.Renderbuffer, (uint)msaaSamples, hdr ? InternalFormat.Rgba16f : InternalFormat.Rgba8, (uint)width, (uint)height);
 
         msaaDepthRb = g.GenRenderbuffer();
         g.BindRenderbuffer(RenderbufferTarget.Renderbuffer, msaaDepthRb);
@@ -4911,19 +5287,29 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.BindRenderbuffer(RenderbufferTarget.Renderbuffer, 0);
         if (status != GLEnum.FramebufferComplete)
         {
-            Log.Information("[GL3D] MSAA framebuffer incomplete ({Status}) — falling back to non-AA terrain", status);
             g.DeleteFramebuffer(msaaFbo);
             g.DeleteRenderbuffer(msaaColorRb);
             g.DeleteRenderbuffer(msaaDepthRb);
             msaaFbo = 0;
             msaaColorRb = 0;
             msaaDepthRb = 0;
+            if (hdr)
+            {
+                // Multisampled float RT unsupported → keep MSAA, drop HDR for the whole chain. The caller
+                // (Render) re-ensures the present target so both sides of the resolve stay format-matched.
+                Log.Information("[GL3D] HDR MSAA framebuffer incomplete ({Status}) — falling back to Rgba8 targets", status);
+                hdrUnsupported = true;
+                return EnsureMsaaTarget(g, width, height);
+            }
+
+            Log.Information("[GL3D] MSAA framebuffer incomplete ({Status}) — falling back to non-AA terrain", status);
             msaaUnsupported = true;
             return false;
         }
 
         msaaWidth = width;
         msaaHeight = height;
+        msaaIsHdr = hdr;
         return true;
     }
 
@@ -5728,6 +6114,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         ambientLocation = g.GetUniformLocation(program, "uAmbient");
         sunColorLocation = g.GetUniformLocation(program, "uSunColor");
         skyAmbientLocation = g.GetUniformLocation(program, "uSkyAmbient");
+        terrainFireCountLoc = g.GetUniformLocation(program, "uFireCount");
+        terrainFirePosLoc = g.GetUniformLocation(program, "uFirePos[0]");
+        terrainFireColorLoc = g.GetUniformLocation(program, "uFireColor[0]");
+        terrainFireInvR2Loc = g.GetUniformLocation(program, "uFireInvR2[0]");
         orthoSamplerLocation = g.GetUniformLocation(program, "uOrtho");
         useOrthoLocation = g.GetUniformLocation(program, "uUseOrtho");
         orthoGlobalFadeLocation = g.GetUniformLocation(program, "uOrthoGlobalFade");
@@ -5942,6 +6332,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         godrayProgram = BuildPostProgram(g, GodrayFragmentShaderSource, "God rays");
         godrayTexLoc = g.GetUniformLocation(godrayProgram, "uTex");
         godraySunUvLoc = g.GetUniformLocation(godrayProgram, "uSunUv");
+        hazeProgram = BuildPostProgram(g, HazeFragmentShaderSource, "Heat haze");
+        hazeSceneLoc = g.GetUniformLocation(hazeProgram, "uScene");
+        hazeHeatLoc = g.GetUniformLocation(hazeProgram, "uHeat");
+        hazeTimeLoc = g.GetUniformLocation(hazeProgram, "uTime");
+        hazeStrengthLoc = g.GetUniformLocation(hazeProgram, "uHazeStrength");
 
         // Shadow depth program — depth-only pass for Cascaded Shadow Maps (own vertex/fragment shaders).
         uint shvs = CompileShader(g, ShaderType.VertexShader, ShadowDepthVertexShaderSource);
@@ -6145,28 +6540,45 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             "uniform mat3 uNormal;\n" +
             "out vec3 vN;\n" +
             "out vec2 vUv;\n" +
-            "void main(){ vec4 wp = uModel * vec4(aPos, 1.0); vN = uNormal * aNormal; vUv = aUv; gl_Position = uMvp * wp; }\n";
+            "out vec3 vWp;\n" + // world position (exaggerated Z) — the fire-light loop samples it
+            "void main(){ vec4 wp = uModel * vec4(aPos, 1.0); vN = uNormal * aNormal; vUv = aUv; vWp = wp.xyz; gl_Position = uMvp * wp; }\n";
         // Textured path (uHasTex=1): albedo from the model's base-colour texture with a MASK-style alpha cutout
         // (the animated dragon's wing membranes are alpha-masked cutouts on double-sided quads). Untextured
-        // models keep the solid uColor look.
+        // models keep the solid uColor look. Fire-light loop (B2): the breath and impact blasts light the
+        // dragon's own body — same 8-light set as the terrain, wrap-diffuse so the belly catches the glow.
         const string fs =
             "#version 300 es\n" +
             "precision highp float;\n" +
             "in vec3 vN;\n" +
             "in vec2 vUv;\n" +
+            "in vec3 vWp;\n" +
             "uniform vec3 uLight;\n" +
             "uniform vec3 uColor;\n" +
             "uniform float uAmbient;\n" +
             "uniform sampler2D uTex;\n" +
             "uniform float uHasTex;\n" +
             "uniform vec3 uTint;\n" + // per-dragon colour multiply (white = unchanged; the AI flock varies it)
+            "uniform float uFireCount;\n" +
+            "uniform vec3 uFirePos[8];\n" +
+            "uniform vec3 uFireColor[8];\n" +
+            "uniform float uFireInvR2[8];\n" +
             "out vec4 frag;\n" +
             "void main(){ float d = max(0.0, dot(normalize(vN), normalize(uLight)));" +
             " float sh = uAmbient + (1.0 - uAmbient) * d;" +
             " vec4 tex = texture(uTex, vUv);" +
             " if (uHasTex > 0.5 && tex.a < 0.45) discard;" +
             " vec3 base = mix(uColor, tex.rgb, uHasTex);" +
-            " frag = vec4(base * uTint * sh, 1.0); }\n";
+            " vec3 nrm = normalize(vN);\n" +
+            "  vec3 fireGlow = vec3(0.0);\n" +
+            "  for (int fi = 0; fi < 8; fi++) {\n" +
+            "    if (float(fi) >= uFireCount) { break; }\n" +
+            "    vec3 dF = uFirePos[fi] - vWp;\n" +
+            "    float attF = 1.0 / (1.0 + (dot(dF, dF) * uFireInvR2[fi]));\n" +
+            "    attF *= attF;\n" +
+            "    float wrapF = max((dot(nrm, normalize(dF)) + 0.25) / 1.25, 0.0);\n" +
+            "    fireGlow += uFireColor[fi] * (attF * wrapF);\n" +
+            "  }\n" +
+            " frag = vec4(base * uTint * (vec3(sh) + fireGlow), 1.0); }\n";
 
         uint v = CompileShader(g, ShaderType.VertexShader, vs);
         uint f = CompileShader(g, ShaderType.FragmentShader, fs);
@@ -6196,6 +6608,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         dragonTexLoc = g.GetUniformLocation(dragonProgram, "uTex");
         dragonHasTexLoc = g.GetUniformLocation(dragonProgram, "uHasTex");
         dragonTintLoc = g.GetUniformLocation(dragonProgram, "uTint");
+        dragonFireCountLoc = g.GetUniformLocation(dragonProgram, "uFireCount");
+        dragonFirePosLoc = g.GetUniformLocation(dragonProgram, "uFirePos[0]");
+        dragonFireColorLoc = g.GetUniformLocation(dragonProgram, "uFireColor[0]");
+        dragonFireInvR2Loc = g.GetUniformLocation(dragonProgram, "uFireInvR2[0]");
 
         dragonVao = g.GenVertexArray();
         dragonPosVbo = g.GenBuffer();
@@ -6287,7 +6703,93 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         Vector3 WorldPos, float RadiusMeters, float Intensity, float Seed, float Kind, Vector3 Velocity);
 
     private uint fireProgram;
-    private int fireMvpLoc = -1, fireRightLoc = -1, fireUpLoc = -1, fireTimeLoc = -1;
+    private int fireMvpLoc = -1, fireRightLoc = -1, fireUpLoc = -1, fireTimeLoc = -1, fireGainLoc = -1;
+    private int fireSceneDepthLoc = -1, fireSoftOnLoc = -1, fireDepthNearFarLoc = -1; // soft particles (B1)
+    private int fireCamPosLoc = -1; // A2 raymarch: world-space ray origin
+
+    // B3 heat haze: a half-res heat mask (the fire list re-drawn with a tiny "heat" program, depth-gated in
+    // the shader) + a full-res refraction stage at the START of the post chain — bloom sees the distorted
+    // image. All failure latches to hazeUnsupported; the feature just turns off.
+    private uint fireHeatProgram;
+    private int heatMvpLoc = -1, heatRightLoc = -1, heatUpLoc = -1;
+    private int heatSceneDepthLoc = -1, heatSoftOnLoc = -1, heatDepthNearFarLoc = -1;
+    private uint hazeMaskFbo, hazeMaskTex;
+    private int hazeMaskW, hazeMaskH;
+    private bool hazeMaskIsHdr;
+    private uint hazeColorFbo, hazeColorTex;
+    private int hazeColorW, hazeColorH;
+    private bool hazeColorIsHdr;
+    private uint hazeProgram;
+    private int hazeSceneLoc = -1, hazeHeatLoc = -1, hazeTimeLoc = -1, hazeStrengthLoc = -1;
+    private bool hazeUnsupported;
+    private bool hazeMaskValidThisFrame;
+    private bool hazeStageLogged;
+    private uint sceneFboThisFrame;   // the FBO the scene is being drawn into (heat-mask pass restores it)
+    private int fireListVertexCount;  // vertices uploaded by the last UploadAndDrawFireList (heat pass re-draws them)
+    private const float HazeStrength = 0.0045f; // UV offset at full heat ≈ a few px — subtle shimmer, not glass
+    private bool ghostDepthFrameValid; // ghostDepthTex holds THIS frame's scene depth (fire + line gate share one resolve)
+
+    // B2 fire lights: ≤8 point lights (reduced CPU-side by the view from the fire sprites), flattened for
+    // Uniform3(count, span). Three programs consume the same set: terrain (+ its reflection pass for free),
+    // dragon bodies, and the fire program's smoke pass.
+    private int fireLightCount;
+    private readonly float[] fireLightPosFlat = new float[24];
+    private readonly float[] fireLightColorFlat = new float[24];
+    private readonly float[] fireLightInvR2Flat = new float[8];
+    private int terrainFireCountLoc = -1, terrainFirePosLoc = -1, terrainFireColorLoc = -1, terrainFireInvR2Loc = -1;
+    private int dragonFireCountLoc = -1, dragonFirePosLoc = -1, dragonFireColorLoc = -1, dragonFireInvR2Loc = -1;
+    private int fireLightsCountLoc = -1, fireLightsPosLoc = -1, fireLightsColorLoc = -1, fireLightsInvR2Loc = -1;
+
+    /// <summary>
+    /// Sets this frame's dragon-fire point lights (B2). Positions in ABSOLUTE world with exaggerated Z (the
+    /// fire sprites' frame); colour premultiplied by intensity/flicker; invR2 = 1/(3R)² per light. Count 0 hides.
+    /// </summary>
+    public void SetFireLights(int count, ReadOnlySpan<Vector3> positions, ReadOnlySpan<Vector3> colors, ReadOnlySpan<float> invR2)
+    {
+        fireLightCount = Math.Clamp(count, 0, 8);
+        for (int i = 0; i < fireLightCount; i++)
+        {
+            fireLightPosFlat[i * 3] = positions[i].X;
+            fireLightPosFlat[(i * 3) + 1] = positions[i].Y;
+            fireLightPosFlat[(i * 3) + 2] = positions[i].Z;
+            fireLightColorFlat[i * 3] = colors[i].X;
+            fireLightColorFlat[(i * 3) + 1] = colors[i].Y;
+            fireLightColorFlat[(i * 3) + 2] = colors[i].Z;
+            fireLightInvR2Flat[i] = invR2[i];
+        }
+    }
+
+    // Pushes the light set into whichever program is CURRENTLY bound (locations differ per program).
+    private void UploadFireLights(GL g, int countLoc, int posLoc, int colorLoc, int invLoc)
+    {
+        if (countLoc < 0)
+        {
+            return;
+        }
+
+        g.Uniform1(countLoc, (float)fireLightCount);
+        if (fireLightCount > 0)
+        {
+            if (posLoc >= 0)
+            {
+                g.Uniform3(posLoc, (uint)fireLightCount, fireLightPosFlat.AsSpan(0, fireLightCount * 3));
+            }
+
+            if (colorLoc >= 0)
+            {
+                g.Uniform3(colorLoc, (uint)fireLightCount, fireLightColorFlat.AsSpan(0, fireLightCount * 3));
+            }
+
+            if (invLoc >= 0)
+            {
+                g.Uniform1(invLoc, (uint)fireLightCount, fireLightInvR2Flat.AsSpan(0, fireLightCount));
+            }
+        }
+    }
+
+    // Fire brightness inside the ACES shoulder (A1). Scales the blackbody T⁴ radiance only — the scene
+    // exposure is untouched, so terrain/sky read exactly as before. Tuning range ~1.0–3.0.
+    private const float FireGain = 1.3f;
     private uint fireVao, fireVbo;
     private IReadOnlyList<FireballSprite>? fireballs;
     private IReadOnlyList<FireballSprite>? fireSmoke;
@@ -6324,6 +6826,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             "out float vIntensity;\n" +
             "out float vSeed;\n" +
             "flat out float vKind;\n" +
+            "out vec3 vWpos;\n" +          // fragment's world position on the billboard plane (ray reconstruction)
+            "flat out vec3 vCenter;\n" +   // A2 raymarch: ball centre (world, exaggerated Z)
+            "flat out float vRadius;\n" +
+            "flat out vec3 vAxis;\n" +     // comet ellipsoid axis = WORLD velocity direction
+            "flat out float vStretch;\n" + // elongation along vAxis (1 = sphere)
             "void main(){\n" +
             "  vec2 c = aCorner;\n" +
             // velocity-stretch flame(0) + ember(3) into a comet/tongue: elongate along screen velocity, thin across (~const area)
@@ -6331,14 +6838,23 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             "    vec2 vp = vec2(dot(aVel,uRight), dot(aVel,uUp)); float vl = length(vp);\n" +
             "    if (vl > 1e-3){ vec2 sd = vp/vl; float st = 1.0 + min(vl*0.010, 1.6);\n" +
             "      vec2 al = sd*dot(c,sd); vec2 pe = c - al; c = al*st + pe*inversesqrt(st); } }\n" +
+            // A2: the raymarched kinds (flame 0, puff 4) inflate the quad a touch so the perspective rim of
+            // the 3D body never clips against the billboard edge (misses just discard).
+            "  if (aKind < 0.5 || (aKind > 3.5 && aKind < 4.5)) { c *= 1.15; }\n" +
             "  vec3 wp = aCenter + ((uRight * c.x) + (uUp * c.y)) * aRadius;\n" +
-            "  vUv = aCorner; vIntensity = aIntensity; vSeed = aSeed; vKind = aKind;\n" +
+            "  vUv = aCorner; vIntensity = aIntensity; vSeed = aSeed; vKind = aKind; vWpos = wp;\n" +
+            "  vCenter = aCenter; vRadius = aRadius;\n" +
+            "  float wvl = length(aVel);\n" +
+            "  vAxis = wvl > 1e-3 ? aVel / wvl : vec3(0.0, 0.0, 1.0);\n" +
+            "  vStretch = aKind < 0.5 ? (1.0 + min(wvl * 0.010, 1.6)) : 1.0;\n" + // same law as the quad stretch
             "  gl_Position = uMvp * vec4(wp, 1.0); }\n";
         // Domain-warped 2-octave value noise (sin-free hash → no GLES banding) advected UPWARD gives churning gas;
-        // a teardrop silhouette with a noise-eroded edge kills the "clean circle" tell; heat = turbulence − height
-        // maps a temperature ramp (white-hot dense base → orange → deep-red thin tips). Premultiplied output +
-        // additive One,One so overlapping balls sum LINEARLY (the old SrcAlpha,One squared the falloff and
-        // crushed the core). A self-emissive halo keeps it glowing even when post-bloom is off (night).
+        // a teardrop silhouette with a noise-eroded edge kills the "clean circle" tell. PUFF/FLAME colour is
+        // PHYSICAL (A1): heat → Planckian-locus blackbody chromaticity × T⁴ radiance (chroma and brightness
+        // separated, so the white-hot zone is only the genuinely hottest core and the body grades yellow →
+        // orange → deep red) — real > 1 energy that survives in the HDR scene buffer and feeds the bloom
+        // honestly. Premultiplied output + additive One,One so overlapping balls sum LINEARLY (the old
+        // SrcAlpha,One squared the falloff and crushed the core).
         const string fs =
             "#version 300 es\n" +
             "precision highp float;\n" +
@@ -6346,26 +6862,93 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             "in float vIntensity;\n" +
             "in float vSeed;\n" +
             "flat in float vKind;\n" +
+            "in vec3 vWpos;\n" +
+            "flat in vec3 vCenter;\n" +
+            "flat in float vRadius;\n" +
+            "flat in vec3 vAxis;\n" +
+            "flat in float vStretch;\n" +
+            "uniform vec3 uCamPos;\n" +    // A2: ray origin (world, exaggerated Z — the sprites' frame)
             "uniform float uTime;\n" +
+            "uniform float uFireGain;\n" + // fire brightness inside the ACES shoulder (scene exposure untouched)
+            "uniform float uFireCount;\n" +   // B2: the same ≤8 fire lights as the terrain — the SMOKE pass
+            "uniform vec3 uFirePos[8];\n" +   // samples them so soot glows orange from inside the blaze
+            "uniform vec3 uFireColor[8];\n" +
+            "uniform float uFireInvR2[8];\n" +
+            "uniform sampler2D uSceneDepth;\n" + // resolved scene depth (soft particles, B1) — same tex as the line gate
+            "uniform float uSoftOn;\n" +         // 1 = uSceneDepth valid this frame; 0 = hard-edged fallback
+            "uniform vec2 uDepthNearFar;\n" +    // ACTIVE projection near/far (metres) for linearization
             "out vec4 frag;\n" +
             "float h21(vec2 p){ vec3 p3=fract(vec3(p.xyx)*0.1031); p3+=dot(p3,p3.yzx+33.33); return fract((p3.x+p3.y)*p3.z); }\n" +
             "float vn(vec2 p){ vec2 i=floor(p),f=fract(p); vec2 u=f*f*(3.0-2.0*f);\n" +
             "  float a=h21(i),b=h21(i+vec2(1.0,0.0)),c=h21(i+vec2(0.0,1.0)),d=h21(i+vec2(1.0,1.0));\n" +
             "  return mix(mix(a,b,u.x),mix(c,d,u.x),u.y); }\n" +
             "float fbm(vec2 p){ return 0.65*vn(p) + 0.35*vn(p*2.03+7.1); }\n" +
+            // 3D value noise + fbm + a cheap swirl field (A2/A3). The volume samples these in WORLD space
+            // with NO per-ball offset — neighbouring balls read the same field and fuse into one column.
+            "float h31(vec3 p){ p=fract(p*0.1031); p+=dot(p,p.yzx+33.33); return fract((p.x+p.y)*p.z); }\n" +
+            "float vn3(vec3 p){ vec3 i=floor(p), f=fract(p); vec3 u=f*f*(3.0-2.0*f);\n" +
+            "  return mix(mix(mix(h31(i),h31(i+vec3(1,0,0)),u.x), mix(h31(i+vec3(0,1,0)),h31(i+vec3(1,1,0)),u.x), u.y),\n" +
+            "             mix(mix(h31(i+vec3(0,0,1)),h31(i+vec3(1,0,1)),u.x), mix(h31(i+vec3(0,1,1)),h31(i+vec3(1,1,1)),u.x), u.y), u.z); }\n" +
+            "float fbm3(vec3 p){ return 0.6*vn3(p) + 0.4*vn3(p*2.07+7.1); }\n" +
+            "vec3 swirl3(vec3 p){\n" + // pseudo-curl from finite differences of one scalar field — divergence-poor, cheap (6 taps)
+            "  float e=0.35;\n" +
+            "  float dx = vn3(p+vec3(e,0,0)) - vn3(p-vec3(e,0,0));\n" +
+            "  float dy = vn3(p+vec3(0,e,0)) - vn3(p-vec3(0,e,0));\n" +
+            "  float dz = vn3(p+vec3(0,0,e)) - vn3(p-vec3(0,0,e));\n" +
+            "  return vec3(dy - dz, dz - dx, dx - dy);\n" +
+            "}\n" +
+            // Blackbody chromaticity: Kim et al. cubic Planckian-locus fit (CIE xy) → XYZ (Y=1) → linear sRGB.
+            // Valid 1667–25000 K; clamped below (deeper reds keep the 1667 K hue, radiance keeps falling).
+            "vec3 blackbodyLinear(float T){\n" +
+            "  float t=clamp(T,1667.0,10000.0); float u=1000.0/t; float u2=u*u; float u3=u2*u;\n" +
+            "  float x = t<=4000.0 ? -0.2661239*u3-0.2343589*u2+0.8776956*u+0.179910\n" +
+            "                      : -3.0258469*u3+2.1070379*u2+0.2226347*u+0.240390;\n" +
+            "  float x2=x*x; float x3=x2*x;\n" +
+            "  float y = t<=2222.0 ? -1.1063814*x3-1.34811020*x2+2.18555832*x-0.20219683\n" +
+            "          : t<=4000.0 ? -0.9549476*x3-1.37418593*x2+2.09137015*x-0.16748867\n" +
+            "                      :  3.0817580*x3-5.87338670*x2+3.75112997*x-0.37001483;\n" +
+            "  float iy=1.0/max(y,1e-4); float X=x*iy; float Z=(1.0-x-y)*iy;\n" +
+            "  return max(vec3( 3.2404542*X-1.5371385-0.4985314*Z,\n" +
+            "                  -0.9692660*X+1.8760108+0.0415560*Z,\n" +
+            "                   0.0556434*X-0.2040259+1.0572252*Z), vec3(0.0));\n" +
+            "}\n" +
+            // heat 0..1 → emitted radiance. Chroma from the locus (luminance-normalised), brightness from the
+            // Stefan–Boltzmann-ish T^3.5 law referenced to 2600 K (≈ radiance 1). heat² so only the densest
+            // core reaches the 7000 K white-hot zone — the body stays in the yellow/orange/red band.
+            "vec3 fireEmit(float heat){\n" +
+            "  float T = mix(1300.0, 7000.0, heat*heat);\n" +
+            "  vec3 bb = blackbodyLinear(T);\n" +
+            "  vec3 chroma = bb / max(dot(bb, vec3(0.2126,0.7152,0.0722)), 1e-4);\n" +
+            "  return chroma * (uFireGain * pow(T/2600.0, 3.5));\n" +
+            "}\n" +
+            // Soft particles (B1): metres between this fragment and the visible scene surface behind it.
+            // Same exact linearization as the line shader's rock-thickness gate (D3D-style window depth).
+            "float sceneGapMeters(){\n" +
+            "  if (uSoftOn < 0.5) return 1e6;\n" +
+            "  vec2 duv = gl_FragCoord.xy / vec2(textureSize(uSceneDepth, 0));\n" +
+            "  float n = uDepthNearFar.x; float f = uDepthNearFar.y;\n" +
+            "  float ndcS = texture(uSceneDepth, duv).r * 2.0 - 1.0;\n" +
+            "  float ndcF = gl_FragCoord.z * 2.0 - 1.0;\n" +
+            "  float linS = (f * n) / (f - ndcS * (f - n));\n" +
+            "  float linF = (f * n) / (f - ndcF * (f - n));\n" +
+            "  return linS - linF;\n" +
+            "}\n" +
             "void main(){\n" +
             "  float r = length(vUv);\n" +
-            "  vec2 nOff = vec2(vSeed*13.3, vSeed*29.1);\n" + // per-ball noise offset → each samples a UNIQUE region
-                                                              // FLASH (kind 1): a sub-frame white pop
+            // Soft-particle fade: premultiplied kinds scale the WHOLE output (colour+alpha) by how far the
+            // fragment floats in front of the scene; the ranges are per kind (a spark dies on contact, smoke
+            // dissolves over tens of metres) — kills the hard sprite edge against rock and dragon bellies.
+            "  float gapM = sceneGapMeters();\n" +
+            // FLASH (kind 1): a sub-frame white pop
             "  if (vKind > 0.5 && vKind < 1.5){ float a=(1.0-smoothstep(0.0,1.0,r))*vIntensity;\n" +
-            "    frag=vec4(vec3(1.0,0.95,0.85)*a*2.0, a); return; }\n" +
+            "    frag=vec4(vec3(1.0,0.95,0.85)*a*2.0, a)*clamp(gapM*0.25,0.0,1.0); return; }\n" +
             // SHOCK (kind 2): a thin expanding ring
             "  if (vKind > 1.5 && vKind < 2.5){ float ring=smoothstep(0.72,0.86,r)*(1.0-smoothstep(0.90,1.0,r));\n" +
-            "    float a=ring*vIntensity; frag=vec4(vec3(1.0,0.75,0.45)*a*1.5, a); return; }\n" +
+            "    float a=ring*vIntensity; frag=vec4(vec3(1.0,0.75,0.45)*a*1.5, a)*clamp(gapM/6.0,0.0,1.0); return; }\n" +
             // EMBER (kind 3): a tiny hot spark point
             "  if (vKind > 2.5 && vKind < 3.5){ float a=(1.0-smoothstep(0.0,0.5,r))*vIntensity;\n" +
             "    vec3 col=mix(vec3(1.0,0.9,0.6), vec3(1.0,0.35,0.08), smoothstep(0.0,0.5,r));\n" +
-            "    frag=vec4(col*a*1.8, a); return; }\n" +
+            "    frag=vec4(col*a*1.8, a)*clamp(gapM/1.5,0.0,1.0); return; }\n" +
             // SMOKE (kind 5) / STEAM (kind 6): straight-alpha, drawn in the SECOND (non-additive) pass; curled
             // disc. Smoke = soot; steam = white vapour (fire quenched on water). Luminance low so it never blooms.
             "  if (vKind > 4.5){ float ang=atan(vUv.y,vUv.x)+vSeed*6.283+sin(uTime*0.6+vSeed*3.0)*0.4;\n" +
@@ -6373,48 +6956,77 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             "    float a=(1.0-smoothstep(0.35,1.0,rr))*vIntensity;\n" +
             "    vec3 col; if (vKind > 5.5){ col=vec3(0.92,0.95,1.0); a*=0.5; }\n" +
             "    else { col=mix(vec3(0.35,0.18,0.08), vec3(0.09), 1.0-vIntensity); a*=0.55; }\n" +
-            "    frag=vec4(col, a); return; }\n" +
-            // PUFF (kind 4): a VOLUMETRIC 3D sphere of fire — spherical thickness (dense hot core → thin cool
-            // edge), noise displaced by the sphere depth (parallax = reads as a solid rolling ball), form shading.
-            "  if (vKind > 3.5){ if(r>=1.0) discard; float z=sqrt(1.0-r*r);\n" +
-            "    float tt=mod(uTime,64.0)*1.3 + vSeed*9.0;\n" +
-            "    float ca=cos(vSeed*2.3), sa=sin(vSeed*2.3); vec2 ru=mat2(ca,-sa,sa,ca)*vUv;\n" + // per-ball rotation
-            "    float warp=fbm(ru*2.2 + vec2(0.0,-tt*0.6) + z*0.5 + nOff);\n" +
-            "    float n=fbm(ru*2.2 + (warp-0.5)*1.6 + z*0.5 + nOff);\n" +
-            "    float dens=z*(0.35+0.85*n)*smoothstep(1.0,0.15,r);\n" +
-            "    if(dens<=0.01) discard;\n" +
-            "    float heat=clamp(dens*1.8 - 0.15, 0.0, 1.0);\n" +
-            "    vec3 col=mix(vec3(0.7,0.10,0.02), vec3(1.0,0.55,0.12), smoothstep(0.15,0.5,heat));\n" +
-            "    col=mix(col, vec3(1.0,0.95,0.80), smoothstep(0.55,0.95,heat));\n" +
-            "    col*=1.0 + 2.5*smoothstep(0.72,1.0,heat);\n" +
-            "    col*=0.55+0.45*z;\n" +
-            "    float coverage=dens*vIntensity; frag=vec4(col*coverage, coverage); return; }\n" +
-            // FLAME (kind 0, default): buoyant teardrop, but with a ROUND cross-section (3D tube of fire, not a
-            // flat disc) — thickness z across the tongue drives density + form shading.
-            "  vec2 p = vUv; float up = p.y;\n" +
-            "  float t = mod(uTime,64.0)*1.6 + vSeed*11.0;\n" +
-            "  vec2 q = p*vec2(2.2,1.6);\n" +
-            "  q.y -= t;\n" +
-            "  q.y -= 0.30*(up+1.0)*(up+1.0);\n" +
-            "  float warp = fbm(q + vec2(0.0, t*0.5) + nOff);\n" +
-            "  float n = fbm(q + (warp-0.5)*1.4 + nOff);\n" +
-            "  float sway = (fbm(vec2(vSeed*3.1, t*0.5))-0.5)*0.5*(up+1.2);\n" +
-            "  float taper = 1.0 - smoothstep(-0.35,1.0,up);\n" +
-            "  float rnd = smoothstep(-1.05,-0.6,up);\n" +
-            "  float halfW = 0.9*taper*rnd*(0.65+0.6*n);\n" +
-            "  float px = abs(p.x - sway);\n" +
-            "  if(halfW <= 0.001 || px >= halfW) discard;\n" +
-            "  float z = sqrt(1.0 - (px/halfW)*(px/halfW));\n" +
-            "  float tip = 1.0 - smoothstep(0.15,1.0, up-(n-0.5)*0.9);\n" +
-            "  float body = z*tip*(0.55+0.6*n);\n" +
-            "  if(body <= 0.01) discard;\n" +
-            "  float heat = clamp(n*1.15 - (up*0.5+0.5)*0.85 + 0.35, 0.0, 1.0);\n" +
-            "  vec3 col = mix(vec3(0.85,0.16,0.03), vec3(1.0,0.55,0.12), smoothstep(0.15,0.5,heat));\n" +
-            "  col = mix(col, vec3(1.0,0.95,0.80), smoothstep(0.5,0.9,heat));\n" +
-            "  col *= 1.0 + 2.5*smoothstep(0.72,1.0,heat);\n" +
-            "  col *= 0.6+0.4*z;\n" +
-            "  float coverage = body*vIntensity;\n" +
-            "  frag = vec4(col*coverage, coverage);\n" +
+            // Fire-lit soot (B2): smoke drifting through the blaze glows orange from the near side. Pure
+            // attenuation (billboards have no normal), sampled at the billboard's world position.
+            "    vec3 fg=vec3(0.0);\n" +
+            "    for (int fi = 0; fi < 8; fi++) {\n" +
+            "      if (float(fi) >= uFireCount) { break; }\n" +
+            "      vec3 dF = uFirePos[fi] - vWpos;\n" +
+            "      float attF = 1.0 / (1.0 + (dot(dF, dF) * uFireInvR2[fi]));\n" +
+            "      fg += uFireColor[fi] * (attF * attF);\n" +
+            "    }\n" +
+            "    col = (col * (1.0 + (fg * 1.6))) + (fg * 0.06);\n" +
+            "    frag=vec4(col, a*clamp(gapM*0.025,0.0,1.0)); return; }\n" + // straight alpha → fade ALPHA only (40 m)
+                                                                             // ── A2+A3: FLAME (0) + PUFF (4) = per-billboard VOLUMETRIC raymarch ────────────────────────
+                                                                             // The fragment reconstructs its world ray, intersects the ball's ellipsoid (axis = velocity —
+                                                                             // comets are real 3D bodies) and integrates emission–absorption front-to-back. Density is a
+                                                                             // WORLD-space fbm3 with a swirling (curl-ish) advection and NO per-ball offset, so neighbouring
+                                                                             // balls sample the same medium and FUSE into one coherent turbulent column. Constant loop bound
+                                                                             // + break (ANGLE rule); a per-pixel start jitter turns slice banding into fine noise.
+            "  vec3 ro = uCamPos;\n" +
+            "  vec3 rd = normalize(vWpos - uCamPos);\n" +
+            "  vec3 ax = vAxis;\n" +
+            "  float raA = vRadius * vStretch;\n" +           // semi-axis along the flight (comet length)
+            "  float rcA = vRadius * inversesqrt(vStretch);\n" + // across — area-preserving, matches the quad
+            "  vec3 b1 = normalize(abs(ax.z) < 0.9 ? cross(ax, vec3(0.0,0.0,1.0)) : cross(ax, vec3(1.0,0.0,0.0)));\n" +
+            "  vec3 b2 = cross(ax, b1);\n" +
+            "  vec3 rel = ro - vCenter;\n" +
+            "  vec3 roE = vec3(dot(rel,ax)/raA, dot(rel,b1)/rcA, dot(rel,b2)/rcA);\n" +
+            "  vec3 rdE = vec3(dot(rd,ax)/raA, dot(rd,b1)/rcA, dot(rd,b2)/rcA);\n" +
+            "  float qa = dot(rdE,rdE);\n" +
+            "  float qb = 2.0*dot(roE,rdE);\n" +
+            "  float qc = dot(roE,roE) - 1.0;\n" +
+            "  float disc = (qb*qb) - (4.0*qa*qc);\n" +
+            "  if (disc <= 0.0) { discard; }\n" +
+            "  float sq = sqrt(disc);\n" +
+            "  float tEnter = max((-qb - sq) / (2.0*qa), 0.0);\n" +
+            "  float tExit = (-qb + sq) / (2.0*qa);\n" +
+            "  if (tExit <= tEnter) { discard; }\n" +
+            "  const int STEPS = 20;\n" +
+            "  float stepT = (tExit - tEnter) / float(STEPS);\n" +
+            "  float tRay = tEnter + (stepT * h21(gl_FragCoord.xy + vSeed));\n" +
+            "  vec3 acc = vec3(0.0);\n" +
+            "  float tr = 1.0;\n" +
+            "  float sig = 2.5 / vRadius;\n" +
+            "  for (int i = 0; i < STEPS; i++) {\n" +
+            "    vec3 wp = ro + (rd * tRay);\n" +
+            "    vec3 relW = wp - vCenter;\n" +
+            "    vec3 pE = vec3(dot(relW,ax)/raA, dot(relW,b1)/rcA, dot(relW,b2)/rcA);\n" +
+            "    float rn = length(pE);\n" +
+            "    float env = 1.0 - smoothstep(0.42, 1.0, rn);\n" + // fatter core → neighbouring balls overlap and fuse into one jet
+            "    if (env > 0.01) {\n" +
+            "      vec3 q3 = wp * 0.14;\n" +                  // ~7 m features — the SHARED field that fuses the jet
+            "      q3 += swirl3(q3 * 0.55) * 1.2;\n" +        // A3: swirling, roughly divergence-free advection
+            "      q3.z -= uTime * 1.4;\n" +                  // buoyancy — the field slides down = the gas boils UP
+            "      float noi = fbm3(q3);\n" +
+            "      float dens = env * clamp((noi * 1.5) - 0.35, 0.0, 1.0) * 1.8;\n" + // erosion tears the rim
+            "      if (dens > 0.003) {\n" +
+            "        float heat = clamp(dens * (1.45 - (0.55 * rn)), 0.0, 1.0);\n" +  // hot core → cool rim
+            "        vec3 emitc = fireEmit(heat);\n" +
+            "        float occ = fbm3(q3 + vec3(0.0, 0.0, 0.7));\n" +                 // 1-tap self-shadow from above
+            "        emitc *= 0.60 + (0.40 * (1.0 - (0.55 * occ)));\n" +
+            "        float aStep = 1.0 - exp(-dens * sig * stepT);\n" +
+            "        acc += tr * emitc * aStep;\n" +
+            "        tr *= 1.0 - aStep;\n" +
+            "        if (tr < 0.02) { break; }\n" +
+            "      }\n" +
+            "    }\n" +
+            "    tRay += stepT;\n" +
+            "  }\n" +
+            "  float soft = clamp(gapM / 8.0, 0.0, 1.0);\n" + // B1 soft fade rides on top of the volume
+            "  float cover = (1.0 - tr) * vIntensity * soft;\n" +
+            "  if (cover <= 0.002) { discard; }\n" +
+            "  frag = vec4(acc * (vIntensity * soft), cover);\n" +
             "}\n";
 
         uint v = CompileShader(g, ShaderType.VertexShader, vs);
@@ -6440,6 +7052,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         fireRightLoc = g.GetUniformLocation(fireProgram, "uRight");
         fireUpLoc = g.GetUniformLocation(fireProgram, "uUp");
         fireTimeLoc = g.GetUniformLocation(fireProgram, "uTime");
+        fireGainLoc = g.GetUniformLocation(fireProgram, "uFireGain");
+        fireSceneDepthLoc = g.GetUniformLocation(fireProgram, "uSceneDepth");
+        fireSoftOnLoc = g.GetUniformLocation(fireProgram, "uSoftOn");
+        fireDepthNearFarLoc = g.GetUniformLocation(fireProgram, "uDepthNearFar");
+        fireLightsCountLoc = g.GetUniformLocation(fireProgram, "uFireCount");
+        fireLightsPosLoc = g.GetUniformLocation(fireProgram, "uFirePos[0]");
+        fireLightsColorLoc = g.GetUniformLocation(fireProgram, "uFireColor[0]");
+        fireLightsInvR2Loc = g.GetUniformLocation(fireProgram, "uFireInvR2[0]");
+        fireCamPosLoc = g.GetUniformLocation(fireProgram, "uCamPos");
 
         fireVao = g.GenVertexArray();
         fireVbo = g.GenBuffer();
@@ -6461,6 +7082,68 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.EnableVertexAttribArray(6);
         g.VertexAttribPointer(6, 3, VertexAttribPointerType.Float, false, stride, (void*)(9 * sizeof(float)));
         g.BindVertexArray(0);
+
+        // B3 heat program: the SAME billboard vertex shader, a tiny fragment that writes scalar "heat" into
+        // the half-res mask — upward-biased falloff (convection plume) and the same depth linearization as
+        // the soft particles, so occluded fire heats nothing (that is the haze's depth gate).
+        const string heatFs =
+            "#version 300 es\n" +
+            "precision highp float;\n" +
+            "in vec2 vUv;\n" +
+            "in float vIntensity;\n" +
+            "flat in float vKind;\n" +
+            "uniform sampler2D uSceneDepth;\n" +
+            "uniform float uSoftOn;\n" +
+            "uniform vec2 uDepthNearFar;\n" +
+            "out vec4 frag;\n" +
+            "void main(){\n" +
+            "  float heat;\n" +
+            "  if (vKind > 4.5) { discard; }\n" +           // smoke/steam never shimmer (and never land here)
+            "  else if (vKind > 3.5) { heat = 1.0; }\n" +   // puff
+            "  else if (vKind > 2.5) { heat = 0.25; }\n" +  // ember
+            "  else if (vKind > 1.5) { discard; }\n" +      // shock ring
+            "  else if (vKind > 0.5) { heat = 0.7; }\n" +   // flash
+            "  else { heat = 1.0; }\n" +                    // flame
+            "  vec2 uvb = vUv;\n" +
+            "  if (uvb.y > 0.0) { uvb.y *= 0.55; }\n" +     // top lobe stretched → the heat column rises past the ball
+            "  float m = 1.0 - smoothstep(0.15, 1.05, length(uvb));\n" +
+            "  if (uSoftOn > 0.5) {\n" +
+            "    vec2 duv = gl_FragCoord.xy / vec2(textureSize(uSceneDepth, 0));\n" +
+            "    float n = uDepthNearFar.x; float f = uDepthNearFar.y;\n" +
+            "    float linS = (f * n) / (f - ((texture(uSceneDepth, duv).r * 2.0 - 1.0) * (f - n)));\n" +
+            "    float linF = (f * n) / (f - ((gl_FragCoord.z * 2.0 - 1.0) * (f - n)));\n" +
+            "    m *= clamp((linS - linF) / 4.0, 0.0, 1.0);\n" +
+            "  }\n" +
+            "  frag = vec4(m * vIntensity * heat, 0.0, 0.0, 1.0);\n" +
+            "}\n";
+        uint hv = CompileShader(g, ShaderType.VertexShader, vs);
+        uint hf = CompileShader(g, ShaderType.FragmentShader, heatFs);
+        fireHeatProgram = g.CreateProgram();
+        g.AttachShader(fireHeatProgram, hv);
+        g.AttachShader(fireHeatProgram, hf);
+        g.LinkProgram(fireHeatProgram);
+        g.GetProgram(fireHeatProgram, ProgramPropertyARB.LinkStatus, out int heatLinked);
+        g.DetachShader(fireHeatProgram, hv);
+        g.DetachShader(fireHeatProgram, hf);
+        g.DeleteShader(hv);
+        g.DeleteShader(hf);
+        if (heatLinked == 0)
+        {
+            // Haze is pure garnish — losing it must not take the fire down.
+            Log.Warning("[GL3D] fire-heat program link failed — heat haze off this session: {Log}", g.GetProgramInfoLog(fireHeatProgram));
+            g.DeleteProgram(fireHeatProgram);
+            fireHeatProgram = 0;
+            hazeUnsupported = true;
+        }
+        else
+        {
+            heatMvpLoc = g.GetUniformLocation(fireHeatProgram, "uMvp");
+            heatRightLoc = g.GetUniformLocation(fireHeatProgram, "uRight");
+            heatUpLoc = g.GetUniformLocation(fireHeatProgram, "uUp");
+            heatSceneDepthLoc = g.GetUniformLocation(fireHeatProgram, "uSceneDepth");
+            heatSoftOnLoc = g.GetUniformLocation(fireHeatProgram, "uSoftOn");
+            heatDepthNearFarLoc = g.GetUniformLocation(fireHeatProgram, "uDepthNearFar");
+        }
     }
 
     private void DrawFireballs(GL g, Matrix4x4 mvp, Camera3D camera)
@@ -6490,6 +7173,20 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.Uniform3(fireRightLoc, right.X, right.Y, right.Z);
         g.Uniform3(fireUpLoc, up.X, up.Y, up.Z);
         g.Uniform1(fireTimeLoc, (float)(frameClock.ElapsedMilliseconds % 100_000) / 1000f);
+        g.Uniform1(fireGainLoc, FireGain);
+        g.Uniform3(fireCamPosLoc, camera.Position.X, camera.Position.Y, camera.Position.Z); // A2: ray origin
+        UploadFireLights(g, fireLightsCountLoc, fireLightsPosLoc, fireLightsColorLoc, fireLightsInvR2Loc); // B2: smoke glows from inside the blaze
+        // Soft particles: this frame's resolved scene depth (unit 7 — the line pass re-binds it later anyway).
+        bool softOk = ghostDepthFrameValid && ghostDepthTex != 0;
+        g.Uniform1(fireSoftOnLoc, softOk ? 1f : 0f);
+        if (softOk)
+        {
+            g.ActiveTexture(TextureUnit.Texture7);
+            g.BindTexture(TextureTarget.Texture2D, ghostDepthTex);
+            g.ActiveTexture(TextureUnit.Texture0);
+            g.Uniform1(fireSceneDepthLoc, 7);
+            g.Uniform2(fireDepthNearFarLoc, camera.NearPlane, camera.FarPlane);
+        }
 
         // Translucent: depth-TESTED (rocks occlude) but no depth write.
         g.Enable(EnableCap.DepthTest);
@@ -6503,6 +7200,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             g.BlendFunc(BlendingFactor.One, BlendingFactor.One);
             UploadAndDrawFireList(g, fireballs!);
+            RenderHeatMask(g, right, up, camera, softOk); // B3: same VBO content → half-res heat for the haze
         }
 
         // Pass 2 — smoke, straight alpha OVER the fire (soot occludes, never blooms; drawn last = sits in front).
@@ -6515,6 +7213,52 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.BindVertexArray(0);
         g.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
         g.DepthMask(true);
+    }
+
+    // B3: re-draws the fire vertices STILL SITTING in the fire VBO into the half-res heat mask with the tiny
+    // heat program (in-shader depth gate = occluded fire heats nothing). Leaves the fire VAO + blend enabled
+    // exactly as found; restores the scene FBO/viewport/program/depth-test before returning.
+    private void RenderHeatMask(GL g, Vector3 right, Vector3 up, Camera3D camera, bool depthOk)
+    {
+        hazeMaskValidThisFrame = false;
+        if (hazeUnsupported || fireHeatProgram == 0 || fireListVertexCount <= 0
+            || presentWidth <= 0 || sceneFboThisFrame == 0)
+        {
+            return;
+        }
+
+        int hw = Math.Max(16, presentWidth / 2);
+        int hh = Math.Max(16, presentHeight / 2);
+        if (!EnsureHazeMask(g, hw, hh))
+        {
+            return;
+        }
+
+        g.BindFramebuffer(FramebufferTarget.Framebuffer, hazeMaskFbo);
+        g.Viewport(0, 0, (uint)hw, (uint)hh);
+        g.ClearColor(0f, 0f, 0f, 0f);
+        g.Clear((uint)ClearBufferMask.ColorBufferBit);
+        g.UseProgram(fireHeatProgram);
+        g.UniformMatrix4(heatMvpLoc, 1, false, dragonMat4); // still holds this draw's MVP
+        g.Uniform3(heatRightLoc, right.X, right.Y, right.Z);
+        g.Uniform3(heatUpLoc, up.X, up.Y, up.Z);
+        g.Uniform1(heatSoftOnLoc, depthOk ? 1f : 0f);
+        if (depthOk)
+        {
+            g.Uniform1(heatSceneDepthLoc, 7); // ghostDepthTex is already bound on unit 7 by the fire pass
+            g.Uniform2(heatDepthNearFarLoc, camera.NearPlane, camera.FarPlane);
+        }
+
+        g.Disable(EnableCap.DepthTest); // the mask FBO has no depth — the gate lives in the shader
+        g.BlendFunc(BlendingFactor.One, BlendingFactor.One); // heat sums like the fire it mirrors
+        g.DrawArrays(PrimitiveType.Triangles, 0, (uint)fireListVertexCount);
+        hazeMaskValidThisFrame = true;
+
+        // Hand the state back to the fire pass (smoke pass follows with its own blend func).
+        g.BindFramebuffer(FramebufferTarget.Framebuffer, sceneFboThisFrame);
+        g.Viewport(0, 0, (uint)presentWidth, (uint)presentHeight);
+        g.UseProgram(fireProgram);
+        g.Enable(EnableCap.DepthTest);
     }
 
     // Streams a sprite list into the fire VBO (12 floats/vertex) and draws it. Assumes fireProgram + its uniforms
@@ -6554,6 +7298,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         g.BindBuffer(BufferTargetARB.ArrayBuffer, fireVbo);
         g.BufferData<float>(BufferTargetARB.ArrayBuffer, new ReadOnlySpan<float>(fireScratch, 0, floats), BufferUsageARB.DynamicDraw);
+        fireListVertexCount = list.Count * 6; // the heat-mask pass re-draws exactly these vertices
         g.DrawArrays(PrimitiveType.Triangles, 0, (uint)(list.Count * 6));
     }
 
@@ -6730,6 +7475,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.Uniform3(dragonColorLoc, 0.34f, 0.09f, 0.09f); // dark blood-red hide (untextured fallback)
         g.Uniform1(dragonAmbientLoc, 0.38f);
         g.Uniform3(dragonTintLoc, 1f, 1f, 1f); // player dragon: no tint
+        UploadFireLights(g, dragonFireCountLoc, dragonFirePosLoc, dragonFireColorLoc, dragonFireInvR2Loc); // B2: breath glow on the body
 
         // Texture path: bind the model's base colour (unit 9 — 0-8 are owned by terrain/CSM/ghost passes).
         bool hasTex = EnsureDragonTexture(g, model);
@@ -6881,6 +7627,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.Uniform3(dragonColorLoc, 0.30f, 0.10f, 0.12f); // untextured fallback hide
         g.Uniform1(dragonAmbientLoc, 0.38f);
         g.Uniform1(dragonTexLoc, 9);
+        UploadFireLights(g, dragonFireCountLoc, dragonFirePosLoc, dragonFireColorLoc, dragonFireInvR2Loc); // B2: a hit blast lights its victim
 
         g.Enable(EnableCap.DepthTest);
         g.DepthFunc(DepthFunction.Lequal);
