@@ -437,6 +437,41 @@ public sealed class DragonFlightTests
     }
 
     [Fact]
+    public void SmallAnalogInput_BanksProportionallyLess_ThanFullInput()
+    {
+        // Mouse steering feeds fractional yaw — expo must keep a 30 % stick well under 30 % of the full bank.
+        var gentle = NewDragon(heading: 0f);
+        var full = NewDragon(heading: 0f);
+        for (int i = 0; i < 60; i++)
+        {
+            gentle.Step(0.05f, yawInput: 0.3f, pitchInput: 0f, throttleInput: 0f);
+            full.Step(0.05f, yawInput: 1f, pitchInput: 0f, throttleInput: 0f);
+        }
+
+        gentle.RollRadians.Should().BeGreaterThan(0.02f, "a small analog input still steers");
+        gentle.RollRadians.Should().BeLessThan(full.RollRadians * 0.3f, "expo flattens the centre of the stick");
+    }
+
+    [Fact]
+    public void YawCommand_DischargesQuickly_AfterRelease()
+    {
+        var dragon = NewDragon(heading: 0f);
+        for (int i = 0; i < 12; i++)
+        {
+            dragon.Step(0.05f, yawInput: 1f, pitchInput: 0f, throttleInput: 0f); // charge fully (0.6 s)
+        }
+
+        MathF.Abs(dragon.YawCommand).Should().BeGreaterThan(0.9f);
+
+        for (int i = 0; i < 6; i++)
+        {
+            dragon.Step(0.05f, 0f, 0f, 0f); // 0.3 s of release ≫ the 0.18 s discharge time
+        }
+
+        MathF.Abs(dragon.YawCommand).Should().BeLessThan(0.05f, "the command must not linger past the release time");
+    }
+
+    [Fact]
     public void YawCommand_TapStaysBelowTheStrokeGate_HoldCommitsAboveIt()
     {
         var dragon = NewDragon(heading: 0f);
