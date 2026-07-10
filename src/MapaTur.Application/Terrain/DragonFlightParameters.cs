@@ -45,14 +45,14 @@ public sealed record DragonFlightParameters
 
     /// <summary>Seconds a held ±1 input takes to CHARGE the yaw command to full — a tap charges only a
     /// fraction, which is what makes small corrections precise (keys arrive as a hard 0/1).</summary>
-    public float YawCommandAttackSeconds { get; init; } = 0.35f;
+    public float YawCommandAttackSeconds { get; init; } = 0.28f;
 
     /// <summary>Seconds a released yaw command takes to discharge back to zero.</summary>
-    public float YawCommandReleaseSeconds { get; init; } = 0.12f;
+    public float YawCommandReleaseSeconds { get; init; } = 0.18f;
 
     /// <summary>Expo exponent on the yaw command (cmd·|cmd|^(expo−1)): flat near centre for precision, full
     /// authority at the edge — the RC-transmitter classic.</summary>
-    public float YawExpo { get; init; } = 1.6f;
+    public float YawExpo { get; init; } = 1.3f;
 
     /// <summary>Natural frequency ωn (rad/s) of the CRITICALLY damped spring the roll uses to track its bank
     /// target — ζ=1 means no overshoot and no oscillation by construction; ~6 settles a full bank in ~0.8 s.</summary>
