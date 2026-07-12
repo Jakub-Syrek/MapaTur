@@ -40,6 +40,16 @@ public sealed record WalkParameters
     /// steep face (a wall), not float on the flat. tan(~22°) ≈ 0.4.</summary>
     public float HangMinSlopeGrade { get; init; } = 0.4f;
 
+    /// <summary>Climb speed with the two ciupagas planted, m/s — slower than a walk: you haul yourself up the
+    /// face one axe at a time. Holding the axe on steep rock (≥ <see cref="HangMinSlopeGrade"/>) and pushing a
+    /// move direction ascends/traverses the wall at this rate, OVERRIDING the walk-slope gate (you climb even a
+    /// vertical face). No input → the axes just hang (self-arrest).</summary>
+    public float ClimbSpeedMetersPerSecond { get; init; } = 1.4f;
+
+    /// <summary>Sideways (contour) climb speed as a fraction of the up/down fall-line rate — traversing a face
+    /// is slower than going straight up, the Isonzo Ascent feel ("moving sideways is slower"). 0.5 = half.</summary>
+    public float ClimbTraverseFraction { get; init; } = 0.5f;
+
     /// <summary>Half-width (metres) of the central-difference used to estimate the ground gradient/slope. Wider
     /// = smoother (ignores sub-metre bumps); ~2 m matches the mesh's normal-smoothing scale.</summary>
     public float SlopeProbeMeters { get; init; } = 2.0f;
