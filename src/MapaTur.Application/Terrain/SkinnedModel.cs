@@ -41,6 +41,7 @@ public sealed class SkinnedModel
     private readonly ArmatureInstance armature;
     private readonly Matrix4x4[] bindLocals;             // each armature node's bind-pose local matrix
     private readonly Dictionary<string, int> nodeByName; // bone name → armature node index
+    private Matrix4x4[]? blendLocals;                    // scratch: clip-A locals captured during a PoseBlend
 
     private SkinnedModel(
         IReadOnlyList<Primitive> primitives,
@@ -230,6 +231,47 @@ public sealed class SkinnedModel
     public void Pose(int animationIndex, float seconds)
     {
         SetFrame(animationIndex, seconds);
+        Skin();
+    }
+
+    /// <summary>
+    /// Poses the model as a CROSSFADE between two animation frames: animation <paramref name="animA"/> at
+    /// <paramref name="secondsA"/> and animation <paramref name="animB"/> at <paramref name="secondsB"/>, blended
+    /// per-bone by <paramref name="weight"/> (0 = fully A, 1 = fully B) with a TRS-decomposed, slerped bone lerp so
+    /// the blend doesn't shear, then skins the result like <see cref="Pose"/>. The walk animation state machine
+    /// drives this to fade Idle↔Walk↔Run / Jump / Land smoothly instead of snapping between clips.
+    /// </summary>
+    public void PoseBlend(int animA, float secondsA, int animB, float secondsB, float weight)
+    {
+        weight = Math.Clamp(weight, 0f, 1f);
+        if (weight <= 0f)
+        {
+            Pose(animA, secondsA);
+            return;
+        }
+
+        if (weight >= 1f)
+        {
+            Pose(animB, secondsB);
+            return;
+        }
+
+        int count = this.armature.LogicalNodes.Count;
+        this.blendLocals ??= new Matrix4x4[count];
+
+        SetFrame(animA, secondsA);
+        for (int i = 0; i < count; i++)
+        {
+            this.blendLocals[i] = this.armature.LogicalNodes[i].LocalMatrix;
+        }
+
+        SetFrame(animB, secondsB);
+        for (int i = 0; i < count; i++)
+        {
+            NodeInstance node = this.armature.LogicalNodes[i];
+            node.LocalMatrix = LerpTransform(this.blendLocals[i], node.LocalMatrix, weight);
+        }
+
         Skin();
     }
 
