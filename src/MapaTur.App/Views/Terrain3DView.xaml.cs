@@ -2112,16 +2112,13 @@ public partial class Terrain3DView : ContentView
     // ── 3rd-person walk avatar (KayKit "Adventurers" Rogue_Hooded → hiker.glb; loaded once per walk session) ──
     private MapaTur.Application.Terrain.SkinnedModel? humanoidModel3D;
     private bool humanoidModelLoading;
-    private int humanoidIdleAnimIndex = -1;
-    private int humanoidWalkAnimIndex = -1;
-    private int humanoidRunAnimIndex = -1;
-    private float humanoidAnimTime;
+    private int humanoidIdleAnimIndex = -1;        // resolved at load; used only for the pre-animator fallback pose
+    private MapaTur.Application.Terrain.HumanoidAnimator? humanoidAnimator;
     private Matrix4x4 humanoidWorldMatrix = Matrix4x4.Identity;
     private Matrix4x4 humanoidNormalMatrix = Matrix4x4.Identity;
     private System.Numerics.Vector2 walkPrevXY;    // last-tick walker XY → ground speed (drives clip + anti-skate)
     private readonly bool walkThirdPerson = true;  // draw the 3D avatar + follow camera (vs the 1st-person ciupagas)
     private bool walkShootQueued;                  // F pressed → fire the crossbow on the next tick
-    private float humanoidShootTimeRemaining;      // >0 while the one-shot crossbow-fire clip plays (overrides locomotion)
     private int humanoidShootAnimIndex = -1;       // "1H_Ranged_Shoot" clip index (−1 = model has no ranged clip)
     private float walkCamBack = WalkCamBackMeters;  // 3rd-person boom length behind the walker (mouse wheel zooms it)
 
@@ -2306,7 +2303,6 @@ public partial class Terrain3DView : ContentView
         walkJumpQueued = false;
         walkLmbDown = false;
         walkShootQueued = false;
-        humanoidShootTimeRemaining = 0f;
         walkDetailTick = 0;
 
         walkActive = true;
@@ -2385,28 +2381,22 @@ public partial class Terrain3DView : ContentView
         bool jump = walkJumpQueued;
         walkJumpQueued = false;
 
-        // Fire the crossbow: start the one-shot ranged clip (ignored if it's already playing or the model has none).
-        if (walkShootQueued && humanoidShootAnimIndex >= 0 && humanoidShootTimeRemaining <= 0f
-            && humanoidModel3D is { } shootModel)
-        {
-            humanoidShootTimeRemaining = shootModel.Animations[humanoidShootAnimIndex].Duration;
-
-            // Loose a bolt where the camera aims (heading + look pitch), from chest height just in front of the walker.
-            if (arrowModel3D is not null && arrows.Count < MaxArrowsInFlight)
-            {
-                float aim = Math.Clamp(walkLookPitchRadians, -WalkCamMaxDownRadians, WalkCamMaxUpRadians);
-                float ca = MathF.Cos(aim);
-                var dir = new Vector3(ca * ch, ca * sh, MathF.Sin(aim));
-                arrows.Add(new ArrowProjectile
-                {
-                    Pos = new Vector3(w.PositionXY.X + (ch * 0.5f), w.PositionXY.Y + (sh * 0.5f), w.FeetElevation + ArrowSpawnHeightMeters),
-                    Vel = dir * ArrowSpeedMetersPerSecond,
-                    Age = 0f,
-                });
-            }
-        }
-
+        // Fire the crossbow (F): the animator plays the one-shot ranged clip; here we just loose the bolt.
+        bool shootThisTick = walkShootQueued && humanoidShootAnimIndex >= 0;
         walkShootQueued = false;
+        if (shootThisTick && arrowModel3D is not null && arrows.Count < MaxArrowsInFlight)
+        {
+            // Loose a bolt where the camera aims (heading + look pitch), from chest height just in front of the walker.
+            float aim = Math.Clamp(walkLookPitchRadians, -WalkCamMaxDownRadians, WalkCamMaxUpRadians);
+            float ca = MathF.Cos(aim);
+            var dir = new Vector3(ca * ch, ca * sh, MathF.Sin(aim));
+            arrows.Add(new ArrowProjectile
+            {
+                Pos = new Vector3(w.PositionXY.X + (ch * 0.5f), w.PositionXY.Y + (sh * 0.5f), w.FeetElevation + ArrowSpawnHeightMeters),
+                Vel = dir * ArrowSpeedMetersPerSecond,
+                Age = 0f,
+            });
+        }
 
         w.Step(dt, wish, speed, jump, hangHeld: walkLmbDown);
 
@@ -2419,7 +2409,7 @@ public partial class Terrain3DView : ContentView
         walkPrevXY = w.PositionXY;
         if (humanoidModel3D is { } hm)
         {
-            PoseAndSeatHumanoid(hm, w, exaggeration, dt, groundSpeed);
+            PoseAndSeatHumanoid(hm, w, exaggeration, dt, groundSpeed, shootThisTick);
         }
 
         AdvanceAndBuildArrows(exaggeration, dt);
@@ -2645,7 +2635,7 @@ public partial class Terrain3DView : ContentView
             await s.CopyToAsync(ms).ConfigureAwait(false);
             var model = MapaTur.Application.Terrain.SkinnedModel.LoadGlb(ms.ToArray());
 
-            int idle = -1, walk = -1, run = -1, shoot = -1;
+            int idle = -1, walk = -1, run = -1, shoot = -1, jumpIdle = -1, jumpLand = -1;
             for (int i = 0; i < model.Animations.Count; i++)
             {
                 string name = model.Animations[i].Name;
@@ -2653,21 +2643,29 @@ public partial class Terrain3DView : ContentView
                 else if (walk < 0 && string.Equals(name, "Walking_A", StringComparison.OrdinalIgnoreCase)) { walk = i; }
                 else if (run < 0 && string.Equals(name, "Running_A", StringComparison.OrdinalIgnoreCase)) { run = i; }
                 else if (shoot < 0 && string.Equals(name, "1H_Ranged_Shoot", StringComparison.OrdinalIgnoreCase)) { shoot = i; }
+                else if (jumpIdle < 0 && string.Equals(name, "Jump_Idle", StringComparison.OrdinalIgnoreCase)) { jumpIdle = i; }
+                else if (jumpLand < 0 && string.Equals(name, "Jump_Land", StringComparison.OrdinalIgnoreCase)) { jumpLand = i; }
             }
 
             MainThread.BeginInvokeOnMainThread(() =>
             {
                 humanoidModel3D = model;
                 humanoidIdleAnimIndex = idle >= 0 ? idle : 0;
-                humanoidWalkAnimIndex = walk >= 0 ? walk : humanoidIdleAnimIndex;
-                humanoidRunAnimIndex = run; // -1 → fall back to walk
                 humanoidShootAnimIndex = shoot; // -1 → F does nothing (no ranged clip)
-                humanoidAnimTime = 0f;
+                humanoidAnimator = new MapaTur.Application.Terrain.HumanoidAnimator(
+                    new MapaTur.Application.Terrain.HumanoidAnimator.Clips(
+                        Idle: humanoidIdleAnimIndex,
+                        Walk: walk >= 0 ? walk : humanoidIdleAnimIndex,
+                        Run: run,
+                        JumpIdle: jumpIdle,
+                        JumpLand: jumpLand,
+                        Shoot: shoot),
+                    model.Animations.Select(x => x.Duration).ToList());
                 Canvas.InvalidateSurface();
             });
             Serilog.Log.Information(
-                "[Walk] humanoid model loaded: {Prims} prims, extent={Ext:F2}, anims={N}, idle={Idle} walk={Walk} run={Run} shoot={Shoot}, tex={Tex}",
-                model.Primitives.Count, model.LocalExtent, model.Animations.Count, idle, walk, run, shoot,
+                "[Walk] humanoid model loaded: {Prims} prims, extent={Ext:F2}, anims={N}, idle={Idle} walk={Walk} run={Run} shoot={Shoot} jIdle={JI} jLand={JL}, tex={Tex}",
+                model.Primitives.Count, model.LocalExtent, model.Animations.Count, idle, walk, run, shoot, jumpIdle, jumpLand,
                 model.BaseColorImageBytes is { Length: > 0 } bytes ? $"{bytes.Length / 1024}kB" : "none");
         }
         catch (Exception ex)
@@ -2765,45 +2763,23 @@ public partial class Terrain3DView : ContentView
         }
     }
 
-    // Poses the avatar to the walker's motion (Idle vs Walking vs Running by ground speed) and builds its
-    // model→world matrix: scale the tallest bind extent to HumanoidHeightMeters, remap glTF Y-up → world Z-up,
-    // yaw to the walk heading, and seat the LOWEST posed vertex (the soles) on the feet elevation. A single time
-    // accumulator advances the clip (no crossfade yet — that is the Faza 2 animation state machine).
+    // Poses the avatar via the HumanoidAnimator (crossfaded Idle/Walk/Run + Jump/Land + shoot, speed-matched) and
+    // builds its model→world matrix: scale the tallest bind extent to HumanoidHeightMeters, remap glTF Y-up → world
+    // Z-up, yaw to the walk heading, and seat the LOWEST posed vertex (the soles) on the feet elevation.
     private void PoseAndSeatHumanoid(
         MapaTur.Application.Terrain.SkinnedModel model, MapaTur.Application.Terrain.WalkPhysics w,
-        float exaggeration, float dt, float groundSpeed)
+        float exaggeration, float dt, float groundSpeed, bool shootRequested)
     {
-        int clip;
-        float poseTime;
-        if (humanoidShootTimeRemaining > 0f && humanoidShootAnimIndex >= 0 && humanoidShootAnimIndex < model.Animations.Count)
+        if (humanoidAnimator is { } anim)
         {
-            // One-shot crossbow fire: play the ranged clip once over its own duration, overriding locomotion.
-            clip = humanoidShootAnimIndex;
-            float shootDuration = model.Animations[clip].Duration;
-            poseTime = MathF.Max(0f, shootDuration - humanoidShootTimeRemaining);
-            humanoidShootTimeRemaining -= dt;
+            MapaTur.Application.Terrain.HumanoidAnimator.Blend b =
+                anim.Update(dt, groundSpeed, w.IsGrounded, w.VerticalVelocity, shootRequested);
+            model.PoseBlend(b.ClipA, b.TimeA, b.ClipB, b.TimeB, b.Weight);
         }
         else
         {
-            clip = humanoidIdleAnimIndex;
-            if (w.IsGrounded && groundSpeed > 0.4f)
-            {
-                clip = (walkRun && groundSpeed > 3.2f && humanoidRunAnimIndex >= 0)
-                    ? humanoidRunAnimIndex
-                    : humanoidWalkAnimIndex;
-            }
-
-            if (clip < 0)
-            {
-                clip = 0;
-            }
-
-            float duration = clip < model.Animations.Count ? model.Animations[clip].Duration : 0f;
-            humanoidAnimTime += dt;
-            poseTime = duration > 0f ? humanoidAnimTime % duration : 0f;
+            model.Pose(humanoidIdleAnimIndex >= 0 ? humanoidIdleAnimIndex : 0, 0f);
         }
-
-        model.Pose(clip, poseTime);
 
         (Vector3 pmin, Vector3 pmax) = model.GetPosedBounds();
         Vector3 posedCenter = (pmin + pmax) * 0.5f;
