@@ -20,3 +20,21 @@
 *.pbf      binary
 *.sqlite   binary
 *.db       binary
+
+# Large dragon source/candidate assets live under data/ (Maya bundles, model
+# variants, source archives, raw audio). Versioned via Git LFS, scoped to data/
+# so the app's small runtime assets in src/.../Resources/Raw stay normal blobs.
+data/*.glb     filter=lfs diff=lfs merge=lfs -text
+data/**/*.glb  filter=lfs diff=lfs merge=lfs -text
+data/*.zip     filter=lfs diff=lfs merge=lfs -text
+data/**/*.zip  filter=lfs diff=lfs merge=lfs -text
+data/*.mp3     filter=lfs diff=lfs merge=lfs -text
+data/**/*.mp3  filter=lfs diff=lfs merge=lfs -text
+data/*.tif     filter=lfs diff=lfs merge=lfs -text
+data/**/*.tif  filter=lfs diff=lfs merge=lfs -text
+data/*.ma      filter=lfs diff=lfs merge=lfs -text
+data/**/*.ma   filter=lfs diff=lfs merge=lfs -text
+data/*.exr     filter=lfs diff=lfs merge=lfs -text
+data/**/*.exr  filter=lfs diff=lfs merge=lfs -text
+data/*.hdr     filter=lfs diff=lfs merge=lfs -text
+data/**/*.hdr  filter=lfs diff=lfs merge=lfs -text
