@@ -29,6 +29,9 @@ public sealed class DemRegionBaker
     private readonly IDemTileSource source;
     private readonly int maxConcurrentFetches;
     private readonly DemRaster? baseDem;
+    private readonly int zeroStripMaxCells;
+    private readonly bool dealiasFinest;
+    private double regionMidLatRad;
 
     /// <summary>Initializes the baker over a tile source.</summary>
     /// <param name="source">The DEM tile source the finest level is baked from (e.g. a composite GUGiK + Terrarium).</param>
@@ -38,15 +41,30 @@ public sealed class DemRegionBaker
     /// watercourse/border voids — so the baked mesh shows base-height terrain there instead of see-through gaps,
     /// matching the live detail path. Null skips the backfill (coverage holes stay NoData → the render base shows
     /// through). The same base every live load uses, so the bake reproduces the live surface.</param>
+    /// <param name="zeroStripMaxCells">Widest flat-zero strip (in CELLS) the bake bridges. The default
+    /// (<see cref="DemTileBaker.DefaultZeroStripMaxCells"/> = 24) is the accepted z16 policy (~37 m at
+    /// 1.56 m/cell); the parameter is CELL-denominated, so a finer level must scale it to keep the same
+    /// PHYSICAL policy — z17 (0.78 m/cell) uses 48 (audit 2026-07-10: 638 bounded runs of 25–96 cells in the
+    /// fetched z17 set that 24 would leave as unbridged "fault" lines — audit-dem-tile-strips.py, §E.1).</param>
+    /// <param name="dealiasFinest">Apply <see cref="DemRasterDealias"/> to every finest-level bake window
+    /// (wariant 3, TILE-PRODUCTION §2.5) — kills the WCS sub-native grid weave and the near-vertical
+    /// "organ-pipe" flutes the 0.78 m z17 grid exposed.</param>
     /// <exception cref="ArgumentNullException"><paramref name="source"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="maxConcurrentFetches"/> is below 1.</exception>
-    public DemRegionBaker(IDemTileSource source, int maxConcurrentFetches = 6, DemRaster? baseDem = null)
+    public DemRegionBaker(
+        IDemTileSource source,
+        int maxConcurrentFetches = 6,
+        DemRaster? baseDem = null,
+        int zeroStripMaxCells = DemTileBaker.DefaultZeroStripMaxCells,
+        bool dealiasFinest = false)
     {
         ArgumentNullException.ThrowIfNull(source);
         ArgumentOutOfRangeException.ThrowIfLessThan(maxConcurrentFetches, 1);
         this.source = source;
         this.maxConcurrentFetches = maxConcurrentFetches;
         this.baseDem = baseDem;
+        this.zeroStripMaxCells = zeroStripMaxCells;
+        this.dealiasFinest = dealiasFinest;
     }
 
     /// <summary>
@@ -77,6 +95,10 @@ public sealed class DemRegionBaker
         {
             throw new ArgumentException("At least one zoom level is required.", nameof(zoomLevels));
         }
+
+        // Region-wide constant for the dealias slope gate: any per-window scale differs between adjacent
+        // margin windows by ulps and breaks the bit-identical seam weld (bake verify failure 2026-07-10).
+        this.regionMidLatRad = (bounds.SouthWest.Latitude + bounds.NorthEast.Latitude) * 0.5 * Math.PI / 180.0;
 
         int[] zooms = zoomLevels.Distinct().OrderByDescending(z => z).ToArray();
         int total = zooms.Sum(z => DemTilePlanner.TilesForBounds(bounds, z).Count);
@@ -206,7 +228,14 @@ public sealed class DemRegionBaker
             DemRaster window = StitchNeighbourBlock(block, tileW, tileH, (float)centre.NoDataValue);
             // The centre tile sits at offset (tileW, tileH) inside the fixed 3×3 window (the -1 column/row are
             // always present in the buffer even when the neighbour data is NoData).
-            return DemTileBaker.BakeWithMargin(window, tileW, tileH, tileW, tileH, key, this.baseDem);
+            // Pure-constant cell size (no tile-bounds arithmetic — 360/2^z and the region mid-lat are the
+            // same doubles for EVERY tile at this zoom, so neighbouring windows filter bit-identically).
+            double dealiasCellSize = this.dealiasFinest
+                ? 360.0 / (1L << key.Zoom) / (tileW - 1) * 111_320.0 * Math.Cos(this.regionMidLatRad)
+                : 0.0;
+            return DemTileBaker.BakeWithMargin(
+                window, tileW, tileH, tileW, tileH, key, this.baseDem,
+                zeroStripMaxCells: this.zeroStripMaxCells, dealiasCellSizeMeters: dealiasCellSize);
         }
         finally
         {

@@ -25,6 +25,7 @@ Run
 ---
   python testdata/maps/bake-sk-dmr5-tiles.py            # bake to .tmp-offset/sk-tiles/16/x/y.tif
   python testdata/maps/bake-sk-dmr5-tiles.py --limit 20 # smoke-test on 20 tiles
+  python testdata/maps/bake-sk-dmr5-tiles.py --zoom 17  # z17 variant (sub-1m Faza A) -> sk-tiles/17/x/y.tif
 """
 from __future__ import annotations
 
@@ -129,7 +130,10 @@ class SheetIndex:
             fu = (uu - u0).astype(np.float32); fv = (vv - v0).astype(np.float32)
             a = arr[v0, u0]; b = arr[v0, u1]; c = arr[v1, u0]; d = arr[v1, u1]
             val = a * (1 - fu) * (1 - fv) + b * fu * (1 - fv) + c * (1 - fu) * fv + d * fu * fv
-            bad = (a < -10000) | (b < -10000) | (c < -10000) | (d < -10000) | np.isnan(a) | np.isnan(b) | np.isnan(c) | np.isnan(d)
+            # LOT26 sjtsk03_bpv pads outside its data with -999 (not just huge sentinels) — a -999 slab that
+            # slips through becomes a "baked" tile whose bake repair replaces it with coarse base, DEGRADING
+            # ground that has real finer-level data. Anything below -900 m is nodata (Tatry floor ~700 m).
+            bad = (a < -900) | (b < -900) | (c < -900) | (d < -900) | np.isnan(a) | np.isnan(b) | np.isnan(c) | np.isnan(d)
             val[bad] = np.nan
             out[m] = val
         return out
@@ -170,9 +174,13 @@ def fetch_gugik_window_mask():
 
 
 def main() -> int:
+    global ZOOM
     limit = 0
     if "--limit" in sys.argv:
         limit = int(sys.argv[sys.argv.index("--limit") + 1])
+    if "--zoom" in sys.argv:
+        ZOOM = int(sys.argv[sys.argv.index("--zoom") + 1])
+    print(f"zoom {ZOOM} -> {OUT_ROOT}\\{ZOOM}")
 
     idx = SheetIndex(SRC_DIR)
     plmask, m_lon0, m_lat1, m_dlon, m_dlat = fetch_gugik_window_mask()

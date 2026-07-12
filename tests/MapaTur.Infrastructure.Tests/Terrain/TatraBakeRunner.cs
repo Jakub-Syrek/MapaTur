@@ -38,8 +38,17 @@ public sealed class TatraBakeRunner
         @"C:\Users\jaqbs\AppData\Local\User Name\com.companyname.mapatur.app\Data\dem-cache\gugik";
 
     // Bake the same descending, contiguous run the LOD streamer will pull (finest baked from source, coarser
-    // derived by NoData-aware box-average of the level one step finer).
-    private static readonly int[] ZoomLevels = { 16, 15, 14, 13 };
+    // derived by NoData-aware box-average of the level one step finer). Override with MAPATUR_BAKE_ZOOMS
+    // (comma-separated, e.g. "17") to bake a NEW finest level — the sub-1m plan's z17 — WITHOUT touching the
+    // existing z13–z16 pyramid (BakeRegionAsync derives coarser levels only for zooms in the list).
+    private static readonly int[] DefaultZoomLevels = { 16, 15, 14, 13 };
+
+    private static int[] ResolveZoomLevels()
+        => Environment.GetEnvironmentVariable("MAPATUR_BAKE_ZOOMS") is { Length: > 0 } spec
+            ? spec.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .Select(z => int.Parse(z, CultureInfo.InvariantCulture))
+                .ToArray()
+            : DefaultZoomLevels;
 
     [Fact]
     public async Task BakeTatraRegion_FromRealGugikCache_AndVerifyBitIdentical()
@@ -79,8 +88,11 @@ public sealed class TatraBakeRunner
             ? $"[bake] base DEM for backfill: {baseDemPath} ({baseDem.Columns}x{baseDem.Rows})"
             : "[bake] WARNING: no base DEM found — voids will stay NoData (set MAPATUR_BASE_DEM to a .dem path)");
 
+        int[] zoomLevels = ResolveZoomLevels();
+        int finestZoom = zoomLevels.Max();
+
         // Report planned counts before we start (so the log shows scope even if the bake is long).
-        foreach (int z in ZoomLevels)
+        foreach (int z in zoomLevels)
         {
             long planned = DemTilePlanner.TileCount(bounds, z);
             Console.WriteLine($"[bake] z{z}: planned {planned} tiles over bounds " +
@@ -88,7 +100,20 @@ public sealed class TatraBakeRunner
                 $"N{bounds.NorthEast.Latitude} E{bounds.NorthEast.Longitude}");
         }
 
-        var baker = new DemRegionBaker(source, maxConcurrentFetches: 8, baseDem: baseDem);
+        // MAPATUR_BAKE_ZEROSTRIP: FillNarrowZeroStrips width in CELLS. Cell-denominated, so keep the z16
+        // PHYSICAL policy (~37 m) on finer levels by scaling: z17 (0.78 m/cell) → 48 (audit: TILE-PRODUCTION §E.1).
+        int zeroStripMaxCells = Environment.GetEnvironmentVariable("MAPATUR_BAKE_ZEROSTRIP") is { Length: > 0 } zs
+            ? int.Parse(zs, CultureInfo.InvariantCulture)
+            : DemTileBaker.DefaultZeroStripMaxCells;
+        // MAPATUR_BAKE_DEALIAS=1 → wariant 3 (TILE-PRODUCTION §2.5): global de-alias + slope-gated wall
+        // smooth on the finest level, killing the WCS sub-native weave and the wall organ-pipes.
+        bool dealias = Environment.GetEnvironmentVariable("MAPATUR_BAKE_DEALIAS") == "1";
+        Console.WriteLine(
+            $"[bake] zooms: {string.Join(",", zoomLevels)}, zeroStripMaxCells: {zeroStripMaxCells}, dealias: {dealias}");
+
+        var baker = new DemRegionBaker(
+            source, maxConcurrentFetches: 8, baseDem: baseDem,
+            zeroStripMaxCells: zeroStripMaxCells, dealiasFinest: dealias);
 
         int lastPct = -1;
         var progress = new SyncProgress<BakeProgress>(p =>
@@ -107,7 +132,7 @@ public sealed class TatraBakeRunner
         });
 
         var sw = Stopwatch.StartNew();
-        BakeRegionResult result = await baker.BakeRegionAsync(bounds, ZoomLevels, bakedOut, progress);
+        BakeRegionResult result = await baker.BakeRegionAsync(bounds, zoomLevels, bakedOut, progress);
         sw.Stop();
 
         // -------- Per-zoom counts + bytes on disk (read back from the written tree) --------
@@ -117,7 +142,7 @@ public sealed class TatraBakeRunner
         Console.WriteLine($"[bake] output dir: {bakedOut}");
 
         long bytesTotal = 0;
-        foreach (int z in ZoomLevels)
+        foreach (int z in zoomLevels)
         {
             string zdir = Path.Combine(bakedOut, z.ToString(CultureInfo.InvariantCulture));
             int count = 0;
@@ -139,15 +164,17 @@ public sealed class TatraBakeRunner
 
         result.TilesWritten.Should().BeGreaterThan(0, "the real cache should yield baked tiles for the Tatra region");
 
-        // -------- VERIFY: adjacent baked z16 tiles agree bit-for-bit on their shared edge (the seam/wall fix) --
+        // -------- VERIFY: adjacent FINEST-level tiles agree bit-for-bit on their shared edge (the seam/wall fix) --
         // Because each tile is baked WITH a neighbour margin, two side-by-side tiles must produce an identical
         // shared edge row/column — proving the margin bake removed the per-tile-repair edge divergence that
-        // rendered as vertical walls/cracks. We scan the real baked z16 set for adjacent pairs and compare edges.
+        // rendered as vertical walls/cracks. We scan the freshly baked finest set for adjacent pairs and compare.
         var z16Files = Directory
             .EnumerateFiles(
-                Path.Combine(bakedOut, "16"), "*" + BakedDemTileStore.FileExtension, SearchOption.AllDirectories)
+                Path.Combine(bakedOut, finestZoom.ToString(CultureInfo.InvariantCulture)),
+                "*" + BakedDemTileStore.FileExtension,
+                SearchOption.AllDirectories)
             .ToList();
-        z16Files.Should().NotBeEmpty("z16 is the finest baked level and must have tiles");
+        z16Files.Should().NotBeEmpty($"z{finestZoom} is the finest baked level and must have tiles");
 
         bool BakedExists(DemTileKey k) =>
             File.Exists(Path.Combine(bakedOut, BakedDemTileStore.RelativePathFor(k)));
@@ -171,7 +198,7 @@ public sealed class TatraBakeRunner
 
             BakedDemTile a = ReadKey(key);
 
-            var east = new DemTileKey(16, key.X + 1, key.Y);
+            var east = new DemTileKey(finestZoom, key.X + 1, key.Y);
             if (BakedExists(east))
             {
                 BakedDemTile b = ReadKey(east);
@@ -188,7 +215,7 @@ public sealed class TatraBakeRunner
                 }
             }
 
-            var south = new DemTileKey(16, key.X, key.Y + 1);
+            var south = new DemTileKey(finestZoom, key.X, key.Y + 1);
             if (BakedExists(south))
             {
                 BakedDemTile b = ReadKey(south);
@@ -206,11 +233,12 @@ public sealed class TatraBakeRunner
             }
         }
 
-        (eastPairs + southPairs).Should().BeGreaterThan(0, "the baked set must contain adjacent z16 tiles to verify seams");
-        Console.WriteLine($"[verify] z16 edge agreement: {eastPairs} east + {southPairs} south adjacent pairs PASS");
+        (eastPairs + southPairs).Should().BeGreaterThan(
+            0, $"the baked set must contain adjacent z{finestZoom} tiles to verify seams");
+        Console.WriteLine($"[verify] z{finestZoom} edge agreement: {eastPairs} east + {southPairs} south adjacent pairs PASS");
 
         // -------- VERIFY: a few coarser baked tiles read back as valid, finite, non-empty rasters --------
-        foreach (int z in new[] { 15, 14, 13 })
+        foreach (int z in zoomLevels.Where(z => z != finestZoom))
         {
             string zdir = Path.Combine(bakedOut, z.ToString(CultureInfo.InvariantCulture));
             if (!Directory.Exists(zdir))

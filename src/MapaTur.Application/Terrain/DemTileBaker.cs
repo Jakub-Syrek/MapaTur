@@ -87,6 +87,10 @@ public static class DemTileBaker
     /// <param name="zeroStripMaxCells">FillNarrowZeroStrips max strip width (defaults to the live value).</param>
     /// <param name="pitDepthMeters">FillPits depth threshold (defaults to the live value).</param>
     /// <param name="coverageFloorMeters">HoleBelow floor (defaults to the live value).</param>
+    /// <param name="dealiasCellSizeMeters">&gt; 0 applies <see cref="DemRasterDealias"/> (wariant 3: global
+    /// de-alias + slope-gated wall smooth) on the margin window before the weld, using this REGION-WIDE
+    /// constant ground cell pitch — deterministic across neighbouring windows, which the bit-identical seam
+    /// weld requires. 0 (default) skips the filter.</param>
     /// <returns>The repaired tile cropped to its footprint, addressed by <paramref name="key"/>.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="window"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">The core rectangle does not lie within the window.</exception>
@@ -100,7 +104,8 @@ public static class DemTileBaker
         DemRaster? baseDem = null,
         int zeroStripMaxCells = DefaultZeroStripMaxCells,
         double pitDepthMeters = DefaultPitDepthMeters,
-        double coverageFloorMeters = DefaultCoverageFloorMeters)
+        double coverageFloorMeters = DefaultCoverageFloorMeters,
+        double dealiasCellSizeMeters = 0.0)
     {
         ArgumentNullException.ThrowIfNull(window);
         if (coreCol < 0 || coreRow < 0 || coreWidth < 2 || coreHeight < 2
@@ -116,6 +121,16 @@ public static class DemTileBaker
         // (PerTileRepair's invariant).
         DemRaster bridged = DemRasterRepair.FillNarrowZeroStrips(window, zeroStripMaxCells);
         DemRaster despiked = DemRasterRepair.FillPits(bridged, pitDepthMeters);
+
+        // Wariant 3 (z17): de-alias + slope-gated wall smooth on the WHOLE margin window (kernel radius
+        // ≤ 5 cells ≪ margin), so adjacent tiles filter identically in their overlap and the weld below
+        // still lands on bit-identical shared cells — which REQUIRES the explicit region-wide cell size
+        // (a window-bounds-derived scale differs between neighbours by ulps and broke the seam verify).
+        // Runs BEFORE HoleBelow — the filter itself excludes sub-floor flat-0 and NoData cells.
+        if (dealiasCellSizeMeters > 0.0)
+        {
+            despiked = DemRasterDealias.Apply(despiked, coverageFloorMeters, dealiasCellSizeMeters);
+        }
 
         // SEAM WELD. Adjacent slippy tiles SHARE their boundary meridian/parallel (a 256-sample tile has column 0
         // on its west edge and column 255 on its east edge = the next tile's west edge — the SAME ground point),

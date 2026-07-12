@@ -157,6 +157,98 @@ public sealed class GugikNmtDemTileSourceTests : IDisposable
         source.IsCached(InsidePoland).Should().BeTrue("the fetched TIFF is now on disk and serves offline");
     }
 
+    // A z17 tile in the same Warsaw area as InsidePoland — the SUB-NATIVE zoom (0.78 m/px from a 1.0 m
+    // source) where the WCS resample bakes a grid-locked weave unless we supersample and low-pass ourselves.
+    private static readonly DemTileKey FinestInsidePoland = new(17, 571 * 128, 332 * 128);
+
+    [Fact]
+    public async Task GetTileAsync_Z17_SupersamplesAndDownsamplesBackToTheTileGrid()
+    {
+        // Sub-native fix (2026-07-10 night): z≥17 over-requests ×2 (512 px) and Gaussian-downsamples to 256 —
+        // the SAME clean path the self-sampled Slovak DMR5 tiles take (their weave metric: 0.02 vs PL 0.14+).
+        // This is NOT the §B1 moiré case: there the server COARSENED 1 m data on a 19 m grid; here it only
+        // upsamples, and the low-pass is ours.
+        var samples = new float[512 * 512];
+        Array.Fill(samples, 1500f);
+        var handler = new StubHandler(_ => Ok(BuildTiff(512, 512, samples)));
+        var source = NewSource(handler);
+
+        DemRaster? raster = await source.GetTileAsync(FinestInsidePoland);
+
+        handler.Calls[0].ToString().Should().ContainAll("WIDTH=512", "HEIGHT=512");
+        raster.Should().NotBeNull();
+        raster!.Columns.Should().Be(256, "the over-request is averaged back to the tile grid");
+        raster.Rows.Should().Be(256);
+        raster.Samples[(128 * 256) + 128].Should().BeApproximately(1500f, 0.01f);
+    }
+
+    [Fact]
+    public async Task GetTileAsync_Z17_CachesUnderTheSuffixedName()
+    {
+        var samples = new float[512 * 512];
+        Array.Fill(samples, 1500f);
+        var handler = new StubHandler(_ => Ok(BuildTiff(512, 512, samples)));
+        var source = NewSource(handler);
+
+        await source.GetTileAsync(FinestInsidePoland);
+
+        string suffixed = Path.Combine(
+            cacheDir, "17", FinestInsidePoland.X.ToString(CultureInfo.InvariantCulture),
+            $"{FinestInsidePoland.Y}_512.tif");
+        File.Exists(suffixed).Should().BeTrue("the supersampled fetch must not collide with legacy raw tiles");
+        source.IsCached(FinestInsidePoland).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task GetTileAsync_Z17_DoesNotSmearFlatZeroVoidsInTheDownsample()
+    {
+        // The zero-void lesson, supersampling edition (regression 2026-07-11 morning): GUGiK marks
+        // out-of-coverage with literal 0.0, and a Gaussian downsample that treats 0 as VALID blends it into
+        // real terrain (100–900 m garbage the bake's FillNarrowZeroStrips can no longer recognise as a
+        // strip). Voids must come out of the downsample as EXACT 0 and their neighbours unpolluted.
+        var samples = new float[512 * 512];
+        Array.Fill(samples, 1500f);
+        for (int r = 0; r < 512; r++)
+        {
+            for (int c = 200; c < 248; c++)
+            {
+                samples[(r * 512) + c] = 0f; // a 48-px flat-0 strip (24 cells after the 2× downsample)
+            }
+        }
+
+        var handler = new StubHandler(_ => Ok(BuildTiff(512, 512, samples)));
+        var source = NewSource(handler);
+
+        DemRaster? raster = await source.GetTileAsync(FinestInsidePoland);
+
+        raster.Should().NotBeNull();
+        raster!.Samples[(128 * 256) + 110].Should().Be(0f, "a void cell stays an exact flat-0 marker");
+        raster.Samples[(128 * 256) + 60].Should().BeApproximately(1500f, 0.01f, "far terrain is untouched");
+        raster.Samples[(128 * 256) + 99].Should().BeApproximately(
+            1500f, 0.01f, "a cell whose Gaussian window overlaps the strip averages only VALID taps — no 0-smear");
+    }
+
+    [Fact]
+    public async Task GetTileAsync_Z17_FallsBackToTheLegacyCacheFile_WhenTheDownloadFails()
+    {
+        // The Slovak DMR5 z17 tiles are INJECTED into the cache under the legacy {y}.tif name and can never
+        // be re-downloaded (GUGiK has no data there). After the supersampling change they must still be
+        // served — orphaning them would erase the whole Slovak z17 level (the §B1 cache-name lesson).
+        string legacyDir = Path.Combine(
+            cacheDir, "17", FinestInsidePoland.X.ToString(CultureInfo.InvariantCulture));
+        Directory.CreateDirectory(legacyDir);
+        await File.WriteAllBytesAsync(
+            Path.Combine(legacyDir, $"{FinestInsidePoland.Y}.tif"), BuildTiff(2, 2, Quad));
+        var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
+        var source = NewSource(handler);
+
+        DemRaster? raster = await source.GetTileAsync(FinestInsidePoland);
+
+        raster.Should().NotBeNull("the injected legacy tile is the only source of Slovak z17 data");
+        raster!.Samples.Should().Equal(Quad);
+        handler.Calls.Should().ContainSingle("the fresh supersampled fetch is still attempted first");
+    }
+
     [Fact]
     public async Task GetTileAsync_OutsidePoland_ReturnsNullWithoutAnyNetworkCall()
     {
