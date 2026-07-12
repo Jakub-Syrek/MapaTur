@@ -95,6 +95,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform vec3 uSlopePalette[8];\n" + // band colours (0-20…80-90°), from SlopePalette
         "uniform float uSharpen;\n" +   // unsharp-mask strength; 0 = off
         "uniform float uDebugUv;\n" +   // DIAGNOSTIC: 1 = render the raw ortho UV as colour (R=U, G=V)
+        "uniform float uDebugTerrainView;\n" +   // DIAGNOSTIC: 0=final 1=albedo 2=baked-shadow mask 3=corrected albedo 4=lightSum
         "uniform float uRockStrength;\n" + // rock-material-on-steep blend strength; 0 = off (pure ortho)
         "uniform vec3 uFogColor;\n" +
         "uniform float uFogDensity;\n" + // per-metre exponential; 0 = no aerial perspective
@@ -111,9 +112,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform float uShadowStrength;\n" +
         "uniform float uShadowTexel;\n" + // 1/ShadowMapSize — keeps the PCF radius true at any map size
         "uniform float uAoStrength;\n" +  // curvature-AO multiplier strength (0 = off)
-                                          // Cloud-shadow inputs: the SAME field the sea-of-clouds layer draws, so the shadows on the
-                                          // ground line up with the clouds overhead. The terrain fragment projects up along the sun
-                                          // ray to the cloud plane and samples the field there — moving dappled light at any sun angle.
+        "uniform float uBakedShadowComp;\n" +  // baked-shadow (dark ortho in shade) de-cyan + lift strength (0 = off)
+                                               // Cloud-shadow inputs: the SAME field the sea-of-clouds layer draws, so the shadows on the
+                                               // ground line up with the clouds overhead. The terrain fragment projects up along the sun
+                                               // ray to the cloud plane and samples the field there — moving dappled light at any sun angle.
         "uniform float uCloudAltitude;\n" +
         "uniform float uCloudNoiseScale;\n" +
         "uniform vec2 uCloudWind;\n" +
@@ -703,7 +705,28 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    scorch += uScorchParam[si].y * (1.0 - smoothstep(uScorchParam[si].x * 0.2, uScorchParam[si].x, d2S));\n" +
         "  }\n" +
         "  base = mix(base, base * vec3(0.16, 0.14, 0.13), clamp(scorch, 0.0, 0.85));\n" +
-        "  vec3 lit = base * lightSum;\n" +
+        // BAKED-SHADOW ALBEDO correction (2026-07-11, user spec): the ortho carries the aerial photo's shadow
+        // in its ALBEDO (a shadow baked into the texture, with the photo's exact shape at noon). Correcting the
+        // final `lit` only brightens the symptom; the fix must edit the ALBEDO *before* lighting, so the render
+        // lights corrected ground instead of amplifying a baked hole. Detect it from `base` alone: LOW luma AND
+        // a COOL (cyan/teal) tint that normal dark ROCK lacks — normal shadow-rock is neutral (R≈G≈B), a baked
+        // photo shadow crushes R and lifts G/B. Correct = neutralise toward grey + lift luma. `uBakedShadowComp`
+        // = strength (0 disables). The mask + corrected albedo are exposed to the debug views (uDebugTerrainView).
+        "  float baseLuma = dot(base, vec3(0.299, 0.587, 0.114));\n" +
+        "  float bsCoolness = ((base.g + base.b) * 0.5) - base.r;\n" +                       // cyan/teal amount (R deficit)
+        "  float bsDark = 1.0 - smoothstep(0.12, 0.48, baseLuma);\n" +                       // 1 where albedo DARK
+        "  float bsCoolGate = smoothstep(0.04, 0.14, bsCoolness);\n" +                       // was this a COOL baked shadow (rock ≈0)?
+        "  float bsMask = bsDark * bsCoolGate * uBakedShadowComp;\n" +
+        // Correct toward the LOCAL MATERIAL — scree/rock is WARM-NEUTRAL, NOT green (user 2026-07-11: this is a
+        // rock cirque, not forest). Pull the cool G,B excess down toward R's warm level (removes the cyan/teal
+        // cast, keeps the material's own warmth), then LIFT the luminance so the baked shadow reads as *darker
+        // scree/rock*, not a green carpet or a dark colour blob. All gated to dark+cool → sunlit ground, bright
+        // ortho and genuinely-neutral dark rock are untouched. Colour of the BLUE forest shadows stays the
+        // ortho de-blue's job (§3.13, self-gating, idempotent). uBakedShadowComp = strength (F6 cycles 0/0.5/1.0).
+        "  vec3 bsWarm = vec3(base.r, mix(base.g, base.r, 0.7 * bsMask), mix(base.b, base.r, 0.85 * bsMask));\n" +
+        "  vec3 bsCorrected = clamp(bsWarm * (1.0 + (1.3 * bsMask)), 0.0, 1.0);\n" +
+        "  vec3 baseCorrected = bsCorrected;\n" +
+        "  vec3 lit = baseCorrected * lightSum;\n" +
         // Snow shading (dedicated): high albedo + sky/multiple scattering keeps snow BRIGHT and COOL-BLUE in
         // shadow (real snow shadows are blue, not grey), driven by the sun (not the camera) so orbiting never
         // changes it, and scaling with uSkyAmbient so night snow dims. WINTER FORM: the sun↔shadow contrast
@@ -823,6 +846,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    }\n" +
         "  }\n" +
         "  fragColor = vec4(mix(lit, uFogColor, fogAmount), 1.0);\n" +
+        // DEBUG VIEWS (2026-07-11, user request F1–F5): isolate the baked-shadow pipeline stages so we can SEE
+        // whether the cyan lives in the albedo or the lighting. 0=final, 1=albedo, 2=baked-shadow mask,
+        // 3=corrected albedo, 4=lightSum. Pre-fog, pre-overlay so each stage is raw.
+        "  if (uDebugTerrainView > 0.5) {\n" +
+        "    if (uDebugTerrainView < 1.5) { fragColor = vec4(base, 1.0); }\n" +                    // F2 albedo
+        "    else if (uDebugTerrainView < 2.5) { fragColor = vec4(vec3(bsDark), 1.0); }\n" +       // F3 lowLuma sub-mask
+        "    else if (uDebugTerrainView < 3.5) { fragColor = vec4(vec3(bsCoolGate), 1.0); }\n" +   // F4 cool/cyan sub-mask
+        "    else if (uDebugTerrainView < 4.5) { fragColor = vec4(vec3(bsDark * bsCoolGate), 1.0); }\n" + // F5 combined mask (pre-comp)
+        "    else { fragColor = vec4(baseCorrected, 1.0); }\n" +                                    // F6 corrected albedo
+        "    return;\n" +
+        "  }\n" +
         // DIAGNOSTIC overlay: render the raw ortho UV as colour (R=U, G=V). A clean smooth gradient per cell = UV
         // is fine → flat bands are texture sampling (mip/aniso/content). A striped/sawtooth pattern = UV is broken.
         "  if (uDebugUv > 1.5 && uUseOrtho == 1) {\n" +
@@ -1837,6 +1871,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int orthoTexelLocation = -1;
     private int sharpenLocation = -1;
     private int debugUvLocation = -1;
+    private int debugTerrainViewLocation = -1;
+
+    /// <summary>Baked-shadow debug view: 0=final, 1=albedo, 2=mask, 3=corrected albedo, 4=lightSum (F1–F5).</summary>
+    public float DebugTerrainView { get; set; }
     private int orthoMinXyLocation = -1;
     private int orthoMaxXyLocation = -1;
     private int orthoBlendLocation = -1;
@@ -2279,6 +2317,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int cascadeVp0Loc = -1, cascadeVp1Loc = -1, cascadeVp2Loc = -1;
     private int cascadeSplitLoc = -1, shadowStrengthLoc = -1, shadowTexelLoc = -1;
     private int aoStrengthLoc = -1;
+    private int bakedShadowCompLoc = -1;
+
+    /// <summary>Strength of the baked-shadow (dark ortho in shade) de-cyan + lift compensation. 0 = OFF by
+    /// default: the per-fragment (dark+cool) detection was PROVEN not to discriminate baked shadow from
+    /// ordinary dark terrain (2026-07-11 split-mask debug — the cirque-shadow albedo is neutral, not cool;
+    /// the "cool" is the whole-ortho green bias on LIT scree). Kept behind the debug keys for experiments;
+    /// the real de-shadow is an image-based ortho preprocess (spatial illumination estimate), not this.</summary>
+    public float BakedShadowComp { get; set; }
     // Curvature-AO strength (B-package 2026-07-05); 0 = instant off for A/B comparison.
     private const float AoStrength = 0.6f;
     private bool shadowsActiveThisFrame;
@@ -2295,6 +2341,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // scene gap at pendingUploads=146). The drain now uploads until the per-frame time budget is spent,
     // always at least one tile per frame so the queue can never stall.
     private const double TileUploadBudgetMsPerFrame = 6.0;
+    // BYTE budget on top of the time budget (2026-07-11): the ms clock measures the CHEAP client-side
+    // glBufferData call, while the actual PCIe transfer + driver sync bites at swap — the F9 demo showed 34
+    // pending tiles draining in ~2 "on-budget" frames (≈50 MB/frame) as 200–320 ms frame gaps. ~8 MB/frame
+    // ≈ 2-3 detail tiles keeps the real transfer inside a vsync-ish slice; the min-one-tile rule still
+    // guarantees the queue drains.
+    private const long TileUploadBudgetBytesPerFrame = 8L * 1024 * 1024;
     // Per-swap render-thread cost breakdown (the frame after a detail reload re-runs these over the new tile list).
     private bool dbgTileSwapFrame;
     private double dbgSwapSyncMs, dbgSwapOrthoMs, dbgSwapLakeMs;
@@ -2711,6 +2763,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             orthoTexelLocation = -1;
             sharpenLocation = -1;
             debugUvLocation = -1;
+            debugTerrainViewLocation = -1;
             orthoMinXyLocation = -1;
             orthoMaxXyLocation = -1;
             orthoBlendLocation = -1;
@@ -2942,6 +2995,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             cascadeVp0Loc = cascadeVp1Loc = cascadeVp2Loc = -1;
             cascadeSplitLoc = shadowStrengthLoc = shadowTexelLoc = -1;
             aoStrengthLoc = -1;
+            bakedShadowCompLoc = -1;
             shadowsActiveThisFrame = false;
             // The planar-reflection target belonged to the dead context — drop the handles so it's rebuilt fresh.
             reflectionFbo = 0;
@@ -3337,6 +3391,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform3(modelOffsetLocation, 0f, 0f, 0f);
         gl.Uniform3(stableOffsetLocation, 0f, 0f, 0f);
         gl.Uniform1(debugUvLocation, 0f); // UV/clamp viz off
+        gl.Uniform1(debugTerrainViewLocation, DebugTerrainView);
         // Ortho coverage AABB + soft edge blend. Convert the coverage geo-bounds to world XY via the tiles'
         // anchor; beyond it the ortho UV clamps into stretched edge texels (strata bands) → the shader fades to
         // hypsometric instead. No coverage bounds (or no tiles) → blend 0 = no cull (pure ortho).
@@ -3645,6 +3700,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             // (GL_INVALID_OPERATION) → terrain vanishes. Desktop GL tolerated it; the device did not. Must be
             // set even when shadows are off (csmShadow early-returns before sampling, so empty units are fine).
             gl.Uniform1(aoStrengthLoc, AoStrength);
+            gl.Uniform1(bakedShadowCompLoc, BakedShadowComp);
             gl.Uniform1(shadowMap0Loc, 2);
             gl.Uniform1(shadowMap1Loc, 3);
             gl.Uniform1(shadowMap2Loc, 4);
@@ -6161,6 +6217,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         slopePaletteLocation = g.GetUniformLocation(program, "uSlopePalette");
         sharpenLocation = g.GetUniformLocation(program, "uSharpen");
         debugUvLocation = g.GetUniformLocation(program, "uDebugUv");
+        debugTerrainViewLocation = g.GetUniformLocation(program, "uDebugTerrainView");
         orthoMinXyLocation = g.GetUniformLocation(program, "uOrthoMinXY");
         orthoMaxXyLocation = g.GetUniformLocation(program, "uOrthoMaxXY");
         orthoBlendLocation = g.GetUniformLocation(program, "uOrthoBlendMeters");
@@ -6224,6 +6281,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         shadowStrengthLoc = g.GetUniformLocation(program, "uShadowStrength");
         shadowTexelLoc = g.GetUniformLocation(program, "uShadowTexel");
         aoStrengthLoc = g.GetUniformLocation(program, "uAoStrength");
+        bakedShadowCompLoc = g.GetUniformLocation(program, "uBakedShadowComp");
 
         // Sky program — single triangle covering the screen, fragment-shader-only atmospheric model.
         uint sks = CompileShader(g, ShaderType.VertexShader, SkyVertexShaderSource);
@@ -7898,6 +7956,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         long start = frameClock.ElapsedMilliseconds;
+        long uploadedBytes = 0;
         do
         {
             int last = pendingTileUploads.Count - 1;
@@ -7906,9 +7965,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             if (!tileBuffers.ContainsKey(t))
             {
                 UploadTile(g, t);
+                uploadedBytes += t.EstimatedGpuBytes;
             }
         }
         while (pendingTileUploads.Count > 0
+            && uploadedBytes < TileUploadBudgetBytesPerFrame
             && frameClock.ElapsedMilliseconds - start < TileUploadBudgetMsPerFrame);
     }
 
@@ -9542,6 +9603,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.Enable(EnableCap.Blend);
         g.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
         g.DepthMask(false);
+        // Depth-bias the puffs TOWARD the camera so a distant billboard grazing a ridge silhouette wins the
+        // depth-test tie CONSISTENTLY instead of dithering pass/fail every frame ("chmury daleko migają" —
+        // diagnosed 2026-07-11: at 20-30 km the 24-bit buffer resolves only ~2-5 m, so a coincident puff blinks).
+        // PolygonOffset (NOT a clip-space z-bias, which is strong up-close / ~0 far — the trail-line dead-end):
+        // its offset scales with the LOCAL depth resolution, so it's strong exactly where the buffer is coarse
+        // (far) and negligible up close, so near peaks still occlude. Billboards face the camera (~0 slope) so
+        // only the constant `units` term acts. Depth-write is off, but the offset still biases the compared depth.
+        g.Enable(EnableCap.PolygonOffsetFill);
+        g.PolygonOffset(0f, -8f);
         g.UseProgram(cumulusProgram);
         g.UniformMatrix4(cumulusMvpLocation, 1, false, mvp);
         Vector3 cam = camera.Position;
@@ -9561,6 +9631,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.BindVertexArray(cumulusVao);
         g.DrawArraysInstanced(PrimitiveType.TriangleStrip, 0, 4, (uint)cumulusInstanceCount);
         g.BindVertexArray(0);
+        g.Disable(EnableCap.PolygonOffsetFill);
+        g.PolygonOffset(0f, 0f);
         g.DepthMask(true);
         g.Disable(EnableCap.Blend);
     }

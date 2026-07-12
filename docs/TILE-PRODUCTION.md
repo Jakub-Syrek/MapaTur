@@ -36,10 +36,47 @@ słowacką połowę wypełnioną **ZERAMI** (nie NaN!) — patrz 2.3.
    geoportal.sk ma zepsuty cert — używać opendata). Rozpakować do `.tmp-offset\lot26\`.
    ⚠️ Wariant „INSPIRE" ma wysokości ELIPSOIDALNE (+43 m) — brać sjtsk03_bpv.
 2. `python testdata/maps/bake-sk-dmr5-tiles.py` → kafle do `.tmp-offset/sk-tiles/16/`.
+   **Wariant z17 (sub-1m Faza A, 2026-07-10):** `--zoom 17` → `.tmp-offset/sk-tiles/17/` (siatka pixel-centre
+   — ta sama konwencja co WCS GUGiK, potwierdzona sondą §1.3). ⚠️ **Lekcja −999:** arkusz LOT26 padduje
+   OBSZAR BEZ DANYCH wartością **−999** (nie NaN/−32768!) — stara bramka `< −10000` przepuszczała ją jako
+   wysokość → kafle-slaby −999, które na z17 ZAJMUJĄ slot i degradują teren (bake zamienia je w kopię bazy,
+   a quadtree wybiera je zamiast realnego z16). Bramka nodata = `< −900` (dno Tatr ~700 m). Ta sama klasa co
+   lekcja zero-void z §2.3.
    Deps: `numpy pyproj tifffile requests pillow imagecodecs` (arkusz jest LZW).
    Skrypt POMIJA kafle, które maska WMS GUGiK uznaje za polskie (`poland_fraction > 0.005`) ORAZ kafle
    z pokryciem <99.5% — **dlatego kafle graniczne wymagają kroków 2.2–2.3**.
 3. Kopiowanie do cache gugik: historycznie one-off (tylko sloty w 100% void, ≥50% real).
+
+### 1.3 Sonda z17 — zysk informacyjny WCS przy 0.78 m/px (Faza 0 sub-1m; WYKONANE 2026-07-10)
+Pytanie: czy GUGiK WCS poproszony o z17 (256 px / ~200 m = 0.78 m/px) niesie realny relief ponad nasze
+z16 (1.56 m/px), zanim zainwestujemy w download/bake całych Tatr? Runner (gated, live WCS; kafle z17
+lądują w `gugik\17` i są REUŻYWANE przez Fazę A):
+```powershell
+$env:MAPATUR_PROBE_Z17="1"
+dotnet test tests/MapaTur.Infrastructure.Tests --filter FullyQualifiedName~Z17ProbeRunner --nologo
+```
+Raport: `<dem-cache>\z17-probe-results.txt`. Metryka PIERWOTNA jest SELF-konsystentna (lekcja
+SMOOTH-SURFACE-BUG §5, zaprojektowana po adwersaryjnej weryfikacji): `self_dec` = RMS(z17 −
+CatmullRom(decymacja 2× z17)) liczona z SAMEGO kafla z17 — odporna na rejestrację siatki, dryf czasowy
+i różnice metod interpolacji, które zanieczyszczają każdą metrykę cross-fetch. Kolumny kontrolne:
+`rms_fit` (cross-fetch po ko-rejestracji Nuth–Kääb per dziecko), `shift_m` (dopasowane przesunięcie
+siatek), `drift_m` (re-fetch tego samego z16 vs cache), `gross` (odrzucone komórki-śmieci).
+
+**Wynik (2026-07-10): GO — z17 niesie DUŻO realnego reliefu.** self_dec na skale: Granaty 0.64 m,
+Kozi Wierch 0.81 m, Zamarła Turnia 1.14 m, Krzyżne 0.31 m (mediana ~0.73 m ≈ 5× próg GO 0.15 m);
+kontrole uporządkowane fizycznie: trawa-stromo 0.18, łąka 0.09, tafla jeziora 0.06 m; drift 0.000.
+
+**Odkrycie 1 — rejestracja siatki WCS:** `shift_m` ≈ 0.44–0.47 m konsekwentnie na wszystkich skalnych
+siedliskach ≈ przewidziana sygnatura odczytu pixel-centre jako node (pół komórki z17 na oś). Czyli WCS
+zwraca siatkę PIXEL-CENTRE, a cały nasz pipeline czyta ją jako NODE — dziś niewidoczne (wszystko
+przesunięte spójnie o ~pół komórki), ale **z16 i z17 czytane obok siebie rozjadą się o ~0.4–0.55 m
+poziomo** na granicach ringów LOD (duch podwójnej krawędzi na ostrej grani). Do rozstrzygnięcia w
+Fazie A (patrz PLAN-sub-1m-geometry.md §Faza A / decyzja rejestracji).
+
+**Odkrycie 2 — kafle graniczne:** siedlisko Mięguszowiecki (grań graniczna) = wiersz-śmietnik zgodnie z
+projektem guardów (drift 1784 m, gross 29 158): cache z16 ma tam wmergowane DMR5 (§2.2–2.3), a ŻYWY
+GUGiK zwraca zera na słowackiej połowie; **z17 nad pasem granicznym musi przejść tę samą ścieżkę
+DMR5-merge co z16** (skrypty §1.2/§2.3 z parametrem zoom 17) — sam WCS GUGiK nie wystarczy.
 
 ## 2. DEM — naprawy dziur (kolejność!)
 
@@ -71,8 +108,50 @@ dotnet test tests/MapaTur.Infrastructure.Tests --filter FullyQualifiedName~Tatra
 ~3 min, przepisuje wszystkie .bdt. Weryfikacja: (a) licznik .bdt w `baked\16` (2026-07-02: **6469**;
 całość 8741), (b) nowe mtime, (c) magic BDT2, (d) rozmiar kafla z16 = 262 209 B (header+heights+DetailNone),
 gruby z detail = 524 353 B. Aplikację ZRESTARTOWAĆ (indeks dostępności skanowany na starcie).
+**Poziomy do bake'u można nadpisać:** `$env:MAPATUR_BAKE_ZOOMS="17"` (lista po przecinku) — bake'uje TYLKO
+podane poziomy (z17 = Faza A sub-1m; finest z listy jest fetchowany ze źródła/cache, weryfikacja szwów działa
+na finest). Istniejąca piramida z13–z16 zostaje nietknięta. Źródło z17 = `gugik\17` (download:
+`MAPATUR_DOWNLOAD_Z17=1` → `Z17DownloadRunner`, wznawialny; braki → `z17-download-missing.txt` = pas SK/graniczny
+do DMR5-merge zoom 17 + tereny poza pokryciem GUGiK, które po prostu zostają na z16).
 ⚠️ Weryfikuj, że zmiana w tif faktycznie weszła do .bdt (porównanie próbki wysokości tif vs .bdt) —
 patrz sesyjny `verify-merge-in-bdt.py` (wzór w scratchpadzie sesji 2026-07-02).
+
+### 2.5 De-alias z17 — „wariant 3" (WYKONANE 2026-07-10 wieczór; wybór usera z arkusza próbek)
+**Objaw** (dwa zgłoszenia usera z apki): (a) „podejrzanie równoległe" pionowe piszczałki na ścianach
+(Mylne Wrótka), (b) regularna „strukturka" na płaskich piargach. **Diagnoza z danych** (nie z ekranu):
+plecionka resamplingu WCS 1 m→0.78 m zsynchronizowana z siatką pokrywa CAŁY kafel (~dm na płaskim —
+dokładnie „podłoga" 0.06–0.09 m kontrol z sondy §1.3), a na pionie >55° DEM 2.5D niesie ±1–2 m
+quasi-losowego szumu per KOLUMNA (LiDAR nie widzi pionu) → mesh 0.78 m renderuje równoległe flety.
+To NIE washboard §B1 (brak wąskopasmowego piku globalnie) i NIE syntezator Fazy B (nie działał w sesji).
+
+**Fix = `DemRasterDealias` w bake** (TDD 6/6; `MAPATUR_BAKE_DEALIAS=1` w TatraBakeRunner):
+1. globalny Gaussian σ=0.5 komórki (tnie pasmo poniżej natywnego 1 m; koszt na terenie <45° = 0.094 m RMS
+   ≈ sam szum — zmierzone na kaflu 72821/44890);
+2. bramka nachylenia: >tan 54° miks do σ=1.6, pełny od ~66° (ściany scalają się w spójne płyty z realnymi
+   żebrami). NoData i flat-0 <100 m wykluczone z jąder (nie zamazuje dziur, nie ciągnie brzegu pokrycia do 0).
+Filtr działa na OKNIE Z MARGINESEM przed weldem → sąsiednie kafle filtrują identycznie w overlapu → szwy
+bit-identyczne jak dotąd. Proces uzgodnienia wyglądu: arkusz 6 próbek hillshade (RAW / DEALIAS / +GATE,
+ściana + półki) w scratchpadzie sesji 2026-07-10; user wybrał wariant 3.
+Komenda = §2.4 z `MAPATUR_BAKE_ZOOMS=17`, `MAPATUR_BAKE_ZEROSTRIP=48`, `MAPATUR_BAKE_DEALIAS=1`.
+⚠️ Tify w `gugik\17` zostają SUROWE (filtr tylko w .bdt) — re-bake bez `DEALIAS=1` przywraca stan sprzed.
+
+**DOGRYWKA tej samej nocy — fix U ŹRÓDŁA (po werdykcie usera „wciąż strukturka"):** sam filtr σ0.5 zbijał
+plecionkę tylko ~60% (0.141 na kaflu Koziej — wciąż widoczna). Prawdziwa przyczyna: **resample WCS przy
+żądaniu 0.78 m/px z natywnego 1 m** (kafle SK, samplowane przez NAS, mają 0.02 — czyste). Fix:
+`GugikNmtDemTileSource` przy z≥17 **nadpróbkowuje ×2 (512 px) i sam Gaussian-downsampluje** (istniejący
+`LowPassDownsample`) — to NIE przypadek moiré §B1 (serwer tu tylko upsampluje, bez gruboziarnistego
+resamplingu). Cache: `{y}_512.tif`; **fallback odczytu do legacy `{y}.tif`** chroni wstrzykiwane kafle SK
+DMR5 przed osieroceniem (lekcja §B1 zastosowana świadomie). Pomiar na kaflach sondy: skała 0.32→0.17
+(−47%), łąka 0.044→0.023; po bake z σ0.5 zmierzone finalnie: Kozia 0.141→**0.053**, ściana Mylnych
+0.167→**0.068** (podłoga SK = 0.02). Surowe `{y}.tif` PL zostają na dysku jako rollback. Równolegle
+poprawiony wzór szumu z18/z19 (obrócona krata — patrz PLAN-sub-1m-geometry §Faza B): „równomierny groszek"
+syntetycznego displacementu przestaje synchronizować się z siatką.
+⚠️ **REGRESJA I FIX (11.07 rano) — lekcja zero-void, edycja supersamplingowa:** Gaussian downsample 512→256
+traktował flat-0 jako PRAWIDŁOWE wartości i rozsmarował pasy dropoutu po sąsiadach (wartości 100–900 m,
+których `FillNarrowZeroStrips` nie rozpoznaje; kafel 72738/44860: weave 0.056→4.456!). Fix w
+`GugikNmtDemTileSource`: maska ≤0.5→sentinel PRZED low-passem, przywrócenie markera 0 PO nim (test
+`DoesNotSmearFlatZeroVoidsInTheDownsample`). Wniosek na przyszłość: **każdy nowy krok przetwarzania rastrów
+GUGiK musi jawnie obsłużyć klasę flat-0, zanim uśredni cokolwiek.**
 
 ---
 
@@ -191,7 +270,26 @@ ponownym bake NAJPIERW restore `*.pre-dehaze.bak` → PNG (inaczej podwójna kor
 
 **STATUS:** werdykt wizualny w apce (3D, 12:00) — w toku u usera; parametry do dostrojenia (`DELIGHT_EXP`/gain za
 słabo→podbić, za płasko→med). Rollout na inne komórki (welon też w `r0-c2`?) + regeneracja zestawu mobilnego —
-dopiero po akceptacji. Proces uzgadniania wyglądu = arkusze w scratchpadzie sesji (`dehaze-sheet2`, `deblue-sheet`,
+dopiero po akceptacji.
+**ROLLOUT (1,3) — 2026-07-11 (zgłoszenie usera: niebieskozielony cień przy Kieżmarskim):** OUTLINE
+rozszerzony o `(1,3)=(20.180,49.150,20.320,49.235)` (kotły Kieżmarskiego/Łomnicy + Zielony Staw), osobna
+grupa (kotły ~5 km od szwu 20.175 → EDGE_MARGIN wystarcza). Domyślne parametry dały za słaby lift (gain
+max 1.55 — wielkie płaty cienia mieszają się z jasnymi ścianami w rozmyciu 320 m); arkusz wariantów
+(scratchpad `delight-sheet-r1c3.py`) → wariant B (`DELIGHT_EXP 1.3, LREF_PCT 82`). **COFNIĘTE** — user nadal
+widział zielony; 3-soczewkowa diagnoza (workflow `diagnose-green-shadow`) obaliła kierunek:
+⚠️ **KLUCZOWA LEKCJA — de-blue NIE usuwa zieleni, produkuje ją.** Pomiar: (a) czysty SK-shadow był PRAWIE
+NEUTRALNY (131/129/123, G-B +6); (b) de-blip zbija tylko `B−R`, bez żadnej neutralizacji zieleni →
+z niebiesko-zielonego robi żółto-zielony (blue-green pixel (40,70,75) → (49,72,51), G staje się dominantą);
+gain równokanałowy tylko rozjaśnia, nigdy nie zmienia hue → moje passy POGORSZYŁY SK (105/102/91, żółto-ziel).
+(c) **Zielony bias jest GLOBALNY** (G−B +14–18 na oświetlonej scree, PL GUGiK ORAZ SK ZBGIS — strona PL
+zaakceptowana), więc to charakter całego orto, nie lokalny błąd SK; shader wykluczony (ambient niebieski,
+mnożenie czyste). **Właściwa metoda** (gdy user zechce): neutralizacja castu w cieniu = desaturacja ku
+ŚREDNIEJ RGB (NIE ku luma — luma jest G-zdominowana, bezużyteczna jako kotwica szarości), bramkowana cieniem;
+albo globalna redukcja green-biasu (dotyka PL → re-bake wszystkich 8 kafli + mobile → wymaga zgody usera).
+Stan: r1-c3 przywrócony do `.pre-dehaze.bak` (czysty, najbardziej neutralny z trzech stanów). ⚠️ **PUŁAPKA zastanego backupu:** `.pre-dehaze.bak` dla r1-c3
+istniał już z 7.07 (jakiś wcześniejszy pass!), a skrypt backupuje „if absent" → pierwszy dzisiejszy przebieg
+poszedł NA stanie po tamtym (podwójna korekcja). Poprawnie: **restore z .pre-dehaze.bak → JEDEN czysty
+pass**. Przed każdym (re)passem sprawdź datę `.pre-dehaze.bak` — stara data = najpierw restore. Proces uzgadniania wyglądu = arkusze w scratchpadzie sesji (`dehaze-sheet2`, `deblue-sheet`,
 `delight-sheet`). ⚠️ Re-tune 2026-07-06: dotychczasowe stałe dobrane były pod ZABRUDZONY stan (§3.6). Po §3.11
 baza jest jaśniejsza (~58) → parametry przeliczane od nowa na czystym GUGiK.
 

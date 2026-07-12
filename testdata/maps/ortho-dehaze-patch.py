@@ -50,11 +50,28 @@ W0, S0, E0, N0 = 19.50, 49.10, 20.40, 49.40
 OUTLINE = {
     (1, 1): (19.730, 49.170, 19.950, 49.250),   # Western Tatras high cirques
     (1, 2): (19.950, 49.150, 20.175, 49.245),   # Morskie Oko / 5 Stawow / Rybi Potok
+    (1, 3): (20.180, 49.150, 20.320, 49.235),   # Kezmarsky/Lomnica cirques + Zelene pleso (user report 2026-07-11:
+                                                # "niebieskozielony cien wspawany" — the cell never got the pass)
 }
 # Cells whose shadow is CONTINUOUS across a shared cell seam must share GLOBAL airlight + Lref so the
 # de-light is one continuous geographic transform (no EDGE_MARGIN at the shared seam => no residual-blue
 # strip). Outer edges (shared with a non-group cell) keep the margin.
-GROUPS = [[(1, 1), (1, 2)]]
+# (1,3) stands alone: its cirques sit ~5 km east of the 20.175 seam, so the shared-edge margin is safe.
+GROUPS = [[(1, 1), (1, 2)], [(1, 3)]]
+
+# Per-group parameter overrides (keyed by the group's FIRST cell; a group shares one stats pass anyway).
+# (1,3) needs a stronger lift than the (1,1)/(1,2)-approved defaults: its huge Kezmarsky shadow slabs mix
+# with bright walls in the 320 m illumination blur, capping the default gain at ~1.55 — user picked wariant
+# B from the 2026-07-11 sheet (gain up to ~2.1, no minty forest blow-up of wariant C).
+CELL_PARAMS = {
+    # (1,3) Kezmarsky: user 2026-07-11 "to jest CIEŃ, obok jaśniejszy las bez cienia" — the problem is a
+    # baked-in directional SHADOW, not a colour cast. Proper de-shadow: sampled sunlit forest luma=106 vs
+    # shadowed forest luma=58 (1.84×); wariant L2 lifts shadow -> 107 (matches sunlit). Pure luminance lift
+    # (DEBLUE_KC=0 — no colour op; de-blue is what manufactured the earlier yellow-green). Lref at p90 = the
+    # SUNLIT reference (p72 was dragged down by the shadow-dominated box), GHI 5 to actually reach it.
+    (1, 3): {"DELIGHT_EXP": 1.2, "DELIGHT_GHI": 5.0, "ILLUM_M": 300.0, "LREF_PCT": 90, "DEBLUE_KC": 0.0},
+}
+DEFAULT_LREF_PCT = 72
 
 DOWN = 6                  # overview scale for mask/airlight/transmission (matches the approved sheet res)
 FEATHER_M = 220.0         # spatial feather of mask + transmission, metres
@@ -134,7 +151,8 @@ def process_group(cells, dry):
     W, H = img0.size; ow, oh = W // DOWN, H // DOWN
     lon0c, lon1c, latNc, latSc = cell_bounds(*cells[0])
     m_per_px = (lon1c - lon0c) * np.cos(np.radians(0.5 * (latNc + latSc))) * 111320.0 / ow
-    fr = max(1, int(FEATHER_M / m_per_px)); illum_sig = ILLUM_M / m_per_px
+    pp = CELL_PARAMS.get(cells[0], {})
+    fr = max(1, int(FEATHER_M / m_per_px)); illum_sig = pp.get("ILLUM_M", ILLUM_M) / m_per_px
 
     # stitch overviews + hard box mask onto one canvas (continuous across internal seams)
     canvas = np.zeros((nrow * oh, ncol * ow, 3), np.float32)
@@ -162,23 +180,28 @@ def process_group(cells, dry):
     tdark = minimum_filter(np.min(canvas / A[None, None, :], axis=2), size=5)
     t = blur(np.clip(1.0 - OMEGA * tdark, T0, 1.0), fr)
     L = gaussian_filter(luma, illum_sig)
-    Lref = float(np.percentile(L[inside], 72))
-    gain = np.clip((Lref / np.maximum(L, 6.0)) ** DELIGHT_EXP, DELIGHT_GLO, DELIGHT_GHI)
+    Lref = float(np.percentile(L[inside], pp.get("LREF_PCT", DEFAULT_LREF_PCT)))
+    gain = np.clip((Lref / np.maximum(L, 6.0)) ** pp.get("DELIGHT_EXP", DELIGHT_EXP),
+                   DELIGHT_GLO, pp.get("DELIGHT_GHI", DELIGHT_GHI))
     gain = 1.0 + (gain - 1.0) * box_mask
     print(f"  group {cells}: A={A.round(1)} Lref={Lref:.0f} gain[{gain.min():.2f},{gain.max():.2f}]")
+
+    deblue_kc = pp.get("DEBLUE_KC", DEBLUE_KC)
 
     def correct(I, wk, tt, gn, bm):
         J = np.clip((I - A[None, None, :]) / tt + A[None, None, :], 0, 255)
         a = I * (1 - wk) + J * wk
         a = a * gn
+        if deblue_kc <= 0.0:
+            return np.clip(a, 0, 255)   # pure de-shadow (luminance lift only) — no colour op
         # de-blue: directly remove the blue-over-red EXCESS (the actual blue cast), scaled by shadow weight.
         # Fixed-percent scaling was far too weak ("niebieskie jak morze" in-app); this neutralises B -> ~R.
         lu = a @ LW3
         sw = np.clip((150.0 - lu) / 130.0, 0, 1); sw = (sw * sw * (3 - 2 * sw)) * bm[..., 0]
         be = np.clip(a[..., 2] - a[..., 0], 0.0, None)          # blue cast = B above R
-        R = a[..., 0] + sw * 0.40 * DEBLUE_KC * be              # warm the red up
-        G = a[..., 1] + sw * 0.10 * DEBLUE_KC * be
-        Bl = a[..., 2] - sw * DEBLUE_KC * be                    # kill the blue excess
+        R = a[..., 0] + sw * 0.40 * deblue_kc * be              # warm the red up
+        G = a[..., 1] + sw * 0.10 * deblue_kc * be
+        Bl = a[..., 2] - sw * deblue_kc * be                    # kill the blue excess
         return np.clip(np.stack([R, G, Bl], -1), 0, 255)
 
     for r, c in cells:

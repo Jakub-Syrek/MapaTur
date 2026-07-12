@@ -248,6 +248,12 @@ public sealed partial class MapPageViewModel : ObservableObject
     [ObservableProperty]
     private Func<double, double, double?>? fineElevationSampler;
 
+    /// <summary>CONTACT-grade sampler: the REAL baked surface (z17→z16) with no virtual-tile synthesis —
+    /// for the view's high-frequency scattered probes (fireball contact, fire targeting, flight AGL).
+    /// Null until a baked scene is streaming.</summary>
+    [ObservableProperty]
+    private Func<double, double, double?>? contactElevationSampler;
+
     /// <summary>Whether to show the 3D on-screen chrome (sliders): only in 3D mode and not mid-flight.</summary>
     public bool Show3DChrome => Is3DMode && !Is3DFlying;
 
@@ -3661,6 +3667,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         if (!UseBakedTileStreaming || bakedTileIndex is null || bakedTileIndex.Count == 0)
         {
             FineElevationSampler = null; // coarse-only camera floor (pre-bake scenes)
+            ContactElevationSampler = null;
             logger.LogInformation(
                 "[BakedStream] inactive (enabled={Enabled}, bakedTiles={Count}) — using runtime-build detail",
                 UseBakedTileStreaming, bakedTileIndex?.Count ?? 0);
@@ -3687,13 +3694,52 @@ public sealed partial class MapPageViewModel : ObservableObject
         Func<MapaTur.Application.Terrain.DemTileKey, MapaTur.Application.Terrain.BakedDemTile?> cachedLoad =
             bakedTileCache.Load;
 
+        // The fine levels (real z17 + virtual z18/z19) get their own small ground rings — the legacy
+        // geometric sequence would hand the finest level the full 2.5 km radius. Absent overrides (phone,
+        // maxZoom 16) = legacy radii unchanged.
+        int streamMaxZoom = Math.Max(index.MinZoom, BakedStreamMaxZoom);
+        Dictionary<int, double>? ringOverrides = null;
+        if (streamMaxZoom >= 17)
+        {
+            ringOverrides = new Dictionary<int, double> { [17] = Z17RingRadiusMeters };
+            if (streamMaxZoom >= 19)
+            {
+                ringOverrides[18] = Z18RingRadiusMeters;
+                ringOverrides[19] = Z19RingRadiusMeters;
+            }
+        }
+
+        // Virtual z18/z19 (Faza B): availability = "the real z17 ancestor is baked", load = synthesise from
+        // it (CR upsample + measured-amplitude displacement; deterministic, so the walk-ground sampler below
+        // reads the EXACT rendered surface). Real zooms pass straight through to the index / RAM cache.
+        // Synthesised tiles get their own RAM cache: the synthesis is ~65k Catmull-Rom samples per tile, and
+        // without the cache every ring re-entry (and every floor-sampler probe on a fresh tile) recomputed it
+        // from scratch — a large slice of the 2026-07-11 FPS collapse.
+        Func<MapaTur.Application.Terrain.DemTileKey, bool> isBakedOrVirtual = key =>
+            key.Zoom <= RealFinestBakedZoom
+                ? index.IsBaked(key)
+                : index.IsBaked(new MapaTur.Application.Terrain.DemTileKey(
+                    RealFinestBakedZoom, key.X >> (key.Zoom - RealFinestBakedZoom), key.Y >> (key.Zoom - RealFinestBakedZoom)));
+        if (virtualTileCache is null || !ReferenceEquals(virtualTileCacheIndex, index))
+        {
+            virtualTileCache = new MapaTur.Application.Terrain.BakedDemTileCache(
+                key => MapaTur.Application.Terrain.VirtualDemTileSynthesizer.Synthesize(
+                    key, RealFinestBakedZoom, cachedLoad),
+                VirtualTileCacheMaxBytes);
+            virtualTileCacheIndex = index;
+        }
+
+        MapaTur.Application.Terrain.BakedDemTileCache virtualCache = virtualTileCache;
+        Func<MapaTur.Application.Terrain.DemTileKey, MapaTur.Application.Terrain.BakedDemTile?> loadOrSynthesize = key =>
+            key.Zoom <= RealFinestBakedZoom ? cachedLoad(key) : virtualCache.Load(key);
+
         bakedStreamManager = new MapaTur.Application.Terrain.BakedTileStreamingManager(
             index.Roots,
-            index.IsBaked,
-            cachedLoad,
+            isBakedOrVirtual,
+            loadOrSynthesize,
             lodAnchor,
             index.MinZoom,
-            Math.Max(index.MinZoom, BakedStreamMaxZoom),
+            streamMaxZoom,
             BakedStreamMaxResidentTiles,
             BakedStreamMaxConcurrentLoads,
             BakedStreamMaxErrorPixels,
@@ -3701,15 +3747,42 @@ public sealed partial class MapPageViewModel : ObservableObject
             meshOptions,
             lodOrthoCoverage,
             orthoTileIndexOffset: 0, // baked tiles share the base scene's ortho coverage grid → same cell indices
-            maxResidentBytes: BakedStreamMaxResidentBytes);
+            maxResidentBytes: BakedStreamMaxResidentBytes,
+            ringRadiusOverrideMeters: ringOverrides,
+            // The 1 m CLASS owns the surface for the base-skin discard mask — NOT just the single finest
+            // level: with maxZoom 17 and sparse/absent z17 coverage the z16 tiles must keep owning their
+            // pixels, or the box-averaged base depth-buries the detail again ("lotnisko obok ostrej grani").
+            surfaceOwnershipMinZoom: Math.Min(streamMaxZoom, NearDetailZoom),
+            // FPS gates (2026-07-11): the virtual levels ring the EYE only (the far look-at's drift thrashed
+            // dozens of synthesised tiles per second at a standing camera) and drop out entirely while the
+            // eye covers >25 m between updates (dragon flight — the ring would only churn behind the camera).
+            eyeAnchoredRingMinZoom: RealFinestBakedZoom + 1,
+            fastMotionSuppressMinZoom: RealFinestBakedZoom + 1);
         bakedStreamActive = true;
 
-        // Camera anti-tunnelling floor: give the 3D view a sampler of the TRUE rendered surface (the baked
-        // 1 m z16), because the coarse base raster it samples otherwise understates ridges by metres and the
-        // eye clipped into the drawn terrain ("wjazd w powierzchnię mapy zdarza się często").
+        // Camera anti-tunnelling floor + WALK GROUND: sample the REAL baked surface (z17→z16), BLOCKING via the
+        // RAM-cached loader. This positions the eye/feet, so it must NEVER momentarily read low — the earlier
+        // non-blocking warming front returned null on a cold key and the caller then fell back to the COARSE
+        // 30 m base (metres below the drawn 1 m surface) for a frame, dropping the walker/eye UNDER the map
+        // ("w trybie chodzenia wpadam kamerą pod mapę", 2026-07-11). Real z17/z16 tiles are cheap (disk +
+        // BakedDemTileCache RAM hit) and effectively always resident under the eye, so blocking here does NOT
+        // bring back the F9 stutter — that came from the z18/z19 SYNTHESIS (65k Catmull-Rom samples), which the
+        // camera floor does not need (sub-metre virtual displacement is irrelevant to anti-tunnelling). Cap at
+        // the real finest zoom so the floor never triggers synthesis; scattered fire probes keep their own
+        // non-blocking ContactElevationSampler below.
         var floorSampler = new MapaTur.Application.Terrain.BakedFineElevationSampler(
-            index.IsBaked, cachedLoad, Math.Max(index.MinZoom, BakedStreamMaxZoom));
+            index.IsBaked, cachedLoad, Math.Min(streamMaxZoom, RealFinestBakedZoom), cacheCapacity: 16,
+            fallbackMinZoom: Math.Min(streamMaxZoom, NearDetailZoom));
         FineElevationSampler = floorSampler.Sample;
+
+        // CONTACT-grade sampler for scattered per-tick probes (fireballs, fire targeting, flight AGL): the
+        // REAL surface only — routing those through the virtual-zoom sampler made every fire stream spawn
+        // dozens of background tile syntheses per tick over the cold ground ahead ("ogień strasznie laguje").
+        var contactWarming = new MapaTur.Application.Terrain.AsyncWarmingTileLoader(cachedLoad);
+        var contactSampler = new MapaTur.Application.Terrain.BakedFineElevationSampler(
+            index.IsBaked, contactWarming.TryGetOrWarm, Math.Min(streamMaxZoom, RealFinestBakedZoom),
+            cacheCapacity: 24, fallbackMinZoom: Math.Min(streamMaxZoom, NearDetailZoom));
+        ContactElevationSampler = contactSampler.Sample;
 
         logger.LogInformation(
             "[BakedStream] active: {Count} baked tiles, roots={Roots} z{MinZoom}-{MaxZoom}, cap={Cap}, ortho={Ortho}",
@@ -3722,7 +3795,10 @@ public sealed partial class MapPageViewModel : ObservableObject
     // the finest z16, doubling per coarser level — the visible top surface is untouched (the skirt only appends).
     private static float BakedTileSkirtDepthMeters(DemTileKey key)
     {
-        int stepsCoarserThanFinest = Math.Max(0, BakedStreamMaxZoom - key.Zoom);
+        // Anchor at the finest REAL level: virtual z18/z19 tiles differ from their neighbours by sub-metre
+        // displacement, so they hang the same minimal skirt as z17 instead of doubling every real level's.
+        int anchor = Math.Min(BakedStreamMaxZoom, RealFinestBakedZoom);
+        int stepsCoarserThanFinest = Math.Max(0, anchor - key.Zoom);
         return 6f * (1 << Math.Min(stepsCoarserThanFinest, 4)); // cap the multiplier so a far root skirt stays sane
     }
 
@@ -4196,7 +4272,21 @@ public sealed partial class MapPageViewModel : ObservableObject
     private static readonly long BakedTileCacheMaxBytes =
         DeviceInfo.Platform == DevicePlatform.WinUI ? 6144L * 1024 * 1024 : 512L * 1024 * 1024;
     private const double BakedStreamMaxErrorPixels = 2.5;  // screen-space pixel-error budget driving refinement
-    private const int BakedStreamMaxZoom = NearDetailZoom; // finest baked zoom = the native 1 m level (z16)
+    // Finest zoom the stream refines to. DESKTOP 19 (sub-1m plan): z17 = the finest REAL baked level
+    // (0.78 m/komórkę GUGiK/DMR5, Faza A — user-accepted 2026-07-10); z18/z19 are VIRTUAL tiles synthesised
+    // on demand from z17 (Catmull-Rom + measured-amplitude displacement, Faza B) — nothing on disk, the
+    // loader wrapper below answers for them. The phone stays on the z16 pyramid (budgets).
+    private static readonly int BakedStreamMaxZoom =
+        DeviceInfo.Platform == DevicePlatform.WinUI ? 19 : NearDetailZoom;
+    // The finest REAL baked zoom — the synthesis anchor and the skirt-depth anchor (virtual levels hang the
+    // same minimal skirt as z17; their LOD steps versus neighbours are sub-metre, not tens of metres).
+    private const int RealFinestBakedZoom = 17;
+    // Ground ring radii per fine level (metres, pre-height-scaling). The legacy geometric sequence would
+    // hand the FINEST level the full 2.5 km ring (~500 tiles — budget blowout); small per-level rings keep
+    // the fine sets at ~tens of tiles around the walker/look-at while z16 keeps its legacy 2.5 km ring.
+    private const double Z17RingRadiusMeters = 700.0;
+    private const double Z18RingRadiusMeters = 350.0;
+    private const double Z19RingRadiusMeters = 130.0;
     // The streaming manager for the current LOD scene (rebuilt per BuildLodSceneAsync; null when streaming is
     // inactive). Driven from OnDetailFocusAsync on every camera move.
     private MapaTur.Application.Terrain.BakedTileStreamingManager? bakedStreamManager;
@@ -4205,6 +4295,12 @@ public sealed partial class MapPageViewModel : ObservableObject
     // so the SAME cache survives LOD-session rebuilds — rebuilt only when the underlying baked index changes.
     private MapaTur.Application.Terrain.BakedDemTileCache? bakedTileCache;
     private MapaTur.Application.Terrain.BakedTileAvailabilityIndex? bakedTileCacheIndex;
+    // RAM cache of SYNTHESISED virtual z18/z19 tiles (deterministic → safely reusable); fronts the
+    // synthesizer for both the streaming manager and the walk/floor sampler. Desktop-only sizing — the
+    // phone never reaches the virtual zooms.
+    private MapaTur.Application.Terrain.BakedDemTileCache? virtualTileCache;
+    private MapaTur.Application.Terrain.BakedTileAvailabilityIndex? virtualTileCacheIndex;
+    private static readonly long VirtualTileCacheMaxBytes = 1536L * 1024 * 1024;
     // True once BuildLodSceneAsync has wired a streaming manager for this scene — gates OnDetailFocusAsync onto
     // the baked path. Cleared with the manager when a new scene loads or streaming is unavailable.
     private bool bakedStreamActive;

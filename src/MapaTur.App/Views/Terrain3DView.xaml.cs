@@ -76,6 +76,20 @@ public partial class Terrain3DView : ContentView
         set => SetValue(FineElevationSamplerProperty, value);
     }
 
+    /// <summary>Bindable CONTACT-grade sampler: the REAL baked surface (z17→z16) with no virtual-tile
+    /// synthesis — for high-frequency scattered probes (fireball contact, fire targeting, flight AGL).
+    /// See <see cref="SampleContactGround"/>. Null falls back to <see cref="FineElevationSampler"/>.</summary>
+    public static readonly BindableProperty ContactElevationSamplerProperty = BindableProperty.Create(
+        nameof(ContactElevationSampler),
+        typeof(Func<double, double, double?>),
+        typeof(Terrain3DView));
+
+    public Func<double, double, double?>? ContactElevationSampler
+    {
+        get => (Func<double, double, double?>?)GetValue(ContactElevationSamplerProperty);
+        set => SetValue(ContactElevationSamplerProperty, value);
+    }
+
     /// <summary>Bindable 1 m LOD detail field: when present, trail/road/route vertices inside its window
     /// seat on the detail surface instead of the coarse base, so overlays don't float over the carved-deeper
     /// near-field terrain. Null until the LOD pipeline has built a detail patch.</summary>
@@ -2171,6 +2185,43 @@ public partial class Terrain3DView : ContentView
         return null;
     }
 
+    // CONTACT-grade ground sample (metres) — the REAL baked surface (z17→z16), never the virtual z18/z19
+    // synthesis. For high-frequency, positionally-scattered probes: fireball contact, fire-target probing,
+    // flight AGL (dragon physics + audio). Those need ±0.35 m accuracy at most, and routing them through the
+    // fine sampler made every fire stream spawn dozens of background tile SYNTHESES per tick over the cold
+    // ground ahead of the dragon ("ogień strasznie laguje", 2026-07-11). Falls back to the fine sampler when
+    // the contact one is not wired (pre-bake scenes), then to the coarse base — same chain as walk ground.
+    private float? SampleContactGround(System.Numerics.Vector2 xy)
+    {
+        if (WorldFrame is not { } frame)
+        {
+            return null;
+        }
+
+        GeoPoint geo = frame.WorldToGeo(new Vector3(xy.X, xy.Y, 0f));
+        if (ContactElevationSampler is { } contact && contact(geo.Longitude, geo.Latitude) is { } contactElev)
+        {
+            return (float)contactElev;
+        }
+
+        if (ContactElevationSampler is null
+            && FineElevationSampler is { } fine && fine(geo.Longitude, geo.Latitude) is { } fineElev)
+        {
+            return (float)fineElev;
+        }
+
+        if (Raster is { } raster)
+        {
+            double baseElev = raster.SampleBilinear(geo.Longitude, geo.Latitude);
+            if (!double.IsNaN(baseElev) && baseElev > raster.NoDataValue)
+            {
+                return (float)baseElev;
+            }
+        }
+
+        return null;
+    }
+
     // Enters first-person walk: spawns the walker on the ground under the current eye, facing where the camera
     // looked, and starts the ~60 Hz walk tick. Needs a built scene; a stray toggle before the DEM loads is undone.
     private void EnterWalkMode()
@@ -2336,7 +2387,9 @@ public partial class Terrain3DView : ContentView
         var startXY = new System.Numerics.Vector2(Camera.Target.X, Camera.Target.Y);
         Vector3 viewDir = Camera.Target - Camera.Position;
         float heading = MathF.Atan2(viewDir.Y, viewDir.X);
-        dragon = new MapaTur.Application.Terrain.DragonFlight(startXY, heading, SampleWalkGround);
+        // Contact-grade ground for the flight physics: per-tick AGL/terrain-follow over ground far ahead of
+        // the camera must never trigger virtual-tile synthesis (landing seats on the FINE scan separately).
+        dragon = new MapaTur.Application.Terrain.DragonFlight(startXY, heading, SampleContactGround);
 
         dragonMouseDx = dragonMouseDy = 0f;
         dragonW = dragonS = dragonA = dragonD = false;
@@ -2574,12 +2627,13 @@ public partial class Terrain3DView : ContentView
         for (int i = 0; i < AiFlockCount; i++)
         {
             System.Numerics.Vector2 home = centers[i];
-            float ground = SampleWalkGround(home) ?? 0f;
+            float ground = SampleContactGround(home) ?? 0f;
             int dir = (i % 2 == 0) ? 1 : -1;
 
             var start = home + new System.Numerics.Vector2(AiFlockOrbitRadiusMeters, 0f);
             float heading = dir > 0 ? MathF.PI / 2f : -MathF.PI / 2f;
-            var flight = new MapaTur.Application.Terrain.DragonFlight(start, heading, SampleWalkGround);
+            // AI dragons orbit far from the camera — their per-tick ground probes must stay contact-grade.
+            var flight = new MapaTur.Application.Terrain.DragonFlight(start, heading, SampleContactGround);
             var pilot = new MapaTur.Application.Terrain.DragonAiPilot
             {
                 CircleCenter = home,
@@ -3358,7 +3412,7 @@ public partial class Terrain3DView : ContentView
             float bedWind = MathF.Pow(Math.Clamp((bedSpeed - 22f) / 100f, 0f, 1f), 1.4f)
                 * (1f + (0.35f * MathF.Abs(MathF.Sin(d.RollRadians))));
             float bedWing = Math.Clamp(dragonLastFlapActivity / 1.4f, 0f, 1f);
-            float bedAgl = SampleWalkGround(d.PositionXY) is float bedGround ? d.ElevationMeters - bedGround : 999f;
+            float bedAgl = SampleContactGround(d.PositionXY) is float bedGround ? d.ElevationMeters - bedGround : 999f;
             float bedRush = Math.Clamp(1f - ((bedAgl - 24f) / 36f), 0f, 1f) * Math.Clamp(bedSpeed / 70f, 0f, 1f);
             dragonAudio.SetFlightBed(bedWind, bedWing, bedRush);
         }
@@ -3541,8 +3595,11 @@ public partial class Terrain3DView : ContentView
         float bobX = MathF.Cos(t * bobFreq * 0.5f) * bobAmp * 0.5f;
         float swayDeg = MathF.Sin(t * bobFreq * 0.5f) * (moving ? 1.6f : 0.7f);
 
-        // Ciupaga strike (left click): thrust the head down-and-forward, then recover. Ends when the envelope runs out.
-        float strike = 0f;
+        // Per-hand strike (thrust into the rock). RIGHT axe swings on a left-click; while self-arresting BOTH
+        // axes hold fully planted; while CLIMBING the two axes drive in ALTERNATELY (left, right, left…) — the
+        // "wbijasz lewy prawy i idziesz pod górę" gait.
+        float strikeRight = 0f;
+        float strikeLeft = 0f;
         if (walkSwinging)
         {
             float p = (float)((t - walkSwingStartSeconds) / CiupagaSwingSeconds);
@@ -3552,16 +3609,38 @@ public partial class Terrain3DView : ContentView
             }
             else
             {
-                strike = SwingStrike(Math.Clamp(p, 0f, 1f));
+                strikeRight = SwingStrike(Math.Clamp(p, 0f, 1f));
             }
         }
 
-        // While self-arresting (hanging), hold the ciupaga fully planted into the rock.
-        if (walker is { IsHanging: true })
+        if (walker is { IsClimbing: true })
         {
-            strike = 1f;
+            // Two alternating plants: each hand runs a plant-and-recover envelope, offset half a cycle.
+            const float climbCyclesPerSec = 1.7f;
+            float beat = t * climbCyclesPerSec;
+            strikeRight = MathF.Max(strikeRight, SwingStrike(beat - MathF.Floor(beat)));
+            float leftBeat = beat + 0.5f;
+            strikeLeft = SwingStrike(leftBeat - MathF.Floor(leftBeat));
+        }
+        else if (walker is { IsHanging: true })
+        {
+            strikeRight = 1f;   // both axes buried into the rock, holding the hang
+            strikeLeft = 1f;
         }
 
+        // RIGHT axe (primary right-hand viewmodel).
+        DrawOneCiupaga(canvas, width, height, u, bobX, bobY, swayDeg, strikeRight);
+
+        // LEFT axe: the same drawing mirrored horizontally about the screen centre → a symmetric left-hand tool.
+        canvas.Save();
+        canvas.Scale(-1f, 1f, width * 0.5f, 0f);
+        DrawOneCiupaga(canvas, width, height, u, bobX, bobY, swayDeg, strikeLeft);
+        canvas.Restore();
+    }
+
+    // Draws ONE first-person ciupaga in the lower-right held pose (mirror the canvas to get the left-hand one).
+    private void DrawOneCiupaga(SKCanvas canvas, int width, int height, float u, float bobX, float bobY, float swayDeg, float strike)
+    {
         canvas.Save();
         // Anchor the grip lower-right and lean the shaft up-and-right: head upper-right, butt off the bottom
         // corner — the classic right-hand viewmodel pose. Kept low enough that the head clears the top menu bar.
@@ -4241,6 +4320,10 @@ public partial class Terrain3DView : ContentView
         // far to a walker's horizon so depth precision stays high with such a tiny near.
         if (walkActive)
         {
+            // Eye ~1.7 m over the ground: the fly path's ≥5 m near clips the ground at your feet. Pull near up
+            // to the boots, cap far to a walker's horizon. Back at the ORIGINAL 0.3/16000 (a smaller near
+            // crushed far-Z precision and made distant clouds z-fight/flicker). Wall clipping is handled by the
+            // CLIMB (attach + climb steep faces, never jump INTO them), so the near stays at the safe value.
             Camera.NearPlane = 0.3f;
             Camera.FarPlane = MathF.Min(far, 16_000f);
         }
@@ -5621,6 +5704,25 @@ public partial class Terrain3DView : ContentView
             return;
         }
 
+        // F1–F6: baked-shadow debug views (2026-07-11) — F1 final, F2 albedo, F3 lowLuma sub-mask,
+        // F4 cool/cyan sub-mask, F5 combined mask, F6 corrected albedo. SPLIT masks so we see which condition
+        // misfires. Number keys 1/2/3 set the compensation strength 0 / 0.5 / 1.0.
+        if (glRenderer is { } r)
+        {
+            switch (e.Key)
+            {
+                case Windows.System.VirtualKey.F1: r.DebugTerrainView = 0f; e.Handled = true; return;
+                case Windows.System.VirtualKey.F2: r.DebugTerrainView = 1f; e.Handled = true; return;
+                case Windows.System.VirtualKey.F3: r.DebugTerrainView = 2f; e.Handled = true; return;
+                case Windows.System.VirtualKey.F4: r.DebugTerrainView = 3f; e.Handled = true; return;
+                case Windows.System.VirtualKey.F5: r.DebugTerrainView = 4f; e.Handled = true; return;
+                case Windows.System.VirtualKey.F6: r.DebugTerrainView = 5f; e.Handled = true; return;
+                case Windows.System.VirtualKey.Number1: r.BakedShadowComp = 0f; Serilog.Log.Information("[BakedShadow] comp=0"); e.Handled = true; return;
+                case Windows.System.VirtualKey.Number2: r.BakedShadowComp = 0.5f; Serilog.Log.Information("[BakedShadow] comp=0.5"); e.Handled = true; return;
+                case Windows.System.VirtualKey.Number3: r.BakedShadowComp = 1.0f; Serilog.Log.Information("[BakedShadow] comp=1.0"); e.Handled = true; return;
+            }
+        }
+
         // F8 toggles first-person walk mode (works both in and out of walk). Flip the two-way bindable so the
         // view-model's walk chip stays in sync; the property-changed hook does the Enter/Exit.
         if (e.Key == Windows.System.VirtualKey.F8)
@@ -6263,7 +6365,7 @@ public partial class Terrain3DView : ContentView
                     hitWater = true; // quench on the lake surface → steam
                     ball.Elevation = waterElev + 0.3f;
                 }
-                else if (SampleWalkGround(ball.XY) is { } ground && ball.Elevation <= ground + 0.5f)
+                else if (SampleContactGround(ball.XY) is { } ground && ball.Elevation <= ground + 0.5f)
                 {
                     explode = true;
                     ball.Elevation = ground + 1f;

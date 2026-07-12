@@ -86,7 +86,10 @@ public sealed class QuadtreeTileSelectorTests
         Camera3D camera,
         Func<DemTileKey, bool>? isBaked = null,
         int maxResidentTiles = 100_000,
-        double? finestRingRadiusMeters = null)
+        double? finestRingRadiusMeters = null,
+        int maxZoom = MaxZoom,
+        IReadOnlyDictionary<int, double>? ringRadiusOverrideMeters = null,
+        int eyeAnchoredRingMinZoom = int.MaxValue)
         => new()
         {
             Camera = camera,
@@ -95,13 +98,15 @@ public sealed class QuadtreeTileSelectorTests
             GroundElevationMeters = GroundElevation,
             VerticalExaggeration = VerticalExaggeration,
             MinZoom = MinZoom,
-            MaxZoom = MaxZoom,
+            MaxZoom = maxZoom,
             AspectRatio = Aspect,
             ViewportHeightPixels = ViewportHeight,
             MaxErrorPixels = 2.0,
             MaxResidentTiles = maxResidentTiles,
             IsBaked = isBaked ?? (_ => true),
             FinestRingRadiusMeters = finestRingRadiusMeters ?? QuadtreeTileSelectorOptions.DefaultFinestRingRadiusMeters,
+            RingRadiusOverrideMeters = ringRadiusOverrideMeters,
+            EyeAnchoredRingMinZoom = eyeAnchoredRingMinZoom,
         };
 
     // True when `a` is the same tile as `b` or a quadtree descendant of it (its footprint nests inside b's).
@@ -114,6 +119,91 @@ public sealed class QuadtreeTileSelectorTests
 
         int shift = a.Zoom - b.Zoom;
         return (a.X >> shift) == b.X && (a.Y >> shift) == b.Y;
+    }
+
+    [Fact]
+    public void RingRadiusOverride_LimitsTheZ17Ring_WhileZ16KeepsItsLegacyRadius()
+    {
+        // Faza A (sub-1m plan): with MaxZoom 17 the LEGACY geometric sequence would hand z17 the full
+        // FinestRingRadius (2.5 km ≈ ~500 z17 tiles — the budget blowout). The override caps the z17 ring
+        // small while z16 keeps the exact radius it had when IT was the finest level.
+        Vector3 c = TileWorldCentre(RootTile());
+        Camera3D camera = CameraAtGround(new Vector2(c.X, c.Y), heightMeters: 300f, azimuth: 0f, pitch: MathF.PI / 2f);
+
+        QuadtreeTileSelection selection = QuadtreeTileSelector.Select(Options(
+            camera, maxZoom: 17, ringRadiusOverrideMeters: new Dictionary<int, double> { [17] = 700.0 }));
+
+        var focus = new Vector2(c.X, c.Y);
+        selection.Tiles.Should().Contain(t => t.Key.Zoom == 17, "the focus sits inside the z17 override ring");
+        selection.Tiles.Where(t => t.Key.Zoom == 17).Should().OnlyContain(
+            t => GroundDistance(focus, t.Key) <= 700.0 + 300.0,
+            "z17 must not leak past its overridden ring (+ tile-centre slack)");
+        selection.Tiles.Should().Contain(
+            t => t.Key.Zoom == 16 && GroundDistance(focus, t.Key) > 1_000.0,
+            "beyond the z17 ring the legacy 2.5 km z16 ring must still be in force");
+    }
+
+    [Fact]
+    public void RingRadiusOverride_NullAndEmpty_YieldTheLegacySelection()
+    {
+        Camera3D camera = CameraOver(RootTile(), heightMeters: 400f);
+
+        IReadOnlyList<DemTileKey> withNull = QuadtreeTileSelector.Select(Options(camera))
+            .Tiles.Select(t => t.Key).ToList();
+        IReadOnlyList<DemTileKey> withEmpty = QuadtreeTileSelector.Select(Options(
+                camera, ringRadiusOverrideMeters: new Dictionary<int, double>()))
+            .Tiles.Select(t => t.Key).ToList();
+
+        withEmpty.Should().Equal(withNull, "an empty override map must not change the legacy behaviour");
+    }
+
+    [Fact]
+    public void RingRadiusOverride_LargerThanACoarserRing_ClampsTheCoarserRingsMonotonically()
+    {
+        // Rings may only GROW outward. Without the clamp, a z17 override LARGER than the legacy radii of the
+        // coarser levels inverts the ring order: a z15 tile at 500-1500 m sits inside the z17 ring but
+        // outside the (uninflated) 400 m z16 ring, so it never refines — a COARSE DONUT inside the fine
+        // ring. The clamp lifts every coarser ring to at least the finer one, so everything inside the z17
+        // ring refines past z15 (boundary z16 tiles are fine — the descent walks tile centres).
+        Vector3 c = TileWorldCentre(RootTile());
+        Camera3D camera = CameraAtGround(new Vector2(c.X, c.Y), heightMeters: 300f, azimuth: 0f, pitch: MathF.PI / 2f);
+
+        QuadtreeTileSelection selection = QuadtreeTileSelector.Select(Options(
+            camera,
+            maxZoom: 17,
+            finestRingRadiusMeters: 400.0,
+            ringRadiusOverrideMeters: new Dictionary<int, double> { [17] = 1_500.0 }));
+
+        var focus = new Vector2(c.X, c.Y);
+        selection.Tiles.Should().Contain(t => t.Key.Zoom == 17, "the focus sits inside the overridden z17 ring");
+        selection.Tiles.Should().NotContain(
+            t => t.Key.Zoom <= 15 && GroundDistance(focus, t.Key) <= 1_450.0,
+            "inside the z17 ring nothing may stay at z15 or coarser — that would be the inverted-ring donut");
+    }
+
+    [Fact]
+    public void EyeAnchoredRing_KeepsVirtualZoomsOffTheFarLookAtFocus()
+    {
+        // The 2026-07-11 FPS collapse: virtual z18/z19 ringed the far LOOK-AT focus too, so its drift
+        // thrashed dozens of synthesised tiles per second while the camera stood still. With the option,
+        // zooms ≥ 18 ring ONLY the eye's ground point; the look-at keeps its z17-and-coarser rings.
+        Vector3 c = TileWorldCentre(RootTile());
+        var eyeXY = new Vector2(c.X, c.Y);
+        Camera3D camera = CameraAtGround(eyeXY, heightMeters: 200f, azimuth: 0f, pitch: 0.05f); // target ~1 km away
+        var overrides = new Dictionary<int, double> { [17] = 700.0, [18] = 350.0 };
+
+        QuadtreeTileSelection legacy = QuadtreeTileSelector.Select(Options(
+            camera, maxZoom: 18, ringRadiusOverrideMeters: overrides));
+        QuadtreeTileSelection anchored = QuadtreeTileSelector.Select(Options(
+            camera, maxZoom: 18, ringRadiusOverrideMeters: overrides, eyeAnchoredRingMinZoom: 18));
+
+        legacy.Tiles.Should().Contain(
+            t => t.Key.Zoom == 18 && GroundDistance(eyeXY, t.Key) > 600.0,
+            "the legacy two-foci metric rings the far look-at with z18 — the churn source this pins");
+        anchored.Tiles.Should().Contain(t => t.Key.Zoom == 18, "z18 still rings the eye itself");
+        anchored.Tiles.Where(t => t.Key.Zoom == 18).Should().OnlyContain(
+            t => GroundDistance(eyeXY, t.Key) <= 350.0 + 300.0,
+            "eye-anchored z18 never follows the look-at focus");
     }
 
     [Fact]

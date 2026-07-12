@@ -94,6 +94,58 @@ public sealed class DemRegionBakerTests : IDisposable
         return new MapBounds(new GeoPoint(49.226, 20.018), new GeoPoint(49.232, 20.026));
     }
 
+    // Real terrain crossed by a BOUNDED flat-0 vertical strip (columns 5..10 = 6 cells) — the GUGiK
+    // tile-edge dropout class FillNarrowZeroStrips exists for. Bridgeable only when zeroStripMaxCells ≥ 6.
+    private sealed class ZeroStripTileSource : IDemTileSource
+    {
+        public Task<DemRaster?> GetTileAsync(DemTileKey key, CancellationToken cancellationToken = default)
+        {
+            var (west, south, east, north) = SlippyTileMath.TileBounds(key.X, key.Y, key.Zoom);
+            var bounds = new MapBounds(new GeoPoint(south, west), new GeoPoint(north, east));
+            var samples = new float[TilePx * TilePx];
+            for (int r = 0; r < TilePx; r++)
+            {
+                for (int c = 0; c < TilePx; c++)
+                {
+                    samples[(r * TilePx) + c] = c is >= 5 and <= 10 ? 0f : 1500f;
+                }
+            }
+
+            return Task.FromResult<DemRaster?>(new DemRaster(TilePx, TilePx, bounds, samples));
+        }
+    }
+
+    [Fact]
+    public async Task BakeRegionAsync_ZeroStripMaxCells_ControlsHowWideAStripTheBakeBridges()
+    {
+        // The parameter is CELL-denominated (sub-1m plan: z17 needs 48 to keep z16's ~37 m physical policy),
+        // so the plumb DemRegionBaker → BakeWithMargin must actually carry it: below the strip width the
+        // strip is holed (NoData — never fabricated), at/above it the strip is bridged from its neighbours.
+        MapBounds region = RegionAroundOrlaPerc();
+        DemTileKey key = DemTilePlanner.TilesForBounds(region, Z16)[0];
+
+        string narrowDir = Path.Combine(this.outputDir, "narrow");
+        await new DemRegionBaker(new ZeroStripTileSource(), zeroStripMaxCells: 4)
+            .BakeRegionAsync(region, Z16Only, narrowDir);
+        using (FileStream fs = File.OpenRead(Path.Combine(narrowDir, BakedDemTileStore.RelativePathFor(key))))
+        {
+            BakedDemTile tile = BakedDemTileStore.Read(fs);
+            tile.Heights.Should().Contain(
+                h => h == (float)tile.NoDataValue, "a strip wider than the limit is holed, not fabricated");
+        }
+
+        string wideDir = Path.Combine(this.outputDir, "wide");
+        await new DemRegionBaker(new ZeroStripTileSource(), zeroStripMaxCells: 8)
+            .BakeRegionAsync(region, Z16Only, wideDir);
+        using (FileStream fs = File.OpenRead(Path.Combine(wideDir, BakedDemTileStore.RelativePathFor(key))))
+        {
+            BakedDemTile tile = BakedDemTileStore.Read(fs);
+            tile.Heights.Should().NotContain(
+                h => h == (float)tile.NoDataValue, "a strip within the limit is bridged from real neighbours");
+            tile.Heights.Should().OnlyContain(h => h > 1400f, "bridged cells carry neighbour-level terrain");
+        }
+    }
+
     [Fact]
     public async Task BakeRegionAsync_WritesReadableZ16TilesForTheRegion()
     {

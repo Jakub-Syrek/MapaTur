@@ -60,6 +60,10 @@ public sealed class WalkPhysics
     /// <summary>True while the ciupaga is planted into steep rock arresting a fall (hang).</summary>
     public bool IsHanging { get; private set; }
 
+    /// <summary>True while ascending/traversing a steep face on the two ciupagas (axes planted + a move wish).
+    /// Drives the alternating left/right axe-plant animation.</summary>
+    public bool IsClimbing { get; private set; }
+
     /// <summary>Real elevation of the camera eye in metres (feet + <see cref="WalkParameters.EyeHeightMeters"/>).
     /// The caller multiplies by the vertical-exaggeration to get the world-Z for the camera.</summary>
     public float EyeElevation => FeetElevation + p.EyeHeightMeters;
@@ -102,19 +106,53 @@ public sealed class WalkPhysics
         Vector2 gradient = Gradient(PositionXY);
         float slope = gradient.Length();
 
-        // Ciupaga self-arrest: airborne, holding the axe against steep rock within reach → hang frozen (no gravity,
-        // no drift) until released. A jump this tick overrides it (kick off the wall). Planting re-arms the jumps.
-        if (hangHeld && !IsGrounded && !jumpRequested
-            && (FeetElevation - groundHere) <= this.p.HangReachMeters
-            && slope >= this.p.HangMinSlopeGrade)
+        // Two-ciupaga CLIMB / self-arrest: holding the axe against steep rock (≥ HangMinSlopeGrade) within reach.
+        // A jump this tick overrides it (kick off the wall). With a MOVE wish, haul up/across the face at the
+        // climb rate — feet stay glued to the surface, so you ascend a vertical wall the walk gate would refuse
+        // (the two axes bite in turn). With NO wish, hang frozen (self-arrest). Works from the ground too (walk
+        // to the wall, hold, climb). Reach is measured to the ground under the feet (0 while attached).
+        bool axeOnRock = hangHeld && !jumpRequested
+            && slope >= this.p.HangMinSlopeGrade
+            && (FeetElevation - groundHere) <= this.p.HangReachMeters;
+        if (axeOnRock)
         {
-            IsHanging = true;
+            // ISONZO-style face movement: resolve the input into UP-the-fall-line + ALONG-the-contour, and
+            // traverse slower than you ascend ("moving sideways is slower"). Facing the wall, forward climbs
+            // straight up; strafing shuffles across. Feet stay glued to the surface (no gravity while attached).
+            Vector2 climbMove = Vector2.Zero;
+            if (wishDirXY.LengthSquared() > 1e-8f)
+            {
+                Vector2 dir = Vector2.Normalize(wishDirXY);
+                Vector2 uphill = slope > 1e-4f ? gradient / slope : dir; // gradient points uphill (unit)
+                var contour = new Vector2(-uphill.Y, uphill.X);
+                float alongUp = Vector2.Dot(dir, uphill);
+                float alongSide = Vector2.Dot(dir, contour) * this.p.ClimbTraverseFraction;
+                Vector2 climbVel = (uphill * alongUp) + (contour * alongSide);
+                climbMove = climbVel * (this.p.ClimbSpeedMetersPerSecond * dt);
+            }
+
+            if (climbMove != Vector2.Zero && this.sampleGround(PositionXY + climbMove) is float climbedGround)
+            {
+                PositionXY += climbMove;
+                FeetElevation = climbedGround; // stay on the face — ascend/descend with the surface
+                IsClimbing = true;
+                IsHanging = false;
+            }
+            else
+            {
+                IsHanging = true;   // holding with no input (or off-coverage) → self-arrest
+                IsClimbing = false;
+            }
+
             VerticalVelocity = 0f;
+            IsGrounded = false;
+            IsSliding = false;
             this.jumpsUsed = 0;
             return;
         }
 
         IsHanging = false;
+        IsClimbing = false;
 
         // Jump: from the ground, from a hang, or a mid-air double jump — up to MaxJumps before touching down again.
         if (jumpRequested && this.jumpsUsed < this.p.MaxJumps)
@@ -149,19 +187,37 @@ public sealed class WalkPhysics
         StepWalk(move, groundHere);
     }
 
-    // Airborne: integrate gravity (semi-implicit Euler), allow full horizontal control, and land when the feet
-    // descend onto the ground below. Landing snaps the feet exactly to the ground and zeroes vertical velocity.
+    // How far above the feet the ground at the next airborne position may sit and still be stepped onto: a
+    // small lip you can clear mid-arc. Ground higher than this is a WALL — refuse the step so a jump cannot
+    // carry the walker into a steep face (feet embedded, eye under the texture).
+    private const float WallHitClearanceMeters = 0.6f;
+
+    // Airborne: integrate gravity (semi-implicit Euler), allow horizontal control EXCEPT into a wall, and land
+    // when the feet reach the ground below (or a wall's ground has risen to meet them). Landing snaps the feet
+    // exactly to the ground and zeroes vertical velocity.
     private void StepAirborne(float dt, Vector2 move)
     {
         VerticalVelocity -= this.p.GravityMetersPerSecondSquared * dt;
         FeetElevation += VerticalVelocity * dt;
 
-        if (move != Vector2.Zero && this.sampleGround(PositionXY + move) is not null)
+        // Horizontal control while airborne — but NOT into a steep face: refuse a step whose ground sits above
+        // the feet (+ a small lip), or the walker ends up embedded in the wall with the eye under the texture
+        // ("wpadam pod teksturę skacząc przy pionowych ścianach"). Stepping onto level / lower / just-higher
+        // ground is fine (so a jump still arcs onto a reachable ledge from above). Only samplable ground moves.
+        if (move != Vector2.Zero
+            && this.sampleGround(PositionXY + move) is float groundAtTarget
+            && groundAtTarget <= FeetElevation + WallHitClearanceMeters)
         {
-            PositionXY += move; // only step onto ground we can sample (never off the mapped world)
+            PositionXY += move;
         }
 
-        if (VerticalVelocity <= 0f && this.sampleGround(PositionXY) is float ground && FeetElevation <= ground)
+        // Land when descending onto the ground below, OR when the ground under the current XY sits ABOVE the
+        // feet (jumped/drifted into rising terrain) — snap up either way so the feet are never below the
+        // surface. A fresh jump (feet exactly on the take-off ground, still rising) is NOT caught: that needs
+        // feet strictly below ground.
+        if (this.sampleGround(PositionXY) is float ground
+            && FeetElevation <= ground
+            && (VerticalVelocity <= 0f || FeetElevation < ground))
         {
             FeetElevation = ground;
             VerticalVelocity = 0f;

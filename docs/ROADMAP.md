@@ -88,7 +88,21 @@ on a Galaxy S25 Ultra (FPS "bardzo płynnie", sharp ridges, crack-free).
 
 ### Recommended next (new session)
 
-- [ ] **In-app MP4 export of the fly-through** — currently captured externally
+- [ ] **PRE-RENDERED movie export („Renderuj film", desktop; zlecone 2026-07-11)** — offline, frame-by-frame
+      rendering of SCRIPTED content (F9 demo, route fly-throughs, dragon choreography) instead of live capture:
+      each frame may take 100+ ms to render, the OUTPUT is still perfectly smooth fixed-step 60 fps — live FPS,
+      streaming hitches and GC stutter become irrelevant on the recording (Game Bar can never fix those; it
+      stays the tool for ad-hoc manual flying only). Components: (a) FIXED-TIMESTEP tick decoupled from the
+      wall clock (deterministic demo/dragon/fire sim per frame index); (b) off-screen FBO render at the TARGET
+      resolution/aspect with FOV adjusted — presets: 9:16 1080×1920 (Reels/Stories), 1:1 1080×1080 / 4:5
+      1080×1350 (feed), 16:9 1080p/4K (FB/YT) — native, no post-crop; (c) HUD/chips suppressed, optional
+      supersampling; (d) per-frame streaming settle: advance the tick only when the desired tile set is
+      resident (no pop-in on film); (e) encode via Windows Media Foundation H.264/HEVC (hardware NVENC path),
+      BGRA frames → SinkWriter; audio: mix the dragon bed/roars offline or leave for post. Infra already in
+      place: FBO targets (HDR/reflection), deterministic DragonFlight physics, F9 geo waypoints. Estimate
+      2–4 days. In-app LIVE recording was evaluated and REJECTED (readback sync points would tax the already
+      tight FPS; Game Bar's NVENC path is strictly better for live).
+- [ ] **In-app MP4 export of the fly-through (mobile)** — currently captured externally
       via `adb screenrecord`; an in-app "record & save" would be the headline.
 - [ ] **M11 #39 + #43** — viewport-aware ortho streaming + LRU eviction, the
       real unlock for mid-range phones (1.9 GB resident texture today).

@@ -52,6 +52,17 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
     private const double TargetMetersPerPixel = 5.0;
     private const int MaxSupersampleFactor = 1; // supersampler OFF (user decision): the over-request + downsample baked a moiré ring-grid ("paski") into the base; factor 1 = native, clean. Base re-fetches once (new cache name).
 
+    // SUB-NATIVE supersampling (2026-07-10, TILE-PRODUCTION §2.5): at z≥17 the request grid (0.78 m/px) is
+    // FINER than the 1 m source and the WCS's own resample bakes a grid-locked weave into the heights
+    // ("strukturka" on flats, organ-pipe flutes on walls; the self-sampled Slovak DMR5 tiles are clean —
+    // weave 0.02 vs PL 0.14+). Over-request ×2 (512 px — the server only UPSAMPLES here, no coarse-grid
+    // resample, so the §B1 moiré case does not apply) and Gaussian-downsample ourselves through the existing
+    // LowPassDownsample path. Cached as {y}_512.tif; the legacy {y}.tif is read as a FALLBACK when the
+    // download fails, which keeps the injected (non-redownloadable) Slovak DMR5 tiles alive — the §B1
+    // orphaned-cache lesson applied deliberately instead of tripped over.
+    private const int SubNativeSupersampleZoom = 17;
+    private const int SubNativeSupersampleFactor = 2;
+
     private readonly HttpClient httpClient;
     private readonly string cacheDirectory;
     private readonly string endpoint;
@@ -105,23 +116,29 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
 
         // Read from cache if present; otherwise download — but do NOT write to the cache yet. The tile is
         // committed to disk only AFTER it decodes and passes the empty-tile guard below, so a GUGiK all-zero
-        // response is never cached.
+        // response is never cached. A ServiceException/XML payload decodes to null the same way.
         byte[]? tiff = fromCache
             ? await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false)
             : await DownloadAsync(key, fetchPx, cancellationToken).ConfigureAwait(false);
-        if (tiff is null)
+        Float32Grid? decoded = TryDecode(tiff);
+
+        // Legacy-name fallback: a supersampled zoom writes {y}_{px}.tif, but tiles that can never be
+        // (re)downloaded — the injected Slovak DMR5 z17 set — live under the legacy {y}.tif name. When the
+        // fresh fetch yields nothing usable, serve the legacy file instead of orphaning it (§B1 lesson).
+        bool fromLegacy = false;
+        if (decoded is null && !fromCache)
         {
-            return null;
+            string legacyPath = LegacyCachePath(key);
+            if (!string.Equals(legacyPath, path, StringComparison.Ordinal) && File.Exists(legacyPath))
+            {
+                decoded = TryDecode(
+                    await File.ReadAllBytesAsync(legacyPath, cancellationToken).ConfigureAwait(false));
+                fromLegacy = decoded is not null;
+            }
         }
 
-        Float32Grid grid;
-        try
+        if (decoded is not { } grid)
         {
-            grid = Float32GeoTiffDecoder.Decode(tiff);
-        }
-        catch (FormatException)
-        {
-            // Service returned an XML ServiceException or some unexpected payload — treat as no data, cache nothing.
             return null;
         }
 
@@ -135,12 +152,35 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
         int factor = fetchPx / this.tileSize;
         if (factor > 1 && grid.Width == fetchPx && grid.Height == fetchPx)
         {
+            // ZERO-VOID MASK (the "<=0.5 = void!" lesson, supersampling edition — regression 2026-07-11):
+            // GUGiK marks out-of-coverage with literal flat-0, which the sentinel-aware Gaussian below would
+            // treat as VALID and smear into real terrain (100–900 m garbage the bake's FillNarrowZeroStrips
+            // can no longer recognise as a strip). Mask ≤0.5 to the sentinel BEFORE the low-pass, restore the
+            // 0 marker AFTER, so the repair chain sees exactly the flat-0 semantics it always had. (Caveat:
+            // ties this branch to highland products — real ground ≤0.5 m exists only far outside the current
+            // z17 footprint; the bake's HoleBelow(100) carries the same assumption.)
+            for (int i = 0; i < samples.Length; i++)
+            {
+                if (samples[i] != NoDataSentinel && samples[i] <= 0.5f)
+                {
+                    samples[i] = NoDataSentinel;
+                }
+            }
+
             // Gaussian (overlapping) downsample, not a plain box: the box left a moiré ring-grid ("obwódki")
             // on the base — disjoint blocks can't smooth across boundaries and the box passes WCS ripple that
             // aliases. Gaussian low-pass at the output Nyquist removes it without flattening real terrain. Same
             // factor/fetchPx → same cache key, so this needs NO re-fetch of already-cached tiles.
             float[] averaged = MapaTur.Application.Terrain.DemTileSupersampler.LowPassDownsample(
                 samples, this.tileSize, factor, NoDataSentinel);
+            for (int i = 0; i < averaged.Length; i++)
+            {
+                if (averaged[i] == NoDataSentinel)
+                {
+                    averaged[i] = 0f; // restore the flat-0 void marker for the repair chain
+                }
+            }
+
             raster = new DemRaster(this.tileSize, this.tileSize, bounds, averaged, NoDataSentinel);
         }
         else
@@ -159,14 +199,42 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
         }
 
         // Valid tile: persist a freshly downloaded one. The cache stores the RAW WCS bytes; any area-average
-        // above is re-applied on read, so the cache key/content stays stable.
-        if (!fromCache)
+        // above is re-applied on read, so the cache key/content stays stable. A legacy-fallback read never
+        // persists — the legacy file already IS the cache.
+        if (!fromCache && !fromLegacy)
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            await File.WriteAllBytesAsync(path, tiff, cancellationToken).ConfigureAwait(false);
+            await File.WriteAllBytesAsync(path, tiff!, cancellationToken).ConfigureAwait(false);
         }
 
         return raster;
+    }
+
+    // Decode that treats any unexpected payload (XML ServiceException, truncated body) as "no data".
+    private static Float32Grid? TryDecode(byte[]? tiff)
+    {
+        if (tiff is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return Float32GeoTiffDecoder.Decode(tiff);
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
+    }
+
+    // The pre-supersampling cache name ({y}.tif) — where the injected Slovak DMR5 tiles (and the raw
+    // pre-2026-07-10 PL z17 fetches) live. Read-only fallback; never written to.
+    private string LegacyCachePath(DemTileKey key)
+    {
+        var inv = CultureInfo.InvariantCulture;
+        return Path.Combine(
+            this.cacheDirectory, key.Zoom.ToString(inv), key.X.ToString(inv), $"{key.Y.ToString(inv)}.tif");
     }
 
     private static bool IntersectsPoland(double west, double south, double east, double north)
@@ -225,6 +293,11 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
     // Deterministic per tile (depends only on zoom), so the cache key stays stable.
     private int FetchPixelsFor(DemTileKey key)
     {
+        if (key.Zoom >= SubNativeSupersampleZoom)
+        {
+            return this.tileSize * SubNativeSupersampleFactor; // sub-native anti-weave (see the consts above)
+        }
+
         var (minX, _, maxX, _) = SlippyTileMath.Tile3857Bounds(key.X, key.Y, key.Zoom);
         int factor = MapaTur.Application.Terrain.DemTileSupersampler.SupersampleFactor(
             maxX - minX, this.tileSize, TargetMetersPerPixel, MaxSupersampleFactor);

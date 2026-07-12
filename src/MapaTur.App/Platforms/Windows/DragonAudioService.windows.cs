@@ -46,7 +46,7 @@ public sealed partial class DragonAudioService
     private float bedWingCurrent;
     private float bedGroundCurrent;
     private bool bedPlaying;
-    private const double BedWindGain = 0.5;
+    private const double BedWindGain = 0.3; // 0.5 → 0.3 (2026-07-11, user: "ścisz wiatr w smoku")
     private const double BedWingGain = 0.45;
     private const double BedGroundGain = 0.55;
 

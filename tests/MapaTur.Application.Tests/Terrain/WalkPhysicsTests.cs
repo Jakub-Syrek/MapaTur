@@ -163,6 +163,134 @@ public sealed class WalkPhysicsTests
     }
 
     [Fact]
+    public void JumpingIntoAVerticalWall_NeverPutsTheFeetBelowTheGround()
+    {
+        // "wpadam pod teksturę skacząc przy pionowych ścianach" (2026-07-11): a wall at x≥5 rises 100 m over
+        // one metre. Jump from the flat at x=4 and hold FORWARD (+X) into the wall. The airborne step must not
+        // carry the walker into the wall face — the feet must stay AT OR ABOVE the ground under them every
+        // frame (never embedded, so the eye is never under the texture).
+        static float WallGround(Vector2 p) => p.X < 5f ? 100f : 100f + (100f * (p.X - 5f));
+        var walk = new WalkPhysics(new Vector2(4f, 0f), Ground(WallGround), Params);
+        var into = new Vector2(1f, 0f); // straight at the wall
+
+        walk.Step(0.02f, into, 6f, jumpRequested: true);
+        for (int i = 0; i < 120; i++)
+        {
+            walk.Step(0.02f, into, 6f, jumpRequested: false);
+            float groundUnder = WallGround(walk.PositionXY);
+            walk.FeetElevation.Should().BeGreaterThanOrEqualTo(
+                groundUnder - 0.01f, $"frame {i}: feet must never sink below the ground (embedded in the wall)");
+        }
+    }
+
+    [Fact]
+    public void DoubleJumpingIntoAWall_StaysAboveTheGround_OnBothJumps()
+    {
+        // Double jump must work AND never embed the feet: jump, jump again mid-air, both while shoving into a
+        // 100 m wall at x≥5. The feet stay at/above the ground under them the whole flight.
+        static float WallGround(Vector2 p) => p.X < 5f ? 100f : 100f + (100f * (p.X - 5f));
+        var walk = new WalkPhysics(new Vector2(4f, 0f), Ground(WallGround), Params);
+        var into = new Vector2(1f, 0f);
+
+        walk.Step(0.02f, into, 6f, jumpRequested: true); // first jump
+        for (int i = 0; i < 8; i++)
+        {
+            walk.Step(0.02f, into, 6f, jumpRequested: false);
+        }
+
+        walk.Step(0.02f, into, 6f, jumpRequested: true); // SECOND (double) jump, mid-air
+        for (int i = 0; i < 120; i++)
+        {
+            walk.Step(0.02f, into, 6f, jumpRequested: false);
+            walk.FeetElevation.Should().BeGreaterThanOrEqualTo(
+                WallGround(walk.PositionXY) - 0.01f, $"frame {i}: feet never sink into the wall, double jump or not");
+        }
+    }
+
+    [Fact]
+    public void JumpingOntoALedgeWithinReach_StillLandsOnTop()
+    {
+        // The jump must still clear a step too steep to walk: a 1 m ledge at x≥3. Jump forward and land ON it,
+        // not get blocked at its foot — the wall guard only refuses ground ABOVE the feet, not a reachable lip.
+        static float LedgeGround(Vector2 p) => p.X < 3f ? 100f : 101f;
+        var walk = new WalkPhysics(new Vector2(2f, 0f), Ground(LedgeGround), Params);
+        var fwd = new Vector2(1f, 0f);
+
+        walk.Step(0.02f, fwd, 3f, jumpRequested: true);
+        bool onLedge = false;
+        for (int i = 0; i < 200 && !onLedge; i++)
+        {
+            walk.Step(0.02f, fwd, 3f, jumpRequested: false);
+            onLedge = walk.IsGrounded && walk.PositionXY.X >= 3f && walk.FeetElevation >= 100.9f;
+        }
+
+        onLedge.Should().BeTrue("a jump within reach still carries the walker onto the higher ledge");
+    }
+
+    [Fact]
+    public void HoldingBothCiupagas_WithForwardInput_ClimbsUpTheSteepWall()
+    {
+        // The two-ciupaga climb (2026-07-11): a ≈63° face along +X (grade 2.0). Hold the axes (hangHeld) and
+        // push FORWARD (+X, uphill) — the walker must ASCEND the face, gaining real elevation, overriding the
+        // walk-slope gate that would refuse to walk up it.
+        var walk = new WalkPhysics(new Vector2(1f, 0f), Ground(p => 2.0f * MathF.Max(0f, p.X)), Params);
+        float startElev = walk.FeetElevation;
+        var up = new Vector2(1f, 0f);
+
+        for (int i = 0; i < 60; i++)
+        {
+            walk.Step(0.02f, up, 2.5f, jumpRequested: false, hangHeld: true);
+        }
+
+        walk.IsClimbing.Should().BeTrue("holding the axes and pushing into the face is a climb");
+        walk.FeetElevation.Should().BeGreaterThan(startElev + 1.5f, "the climb hauls the walker UP the wall");
+        walk.IsGrounded.Should().BeFalse("on the face, hanging on the axes, not standing");
+    }
+
+    [Fact]
+    public void ClimbingSideways_IsSlowerThanClimbingUp()
+    {
+        // Isonzo feel: traversing the face is slower than ascending it. On a wall that rises along +X (fall
+        // line = +X), pushing +X (straight up) covers more ground per second than pushing +Y (pure contour).
+        static float Wall(Vector2 p) => 2.0f * MathF.Max(0f, p.X);
+        var up = new WalkPhysics(new Vector2(1f, 0f), Ground(Wall), Params);
+        var side = new WalkPhysics(new Vector2(1f, 0f), Ground(Wall), Params);
+
+        for (int i = 0; i < 25; i++)
+        {
+            up.Step(0.02f, new Vector2(1f, 0f), 2.5f, jumpRequested: false, hangHeld: true);   // up the fall line
+            side.Step(0.02f, new Vector2(0f, 1f), 2.5f, jumpRequested: false, hangHeld: true); // along the contour
+        }
+
+        float upDist = up.PositionXY.X - 1f;               // advanced up the fall line
+        float sideDist = MathF.Abs(side.PositionXY.Y);     // advanced along the contour
+        sideDist.Should().BeLessThan(upDist * 0.7f, "sideways traversal is throttled below the ascent rate");
+        sideDist.Should().BeGreaterThan(0.05f, "but you still shuffle sideways");
+    }
+
+    [Fact]
+    public void HoldingBothCiupagas_WithNoInput_HangsInsteadOfClimbing()
+    {
+        // Holding the axes on a steep face with NO move wish is the self-arrest hang — no drift, no climb.
+        var walk = new WalkPhysics(new Vector2(5f, 0f), Ground(p => 1.5f * p.X), Params);
+        walk.Step(0.02f, Vector2.Zero, 0f, jumpRequested: true); // leave the ground onto the face
+        for (int i = 0; i < 5; i++)
+        {
+            walk.Step(0.02f, Vector2.Zero, 0f, jumpRequested: false, hangHeld: true);
+        }
+
+        float held = walk.FeetElevation;
+        for (int i = 0; i < 30; i++)
+        {
+            walk.Step(0.02f, Vector2.Zero, 0f, jumpRequested: false, hangHeld: true);
+        }
+
+        walk.IsHanging.Should().BeTrue("axes planted, no input → hang");
+        walk.IsClimbing.Should().BeFalse("no move wish → not climbing");
+        walk.FeetElevation.Should().BeApproximately(held, 0.02f, "a hang holds position");
+    }
+
+    [Fact]
     public void HoldingCiupagaAgainstSteepRock_ArrestsTheFall()
     {
         // A grade-1.5 face (≈56°) along +X: steep enough to plant into. Jump off it, then hold the ciupaga (hang)
