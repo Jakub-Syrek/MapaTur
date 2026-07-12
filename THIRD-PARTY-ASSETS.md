@@ -28,6 +28,27 @@ the F7 flight plays the `flying` loop through `SkinnedModel.Pose`. Base colour c
 - Note: the GLB is ~35 MB (embedded textures + three clips) — fine for the desktop build; revisit
   (decimate/re-encode textures) before bundling into the mobile package.
 
+### `src/MapaTur.App/Resources/Raw/hiker.glb` — 3rd-person walk-mode avatar (F8)
+
+A rigged, textured low-poly humanoid — KayKit "Character Pack: Adventurers", the `Rogue_Hooded` character —
+used as the 3rd-person avatar in walk mode. 12 meshes, a single skin (~54-node rig), and 76 baked animation
+clips (`Idle`, `Walking_A/B/C`, `Running_A/B`, `Jump_Start/Idle/Land`, dodges, and more). Loaded and
+CPU-skinned at runtime via `SkinnedModel` (SharpGLTF), exactly like the dragon. ~3.6 MB (single base-colour
+atlas texture) — a normal repo blob (Resources/Raw is not Git LFS; LFS is scoped to `data/**`).
+
+- **License:** CC0 1.0 Universal (public domain) — no attribution required; credited here as courtesy.
+- **Source / author:** Kay Lousberg — <https://kaylousberg.itch.io/kaykit-adventurers>
+  (mirror: <https://github.com/KayKit-Game-Assets/KayKit-Character-Pack-Adventures-1.0>, CC0 `LICENSE.txt`).
+
+### `src/MapaTur.App/Resources/Raw/arrow.glb` — crossbow bolt (walk-mode F)
+
+The KayKit "Adventurers" `arrow` prop — a static, unskinned mesh with the shared gradient atlas texture —
+repacked from the pack's `arrow.gltf` + `arrow.bin` into a self-contained GLB. Fired as a ballistic projectile
+when the walk-mode avatar shoots (F), and drawn through the same CPU-skinned GL path as the character.
+
+- **License:** CC0 1.0 Universal (public domain) — no attribution required; credited here as courtesy.
+- **Source / author:** Kay Lousberg — <https://kaylousberg.itch.io/kaykit-adventurers>.
+
 ## Sound effects
 
 ### `src/MapaTur.App/Resources/Raw/dragon-audio/*.mp3` — dragon voice + wings (F7 flight, desktop)
