@@ -73,22 +73,125 @@ public sealed class BakedTileStreamingManagerTests
         Func<DemTileKey, BakedDemTile?>? loader = null,
         int maxResidentTiles = 256,
         int maxConcurrentLoads = 8,
-        long maxResidentBytes = long.MaxValue)
+        long maxResidentBytes = long.MaxValue,
+        int maxZoom = MaxZoom,
+        IReadOnlyDictionary<int, double>? ringRadiusOverrideMeters = null,
+        int surfaceOwnershipMinZoom = -1,
+        int fastMotionSuppressMinZoom = int.MaxValue)
         => new(
             new[] { RootTile() },
             isBaked,
             loader ?? FakeTile,
             Anchor,
             MinZoom,
-            MaxZoom,
+            maxZoom,
             maxResidentTiles,
             maxConcurrentLoads,
             maxErrorPixels: 2.5,
             skirtDepthMeters: _ => 8f,
-            maxResidentBytes: maxResidentBytes);
+            maxResidentBytes: maxResidentBytes,
+            ringRadiusOverrideMeters: ringRadiusOverrideMeters,
+            surfaceOwnershipMinZoom: surfaceOwnershipMinZoom,
+            fastMotionSuppressMinZoom: fastMotionSuppressMinZoom);
 
     private static BakedStreamingUpdate Update(BakedTileStreamingManager mgr, Camera3D camera)
         => mgr.UpdateAsync(camera, aspectRatio: 16f / 9f, viewportHeightPixels: 1080).GetAwaiter().GetResult();
+
+    [Fact]
+    public void MaxZoom17_WithoutAnyZ17Baked_StillReportsZ16SurfaceOwnershipRects()
+    {
+        // Faza A regression guard (checklist §0 sibling-path class): raising the finest zoom to 17 BEFORE any
+        // z17 tile is baked must NOT empty the surface-ownership rects — they drive the base-skin discard
+        // mask, and an empty mask lets the box-averaged base depth-bury the z16 detail again ("lotnisko obok
+        // ostrej grani"). Ownership is the 1 m CLASS (zoom ≥ 16), not the single finest level.
+        var mgr = NewManager(
+            isBaked: k => k.Zoom <= 16, maxZoom: 17, surfaceOwnershipMinZoom: 16);
+
+        Update(mgr, CameraAbove(RootTile(), 300f));
+
+        mgr.HoleFreeFinestWorldRects().Should().NotBeEmpty(
+            "resident hole-free z16 tiles still own their pixels while z17 coverage does not exist yet");
+    }
+
+    [Fact]
+    public void RingRadiusOverride_PlumbsThroughToTheSelection()
+    {
+        // With maxZoom 17 fully baked and the z17 ring overridden small, the resident set must hold z17 only
+        // near the focus and z16 beyond — if the override were dropped on the way to the selector, the legacy
+        // 2.5 km finest ring would make z17 blanket the whole root.
+        var mgr = NewManager(
+            AllBaked,
+            maxZoom: 17,
+            ringRadiusOverrideMeters: new Dictionary<int, double> { [17] = 400.0 },
+            maxResidentTiles: 4096);
+        Camera3D camera = CameraAbove(RootTile(), 300f);
+
+        for (int i = 0; i < 60 && Update(mgr, camera).Loaded > 0; i++)
+        {
+        }
+
+        Vector3 focusWorld = TileWorldCentre(RootTile());
+        var focus = new Vector2(focusWorld.X, focusWorld.Y);
+        IReadOnlyList<DemTileKey> resident = mgr.OccludingKeys;
+        resident.Should().Contain(k => k.Zoom == 17, "the focus sits inside the overridden z17 ring");
+        List<DemTileKey> z17BeyondRing = resident
+            .Where(k => k.Zoom == 17)
+            .Where(k =>
+            {
+                Vector3 c = TileWorldCentre(k);
+                double dx = c.X - focus.X;
+                double dy = c.Y - focus.Y;
+                return Math.Sqrt((dx * dx) + (dy * dy)) > 400.0 + 300.0;
+            })
+            .ToList();
+        z17BeyondRing.Should().BeEmpty("z17 must stay inside its overridden ring instead of blanketing the root");
+        resident.Should().Contain(k => k.Zoom == 16, "beyond the z17 ring the z16 ring is still in force");
+    }
+
+    // A top-down camera whose eye/target ground sits at an arbitrary world XY (for motion-gate tests).
+    private static Camera3D CameraAtXY(Vector2 xy, float heightMeters) => new()
+    {
+        Target = new Vector3(xy.X, xy.Y, GroundElevation),
+        Distance = heightMeters,
+        PitchRadians = MathF.PI / 2f,
+        AzimuthRadians = 0f,
+        FieldOfViewYRadians = MathF.PI / 4f,
+        NearPlane = 1f,
+        FarPlane = 5_000_000f,
+    };
+
+    [Fact]
+    public void FastMotion_SuppressesVirtualZooms_UntilTheEyeSettles()
+    {
+        // The dragon-flight churn: at speed, every update synthesised/uploaded/evicted a band of virtual
+        // tiles the camera immediately outran. Fast eye movement must cap the selection below the virtual
+        // levels and keep it capped for a few updates (hysteresis), then let them return when the eye rests.
+        var mgr = NewManager(
+            AllBaked,
+            maxZoom: 18,
+            ringRadiusOverrideMeters: new Dictionary<int, double> { [17] = 700.0, [18] = 400.0 },
+            maxResidentTiles: 4096,
+            fastMotionSuppressMinZoom: 18);
+        Vector3 c = TileWorldCentre(RootTile());
+        var home = new Vector2(c.X, c.Y);
+        var away = new Vector2(c.X + 300f, c.Y);
+
+        Update(mgr, CameraAtXY(home, 300f)).LoadedKeys.Should().Contain(
+            k => k.Zoom == 18, "a resting camera loads the virtual ring around the eye");
+
+        BakedStreamingUpdate moved = Update(mgr, CameraAtXY(away, 300f));
+        moved.LoadedKeys.Should().NotContain(k => k.Zoom >= 18, "a 300 m jump is fast motion — no virtual tiles");
+        Update(mgr, CameraAtXY(away, 300f)).LoadedKeys.Should().NotContain(
+            k => k.Zoom >= 18, "hysteresis holds right after the motion stops");
+
+        bool returned = false;
+        for (int i = 0; i < 12 && !returned; i++)
+        {
+            returned = Update(mgr, CameraAtXY(away, 300f)).LoadedKeys.Any(k => k.Zoom >= 18);
+        }
+
+        returned.Should().BeTrue("once the eye settles, the hysteresis drains and the virtual ring returns");
+    }
 
     [Fact]
     public void FirstUpdate_LoadsTilesAndMakesThemResident()

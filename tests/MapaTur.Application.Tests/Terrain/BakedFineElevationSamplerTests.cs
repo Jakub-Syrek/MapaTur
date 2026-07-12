@@ -83,6 +83,67 @@ public sealed class BakedFineElevationSamplerTests
     }
 
     [Fact]
+    public void should_fall_back_to_the_parent_zoom_where_the_finest_is_not_baked()
+    {
+        // Faza A (sub-1m plan): the finest zoom becomes 17 BEFORE any z17 tile is baked. Without a parent
+        // fallback the camera floor / walk ground would lose the whole z16 surface until the bake lands.
+        var sampler = new BakedFineElevationSampler(
+            k => k.Zoom == 16, k => k.Zoom == 16 ? FlatTile(k, 1800f) : null, zoom: 17, fallbackMinZoom: 16);
+
+        sampler.Sample(Lon, Lat).Should().BeApproximately(1800.0, 0.01);
+    }
+
+    [Fact]
+    public void should_prefer_the_finest_baked_zoom_over_its_parent()
+    {
+        var sampler = new BakedFineElevationSampler(
+            _ => true, k => FlatTile(k, k.Zoom == 17 ? 2200f : 1000f), zoom: 17, fallbackMinZoom: 16);
+
+        sampler.Sample(Lon, Lat).Should().BeApproximately(2200.0, 0.01);
+    }
+
+    [Fact]
+    public void should_cache_absence_per_zoom_when_falling_back()
+    {
+        // The fallback probe pattern must stay O(1) per zoom level over a tile's lifetime, not per frame.
+        int probes = 0;
+        var sampler = new BakedFineElevationSampler(
+            _ =>
+            {
+                probes++;
+                return false;
+            },
+            k => FlatTile(k, 1500f),
+            zoom: 17,
+            fallbackMinZoom: 16);
+
+        for (int i = 0; i < 50; i++)
+        {
+            sampler.Sample(Lon, Lat);
+        }
+
+        probes.Should().Be(2, "one availability probe per zoom level (17 and 16), then both absences are cached");
+    }
+
+    [Fact]
+    public void should_retry_a_null_load_while_the_tile_is_marked_baked()
+    {
+        // With the non-blocking warming loader a null means "warming in the background" — the sampler must
+        // retry on the next probe instead of pinning the null (which froze the fine level out until FIFO
+        // eviction and dropped walk feet to the coarse fallback permanently while standing still).
+        int loads = 0;
+        var sampler = new BakedFineElevationSampler(
+            _ => true,
+            k => ++loads >= 3 ? FlatTile(k, 2100f) : null,
+            Zoom);
+
+        sampler.Sample(Lon, Lat).Should().BeNull("the tile is still warming");
+        sampler.Sample(Lon, Lat).Should().BeNull("still warming");
+        sampler.Sample(Lon, Lat).Should().BeApproximately(2100.0, 0.01, "the warm completed — value flows in");
+        loads.Should().Be(3);
+    }
+
+    [Fact]
     public void should_cache_the_absence_of_a_tile_too()
     {
         // A camera hovering off-coverage must not hammer the disk retrying the same missing tile every frame.

@@ -67,6 +67,17 @@ public sealed class BakedTileStreamingManager
     private readonly TerrainMeshOptions? meshOptions;
     private readonly OrthoCoverage? orthoCoverage;
     private readonly int orthoTileIndexOffset;
+    private readonly IReadOnlyDictionary<int, double>? ringRadiusOverrideMeters;
+    private readonly int surfaceOwnershipMinZoom;
+    private readonly int eyeAnchoredRingMinZoom;
+    private readonly int fastMotionSuppressMinZoom;
+    private readonly double fastMotionMoveMetersPerUpdate;
+
+    // Fast-motion gate state: last update's eye XY and the remaining hysteresis updates during which the
+    // virtual levels stay suppressed after fast motion stops (prevents flapping at the speed threshold).
+    private Vector2? fastMotionLastEyeXY;
+    private int fastMotionSuppressUpdates;
+    private const int FastMotionRecoveryUpdates = 8;
 
     // Resident tiles keyed by slippy address, plus the near→far order from the last selection (so eviction
     // releases the far field first — TileResidencyPlanner takes the resident order and reverses it). Each key maps
@@ -122,6 +133,23 @@ public sealed class BakedTileStreamingManager
     /// (<see cref="TerrainMesh3D.EstimatedGpuBytes"/>). Capped by BOTH this and <paramref name="maxResidentTiles"/>:
     /// eviction (farthest-first) runs while resident is over EITHER limit. Defaults to effectively unbounded so the
     /// count cap stays binding unless a caller opts in. ≥ 1.</param>
+    /// <param name="ringRadiusOverrideMeters">Per-zoom explicit ring radii passed straight to
+    /// <see cref="QuadtreeTileSelectorOptions.RingRadiusOverrideMeters"/> — the finer-than-z16 levels need far
+    /// smaller rings than the legacy geometric sequence. Null = legacy radii.</param>
+    /// <param name="surfaceOwnershipMinZoom">Coarsest zoom whose hole-free resident tiles count as OWNING the
+    /// surface for <see cref="HoleFreeFinestWorldRects"/> (the base-skin discard mask). Default −1 =
+    /// <paramref name="maxZoom"/> (legacy). With maxZoom 17 this must stay 16: the z16 tiles keep owning their
+    /// pixels wherever z17 coverage is absent, or the box-averaged base buries the detail again.</param>
+    /// <param name="eyeAnchoredRingMinZoom">Forwarded to
+    /// <see cref="QuadtreeTileSelectorOptions.EyeAnchoredRingMinZoom"/> — zooms at/above it ring around the
+    /// EYE's ground point only. Default = legacy two-foci metric for every zoom.</param>
+    /// <param name="fastMotionSuppressMinZoom">Zooms at/above this level are DROPPED from the selection while
+    /// the eye moves fast (more than <paramref name="fastMotionMoveMetersPerUpdate"/> between updates), and
+    /// for a few updates after (hysteresis) — a dragon at 105 m/s crosses a virtual z19 tile every half
+    /// second, so keeping the level resident is pure synthesise-upload-evict churn the FPS pays for. Default
+    /// = never suppress.</param>
+    /// <param name="fastMotionMoveMetersPerUpdate">Eye movement between consecutive updates that counts as
+    /// fast motion. Default 25 m (~a brisk dragon; walking never trips it).</param>
     /// <exception cref="ArgumentNullException">A required reference argument is null.</exception>
     /// <exception cref="ArgumentException">The zoom range is invalid.</exception>
     /// <exception cref="ArgumentOutOfRangeException">A budget is below its minimum.</exception>
@@ -139,7 +167,12 @@ public sealed class BakedTileStreamingManager
         TerrainMeshOptions? meshOptions = null,
         OrthoCoverage? orthoCoverage = null,
         int orthoTileIndexOffset = 0,
-        long maxResidentBytes = DefaultMaxResidentBytes)
+        long maxResidentBytes = DefaultMaxResidentBytes,
+        IReadOnlyDictionary<int, double>? ringRadiusOverrideMeters = null,
+        int surfaceOwnershipMinZoom = -1,
+        int eyeAnchoredRingMinZoom = int.MaxValue,
+        int fastMotionSuppressMinZoom = int.MaxValue,
+        double fastMotionMoveMetersPerUpdate = 25.0)
     {
         ArgumentNullException.ThrowIfNull(roots);
         ArgumentNullException.ThrowIfNull(isBaked);
@@ -168,6 +201,11 @@ public sealed class BakedTileStreamingManager
         this.meshOptions = meshOptions;
         this.orthoCoverage = orthoCoverage;
         this.orthoTileIndexOffset = orthoTileIndexOffset;
+        this.ringRadiusOverrideMeters = ringRadiusOverrideMeters;
+        this.surfaceOwnershipMinZoom = surfaceOwnershipMinZoom < 0 ? maxZoom : surfaceOwnershipMinZoom;
+        this.eyeAnchoredRingMinZoom = eyeAnchoredRingMinZoom;
+        this.fastMotionSuppressMinZoom = fastMotionSuppressMinZoom;
+        this.fastMotionMoveMetersPerUpdate = fastMotionMoveMetersPerUpdate;
     }
 
     /// <summary>Tiles currently resident (loaded + meshed).</summary>
@@ -180,15 +218,17 @@ public sealed class BakedTileStreamingManager
     /// </summary>
     /// <summary>
     /// World-XY AABBs (mesh world frame — the manager's projection anchor) of the resident, HOLE-FREE tiles
-    /// at the FINEST zoom. Input for <see cref="BaseCoverageMaskBuilder"/>: where these rects fully surround
-    /// the ground, the base skin may be discarded — the streamed 1 m surface owns those pixels.
+    /// at the SURFACE-OWNING zooms (<c>surfaceOwnershipMinZoom</c> and finer — the 1 m class, not just the
+    /// single finest level: with maxZoom 17 the z16 tiles keep owning their pixels wherever z17 is absent).
+    /// Input for <see cref="BaseCoverageMaskBuilder"/>: where these rects fully surround the ground, the base
+    /// skin may be discarded — the streamed fine surface owns those pixels.
     /// </summary>
     public IReadOnlyList<(Vector2 Min, Vector2 Max)> HoleFreeFinestWorldRects()
     {
         var rects = new List<(Vector2 Min, Vector2 Max)>();
         foreach (DemTileKey key in this.residentOrder)
         {
-            if (key.Zoom != this.maxZoom
+            if (key.Zoom < this.surfaceOwnershipMinZoom
                 || !this.holeFreeByKey.TryGetValue(key, out bool holeFree)
                 || !holeFree)
             {
@@ -265,6 +305,32 @@ public sealed class BakedTileStreamingManager
         ArgumentNullException.ThrowIfNull(camera);
 
         float groundElevation = camera.Target.Z; // the look-at height is a good ground proxy for distance/frustum
+
+        // Fast-motion gate: while the eye covers big ground between updates (dragon flight), the virtual
+        // near-field levels are pure synthesise-upload-evict churn — cap the selection below them, and keep
+        // it capped for a few updates after the motion stops so the threshold never flaps.
+        int effectiveMaxZoom = this.maxZoom;
+        if (this.fastMotionSuppressMinZoom <= this.maxZoom)
+        {
+            Vector3 eye = camera.Position;
+            var eyeXY = new Vector2(eye.X, eye.Y);
+            if (this.fastMotionLastEyeXY is { } previous
+                && Vector2.Distance(previous, eyeXY) > this.fastMotionMoveMetersPerUpdate)
+            {
+                this.fastMotionSuppressUpdates = FastMotionRecoveryUpdates;
+            }
+            else if (this.fastMotionSuppressUpdates > 0)
+            {
+                this.fastMotionSuppressUpdates--;
+            }
+
+            this.fastMotionLastEyeXY = eyeXY;
+            if (this.fastMotionSuppressUpdates > 0)
+            {
+                effectiveMaxZoom = Math.Min(this.maxZoom, this.fastMotionSuppressMinZoom - 1);
+            }
+        }
+
         var options = new QuadtreeTileSelectorOptions
         {
             Camera = camera,
@@ -273,12 +339,14 @@ public sealed class BakedTileStreamingManager
             GroundElevationMeters = groundElevation,
             VerticalExaggeration = this.meshOptions?.VerticalExaggeration ?? 1f,
             MinZoom = this.minZoom,
-            MaxZoom = this.maxZoom,
+            MaxZoom = effectiveMaxZoom,
             AspectRatio = aspectRatio,
             ViewportHeightPixels = Math.Max(1.0, viewportHeightPixels),
             MaxErrorPixels = this.maxErrorPixels,
             MaxResidentTiles = this.maxResidentTiles,
             IsBaked = this.isBaked,
+            RingRadiusOverrideMeters = this.ringRadiusOverrideMeters,
+            EyeAnchoredRingMinZoom = this.eyeAnchoredRingMinZoom,
         };
 
         QuadtreeTileSelection selection = QuadtreeTileSelector.Select(options);

@@ -82,6 +82,24 @@ public sealed record QuadtreeTileSelectorOptions
     /// finest ring the bands are ≈2.5 km (z16), ≈6 km (z15), ≈14.4 km (z14), beyond → <see cref="MinZoom"/>.</summary>
     public double RingRadiusGrowth { get; init; } = DefaultRingRadiusGrowth;
 
+    /// <summary>Explicit ring radius (metres, pre-height-scaling) per ZOOM, overriding the geometric
+    /// <see cref="FinestRingRadiusMeters"/>×<see cref="RingRadiusGrowth"/> sequence for the zooms present.
+    /// The finer-than-z16 levels (the z17 pyramid of the sub-1 m plan) need FAR smaller rings than the legacy
+    /// sequence would assign the finest level (a 2.5 km z17 ring ≈ 500 tiles ×2 foci — a budget blowout).
+    /// Zooms absent from the map keep the legacy sequence, which starts at the finest zoom WITHOUT an
+    /// override — so adding <c>{17: 700}</c> leaves z16 at exactly <see cref="FinestRingRadiusMeters"/>, as
+    /// when it was the finest level itself. Coarser rings are clamped to at least the next finer ring's
+    /// radius (rings only grow outward). Null or empty = pure legacy behaviour.</summary>
+    public IReadOnlyDictionary<int, double>? RingRadiusOverrideMeters { get; init; }
+
+    /// <summary>Zooms at/above this level anchor their rings to the EYE's ground point ONLY (plain
+    /// horizontal distance — no look-at focus, no eye-bubble stretch). The virtual near-field levels
+    /// (z18/z19) exist for the ground around the CAMERA (walk mode, low flight); anchoring them to the far
+    /// look-at point as well made the look-at's drift thrash dozens of synthesised tiles per second while
+    /// the camera stood still (the 2026-07-11 FPS collapse — log: 24 in + 24 out every second, z18/z19).
+    /// <see cref="int.MaxValue"/> (default) = every zoom uses the legacy two-foci metric.</summary>
+    public int EyeAnchoredRingMinZoom { get; init; } = int.MaxValue;
+
     /// <summary>Camera height (metres above the ground plane) at or below which the rings are at their full
     /// <see cref="FinestRingRadiusMeters"/>. Above it the radii shrink in inverse proportion to height.</summary>
     public double ReferenceHeightMeters { get; init; } = DefaultReferenceHeightMeters;
@@ -232,11 +250,30 @@ public static class QuadtreeTileSelector
         double scale = HeightScale(options, cameraHeight);
         double growth = Math.Max(1.0, options.RingRadiusGrowth);
         var radii = new double[levels];
-        double radius = Math.Max(0.0, options.FinestRingRadiusMeters) * scale;
+
+        // The legacy geometric sequence starts at the finest zoom WITHOUT an override — so overriding only
+        // the new finer levels (z17) leaves every pre-existing ring (z16 downward) byte-identical to before.
+        double legacy = Math.Max(0.0, options.FinestRingRadiusMeters);
+        double previous = 0.0;
         for (int i = 0; i < levels; i++)
         {
+            int zoom = options.MaxZoom - i;
+            double baseRadius;
+            if (options.RingRadiusOverrideMeters is { } overrides && overrides.TryGetValue(zoom, out double explicitRadius))
+            {
+                baseRadius = Math.Max(0.0, explicitRadius);
+            }
+            else
+            {
+                baseRadius = legacy;
+                legacy *= growth;
+            }
+
+            // Monotonic clamp: a coarser ring is never smaller than the next finer one (an inverted order
+            // would punch a coarse donut inside a fine ring).
+            double radius = Math.Max(baseRadius * scale, previous);
+            previous = radius;
             radii[i] = radius;
-            radius *= growth;
         }
 
         return radii;
@@ -293,7 +330,11 @@ public static class QuadtreeTileSelector
             return false;
         }
 
-        double distance = GroundDistance(tile, options, foci);
+        // Eye-anchored fine rings: the virtual near-field levels follow the CAMERA's ground point only —
+        // the far look-at focus neither creates nor thrashes them (see EyeAnchoredRingMinZoom).
+        double distance = childZoom >= options.EyeAnchoredRingMinZoom
+            ? HorizontalDistance(TileWorldCenter(tile, options), foci.Eye)
+            : GroundDistance(tile, options, foci);
         return distance <= ringRadii[index];
     }
 

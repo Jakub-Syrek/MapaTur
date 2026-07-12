@@ -16,6 +16,7 @@ public sealed class BakedFineElevationSampler
     private readonly Func<DemTileKey, bool> isBaked;
     private readonly Func<DemTileKey, BakedDemTile?> loadTile;
     private readonly int zoom;
+    private readonly int minZoom;
     private readonly int cacheCapacity;
     private readonly Dictionary<DemTileKey, DemRaster?> cache = new();
     private readonly Queue<DemTileKey> cacheOrder = new();
@@ -27,50 +28,77 @@ public sealed class BakedFineElevationSampler
     /// <param name="loadTile">Loads one baked tile by key; null for absent/corrupt.</param>
     /// <param name="zoom">The zoom level to sample (the finest baked level).</param>
     /// <param name="cacheCapacity">Rasters kept resident (FIFO). A handful covers the probe cluster.</param>
+    /// <param name="fallbackMinZoom">Coarsest zoom to FALL BACK to when finer levels have no baked tile (or
+    /// NoData) at the point. Default −1 = no fallback (sample <paramref name="zoom"/> only — the pre-z17
+    /// behaviour). With the finest level raised to z17 the pyramid is z17-sparse for a long time (partial
+    /// bakes, the whole pre-bake window), and without the fallback the camera floor / walk ground would lose
+    /// the entire z16 surface wherever z17 is absent.</param>
     public BakedFineElevationSampler(
         Func<DemTileKey, bool> isBaked,
         Func<DemTileKey, BakedDemTile?> loadTile,
         int zoom,
-        int cacheCapacity = 8)
+        int cacheCapacity = 8,
+        int fallbackMinZoom = -1)
     {
         ArgumentNullException.ThrowIfNull(isBaked);
         ArgumentNullException.ThrowIfNull(loadTile);
         ArgumentOutOfRangeException.ThrowIfLessThan(cacheCapacity, 1);
+        int resolvedMinZoom = fallbackMinZoom < 0 ? zoom : fallbackMinZoom;
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(resolvedMinZoom, zoom, nameof(fallbackMinZoom));
         this.isBaked = isBaked;
         this.loadTile = loadTile;
         this.zoom = zoom;
+        this.minZoom = resolvedMinZoom;
         this.cacheCapacity = cacheCapacity;
     }
 
     /// <summary>
-    /// The baked surface elevation (metres) at the point, or null when no baked tile covers it (caller
-    /// falls back to the coarse raster) or the covering tile has NoData there.
+    /// The baked surface elevation (metres) at the point from the FINEST level that covers it — levels are
+    /// probed from the configured finest zoom down to the fallback floor, so a point outside partial fine
+    /// coverage still reads the coarser baked surface. Null when no probed level has a valid sample there
+    /// (caller falls back to the coarse raster).
     /// </summary>
     /// <param name="longitude">WGS-84 longitude.</param>
     /// <param name="latitude">WGS-84 latitude.</param>
     public double? Sample(double longitude, double latitude)
     {
-        (int x, int y) = SlippyTileMath.LonLatToTile(longitude, latitude, this.zoom);
-        var key = new DemTileKey(this.zoom, x, y);
-
-        if (!this.cache.TryGetValue(key, out DemRaster? raster))
+        for (int z = this.zoom; z >= this.minZoom; z--)
         {
-            BakedDemTile? tile = this.isBaked(key) ? this.loadTile(key) : null;
-            raster = tile is not null ? BakedTileMeshBuilder.AsRaster(tile) : null;
-            this.cache[key] = raster; // absent cached as null — no per-frame disk retry off-coverage
-            this.cacheOrder.Enqueue(key);
-            if (this.cacheOrder.Count > this.cacheCapacity)
+            (int x, int y) = SlippyTileMath.LonLatToTile(longitude, latitude, z);
+            var key = new DemTileKey(z, x, y);
+
+            if (!this.cache.TryGetValue(key, out DemRaster? raster))
             {
-                this.cache.Remove(this.cacheOrder.Dequeue());
+                bool available = this.isBaked(key);
+                BakedDemTile? tile = available ? this.loadTile(key) : null;
+                raster = tile is not null ? BakedTileMeshBuilder.AsRaster(tile) : null;
+                // Cache the result — EXCEPT an "available but load returned null" miss: with a non-blocking
+                // warming loader (AsyncWarmingTileLoader) that null means "warming in the background", and
+                // pinning it would freeze this level out until FIFO eviction. Retrying costs a dictionary
+                // hit per probe, and the truly-absent case (isBaked false) still caches as null.
+                if (!available || raster is not null)
+                {
+                    this.cache[key] = raster; // absent cached as null — no per-frame disk retry off-coverage
+                    this.cacheOrder.Enqueue(key);
+                    if (this.cacheOrder.Count > this.cacheCapacity)
+                    {
+                        this.cache.Remove(this.cacheOrder.Dequeue());
+                    }
+                }
+            }
+
+            if (raster is null)
+            {
+                continue;
+            }
+
+            double elevation = raster.SampleBilinear(longitude, latitude);
+            if (elevation > raster.NoDataValue)
+            {
+                return elevation;
             }
         }
 
-        if (raster is null)
-        {
-            return null;
-        }
-
-        double elevation = raster.SampleBilinear(longitude, latitude);
-        return elevation > raster.NoDataValue ? elevation : null;
+        return null;
     }
 }
