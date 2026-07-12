@@ -3901,6 +3901,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         GpuBegin(gl, GpuPass.Dragons); // 4 CPU-skinned models + fire — was the UNTIMED gap between passes
         DrawDragon(gl, mvp);
         DrawAiDragons(gl, mvp); // autonomous flock, same depth-tested scene
+        DrawHumanoid(gl, mvp); // 3rd-person walk-mode avatar (mutually exclusive with the dragon)
+        DrawArrows(gl, mvp); // crossbow bolts in flight
         // Soft particles (B1): resolve the scene depth NOW — terrain AND both dragons are in, so the fire
         // fades into rock and dragon bellies instead of a hard sprite cut. The x-ray line gate below reuses
         // this same resolve (fire writes no depth, so it stays valid).
@@ -6616,6 +6618,49 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         dragonVisible = visible;
     }
 
+    private MapaTur.Application.Terrain.SkinnedModel? humanoidModel;
+    private Matrix4x4 humanoidWorld = Matrix4x4.Identity;
+    private Matrix4x4 humanoidNormalRot = Matrix4x4.Identity;
+    private Vector3 humanoidLightDir = Vector3.Normalize(new Vector3(0.4f, 0.4f, 1f));
+    private bool humanoidVisible;
+
+    /// <summary>Sets the 3rd-person walk-mode avatar drawn this frame: the already-posed CPU-skinned humanoid, its
+    /// model→world matrix, the rotation-only matrix for normals, and the world light direction. Reuses the dragon
+    /// shader program, VAO and upload path (walk and dragon flight are mutually exclusive). <paramref name="visible"/>
+    /// false hides it.</summary>
+    public void SetHumanoid(
+        MapaTur.Application.Terrain.SkinnedModel? model, Matrix4x4 world, Matrix4x4 normalRotation, Vector3 lightDir, bool visible)
+    {
+        humanoidModel = model;
+        humanoidWorld = world;
+        humanoidNormalRot = normalRotation;
+        if (lightDir.LengthSquared() > 1e-6f)
+        {
+            humanoidLightDir = Vector3.Normalize(lightDir);
+        }
+
+        humanoidVisible = visible;
+    }
+
+    private MapaTur.Application.Terrain.SkinnedModel? arrowModel;
+    private IReadOnlyList<Matrix4x4>? arrowWorlds;
+    private IReadOnlyList<Matrix4x4>? arrowNormals;
+    private Vector3 arrowLightDir = Vector3.Normalize(new Vector3(0.4f, 0.4f, 1f));
+
+    /// <summary>Sets the crossbow arrows drawn this frame: one static (already-posed) arrow model reused for every
+    /// live bolt, with a per-arrow model→world matrix and rotation-only normal matrix. Null/empty hides them.</summary>
+    public void SetArrows(
+        MapaTur.Application.Terrain.SkinnedModel? model, IReadOnlyList<Matrix4x4>? worlds, IReadOnlyList<Matrix4x4>? normals, Vector3 lightDir)
+    {
+        arrowModel = model;
+        arrowWorlds = worlds;
+        arrowNormals = normals;
+        if (lightDir.LengthSquared() > 1e-6f)
+        {
+            arrowLightDir = Vector3.Normalize(lightDir);
+        }
+    }
+
     private void EnsureDragonProgram(GL g)
     {
         if (dragonProgram != 0 && g.IsProgram(dragonProgram))
@@ -7609,6 +7654,102 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.Disable(EnableCap.CullFace); // model winding varies — draw both faces so it's never see-through
         g.BindVertexArray(dragonVao);
         UploadAndDrawDragonPrimitives(g, model);
+        g.BindVertexArray(0);
+    }
+
+    // Draws the 3rd-person walk-mode avatar. Reuses the dragon shader program, VAO and upload path, but with NO
+    // fire lights (uFireCount=0) and a neutral untextured fallback. The KayKit character is textured (single
+    // base-colour atlas), so uHasTex drives the albedo. Texture cached per byte[] via the shared AI-flock cache.
+    private void DrawHumanoid(GL g, Matrix4x4 mvp)
+    {
+        if (!humanoidVisible || humanoidModel is not { } model)
+        {
+            return;
+        }
+
+        EnsureDragonProgram(g);
+        g.UseProgram(dragonProgram);
+        WriteMat4(dragonMat4, mvp);
+        g.UniformMatrix4(dragonMvpLoc, 1, false, dragonMat4);
+        WriteMat4(dragonMat4, humanoidWorld);
+        g.UniformMatrix4(dragonModelLoc, 1, false, dragonMat4);
+        WriteMat3(dragonMat3, humanoidNormalRot);
+        g.UniformMatrix3(dragonNormalLoc, 1, false, dragonMat3);
+        g.Uniform3(dragonLightLoc, humanoidLightDir.X, humanoidLightDir.Y, humanoidLightDir.Z);
+        g.Uniform3(dragonColorLoc, 0.72f, 0.6f, 0.5f); // neutral hide (untextured fallback)
+        g.Uniform1(dragonAmbientLoc, 0.42f);
+        g.Uniform3(dragonTintLoc, 1f, 1f, 1f);
+        g.Uniform1(dragonFireCountLoc, 0f); // the walker is never lit by dragon fire
+
+        uint tex = EnsureAiDragonTexture(g, model.BaseColorImageBytes);
+        bool hasTex = tex != 0;
+        if (hasTex)
+        {
+            g.ActiveTexture(TextureUnit.Texture9);
+            g.BindTexture(TextureTarget.Texture2D, tex);
+            g.ActiveTexture(TextureUnit.Texture0);
+        }
+
+        g.Uniform1(dragonTexLoc, 9);
+        g.Uniform1(dragonHasTexLoc, hasTex ? 1f : 0f);
+
+        g.Enable(EnableCap.DepthTest);
+        g.DepthFunc(DepthFunction.Lequal);
+        g.DepthMask(true);
+        g.Disable(EnableCap.Blend);
+        g.Disable(EnableCap.CullFace); // model winding varies — draw both faces so it's never see-through
+        g.BindVertexArray(dragonVao);
+        UploadAndDrawDragonPrimitives(g, model);
+        g.BindVertexArray(0);
+    }
+
+    // Draws the crossbow bolts: reuses the dragon program + VAO + upload path, one draw per live arrow (only a
+    // handful are ever in flight). No fire lights; the arrow carries its own base-colour atlas (unit 9).
+    private void DrawArrows(GL g, Matrix4x4 mvp)
+    {
+        if (arrowModel is not { } model || arrowWorlds is not { Count: > 0 } worlds)
+        {
+            return;
+        }
+
+        EnsureDragonProgram(g);
+        g.UseProgram(dragonProgram);
+        WriteMat4(dragonMat4, mvp);
+        g.UniformMatrix4(dragonMvpLoc, 1, false, dragonMat4);
+        g.Uniform3(dragonLightLoc, arrowLightDir.X, arrowLightDir.Y, arrowLightDir.Z);
+        g.Uniform3(dragonColorLoc, 0.35f, 0.24f, 0.14f); // wood-brown fallback (untextured)
+        g.Uniform1(dragonAmbientLoc, 0.45f);
+        g.Uniform3(dragonTintLoc, 1f, 1f, 1f);
+        g.Uniform1(dragonFireCountLoc, 0f);
+
+        uint tex = EnsureAiDragonTexture(g, model.BaseColorImageBytes);
+        bool hasTex = tex != 0;
+        if (hasTex)
+        {
+            g.ActiveTexture(TextureUnit.Texture9);
+            g.BindTexture(TextureTarget.Texture2D, tex);
+            g.ActiveTexture(TextureUnit.Texture0);
+        }
+
+        g.Uniform1(dragonTexLoc, 9);
+        g.Uniform1(dragonHasTexLoc, hasTex ? 1f : 0f);
+
+        g.Enable(EnableCap.DepthTest);
+        g.DepthFunc(DepthFunction.Lequal);
+        g.DepthMask(true);
+        g.Disable(EnableCap.Blend);
+        g.Disable(EnableCap.CullFace);
+        g.BindVertexArray(dragonVao);
+        for (int i = 0; i < worlds.Count; i++)
+        {
+            WriteMat4(dragonMat4, worlds[i]);
+            g.UniformMatrix4(dragonModelLoc, 1, false, dragonMat4);
+            Matrix4x4 normal = arrowNormals is { } normals && i < normals.Count ? normals[i] : worlds[i];
+            WriteMat3(dragonMat3, normal);
+            g.UniformMatrix3(dragonNormalLoc, 1, false, dragonMat3);
+            UploadAndDrawDragonPrimitives(g, model);
+        }
+
         g.BindVertexArray(0);
     }
 

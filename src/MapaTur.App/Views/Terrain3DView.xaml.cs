@@ -2108,6 +2108,37 @@ public partial class Terrain3DView : ContentView
     private MapaTur.Application.Terrain.DragonFlightPhase dragonPrevPhase = MapaTur.Application.Terrain.DragonFlightPhase.Flying;
     private Matrix4x4 dragonWorldMatrix = Matrix4x4.Identity;
     private Matrix4x4 dragonNormalMatrix = Matrix4x4.Identity;
+
+    // ── 3rd-person walk avatar (KayKit "Adventurers" Rogue_Hooded → hiker.glb; loaded once per walk session) ──
+    private MapaTur.Application.Terrain.SkinnedModel? humanoidModel3D;
+    private bool humanoidModelLoading;
+    private int humanoidIdleAnimIndex = -1;
+    private int humanoidWalkAnimIndex = -1;
+    private int humanoidRunAnimIndex = -1;
+    private float humanoidAnimTime;
+    private Matrix4x4 humanoidWorldMatrix = Matrix4x4.Identity;
+    private Matrix4x4 humanoidNormalMatrix = Matrix4x4.Identity;
+    private System.Numerics.Vector2 walkPrevXY;    // last-tick walker XY → ground speed (drives clip + anti-skate)
+    private readonly bool walkThirdPerson = true;  // draw the 3D avatar + follow camera (vs the 1st-person ciupagas)
+    private bool walkShootQueued;                  // F pressed → fire the crossbow on the next tick
+    private float humanoidShootTimeRemaining;      // >0 while the one-shot crossbow-fire clip plays (overrides locomotion)
+    private int humanoidShootAnimIndex = -1;       // "1H_Ranged_Shoot" clip index (−1 = model has no ranged clip)
+    private float walkCamBack = WalkCamBackMeters;  // 3rd-person boom length behind the walker (mouse wheel zooms it)
+
+    // Crossbow bolts in flight. Positions are world metres (X,Y horizontal + Z real elevation); the renderer draws
+    // one static arrow model per entry through the reusable world/normal matrix lists (rebuilt each walk tick).
+    private MapaTur.Application.Terrain.SkinnedModel? arrowModel3D;
+    private bool arrowModelLoading;
+    private readonly List<ArrowProjectile> arrows = new();
+    private readonly List<Matrix4x4> arrowWorlds = new();
+    private readonly List<Matrix4x4> arrowNormals = new();
+
+    private struct ArrowProjectile
+    {
+        public Vector3 Pos; // X,Y world metres (unexaggerated horizontal) + Z real elevation metres
+        public Vector3 Vel; // metres / second (real)
+        public float Age;   // seconds since it was loosed
+    }
     private const float DragonModelSizeMeters = 24f; // target max extent of the dragon in world metres
     private const float DragonFlapLiftMeters = 1.6f; // rises on the down-stroke, sinks on the up-stroke
     // Model-orientation tuning (glTF bone/axis frames vary — adjusted by eye):
@@ -2117,6 +2148,25 @@ public partial class Terrain3DView : ContentView
     // BODY well above the flight point ("jest 10 m nade mną") — seat that variant much lower. Per-variant,
     // because the classic model's centring is already right.
     private const float DragonAnimatedDropMeters = 11f;
+
+    // 3rd-person avatar + follow-camera tuning (real metres; the exaggeration is applied only when placing in world).
+    private const float HumanoidHeightMeters = 1.8f;              // target model height (tallest bind extent → 1.8 m)
+    private static readonly float HumanoidYawOffset = MathF.PI / 2f; // ⚠ TUNE visually (same Y-up→Z-up basis as DragonYawOffset)
+    private const float WalkCamBackMeters = 4.0f;               // default eye distance behind the walker (wheel adjusts)
+    private const float WalkCamBackMinMeters = 1.6f;            // closest wheel-zoom (over-the-shoulder)
+    private const float WalkCamBackMaxMeters = 12f;             // farthest wheel-zoom
+    private const float WalkCamHeightMeters = 2.6f;             // eye height above the feet (over the head → looks past it)
+    private const float WalkCamMaxUpRadians = 1.20f;            // ~69° — crane the gaze up at a wall / peak above you
+    private const float WalkCamMaxDownRadians = 0.90f;          // ~51° — look down at your feet / the drop
+    private const float WalkCamGroundMarginMeters = 0.6f;       // keep the eye at least this far above the ground under it
+
+    // Crossbow bolt (F fires it).
+    private const float ArrowLengthMeters = 0.9f;
+    private const float ArrowSpeedMetersPerSecond = 55f;             // fast bolt
+    private const float ArrowGravityMetersPerSecondSquared = 6f;     // mild — barely drops over its short life
+    private const float ArrowLifetimeSeconds = 2.0f;
+    private const float ArrowSpawnHeightMeters = 1.3f;              // chest / crossbow height above the feet
+    private const int MaxArrowsInFlight = 16;
     private const float DragonPitchSign = -1f; // model noses DOWN when descending (↑ = dive), matched to the flight
     private const float DragonRollSign = 1f;
     private float dragonCamPitch;              // camera pitch LAGS the dragon's (dragon responds first, camera catches up)
@@ -2247,6 +2297,7 @@ public partial class Terrain3DView : ContentView
 
         var startXY = new System.Numerics.Vector2(Camera.Position.X, Camera.Position.Y);
         walker = new MapaTur.Application.Terrain.WalkPhysics(startXY, SampleWalkGround);
+        walkPrevXY = startXY;
 
         Vector3 viewDir = Camera.Target - Camera.Position;
         walkHeadingRadians = MathF.Atan2(viewDir.Y, viewDir.X);
@@ -2254,6 +2305,8 @@ public partial class Terrain3DView : ContentView
         walkFwd = walkBack = walkStrafeLeft = walkStrafeRight = walkRun = false;
         walkJumpQueued = false;
         walkLmbDown = false;
+        walkShootQueued = false;
+        humanoidShootTimeRemaining = 0f;
         walkDetailTick = 0;
 
         walkActive = true;
@@ -2271,6 +2324,8 @@ public partial class Terrain3DView : ContentView
 #else
         walkTimer.Start();
 #endif
+        LoadHumanoidModelAsync(); // fire-and-forget; the follow camera runs even before the avatar streams in
+        LoadArrowModelAsync();    // crossbow bolt mesh (F fires it)
         Serilog.Log.Information("[Walk] walk mode ACTIVE (heading={H:F2} rad, feet={F:F0} m)", walkHeadingRadians, walker.FeetElevation);
         Canvas.InvalidateSurface();
     }
@@ -2298,6 +2353,7 @@ public partial class Terrain3DView : ContentView
             Camera.PitchRadians = 0.35f; // ~20° down
         }
 
+        arrows.Clear();
         walker = null;
         Canvas.InvalidateSurface();
     }
@@ -2329,14 +2385,66 @@ public partial class Terrain3DView : ContentView
         bool jump = walkJumpQueued;
         walkJumpQueued = false;
 
+        // Fire the crossbow: start the one-shot ranged clip (ignored if it's already playing or the model has none).
+        if (walkShootQueued && humanoidShootAnimIndex >= 0 && humanoidShootTimeRemaining <= 0f
+            && humanoidModel3D is { } shootModel)
+        {
+            humanoidShootTimeRemaining = shootModel.Animations[humanoidShootAnimIndex].Duration;
+
+            // Loose a bolt where the camera aims (heading + look pitch), from chest height just in front of the walker.
+            if (arrowModel3D is not null && arrows.Count < MaxArrowsInFlight)
+            {
+                float aim = Math.Clamp(walkLookPitchRadians, -WalkCamMaxDownRadians, WalkCamMaxUpRadians);
+                float ca = MathF.Cos(aim);
+                var dir = new Vector3(ca * ch, ca * sh, MathF.Sin(aim));
+                arrows.Add(new ArrowProjectile
+                {
+                    Pos = new Vector3(w.PositionXY.X + (ch * 0.5f), w.PositionXY.Y + (sh * 0.5f), w.FeetElevation + ArrowSpawnHeightMeters),
+                    Vel = dir * ArrowSpeedMetersPerSecond,
+                    Age = 0f,
+                });
+            }
+        }
+
+        walkShootQueued = false;
+
         w.Step(dt, wish, speed, jump, hangHeld: walkLmbDown);
 
-        // Place the eye on the walker (real eye elevation × exaggeration), looking along heading + pitch.
         float exaggeration = frame.VerticalExaggeration;
-        var eye = new Vector3(w.PositionXY.X, w.PositionXY.Y, w.EyeElevation * exaggeration);
-        float cp = MathF.Cos(walkLookPitchRadians);
-        var look = new Vector3(cp * ch, cp * sh, MathF.Sin(walkLookPitchRadians));
-        ApplyFreeCamera(eye, eye + (look * WalkLookDistanceMeters));
+
+        // Third person: how far the walker actually moved this tick (the walk gate can block a wished step, so
+        // ground speed — not the input — drives the clip and, later, guards foot-skate). Then pose + seat the
+        // avatar; it may still be streaming in on the first frames, so the camera below runs regardless.
+        float groundSpeed = dt > 1e-4f ? (w.PositionXY - walkPrevXY).Length() / dt : 0f;
+        walkPrevXY = w.PositionXY;
+        if (humanoidModel3D is { } hm)
+        {
+            PoseAndSeatHumanoid(hm, w, exaggeration, dt, groundSpeed);
+        }
+
+        AdvanceAndBuildArrows(exaggeration, dt);
+
+        // Third-person camera: the eye sits a fixed boom BEHIND and ABOVE the walker (so it never dives into the
+        // ground), and the GAZE pitches freely with the look input — so you can crane the view UP at a wall or peak
+        // above you, or DOWN at your feet, not just flat ahead. Mouse drag / R + PgUp / PgDn feed walkLookPitchRadians
+        // (+ = up). WASD stays heading-relative and the mouse still turns the heading (the whole rig turns with it).
+        var eye = new Vector3(
+            w.PositionXY.X - (ch * walkCamBack),
+            w.PositionXY.Y - (sh * walkCamBack),
+            (w.FeetElevation + WalkCamHeightMeters) * exaggeration);
+        if (SampleWalkGround(new System.Numerics.Vector2(eye.X, eye.Y)) is float camGround)
+        {
+            float minEyeZ = (camGround * exaggeration) + WalkCamGroundMarginMeters;
+            if (eye.Z < minEyeZ)
+            {
+                eye.Z = minEyeZ;
+            }
+        }
+
+        float aimPitch = Math.Clamp(walkLookPitchRadians, -WalkCamMaxDownRadians, WalkCamMaxUpRadians);
+        float cosAim = MathF.Cos(aimPitch);
+        var lookDir = new Vector3(cosAim * ch, cosAim * sh, MathF.Sin(aimPitch));
+        ApplyFreeCamera(eye, eye + (lookDir * WalkLookDistanceMeters));
 
         // Stream the 1 m detail to the ground just ahead of the walker (~1×/s) so the surface under the feet is
         // the fine baked one, not the coarse base. The VM gates on look-at drift + cooldown, so a standing
@@ -2517,6 +2625,198 @@ public partial class Terrain3DView : ContentView
         {
             dragonModelLoading = false;
         }
+    }
+
+    // Loads the KayKit avatar (hiker.glb) once per session, off the UI thread, and resolves the locomotion clip
+    // indices the walk tick plays (Idle / Walking_A / Running_A). Fire-and-forget from EnterWalkMode; until it's
+    // ready the follow camera runs and nothing is drawn where the avatar will be.
+    private async void LoadHumanoidModelAsync()
+    {
+        if (humanoidModel3D is not null || humanoidModelLoading)
+        {
+            return;
+        }
+
+        humanoidModelLoading = true;
+        try
+        {
+            await using Stream s = await Microsoft.Maui.Storage.FileSystem.OpenAppPackageFileAsync("hiker.glb").ConfigureAwait(false);
+            using var ms = new MemoryStream();
+            await s.CopyToAsync(ms).ConfigureAwait(false);
+            var model = MapaTur.Application.Terrain.SkinnedModel.LoadGlb(ms.ToArray());
+
+            int idle = -1, walk = -1, run = -1, shoot = -1;
+            for (int i = 0; i < model.Animations.Count; i++)
+            {
+                string name = model.Animations[i].Name;
+                if (idle < 0 && string.Equals(name, "Idle", StringComparison.OrdinalIgnoreCase)) { idle = i; }
+                else if (walk < 0 && string.Equals(name, "Walking_A", StringComparison.OrdinalIgnoreCase)) { walk = i; }
+                else if (run < 0 && string.Equals(name, "Running_A", StringComparison.OrdinalIgnoreCase)) { run = i; }
+                else if (shoot < 0 && string.Equals(name, "1H_Ranged_Shoot", StringComparison.OrdinalIgnoreCase)) { shoot = i; }
+            }
+
+            MainThread.BeginInvokeOnMainThread(() =>
+            {
+                humanoidModel3D = model;
+                humanoidIdleAnimIndex = idle >= 0 ? idle : 0;
+                humanoidWalkAnimIndex = walk >= 0 ? walk : humanoidIdleAnimIndex;
+                humanoidRunAnimIndex = run; // -1 → fall back to walk
+                humanoidShootAnimIndex = shoot; // -1 → F does nothing (no ranged clip)
+                humanoidAnimTime = 0f;
+                Canvas.InvalidateSurface();
+            });
+            Serilog.Log.Information(
+                "[Walk] humanoid model loaded: {Prims} prims, extent={Ext:F2}, anims={N}, idle={Idle} walk={Walk} run={Run} shoot={Shoot}, tex={Tex}",
+                model.Primitives.Count, model.LocalExtent, model.Animations.Count, idle, walk, run, shoot,
+                model.BaseColorImageBytes is { Length: > 0 } bytes ? $"{bytes.Length / 1024}kB" : "none");
+        }
+        catch (Exception ex)
+        {
+            Serilog.Log.Warning(ex, "[Walk] humanoid model load failed — no 3rd-person avatar this session");
+        }
+        finally
+        {
+            humanoidModelLoading = false;
+        }
+    }
+
+    // Loads the crossbow bolt mesh (arrow.glb — a static, unskinned KayKit prop) once per session. Posed to its
+    // bind pose immediately so its geometry/bounds are ready for the per-arrow world matrices.
+    private async void LoadArrowModelAsync()
+    {
+        if (arrowModel3D is not null || arrowModelLoading)
+        {
+            return;
+        }
+
+        arrowModelLoading = true;
+        try
+        {
+            await using Stream s = await Microsoft.Maui.Storage.FileSystem.OpenAppPackageFileAsync("arrow.glb").ConfigureAwait(false);
+            using var ms = new MemoryStream();
+            await s.CopyToAsync(ms).ConfigureAwait(false);
+            var model = MapaTur.Application.Terrain.SkinnedModel.LoadGlb(ms.ToArray());
+            model.Pose(0, 0f); // static mesh → hold bind pose so PosedPositions/bounds are ready to draw
+
+            MainThread.BeginInvokeOnMainThread(() => arrowModel3D = model);
+            Serilog.Log.Information(
+                "[Walk] arrow model loaded: {Prims} prims, extent={Ext:F2}, tex={Tex}",
+                model.Primitives.Count, model.LocalExtent,
+                model.BaseColorImageBytes is { Length: > 0 } bytes ? $"{bytes.Length / 1024}kB" : "none");
+        }
+        catch (Exception ex)
+        {
+            Serilog.Log.Warning(ex, "[Walk] arrow model load failed — F shows the shoot motion but no bolt flies");
+        }
+        finally
+        {
+            arrowModelLoading = false;
+        }
+    }
+
+    // Advances every live bolt (ballistic, mild gravity), drops those that expire or hit the ground, and rebuilds
+    // the per-arrow world/normal matrices. The arrow mesh's shaft is its local +Y axis, aligned to the bolt's
+    // flight direction in render space (Z exaggerated), scaled to ArrowLengthMeters, pivoted on its centre.
+    private void AdvanceAndBuildArrows(float exaggeration, float dt)
+    {
+        arrowWorlds.Clear();
+        arrowNormals.Clear();
+        if (arrowModel3D is not { } model)
+        {
+            arrows.Clear();
+            return;
+        }
+
+        float scale = ArrowLengthMeters / MathF.Max(0.001f, model.LocalExtent);
+        Matrix4x4 centre = Matrix4x4.CreateTranslation(-((model.BoundsMin + model.BoundsMax) * 0.5f));
+        Matrix4x4 scaleM = Matrix4x4.CreateScale(scale);
+
+        for (int i = arrows.Count - 1; i >= 0; i--)
+        {
+            ArrowProjectile a = arrows[i];
+            a.Vel.Z -= ArrowGravityMetersPerSecondSquared * dt;
+            a.Pos += a.Vel * dt;
+            a.Age += dt;
+
+            bool hitGround = SampleWalkGround(new System.Numerics.Vector2(a.Pos.X, a.Pos.Y)) is float g && a.Pos.Z <= g;
+            if (a.Age > ArrowLifetimeSeconds || hitGround)
+            {
+                arrows.RemoveAt(i);
+                continue;
+            }
+
+            arrows[i] = a;
+
+            // Orient the shaft (local +Y) along the flight direction, in render space (Z exaggerated).
+            var d = new Vector3(a.Vel.X, a.Vel.Y, a.Vel.Z * exaggeration);
+            d = d.LengthSquared() > 1e-6f ? Vector3.Normalize(d) : Vector3.UnitX;
+            Vector3 up = MathF.Abs(d.Z) < 0.99f ? Vector3.UnitZ : Vector3.UnitX;
+            Vector3 ax = Vector3.Normalize(Vector3.Cross(up, d)); // local X image
+            Vector3 az = Vector3.Cross(d, ax);                    // local Z image
+            var rot = new Matrix4x4(
+                ax.X, ax.Y, ax.Z, 0f,
+                d.X, d.Y, d.Z, 0f,   // local Y (shaft) → flight direction
+                az.X, az.Y, az.Z, 0f,
+                0f, 0f, 0f, 1f);
+
+            var worldPos = new Vector3(a.Pos.X, a.Pos.Y, a.Pos.Z * exaggeration);
+            arrowWorlds.Add(centre * scaleM * rot * Matrix4x4.CreateTranslation(worldPos));
+            arrowNormals.Add(rot);
+        }
+    }
+
+    // Poses the avatar to the walker's motion (Idle vs Walking vs Running by ground speed) and builds its
+    // model→world matrix: scale the tallest bind extent to HumanoidHeightMeters, remap glTF Y-up → world Z-up,
+    // yaw to the walk heading, and seat the LOWEST posed vertex (the soles) on the feet elevation. A single time
+    // accumulator advances the clip (no crossfade yet — that is the Faza 2 animation state machine).
+    private void PoseAndSeatHumanoid(
+        MapaTur.Application.Terrain.SkinnedModel model, MapaTur.Application.Terrain.WalkPhysics w,
+        float exaggeration, float dt, float groundSpeed)
+    {
+        int clip;
+        float poseTime;
+        if (humanoidShootTimeRemaining > 0f && humanoidShootAnimIndex >= 0 && humanoidShootAnimIndex < model.Animations.Count)
+        {
+            // One-shot crossbow fire: play the ranged clip once over its own duration, overriding locomotion.
+            clip = humanoidShootAnimIndex;
+            float shootDuration = model.Animations[clip].Duration;
+            poseTime = MathF.Max(0f, shootDuration - humanoidShootTimeRemaining);
+            humanoidShootTimeRemaining -= dt;
+        }
+        else
+        {
+            clip = humanoidIdleAnimIndex;
+            if (w.IsGrounded && groundSpeed > 0.4f)
+            {
+                clip = (walkRun && groundSpeed > 3.2f && humanoidRunAnimIndex >= 0)
+                    ? humanoidRunAnimIndex
+                    : humanoidWalkAnimIndex;
+            }
+
+            if (clip < 0)
+            {
+                clip = 0;
+            }
+
+            float duration = clip < model.Animations.Count ? model.Animations[clip].Duration : 0f;
+            humanoidAnimTime += dt;
+            poseTime = duration > 0f ? humanoidAnimTime % duration : 0f;
+        }
+
+        model.Pose(clip, poseTime);
+
+        (Vector3 pmin, Vector3 pmax) = model.GetPosedBounds();
+        Vector3 posedCenter = (pmin + pmax) * 0.5f;
+        var footPivot = new Vector3(posedCenter.X, pmin.Y, posedCenter.Z); // lowest posed point = soles
+        float scale = HumanoidHeightMeters / MathF.Max(0.001f, model.LocalExtent);
+        Matrix4x4 remap = Matrix4x4.CreateRotationX(MathF.PI / 2f); // glTF Y-up → world Z-up
+        Matrix4x4 yawRot = Matrix4x4.CreateRotationZ(walkHeadingRadians + HumanoidYawOffset);
+        Matrix4x4 rot = remap * yawRot;
+        humanoidNormalMatrix = rot;
+
+        var worldPos = new Vector3(w.PositionXY.X, w.PositionXY.Y, w.FeetElevation * exaggeration);
+        humanoidWorldMatrix =
+            Matrix4x4.CreateTranslation(-footPivot) * Matrix4x4.CreateScale(scale) * rot * Matrix4x4.CreateTranslation(worldPos);
     }
 
     // ── AI DRAGON FLOCK ─────────────────────────────────────────────────────────────────────────────────────
@@ -4549,7 +4849,7 @@ public partial class Terrain3DView : ContentView
             DrawNightLights(canvas, projectedPois);
             DrawFlightMarker(canvas, e.Info.Width, e.Info.Height);
             DrawAiDragonMarkers(canvas, e.Info.Width, e.Info.Height);
-            DrawWalkViewmodel(canvas, e.Info.Width, e.Info.Height);
+            if (!walkThirdPerson) { DrawWalkViewmodel(canvas, e.Info.Width, e.Info.Height); }
             DrawDragon(canvas, e.Info.Width, e.Info.Height);
             if (dragonActive)
             {
@@ -5543,18 +5843,28 @@ public partial class Terrain3DView : ContentView
 
     private void OnPointerWheelChanged(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
     {
-        if (walkActive || dragonActive)
-        {
-            return; // no orbit-zoom while walking or flying the dragon
-        }
-
         int delta = e.GetCurrentPoint((Microsoft.UI.Xaml.UIElement)sender).Properties.MouseWheelDelta;
         if (delta == 0)
         {
             return;
         }
 
-        // One wheel notch = 120 units; ~10% per notch.
+        if (dragonActive)
+        {
+            return; // no wheel-zoom while flying the dragon
+        }
+
+        // One wheel notch = 120 units; ~10% per notch. Scroll up = zoom in (closer).
+        if (walkActive)
+        {
+            // Walk mode: the wheel dollies the 3rd-person camera in/out behind the walker.
+            walkCamBack = Math.Clamp(
+                walkCamBack * MathF.Pow(1f / 1.1f, delta / 120f), WalkCamBackMinMeters, WalkCamBackMaxMeters);
+            Canvas.InvalidateSurface();
+            e.Handled = true;
+            return;
+        }
+
         float scale = MathF.Pow(1.1f, delta / 120f);
         controller.ApplyZoom(scale);
         Canvas.InvalidateSurface();
@@ -5910,9 +6220,11 @@ public partial class Terrain3DView : ContentView
             case Windows.System.VirtualKey.PageUp:
                 walkLookPitchRadians = Math.Clamp(walkLookPitchRadians + WalkKeyTurnRadians, -WalkMaxLookPitchRadians, WalkMaxLookPitchRadians);
                 break;
-            case Windows.System.VirtualKey.F:
             case Windows.System.VirtualKey.PageDown:
                 walkLookPitchRadians = Math.Clamp(walkLookPitchRadians - WalkKeyTurnRadians, -WalkMaxLookPitchRadians, WalkMaxLookPitchRadians);
+                break;
+            case Windows.System.VirtualKey.F:
+                walkShootQueued = true; // F = fire the crossbow (the avatar plays its one-shot ranged clip)
                 break;
         }
 
@@ -6956,6 +7268,15 @@ public partial class Terrain3DView : ContentView
             bool dragon3DVisible = dragonActive && dragonModel3D is not null;
             Vector3 dragonLight = tiles.Count > 0 ? tiles[0].LightDirection : new Vector3(0.4f, 0.4f, 1f);
             glRenderer.SetDragon(dragonModel3D, dragonWorldMatrix, dragonNormalMatrix, dragonLight, dragon3DVisible);
+            // Push the 3rd-person walk avatar into the same GL pass (visible only while walking AND the model has
+            // streamed in). Walk and dragon are mutually exclusive, so at most one of these is ever visible.
+            bool humanoid3DVisible = walkActive && humanoidModel3D is not null;
+            glRenderer.SetHumanoid(humanoidModel3D, humanoidWorldMatrix, humanoidNormalMatrix, dragonLight, humanoid3DVisible);
+            glRenderer.SetArrows(
+                walkActive ? arrowModel3D : null,
+                walkActive ? arrowWorlds : null,
+                walkActive ? arrowNormals : null,
+                dragonLight);
             glRenderer.SetFireballs(dragonActive && dragonFireSprites.Count > 0 ? dragonFireSprites : null);
             glRenderer.SetFireSmoke(dragonActive && dragonFireSmokeSprites.Count > 0 ? dragonFireSmokeSprites : null);
             glRenderer.SetDebugMarkers(dragonActive && dragonDebugMarkers.Count > 0 ? dragonDebugMarkers : null);
