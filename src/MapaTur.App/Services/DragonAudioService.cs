@@ -32,6 +32,11 @@ public sealed partial class DragonAudioService
     public void SetFlightBed(float windLevel, float wingLevel, float groundLevel)
         => SetFlightBedImpl(windLevel, wingLevel, groundLevel);
 
+    /// <summary>Immediately HARD-stops every looped dragon layer (fire, wind, wing, ground) and any ringing
+    /// one-shots — the clean cut for LEAVING dragon flight. Unlike <see cref="SetFlightBed"/>, which only fades
+    /// 15% toward its target per call, so a single all-zero call never actually stops the loops.</summary>
+    public void Silence() => SilenceImpl();
+
     partial void SetFireActiveImpl(bool active);
 
     partial void PlayExplosionImpl(float power, float distanceMeters);
@@ -43,4 +48,6 @@ public sealed partial class DragonAudioService
     partial void PlayRoarImpl(float volume);
 
     partial void SetFlightBedImpl(float windLevel, float wingLevel, float groundLevel);
+
+    partial void SilenceImpl();
 }
