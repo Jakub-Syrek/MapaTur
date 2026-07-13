@@ -50,6 +50,23 @@ public sealed record WalkParameters
     /// is slower than going straight up, the Isonzo Ascent feel ("moving sideways is slower"). 0.5 = half.</summary>
     public float ClimbTraverseFraction { get; init; } = 0.5f;
 
+    /// <summary>On a face this steep (fall-line grade) or steeper, climbing slows to <see cref="SteepClimbFraction"/>
+    /// of the flat-wall rate — hauling up a near-vertical wall is harder than a leaning one. tan(~63°) = 2.0.</summary>
+    public float SteepClimbGrade { get; init; } = 2.0f;
+
+    /// <summary>Climb-rate multiplier at/above <see cref="SteepClimbGrade"/> (1 = no slowdown; the climb never
+    /// stalls, so this stays above 0).</summary>
+    public float SteepClimbFraction { get; init; } = 0.55f;
+
+    /// <summary>Auto-belay: a piton is planted every this many metres of climbing (the first on the initial grab).</summary>
+    public float PitonSpacingMeters { get; init; } = 10f;
+
+    /// <summary>Most pitons kept on the wall at once — planting a further one pulls the oldest (rolling protection).</summary>
+    public int MaxPitons { get; init; } = 3;
+
+    /// <summary>How far below the highest piton the rope lets you drop before it goes taut and holds you (a fall).</summary>
+    public float RopeLengthMeters { get; init; } = 6f;
+
     /// <summary>Half-width (metres) of the central-difference used to estimate the ground gradient/slope. Wider
     /// = smoother (ignores sub-metre bumps); ~2 m matches the mesh's normal-smoothing scale.</summary>
     public float SlopeProbeMeters { get; init; } = 2.0f;

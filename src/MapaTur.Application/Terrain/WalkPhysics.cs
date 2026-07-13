@@ -64,6 +64,25 @@ public sealed class WalkPhysics
     /// Drives the alternating left/right axe-plant animation.</summary>
     public bool IsClimbing { get; private set; }
 
+    /// <summary>While <see cref="IsClimbing"/>, the up-vs-traverse split of the climb move: 1 = straight up the
+    /// fall line, 0 = pure sideways traverse. Lets the renderer blend the climb animation between an up-reach and a
+    /// side-shuffle. Holds its last value when not climbing.</summary>
+    public float ClimbBlend { get; private set; } = 1f;
+
+    /// <summary>A planted piton: its wall position (world XY) and real elevation (metres). The auto-belay keeps up
+    /// to <see cref="WalkParameters.MaxPitons"/> of these while climbing; the rope runs through them.</summary>
+    public readonly record struct PitonPoint(Vector2 PositionXY, float Elevation);
+
+    private readonly List<PitonPoint> pitons = new();
+    private float climbDistanceSincePiton;
+
+    /// <summary>Pitons currently on the wall (oldest → newest), for drawing the protection + trailing rope.</summary>
+    public IReadOnlyList<PitonPoint> Pitons => this.pitons;
+
+    /// <summary>True while a fall is held by the rope (caught, dangling from the highest piton) instead of sliding
+    /// to the base — the auto-belay arrest.</summary>
+    public bool IsRoped { get; private set; }
+
     /// <summary>Real elevation of the camera eye in metres (feet + <see cref="WalkParameters.EyeHeightMeters"/>).
     /// The caller multiplies by the vertical-exaggeration to get the world-Z for the camera.</summary>
     public float EyeElevation => FeetElevation + p.EyeHeightMeters;
@@ -79,6 +98,9 @@ public sealed class WalkPhysics
         IsSliding = false;
         IsHanging = false;
         this.jumpsUsed = 0;
+        this.pitons.Clear();
+        this.climbDistanceSincePiton = 0f;
+        IsRoped = false;
     }
 
     /// <summary>
@@ -116,6 +138,13 @@ public sealed class WalkPhysics
             && (FeetElevation - groundHere) <= this.p.HangReachMeters;
         if (axeOnRock)
         {
+            // Auto-belay: the first grab plants the anchor piton; then a piton every PitonSpacingMeters of climbing.
+            if (this.pitons.Count == 0)
+            {
+                PlantPiton();
+                this.climbDistanceSincePiton = 0f;
+            }
+
             // ISONZO-style face movement: resolve the input into UP-the-fall-line + ALONG-the-contour, and
             // traverse slower than you ascend ("moving sideways is slower"). Facing the wall, forward climbs
             // straight up; strafing shuffles across. Feet stay glued to the surface (no gravity while attached).
@@ -127,16 +156,39 @@ public sealed class WalkPhysics
                 var contour = new Vector2(-uphill.Y, uphill.X);
                 float alongUp = Vector2.Dot(dir, uphill);
                 float alongSide = Vector2.Dot(dir, contour) * this.p.ClimbTraverseFraction;
+
+                // Up-vs-traverse split (1 = straight up the fall line, 0 = pure sideways) for the climb animation.
+                float mag = MathF.Abs(alongUp) + MathF.Abs(alongSide);
+                ClimbBlend = mag > 1e-5f ? MathF.Abs(alongUp) / mag : 1f;
+
+                // Hauling up a near-vertical wall is slower than a leaning one: fade the rate from full at the
+                // gentlest climbable grade down to SteepClimbFraction at/above SteepClimbGrade.
+                float steepT = Math.Clamp(
+                    (slope - this.p.HangMinSlopeGrade) / MathF.Max(1e-3f, this.p.SteepClimbGrade - this.p.HangMinSlopeGrade),
+                    0f,
+                    1f);
+                float speedFactor = 1f + ((this.p.SteepClimbFraction - 1f) * steepT);
+
                 Vector2 climbVel = (uphill * alongUp) + (contour * alongSide);
-                climbMove = climbVel * (this.p.ClimbSpeedMetersPerSecond * dt);
+                climbMove = climbVel * (this.p.ClimbSpeedMetersPerSecond * speedFactor * dt);
             }
 
             if (climbMove != Vector2.Zero && this.sampleGround(PositionXY + climbMove) is float climbedGround)
             {
+                float previousFeet = FeetElevation;
                 PositionXY += climbMove;
                 FeetElevation = climbedGround; // stay on the face — ascend/descend with the surface
                 IsClimbing = true;
                 IsHanging = false;
+
+                // Plant the next piton once a full spacing of wall (3-D distance along the face) has been climbed.
+                float dz = FeetElevation - previousFeet;
+                this.climbDistanceSincePiton += MathF.Sqrt(climbMove.LengthSquared() + (dz * dz));
+                if (this.climbDistanceSincePiton >= this.p.PitonSpacingMeters)
+                {
+                    this.climbDistanceSincePiton -= this.p.PitonSpacingMeters;
+                    PlantPiton();
+                }
             }
             else
             {
@@ -147,6 +199,7 @@ public sealed class WalkPhysics
             VerticalVelocity = 0f;
             IsGrounded = false;
             IsSliding = false;
+            IsRoped = false;
             this.jumpsUsed = 0;
             return;
         }
@@ -184,6 +237,12 @@ public sealed class WalkPhysics
         }
 
         IsSliding = false;
+        IsRoped = false;
+        if (slope <= this.p.HangMinSlopeGrade)
+        {
+            ClearPitons(); // back on safe walkable ground / topped out → drop the rope + pitons
+        }
+
         StepWalk(move, groundHere);
     }
 
@@ -230,7 +289,20 @@ public sealed class WalkPhysics
     // grounded (sliding, not falling) and keeps sampling the ground so the descent follows the surface.
     private void SlideDownhill(float dt, Vector2 gradient)
     {
+        // Rope arrest: once you have dropped a rope length below the highest piton, the rope goes taut and holds
+        // you on the wall (a caught fall) instead of sliding all the way to the base.
+        if (this.pitons.Count > 0 && FeetElevation <= TopPitonElevation() - this.p.RopeLengthMeters + 1e-3f)
+        {
+            VerticalVelocity = 0f;
+            IsSliding = false;
+            IsHanging = true;
+            IsRoped = true;
+            return;
+        }
+
         IsSliding = true;
+        IsHanging = false;
+        IsRoped = false;
         Vector2 downhill = -Vector2.Normalize(gradient); // gradient points uphill; negate for the fall line
         Vector2 target = PositionXY + (downhill * (this.p.SlideSpeedMetersPerSecond * dt));
         if (this.sampleGround(target) is float slid)
@@ -238,6 +310,39 @@ public sealed class WalkPhysics
             PositionXY = target;
             FeetElevation = slid;
         }
+    }
+
+    // Adds a piton at the current wall position, keeping at most MaxPitons (a further plant pulls the oldest).
+    private void PlantPiton()
+    {
+        this.pitons.Add(new PitonPoint(PositionXY, FeetElevation));
+        if (this.pitons.Count > this.p.MaxPitons)
+        {
+            this.pitons.RemoveAt(0); // rolling protection — the 4th removes the 1st
+        }
+    }
+
+    // Drops all pitons + rope (topped out / back on safe walkable ground).
+    private void ClearPitons()
+    {
+        this.pitons.Clear();
+        this.climbDistanceSincePiton = 0f;
+        IsRoped = false;
+    }
+
+    // Highest planted piton's elevation (the rope catches a fall from the top anchor). NegativeInfinity if none.
+    private float TopPitonElevation()
+    {
+        float top = float.NegativeInfinity;
+        foreach (PitonPoint piton in this.pitons)
+        {
+            if (piton.Elevation > top)
+            {
+                top = piton.Elevation;
+            }
+        }
+
+        return top;
     }
 
     // Walk one step, gated by the along-move uphill grade: an uphill step steeper than MaxWalkSlopeGrade is
