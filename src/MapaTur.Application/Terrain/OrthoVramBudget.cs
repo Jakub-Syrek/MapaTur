@@ -40,4 +40,29 @@ public static class OrthoVramBudget
         int budget = (int)Math.Min(cellCount, Math.Max(1L, fit));
         return Math.Max(1, budget);
     }
+
+    /// <summary>
+    /// How many hi-res DETAIL cells fit in the shared VRAM budget AFTER the base ortho's resident bytes,
+    /// clamped to [0, <paramref name="hardCap"/>]. Unlike <see cref="MaxResidentCells"/> this returns 0 when
+    /// the base already fills the budget: the detail overlay is OPTIONAL (the base ortho carries the frame),
+    /// so it must never force an over-budget transient by insisting on a cell. Base + detail share ONE budget
+    /// (the design-panel correction — the 8 base cells are ~1.9 GB, not 1.4; two independent planners would
+    /// silently overcommit).
+    /// </summary>
+    public static int SharedDetailNearCap(
+        long baseResidentBytes, long detailCellBytes, long totalBudgetBytes, int hardCap)
+    {
+        if (detailCellBytes <= 0 || hardCap <= 0)
+        {
+            return 0;
+        }
+
+        long free = totalBudgetBytes - baseResidentBytes;
+        if (free < detailCellBytes)
+        {
+            return 0;
+        }
+
+        return (int)Math.Min(hardCap, free / detailCellBytes);
+    }
 }
