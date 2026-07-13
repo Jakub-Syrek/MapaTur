@@ -2037,6 +2037,7 @@ public partial class Terrain3DView : ContentView
     // centre (where the code plants worldPos), BLUE=posed foot-bone anchor (the drawn feet), YELLOW=target
     // rendered-mesh point (where the feet SHOULD land). Cleared when not perched.
     private readonly List<MapaTur.App.Services.Terrain3DGlRenderer.DebugMarker> dragonDebugMarkers = [];
+    private readonly List<MapaTur.App.Services.Terrain3DGlRenderer.DebugMarker> pitonMarkers = []; // climb auto-belay: pitons + rope
 
     // ── AI DRAGON FLOCK ── a small mixed-species flock that circles the nearby peaks (ambient) and drifts toward
     // the player's dragon when it flies close. Each member owns its OWN posed model instance (independent pose),
@@ -2112,8 +2113,11 @@ public partial class Terrain3DView : ContentView
     // ── 3rd-person walk avatar (KayKit "Adventurers" Rogue_Hooded → hiker.glb; loaded once per walk session) ──
     private MapaTur.Application.Terrain.SkinnedModel? humanoidModel3D;
     private bool humanoidModelLoading;
-    private int humanoidIdleAnimIndex = -1;        // resolved at load; used only for the pre-animator fallback pose
+    private int humanoidIdleAnimIndex = -1;        // resolved at load; base pose for the procedural climb + fallback
     private MapaTur.Application.Terrain.HumanoidAnimator? humanoidAnimator;
+    private float humanoidClimbPhase;              // drives the alternating arm-reach while climbing / the hang sway
+    private const float ClimbCadenceHz = 1.1f;     // arm-plant beats per second while climbing
+    private const float ClimbReachDegrees = 55f;   // ⚠ TUNE visually: how far the arms reach up the wall
     private Matrix4x4 humanoidWorldMatrix = Matrix4x4.Identity;
     private Matrix4x4 humanoidNormalMatrix = Matrix4x4.Identity;
     private System.Numerics.Vector2 walkPrevXY;    // last-tick walker XY → ground speed (drives clip + anti-skate)
@@ -2285,19 +2289,35 @@ public partial class Terrain3DView : ContentView
             return;
         }
 
-        Serilog.Log.Information("[Walk] entering walk mode at eye=({X:F0},{Y:F0})", Camera.Position.X, Camera.Position.Y);
+        // F7→F8 position continuity: capture the dragon's position/heading BEFORE the exit below tears it down, so
+        // the walker appears where the dragon was (facing the way it flew) — not at the far chase-cam eye.
+        System.Numerics.Vector2? carryXY = null;
+        float? carryHeading = null;
+        float? fromDragonElev = null;
+        if (dragon is { } dragonFrom)
+        {
+            carryXY = dragonFrom.PositionXY;
+            carryHeading = dragonFrom.HeadingRadians;
+            fromDragonElev = dragonFrom.ElevationMeters;
+        }
+
         StopFlight(); // never walk during a cinematic fly-through
         if (dragonActive)
         {
             IsDragonFlightActive = false; // walk and dragon are exclusive
         }
 
-        var startXY = new System.Numerics.Vector2(Camera.Position.X, Camera.Position.Y);
+        var startXY = carryXY ?? new System.Numerics.Vector2(Camera.Position.X, Camera.Position.Y);
         walker = new MapaTur.Application.Terrain.WalkPhysics(startXY, SampleWalkGround);
         walkPrevXY = startXY;
+        Serilog.Log.Information(
+            "[Walk] enter from={From} startXY=({X:F0},{Y:F0}) ground={G} feet={F:F0} grounded={Gr} dragonElev={DE}",
+            carryXY is not null ? "dragon" : "orbit", startXY.X, startXY.Y,
+            SampleWalkGround(startXY) is { } gsample ? gsample.ToString("F0") : "null",
+            walker.FeetElevation, walker.IsGrounded, fromDragonElev is { } de ? de.ToString("F0") : "-");
 
         Vector3 viewDir = Camera.Target - Camera.Position;
-        walkHeadingRadians = MathF.Atan2(viewDir.Y, viewDir.X);
+        walkHeadingRadians = carryHeading ?? MathF.Atan2(viewDir.Y, viewDir.X);
         walkLookPitchRadians = 0f; // start looking at the horizon
         walkFwd = walkBack = walkStrafeLeft = walkStrafeRight = walkRun = false;
         walkJumpQueued = false;
@@ -2413,6 +2433,7 @@ public partial class Terrain3DView : ContentView
         }
 
         AdvanceAndBuildArrows(exaggeration, dt);
+        BuildPitonRopeMarkers(w, exaggeration);
 
         // Third-person camera: the eye sits a fixed boom BEHIND and ABOVE the walker (so it never dives into the
         // ground), and the GAZE pitches freely with the look input — so you can crane the view UP at a wall or peak
@@ -2476,15 +2497,25 @@ public partial class Terrain3DView : ContentView
             return;
         }
 
+        // F8→F7 position continuity: capture the walker's position/heading BEFORE the exit below tears walk down, so
+        // the dragon launches from where the walker stood, facing the way it walked — not the orbit look-at point.
+        System.Numerics.Vector2? carryXY = null;
+        float? carryHeading = null;
+        if (walker is { } walkerFrom)
+        {
+            carryXY = walkerFrom.PositionXY;
+            carryHeading = walkHeadingRadians;
+        }
+
         StopFlight();
         if (walkActive)
         {
             IsWalkModeActive = false; // dragon and walk are exclusive
         }
 
-        var startXY = new System.Numerics.Vector2(Camera.Target.X, Camera.Target.Y);
+        var startXY = carryXY ?? new System.Numerics.Vector2(Camera.Target.X, Camera.Target.Y);
         Vector3 viewDir = Camera.Target - Camera.Position;
-        float heading = MathF.Atan2(viewDir.Y, viewDir.X);
+        float heading = carryHeading ?? MathF.Atan2(viewDir.Y, viewDir.X);
         // Contact-grade ground for the flight physics: per-tick AGL/terrain-follow over ground far ahead of
         // the camera must never trigger virtual-tile synthesis (landing seats on the FINE scan separately).
         dragon = new MapaTur.Application.Terrain.DragonFlight(startXY, heading, SampleContactGround);
@@ -2770,7 +2801,11 @@ public partial class Terrain3DView : ContentView
         MapaTur.Application.Terrain.SkinnedModel model, MapaTur.Application.Terrain.WalkPhysics w,
         float exaggeration, float dt, float groundSpeed, bool shootRequested)
     {
-        if (humanoidAnimator is { } anim)
+        if (w.IsClimbing || w.IsHanging)
+        {
+            PoseClimb(model, w, dt); // procedural arm-reach on the wall (no baked climb clip)
+        }
+        else if (humanoidAnimator is { } anim)
         {
             MapaTur.Application.Terrain.HumanoidAnimator.Blend b =
                 anim.Update(dt, groundSpeed, w.IsGrounded, w.VerticalVelocity, shootRequested);
@@ -2793,6 +2828,73 @@ public partial class Terrain3DView : ContentView
         var worldPos = new Vector3(w.PositionXY.X, w.PositionXY.Y, w.FeetElevation * exaggeration);
         humanoidWorldMatrix =
             Matrix4x4.CreateTranslation(-footPivot) * Matrix4x4.CreateScale(scale) * rot * Matrix4x4.CreateTranslation(worldPos);
+    }
+
+    // Procedural climb pose (KayKit has no climb clip): an idle base with the arms reaching up the wall. Climbing =
+    // the two arms plant ALTERNATELY at ClimbCadenceHz (like the ciupaga beats); hanging = both arms up with a slow
+    // sway (self-arrest). SetFrame + overlays + Skin (the dragon wing-beat pattern), so no baked clip is needed.
+    private void PoseClimb(MapaTur.Application.Terrain.SkinnedModel model, MapaTur.Application.Terrain.WalkPhysics w, float dt)
+    {
+        model.SetFrame(humanoidIdleAnimIndex >= 0 ? humanoidIdleAnimIndex : 0, 0f); // arms-down base; overlays raise them
+
+        if (w.IsClimbing)
+        {
+            humanoidClimbPhase += dt * ClimbCadenceHz;
+            float s = MathF.Sin(humanoidClimbPhase * 2f * MathF.PI);
+            ApplyArmReach(model, MathF.Max(0f, s), MathF.Max(0f, -s)); // alternate left / right plant
+        }
+        else
+        {
+            humanoidClimbPhase += dt * 0.5f;
+            float sway = 0.15f * MathF.Sin(humanoidClimbPhase * 2f * MathF.PI);
+            ApplyArmReach(model, 0.85f + sway, 0.85f - sway); // hang: both arms up, gentle sway
+        }
+
+        model.Skin();
+    }
+
+    // Overlays an up-reach on each arm (0 = down, 1 = fully raised). ⚠ ClimbReachAxis/sign are a first guess — if the
+    // arms bend the wrong way, flip the axis or sign here (this is the one thing that needs a visual check).
+    private void ApplyArmReach(MapaTur.Application.Terrain.SkinnedModel model, float leftAmount, float rightAmount)
+    {
+        float reach = ClimbReachDegrees * (MathF.PI / 180f);
+        var axis = Vector3.UnitX;
+        model.RotateBoneOverlay("upperarm.l", Quaternion.CreateFromAxisAngle(axis, -reach * leftAmount));
+        model.RotateBoneOverlay("upperarm.r", Quaternion.CreateFromAxisAngle(axis, -reach * rightAmount));
+        model.RotateBoneOverlay("lowerarm.l", Quaternion.CreateFromAxisAngle(axis, -reach * 0.5f * leftAmount));
+        model.RotateBoneOverlay("lowerarm.r", Quaternion.CreateFromAxisAngle(axis, -reach * 0.5f * rightAmount));
+    }
+
+    // Visualises the climb auto-belay through the shared marker pass: an orange piton sphere at each planted anchor
+    // and a dotted tan rope running piton → piton → the climber's harness. Rebuilt every walk tick from WalkPhysics.
+    private void BuildPitonRopeMarkers(MapaTur.Application.Terrain.WalkPhysics w, float exaggeration)
+    {
+        pitonMarkers.Clear();
+        if (w.Pitons.Count == 0)
+        {
+            return;
+        }
+
+        var rope = new List<Vector3>(w.Pitons.Count + 1);
+        foreach (MapaTur.Application.Terrain.WalkPhysics.PitonPoint piton in w.Pitons)
+        {
+            var at = new Vector3(piton.PositionXY.X, piton.PositionXY.Y, piton.Elevation * exaggeration);
+            pitonMarkers.Add(new(at, new Vector3(1f, 0.55f, 0.1f), 0.5f)); // orange piton
+            rope.Add(at);
+        }
+
+        rope.Add(new Vector3(w.PositionXY.X, w.PositionXY.Y, (w.FeetElevation + 1.2f) * exaggeration)); // to the harness
+
+        for (int i = 0; i + 1 < rope.Count; i++)
+        {
+            Vector3 a = rope[i];
+            Vector3 b = rope[i + 1];
+            int segments = Math.Max(1, (int)((b - a).Length() / 0.6f));
+            for (int s = 1; s < segments; s++)
+            {
+                pitonMarkers.Add(new(Vector3.Lerp(a, b, s / (float)segments), new Vector3(0.85f, 0.75f, 0.4f), 0.12f)); // rope dot
+            }
+        }
     }
 
     // ── AI DRAGON FLOCK ─────────────────────────────────────────────────────────────────────────────────────
@@ -3115,8 +3217,8 @@ public partial class Terrain3DView : ContentView
         dragonRmbHeld = false;
         dragonCamPitch = 0f;
         dragonFireHeld = false;
-        dragonAudio.SetFireActive(false); // the roar must not outlive the flight (the fire tick stops with it)
-        dragonAudio.SetFlightBed(0f, 0f, 0f); // wind/wing/rush loops pause with the mode
+        dragonAudio.Silence(); // HARD-stop every looped layer (fire + wind/wing/ground) + ringing one-shots — a
+                               // single SetFlightBed(0,0,0) only fades 15%/call, so the loops used to play on
         dragonFireHoldSeconds = 0f;
         dragonFireOrbitAngle = 0f;
         dragonPerchGroundElev = null;
@@ -7255,7 +7357,10 @@ public partial class Terrain3DView : ContentView
                 dragonLight);
             glRenderer.SetFireballs(dragonActive && dragonFireSprites.Count > 0 ? dragonFireSprites : null);
             glRenderer.SetFireSmoke(dragonActive && dragonFireSmokeSprites.Count > 0 ? dragonFireSmokeSprites : null);
-            glRenderer.SetDebugMarkers(dragonActive && dragonDebugMarkers.Count > 0 ? dragonDebugMarkers : null);
+            glRenderer.SetDebugMarkers(
+                walkActive && pitonMarkers.Count > 0 ? pitonMarkers
+                : dragonActive && dragonDebugMarkers.Count > 0 ? dragonDebugMarkers
+                : null);
             UpdateAiFlock(); // advance + pose the flock in step with this frame (no separate timer — WinUI-safe)
             glRenderer.SetAiDragons(ShowAiDragons && aiFlockInstances.Count > 0 ? aiFlockInstances : null);
             double dbgPreRenderMs = dbgSwapPaintActive ? dbgPaintWatch.Elapsed.TotalMilliseconds : 0;
