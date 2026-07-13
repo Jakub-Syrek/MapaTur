@@ -67,6 +67,27 @@ public sealed record WalkParameters
     /// <summary>How far below the highest piton the rope lets you drop before it goes taut and holds you (a fall).</summary>
     public float RopeLengthMeters { get; init; } = 6f;
 
+    /// <summary>Full grip stamina, in seconds of continuous climbing before you're spent and peel off.</summary>
+    public float MaxGripStaminaSeconds { get; init; } = 24f;
+
+    /// <summary>Grip drained per second while on the wall (climbing or hanging on the axes).</summary>
+    public float GripDrainPerSecond { get; init; } = 1f;
+
+    /// <summary>Grip regained per second while resting on safe ground or dangling on the rope.</summary>
+    public float GripRegenPerSecond { get; init; } = 4f;
+
+    /// <summary>Grip you must have to ENGAGE the wall (once on, you hold until it hits zero — hysteresis).</summary>
+    public float GripEngageThresholdSeconds { get; init; } = 3f;
+
+    /// <summary>How far ahead-and-up (along the fall line) the mantle probe looks for a walkable ledge to top out onto.</summary>
+    public float MantleProbeAheadMeters { get; init; } = 1.5f;
+
+    /// <summary>Most a mantle ledge may rise above the feet and still be pulled onto.</summary>
+    public float MantleReachMeters { get; init; } = 1.6f;
+
+    /// <summary>The probe ledge must be at least this walkable (fall-line grade below it) to mantle onto. tan(~35°).</summary>
+    public float MantleMaxSlopeGrade { get; init; } = 0.7f;
+
     /// <summary>Half-width (metres) of the central-difference used to estimate the ground gradient/slope. Wider
     /// = smoother (ignores sub-metre bumps); ~2 m matches the mesh's normal-smoothing scale.</summary>
     public float SlopeProbeMeters { get; init; } = 2.0f;

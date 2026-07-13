@@ -83,6 +83,16 @@ public sealed class WalkPhysics
     /// to the base — the auto-belay arrest.</summary>
     public bool IsRoped { get; private set; }
 
+    /// <summary>Remaining grip stamina in seconds of climbing. Drains on the wall, regenerates resting on safe
+    /// ground or on the rope; at zero you can no longer hold and peel off.</summary>
+    public float GripStamina { get; private set; }
+
+    /// <summary>Grip stamina as a 0..1 fraction of the maximum — for the HUD meter.</summary>
+    public float GripStaminaFraction =>
+        this.p.MaxGripStaminaSeconds > 0f ? Math.Clamp(GripStamina / this.p.MaxGripStaminaSeconds, 0f, 1f) : 0f;
+
+    private bool gripEngaged;
+
     /// <summary>Real elevation of the camera eye in metres (feet + <see cref="WalkParameters.EyeHeightMeters"/>).
     /// The caller multiplies by the vertical-exaggeration to get the world-Z for the camera.</summary>
     public float EyeElevation => FeetElevation + p.EyeHeightMeters;
@@ -101,6 +111,8 @@ public sealed class WalkPhysics
         this.pitons.Clear();
         this.climbDistanceSincePiton = 0f;
         IsRoped = false;
+        GripStamina = this.p.MaxGripStaminaSeconds;
+        this.gripEngaged = false;
     }
 
     /// <summary>
@@ -133,11 +145,43 @@ public sealed class WalkPhysics
         // climb rate — feet stay glued to the surface, so you ascend a vertical wall the walk gate would refuse
         // (the two axes bite in turn). With NO wish, hang frozen (self-arrest). Works from the ground too (walk
         // to the wall, hold, climb). Reach is measured to the ground under the feet (0 while attached).
+        // Grip stamina gates the wall: engage steep rock only with at least GripEngageThresholdSeconds of grip,
+        // then hold it until grip runs out (hysteresis via gripEngaged) — spent, you peel off and the rope catches.
+        bool canGrip = this.gripEngaged ? GripStamina > 0f : GripStamina >= this.p.GripEngageThresholdSeconds;
         bool axeOnRock = hangHeld && !jumpRequested
             && slope >= this.p.HangMinSlopeGrade
-            && (FeetElevation - groundHere) <= this.p.HangReachMeters;
+            && (FeetElevation - groundHere) <= this.p.HangReachMeters
+            && canGrip;
+        this.gripEngaged = axeOnRock;
         if (axeOnRock)
         {
+            // Mantle / top-out: a walkable ledge just ahead-and-up (the wall ending) → pull onto it and stand,
+            // instead of climbing on past standable ground.
+            Vector2 uphillDir = slope > 1e-4f ? gradient / slope : Vector2.Zero;
+            Vector2 mantleProbe = PositionXY + (uphillDir * this.p.MantleProbeAheadMeters);
+            float ledgeRise = this.sampleGround(mantleProbe) is float ledge ? ledge - FeetElevation : float.NaN;
+            if (uphillDir != Vector2.Zero
+                && !float.IsNaN(ledgeRise)
+                && ledgeRise >= -0.5f
+                && ledgeRise <= this.p.MantleReachMeters
+                && Gradient(mantleProbe).Length() < this.p.MantleMaxSlopeGrade)
+            {
+                PositionXY = mantleProbe;
+                FeetElevation += ledgeRise;
+                VerticalVelocity = 0f;
+                IsGrounded = true;
+                IsClimbing = false;
+                IsHanging = false;
+                IsSliding = false;
+                IsRoped = false;
+                this.jumpsUsed = 0;
+                ClearPitons();
+                return;
+            }
+
+            // Grip drains while on the wall (climbing or self-arrest hang); when it's spent you peel off next tick.
+            GripStamina = MathF.Max(0f, GripStamina - (this.p.GripDrainPerSecond * dt));
+
             // Auto-belay: the first grab plants the anchor piton; then a piton every PitonSpacingMeters of climbing.
             if (this.pitons.Count == 0)
             {
@@ -238,6 +282,7 @@ public sealed class WalkPhysics
 
         IsSliding = false;
         IsRoped = false;
+        GripStamina = MathF.Min(this.p.MaxGripStaminaSeconds, GripStamina + (this.p.GripRegenPerSecond * dt));
         if (slope <= this.p.HangMinSlopeGrade)
         {
             ClearPitons(); // back on safe walkable ground / topped out → drop the rope + pitons
@@ -297,6 +342,7 @@ public sealed class WalkPhysics
             IsSliding = false;
             IsHanging = true;
             IsRoped = true;
+            GripStamina = MathF.Min(this.p.MaxGripStaminaSeconds, GripStamina + (this.p.GripRegenPerSecond * dt));
             return;
         }
 

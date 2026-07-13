@@ -369,6 +369,75 @@ public sealed class WalkPhysicsTests
     }
 
     [Fact]
+    public void GripStamina_DrainsWhileClimbing()
+    {
+        var walk = new WalkPhysics(new Vector2(1f, 0f), Ground(p => 2.0f * MathF.Max(0f, p.X)), Params);
+        float start = walk.GripStamina;
+
+        for (int i = 0; i < 40; i++) // ~2 s of climbing
+        {
+            walk.Step(0.05f, new Vector2(1f, 0f), 2.5f, jumpRequested: false, hangHeld: true);
+        }
+
+        walk.GripStamina.Should().BeApproximately(start - 2f, 0.3f, "grip drains ~1/s while on the wall");
+    }
+
+    [Fact]
+    public void GripRunningOut_PeelsYouOffOntoTheRope()
+    {
+        // A modest grip pool so exhaustion happens within the step budget (independent of the default tuning), yet
+        // long enough to climb past a rope length so a high piton exists to catch the peel-off.
+        var shortGrip = Params with { MaxGripStaminaSeconds = 8f };
+        var walk = new WalkPhysics(new Vector2(1f, 0f), Ground(p => 2.0f * MathF.Max(0f, p.X)), shortGrip);
+
+        bool everRoped = false;
+        for (int i = 0; i < 240; i++) // climb well past the 8 s grip limit while holding on
+        {
+            walk.Step(0.05f, new Vector2(1f, 0f), 2.5f, jumpRequested: false, hangHeld: true);
+            everRoped |= walk.IsRoped;
+        }
+
+        everRoped.Should().BeTrue("running out of grip peels you off, and the rope catches the fall");
+    }
+
+    [Fact]
+    public void RestingOnTheRope_RegeneratesGrip()
+    {
+        var walk = new WalkPhysics(new Vector2(1f, 0f), Ground(p => 2.0f * MathF.Max(0f, p.X)), Params);
+        for (int i = 0; i < 120; i++)
+        {
+            walk.Step(0.05f, new Vector2(1f, 0f), 2.5f, jumpRequested: false, hangHeld: true); // drain grip climbing
+        }
+
+        float low = walk.GripStamina;
+
+        for (int i = 0; i < 100; i++)
+        {
+            walk.Step(0.05f, Vector2.Zero, 0f, jumpRequested: false, hangHeld: false); // let go → dangle on the rope
+        }
+
+        walk.IsRoped.Should().BeTrue();
+        walk.GripStamina.Should().BeGreaterThan(low, "resting on the rope regenerates grip");
+    }
+
+    [Fact]
+    public void ClimbingToALedge_MantlesOntoIt_AndStands()
+    {
+        // A grade-3 wall topping out at 15 m (x = 5), flat beyond.
+        var walk = new WalkPhysics(new Vector2(1f, 0f), Ground(p => p.X <= 0f ? 0f : MathF.Min(3f * p.X, 15f)), Params);
+
+        for (int i = 0; i < 400; i++)
+        {
+            walk.Step(0.05f, new Vector2(1f, 0f), 2.5f, jumpRequested: false, hangHeld: true);
+        }
+
+        walk.IsGrounded.Should().BeTrue("you mantle onto the ledge and stand");
+        walk.IsClimbing.Should().BeFalse();
+        walk.FeetElevation.Should().BeApproximately(15f, 1.5f, "standing on the flat top");
+        walk.PositionXY.X.Should().BeGreaterThan(5f, "topped out past the lip");
+    }
+
+    [Fact]
     public void HoldingBothCiupagas_WithNoInput_HangsInsteadOfClimbing()
     {
         // Holding the axes on a steep face with NO move wish is the self-arrest hang — no drift, no climb.
