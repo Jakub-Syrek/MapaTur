@@ -2125,6 +2125,9 @@ public partial class Terrain3DView : ContentView
     private bool walkShootQueued;                  // F pressed → fire the crossbow on the next tick
     private int humanoidShootAnimIndex = -1;       // "1H_Ranged_Shoot" clip index (−1 = model has no ranged clip)
     private float walkCamBack = WalkCamBackMeters;  // 3rd-person boom length behind the walker (mouse wheel zooms it)
+    private float walkCamYawOffset;                 // free-look (RMB while climbing): camera orbit yaw off the heading
+    private float walkCamPitchFree;                 // free-look extra pitch
+    private bool walkRmbHeld;                        // right button held → free-look camera (heading + climb unchanged)
 
     // Crossbow bolts in flight. Positions are world metres (X,Y horizontal + Z real elevation); the renderer draws
     // one static arrow model per entry through the reusable world/normal matrix lists (rebuilt each walk tick).
@@ -2322,6 +2325,9 @@ public partial class Terrain3DView : ContentView
         walkFwd = walkBack = walkStrafeLeft = walkStrafeRight = walkRun = false;
         walkJumpQueued = false;
         walkLmbDown = false;
+        walkRmbHeld = false;
+        walkCamYawOffset = 0f;
+        walkCamPitchFree = 0f;
         walkShootQueued = false;
         walkDetailTick = 0;
 
@@ -2439,9 +2445,19 @@ public partial class Terrain3DView : ContentView
         // ground), and the GAZE pitches freely with the look input — so you can crane the view UP at a wall or peak
         // above you, or DOWN at your feet, not just flat ahead. Mouse drag / R + PgUp / PgDn feed walkLookPitchRadians
         // (+ = up). WASD stays heading-relative and the mouse still turns the heading (the whole rig turns with it).
+        // Free-look (RMB while climbing) orbits the camera by walkCamYawOffset around the climber; when released it
+        // eases back behind the heading. The CLIMB direction (ch/sh from the heading) is untouched.
+        if (!walkRmbHeld)
+        {
+            walkCamYawOffset *= 0.85f;
+            walkCamPitchFree *= 0.85f;
+        }
+
+        float camYaw = walkHeadingRadians + walkCamYawOffset;
+        float cc = MathF.Cos(camYaw), sc = MathF.Sin(camYaw);
         var eye = new Vector3(
-            w.PositionXY.X - (ch * walkCamBack),
-            w.PositionXY.Y - (sh * walkCamBack),
+            w.PositionXY.X - (cc * walkCamBack),
+            w.PositionXY.Y - (sc * walkCamBack),
             (w.FeetElevation + WalkCamHeightMeters) * exaggeration);
         if (SampleWalkGround(new System.Numerics.Vector2(eye.X, eye.Y)) is float camGround)
         {
@@ -2452,9 +2468,9 @@ public partial class Terrain3DView : ContentView
             }
         }
 
-        float aimPitch = Math.Clamp(walkLookPitchRadians, -WalkCamMaxDownRadians, WalkCamMaxUpRadians);
+        float aimPitch = Math.Clamp(walkLookPitchRadians + walkCamPitchFree, -WalkCamMaxDownRadians, WalkCamMaxUpRadians);
         float cosAim = MathF.Cos(aimPitch);
-        var lookDir = new Vector3(cosAim * ch, cosAim * sh, MathF.Sin(aimPitch));
+        var lookDir = new Vector3(cosAim * cc, cosAim * sc, MathF.Sin(aimPitch));
         ApplyFreeCamera(eye, eye + (lookDir * WalkLookDistanceMeters));
 
         // Stream the 1 m detail to the ground just ahead of the walker (~1×/s) so the surface under the feet is
@@ -2895,6 +2911,43 @@ public partial class Terrain3DView : ContentView
                 pitonMarkers.Add(new(Vector3.Lerp(a, b, s / (float)segments), new Vector3(0.85f, 0.75f, 0.4f), 0.12f)); // rope dot
             }
         }
+    }
+
+    // Grip-stamina HUD: a small colour-coded bar (green → amber → red, shrinking as grip drains) shown while
+    // climbing / hanging / roped, or while grip is recovering. Bar-only to stay independent of the SkiaSharp text API.
+    private void DrawClimbStaminaHud(SKCanvas canvas, int width, int height)
+    {
+        if (!walkActive || walker is not { } w)
+        {
+            return;
+        }
+
+        float frac = w.GripStaminaFraction;
+        if (!(w.IsClimbing || w.IsHanging || w.IsRoped || frac < 0.999f))
+        {
+            return; // full grip and not on a wall → nothing to show
+        }
+
+        float barW = MathF.Min(320f, width * 0.28f);
+        const float barH = 16f;
+        float x = (width - barW) * 0.5f;
+        float y = height - 64f;
+
+        using (var bg = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill, Color = new SKColor(0, 0, 0, 150) })
+        {
+            canvas.DrawRoundRect(x - 3f, y - 3f, barW + 6f, barH + 6f, 6f, 6f, bg);
+        }
+
+        SKColor col = frac > 0.5f ? new SKColor(70, 200, 90)
+            : frac > 0.25f ? new SKColor(235, 185, 45)
+            : new SKColor(225, 70, 55);
+        using (var fill = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill, Color = col })
+        {
+            canvas.DrawRoundRect(x, y, MathF.Max(0f, barW * frac), barH, 5f, 5f, fill);
+        }
+
+        using var border = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 1.5f, Color = new SKColor(255, 255, 255, 130) };
+        canvas.DrawRoundRect(x, y, barW, barH, 5f, 5f, border);
     }
 
     // ── AI DRAGON FLOCK ─────────────────────────────────────────────────────────────────────────────────────
@@ -4928,6 +4981,7 @@ public partial class Terrain3DView : ContentView
             DrawFlightMarker(canvas, e.Info.Width, e.Info.Height);
             DrawAiDragonMarkers(canvas, e.Info.Width, e.Info.Height);
             if (!walkThirdPerson) { DrawWalkViewmodel(canvas, e.Info.Width, e.Info.Height); }
+            DrawClimbStaminaHud(canvas, e.Info.Width, e.Info.Height);
             DrawDragon(canvas, e.Info.Width, e.Info.Height);
             if (dragonActive)
             {
@@ -5988,24 +6042,23 @@ public partial class Terrain3DView : ContentView
         // starts a look-drag while walking.
         if (walkActive)
         {
-            if (props.IsLeftButtonPressed)
+            // LEFT = grab the ciupagas (climb/hang). RIGHT = free-look. Both can be held together — the actual
+            // look/free-look is driven from the LIVE button flags in PointerMoved (a second mouse button does not
+            // reliably fire PointerPressed on Windows). Here we just latch the holds + the drag baseline.
+            lastPointerPosition = e.GetCurrentPoint(element).Position;
+            if (props.IsLeftButtonPressed && !walkLmbDown)
             {
-                walkLmbDown = true; // held = ciupaga self-arrest (hang) while airborne against rock
+                walkLmbDown = true; // held = ciupaga self-arrest / climb
                 StartCiupagaSwing();
-                element.CapturePointer(e.Pointer); // capture so the release reliably clears the hang
-                mouseDragButton = 0;
-                e.Handled = true;
-                return;
             }
 
-            mouseDragButton = props.IsRightButtonPressed ? 2 : 0;
-            if (mouseDragButton != 0)
+            if (props.IsRightButtonPressed)
             {
-                lastPointerPosition = e.GetCurrentPoint(element).Position;
-                element.CapturePointer(e.Pointer);
-                e.Handled = true;
+                walkRmbHeld = true;
             }
 
+            element.CapturePointer(e.Pointer); // capture so releases reliably clear each hold
+            e.Handled = true;
             return;
         }
 
@@ -6020,14 +6073,56 @@ public partial class Terrain3DView : ContentView
 
     private void OnPlatformPointerMoved(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
     {
+        var element = (Microsoft.UI.Xaml.UIElement)sender;
+        var point = e.GetCurrentPoint(element);
+        var props = point.Properties;
+
+        // Walk mode is driven from the LIVE button flags, not mouseDragButton: pressing a SECOND mouse button (right
+        // while the left is already held climbing) does not reliably fire PointerPressed on Windows — it arrives
+        // here with both flags set. LEFT alone = climb (no look). RIGHT = turn the head. LEFT+RIGHT = free-look
+        // (orbit the camera without changing the climb heading, so you keep climbing while you look around).
+        if (walkActive)
+        {
+            if (!props.IsLeftButtonPressed && !props.IsRightButtonPressed)
+            {
+                return; // hover, no button → ignore
+            }
+
+            float wdx = (float)(point.Position.X - lastPointerPosition.X);
+            float wdy = (float)(point.Position.Y - lastPointerPosition.Y);
+            lastPointerPosition = point.Position;
+
+            if (props.IsRightButtonPressed && props.IsLeftButtonPressed)
+            {
+                walkRmbHeld = true;
+                walkCamYawOffset -= wdx * WalkMouseLookRadiansPerPixel;
+                walkCamPitchFree = Math.Clamp(walkCamPitchFree - (wdy * WalkMouseLookRadiansPerPixel), -1.2f, 1.2f);
+            }
+            else if (props.IsRightButtonPressed)
+            {
+                walkRmbHeld = true;
+                walkHeadingRadians -= wdx * WalkMouseLookRadiansPerPixel;
+                walkLookPitchRadians = Math.Clamp(
+                    walkLookPitchRadians - (wdy * WalkMouseLookRadiansPerPixel),
+                    -WalkMaxLookPitchRadians,
+                    WalkMaxLookPitchRadians);
+            }
+            else
+            {
+                walkRmbHeld = false; // left-only: keep the baseline fresh (left is the climb hold, not a look)
+            }
+
+            Canvas.InvalidateSurface();
+            e.Handled = true;
+            return;
+        }
+
         if (mouseDragButton == 0)
         {
             return;
         }
 
-        var element = (Microsoft.UI.Xaml.UIElement)sender;
-        var point = e.GetCurrentPoint(element);
-        if (!point.Properties.IsLeftButtonPressed && !point.Properties.IsRightButtonPressed)
+        if (!props.IsLeftButtonPressed && !props.IsRightButtonPressed)
         {
             mouseDragButton = 0;
             return;
@@ -6046,20 +6141,6 @@ public partial class Terrain3DView : ContentView
             return;
         }
 
-        if (walkActive)
-        {
-            // Walk mode: drag turns the head (yaw) and tilts the gaze (pitch) in place — movement stays on WASD.
-            // Drag right → turn right (heading decreases); drag up → look up (pitch increases).
-            walkHeadingRadians -= dx * WalkMouseLookRadiansPerPixel;
-            walkLookPitchRadians = Math.Clamp(
-                walkLookPitchRadians - (dy * WalkMouseLookRadiansPerPixel),
-                -WalkMaxLookPitchRadians,
-                WalkMaxLookPitchRadians);
-            Canvas.InvalidateSurface();
-            e.Handled = true;
-            return;
-        }
-
         if (mouseDragButton == 1)
         {
             // Left-drag orbits around the focus (camera circles the scene).
@@ -6068,7 +6149,6 @@ public partial class Terrain3DView : ContentView
         else
         {
             // Right-drag looks around in place — the camera stays put and turns its view direction.
-            // dy is NOT inverted here (unlike orbit): dragging up looks up.
             controller.ApplyLookAround(dx, dy);
         }
 
@@ -6078,10 +6158,31 @@ public partial class Terrain3DView : ContentView
 
     private void OnPlatformPointerReleased(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
     {
-        mouseDragButton = 0;
-        walkLmbDown = false; // releasing the left button lets the ciupaga go — the hang drops
+        var released = (Microsoft.UI.Xaml.UIElement)sender;
+        var relProps = e.GetCurrentPoint(released).Properties;
+
+        // Only drop the hold whose button actually came up — left and right can be held together while climbing.
+        if (!relProps.IsLeftButtonPressed)
+        {
+            walkLmbDown = false; // releasing the left button lets the ciupaga go — the climb/hang drops
+        }
+
+        if (!relProps.IsRightButtonPressed)
+        {
+            walkRmbHeld = false;
+            if (mouseDragButton == 2)
+            {
+                mouseDragButton = 0;
+            }
+        }
+
+        if (!relProps.IsLeftButtonPressed && !relProps.IsRightButtonPressed)
+        {
+            mouseDragButton = 0;
+            released.ReleasePointerCapture(e.Pointer);
+        }
+
         dragonRmbHeld = false; // release the dragon attitude hold → pitch auto-levels again
-        ((Microsoft.UI.Xaml.UIElement)sender).ReleasePointerCapture(e.Pointer);
     }
 
     private void OnPlatformKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
