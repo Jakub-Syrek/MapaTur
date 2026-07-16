@@ -228,6 +228,216 @@ public sealed class GugikNmtDemTileSourceTests : IDisposable
             1500f, 0.01f, "a cell whose Gaussian window overlaps the strip averages only VALID taps — no 0-smear");
     }
 
+    // ── Neighbour-padded downsample (the z17 border-kink fix, 2026-07-15) ─────────────────────────────
+    // The Gaussian downsample used to clamp its window at the tile edge, shifting the outer row's sampling
+    // centroid ~0.85 hi-px into the tile — a real height kink along every z17 tile border (measured on the
+    // baked pyramid: p95 |curvature residual| ≈ 1.0 m at ±1 cell vs 0.44 m background). The source must pad
+    // the window with the NEIGHBOURS' hi-res pixels from its own cache; where no neighbour tif exists the
+    // sentinel padding degrades bit-exactly to the old clamp.
+
+    // A global analytic ramp (1 m per hi-px eastward), safely above the ≤0.5 flat-0 void mask.
+    private static float[] RampTile(int tileXOffset)
+    {
+        var samples = new float[512 * 512];
+        for (int r = 0; r < 512; r++)
+        {
+            for (int c = 0; c < 512; c++)
+            {
+                samples[(r * 512) + c] = 1000f + (tileXOffset * 512f) + c;
+            }
+        }
+
+        return samples;
+    }
+
+    private void WriteNeighbourHiRes(DemTileKey key, int dx, int dy, float[] samples)
+    {
+        string dir = Path.Combine(cacheDir, "17", (key.X + dx).ToString(CultureInfo.InvariantCulture));
+        Directory.CreateDirectory(dir);
+        File.WriteAllBytes(Path.Combine(dir, $"{key.Y + dy}_512.tif"), BuildTiff(512, 512, samples));
+    }
+
+    [Fact]
+    public async Task GetTileAsync_Z17_PadsTheDownsampleWithNeighbourHiResFromTheCache()
+    {
+        // East neighbour's hi-res tif is in the cache → the tile's EAST border cells must come out exactly
+        // as a borderless downsample would produce them (the padded-kernel truth pinned in
+        // DemTileSupersamplerTests), not as the old clamped window.
+        float[] core = RampTile(0);
+        float[] east = RampTile(1);
+        WriteNeighbourHiRes(FinestInsidePoland, dx: 1, dy: 0, east);
+        var handler = new StubHandler(_ => Ok(BuildTiff(512, 512, core)));
+        var source = NewSource(handler);
+
+        DemRaster? raster = await source.GetTileAsync(FinestInsidePoland);
+
+        int pad = DemTileSupersampler.LowPassKernelRadius(2) + 1;
+        float[] padded = DemTileSupersampler.PadWithNeighbours(
+            core, 512, pad, -32768f, (dx, dy) => dx == 1 && dy == 0 ? east : null);
+        float[] expected = DemTileSupersampler.LowPassDownsampleToNodes(padded, 256, 2, -32768f, pad);
+
+        raster.Should().NotBeNull();
+        raster!.Samples[(128 * 256) + 255].Should().Be(
+            expected[(128 * 256) + 255], "the east border must see the neighbour's real pixels");
+        // Node 255 sits ON the east tile edge — hi-res lattice position 255·512/255 − 0.5 = 511.5, i.e.
+        // EXACTLY between this tile's last column and the neighbour's first: node registration.
+        raster.Samples[(128 * 256) + 255].Should().BeApproximately(
+            1000f + 511.5f, 0.01f, "on a linear ramp the node-registered window reads the exact node value");
+        raster.Samples[(128 * 256) + 0].Should().NotBeApproximately(
+            1000f - 0.5f, 0.1f, "the WEST border has no neighbour tif — its clamped window shifts the centroid");
+    }
+
+    [Fact]
+    public async Task GetTileAsync_Z17_WithoutAnyNeighbourTiffs_MatchesTheSentinelPaddedReference()
+    {
+        // The fallback contract at the pyramid rim / not-yet-downloaded neighbours: sentinel padding ⇒ the
+        // kernel renormalises over what exists — the deterministic clamp on that side, exactly the pinned
+        // Application-layer reference. (Heights DID move relative to the pre-node-registration bake — that
+        // is the point of the registration fix and is applied by a full re-bake, never piecemeal.)
+        float[] core = RampTile(0);
+        var handler = new StubHandler(_ => Ok(BuildTiff(512, 512, core)));
+        var source = NewSource(handler);
+
+        DemRaster? raster = await source.GetTileAsync(FinestInsidePoland);
+
+        int pad = DemTileSupersampler.LowPassKernelRadius(2) + 1;
+        float[] padded = DemTileSupersampler.PadWithNeighbours(core, 512, pad, -32768f, (_, _) => null);
+        float[] expected = DemTileSupersampler.LowPassDownsampleToNodes(padded, 256, 2, -32768f, pad);
+        raster.Should().NotBeNull();
+        raster!.Samples.Should().Equal(expected);
+    }
+
+    [Fact]
+    public async Task GetTileAsync_Z17_MasksNeighbourFlatZeroVoids_BeforeTheyReachTheKernel()
+    {
+        // The zero-void lesson applies to the PADDING too: an out-of-coverage neighbour is flat-0, and an
+        // unmasked 0 in the window would smear garbage into this tile's border heights. A flat-0 neighbour
+        // must behave exactly like NO neighbour.
+        float[] core = RampTile(0);
+        WriteNeighbourHiRes(FinestInsidePoland, dx: 1, dy: 0, new float[512 * 512]); // all flat-0
+        var handler = new StubHandler(_ => Ok(BuildTiff(512, 512, core)));
+        var source = NewSource(handler);
+
+        DemRaster? raster = await source.GetTileAsync(FinestInsidePoland);
+
+        int pad = DemTileSupersampler.LowPassKernelRadius(2) + 1;
+        float[] padded = DemTileSupersampler.PadWithNeighbours(core, 512, pad, -32768f, (_, _) => null);
+        float[] expected = DemTileSupersampler.LowPassDownsampleToNodes(padded, 256, 2, -32768f, pad);
+        raster.Should().NotBeNull();
+        raster!.Samples.Should().Equal(expected);
+    }
+
+    // ── Node registration of NATIVE-size grids (z16 + legacy DMR5; 2026-07-15 late) ────────────────────
+    // The native 256 px WCS/DMR5 grids are pixel-centre read as nodes — the same registration flaw as the
+    // z17 supersample at 2× magnitude (z16 borders p95 1.69 vs 1.17 control; SK↔SK medians ±4.3 cm).
+
+    private static readonly DemTileKey Z16InsidePoland = new(16, 571 * 64, 332 * 64);
+
+    private static float[] RampTile256(int tileXOffset)
+    {
+        var samples = new float[256 * 256];
+        for (int r = 0; r < 256; r++)
+        {
+            for (int c = 0; c < 256; c++)
+            {
+                samples[(r * 256) + c] = 1000f + (tileXOffset * 256f) + c;
+            }
+        }
+
+        return samples;
+    }
+
+    private void WriteNeighbourNative(DemTileKey key, int dx, int dy, float[] samples)
+    {
+        string dir = Path.Combine(
+            cacheDir, key.Zoom.ToString(CultureInfo.InvariantCulture),
+            (key.X + dx).ToString(CultureInfo.InvariantCulture));
+        Directory.CreateDirectory(dir);
+        File.WriteAllBytes(Path.Combine(dir, $"{key.Y + dy}.tif"), BuildTiff(256, 256, samples));
+    }
+
+    [Fact]
+    public async Task GetTileAsync_Z16_NodeRegistersTheNativeGrid_WithNeighbourPadding()
+    {
+        // On a linear ramp (1 m per native px eastward) the node-registered read must return node j at its
+        // TRUE ground position j·256/255 − 0.5 — with the east neighbour's real pixels feeding the border
+        // footprint. Node 255 → lattice 255.5 → 1000 + 255.5.
+        float[] core = RampTile256(0);
+        WriteNeighbourNative(Z16InsidePoland, dx: 1, dy: 0, RampTile256(1));
+        var handler = new StubHandler(_ => Ok(BuildTiff(256, 256, core)));
+        var source = NewSource(handler);
+
+        DemRaster? raster = await source.GetTileAsync(Z16InsidePoland);
+
+        raster.Should().NotBeNull();
+        raster!.Columns.Should().Be(256);
+        raster.Samples[(128 * 256) + 255].Should().BeApproximately(
+            1000f + 255.5f, 0.01f, "the east border node reads the neighbour's pixels at its true node position");
+        raster.Samples[(128 * 256) + 128].Should().BeApproximately(
+            1000f + (float)((128 * 256.0 / 255) - 0.5), 0.01f, "interior nodes de-squeeze too (CR is exact on a plane)");
+    }
+
+    [Fact]
+    public async Task GetTileAsync_Z17_UpsamplesALegacyNeighbourIntoTheKernelPadding()
+    {
+        // The PL↔SK case that kept the border gate red: the east neighbour exists ONLY as a legacy 256 px
+        // DMR5 tile. Its grid must be CR-upsampled onto the 512 lattice and fed to the kernel, so the PL
+        // tile's east border node still reads real ground — on a plane, the exact node value.
+        float[] core = RampTile(0);                      // 512 px, 1 m per hi-px
+        var legacyEast = new float[256 * 256];
+        for (int r = 0; r < 256; r++)
+        {
+            for (int c = 0; c < 256; c++)
+            {
+                // The same GLOBAL plane sampled at the legacy tile's 256 px pixel-centres: its px c sits at
+                // hi-lattice position 512 + 2c + 0.5 (one native cell = two hi cells).
+                legacyEast[(r * 256) + c] = 1000f + 512f + (2f * c) + 0.5f;
+            }
+        }
+
+        string legacyDir = Path.Combine(
+            cacheDir, "17", (FinestInsidePoland.X + 1).ToString(CultureInfo.InvariantCulture));
+        Directory.CreateDirectory(legacyDir);
+        await File.WriteAllBytesAsync(
+            Path.Combine(legacyDir, $"{FinestInsidePoland.Y}.tif"), BuildTiff(256, 256, legacyEast));
+        var handler = new StubHandler(_ => Ok(BuildTiff(512, 512, core)));
+        var source = NewSource(handler);
+
+        DemRaster? raster = await source.GetTileAsync(FinestInsidePoland);
+
+        raster.Should().NotBeNull();
+        // Tolerance note: the legacy strip's own westmost fine columns (the ones this window reads) carry a
+        // small CR edge-clamp bias — the legacy tile has no further neighbour on its PL side to pad with.
+        // ~0.05 m at this ramp's cliff-grade slope, vs ~0.35 m for the old hard clamp; the border gate
+        // measures the real-data outcome. Perfect closure would feed the PL tile's own hi-res back into the
+        // legacy pad — noted as a follow-up if the gate still flags PL↔SK.
+        raster!.Samples[(128 * 256) + 255].Should().BeApproximately(
+            1000f + 511.5f, 0.08f, "the border node must read the upsampled legacy ground, not a clamped window");
+    }
+
+    [Fact]
+    public async Task GetTileAsync_Z17_LegacyTile_IsNodeRegisteredWithItsLegacyNeighbours()
+    {
+        // The SK↔SK case: the tile itself is a legacy 256 px DMR5 tile (download fails, legacy fallback
+        // serves it). It must be node-registered against its LEGACY neighbours, so two adjacent SK tiles
+        // compute their shared border node identically — the ±4.3 cm median kink dies at the source.
+        float[] legacyCore = RampTile256(0);
+        WriteNeighbourNative(FinestInsidePoland, dx: 1, dy: 0, RampTile256(1));
+        string dir = Path.Combine(cacheDir, "17", FinestInsidePoland.X.ToString(CultureInfo.InvariantCulture));
+        Directory.CreateDirectory(dir);
+        await File.WriteAllBytesAsync(
+            Path.Combine(dir, $"{FinestInsidePoland.Y}.tif"), BuildTiff(256, 256, legacyCore));
+        var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
+        var source = NewSource(handler);
+
+        DemRaster? raster = await source.GetTileAsync(FinestInsidePoland);
+
+        raster.Should().NotBeNull("the legacy tile is the only source of Slovak z17 data");
+        raster!.Columns.Should().Be(256);
+        raster.Samples[(128 * 256) + 255].Should().BeApproximately(
+            1000f + 255.5f, 0.01f, "the legacy tile's border node sits on the node lattice like everyone else's");
+    }
+
     [Fact]
     public async Task GetTileAsync_Z17_FallsBackToTheLegacyCacheFile_WhenTheDownloadFails()
     {
