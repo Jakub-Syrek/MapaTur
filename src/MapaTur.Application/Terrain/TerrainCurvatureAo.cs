@@ -17,9 +17,16 @@ public static class TerrainCurvatureAo
     /// <summary>Darkest allowed factor — a fully enclosed floor keeps 40% of its ambient.</summary>
     public const float MinAo = 0.4f;
 
+    /// <summary>
+    /// The widest probe ring in metres. Public because anyone meshing a SUB-raster (a baked tile with a
+    /// neighbour halo) must supply at least this much real surrounding data, or the ring clamps at the raster
+    /// edge and bakes a tonal band along it (measured on the z17 pyramid: a ±0.08 AO step at every tile border).
+    /// </summary>
+    public const double MaxProbeRadiusMeters = 45.0;
+
     // Probe radii in METRES (not cells), so the coarse base and the 1 m tiles shade consistently: a
     // couloir reads equally occluded whether its floor vertex came from a 15 m or a 1 m grid.
-    private static readonly double[] RadiiMeters = { 6.0, 18.0, 45.0 };
+    private static readonly double[] RadiiMeters = { 6.0, 18.0, MaxProbeRadiusMeters };
 
     // 8 ring directions (unit steps); the probe walks radiusCells along each.
     private static readonly (int Dc, int Dr)[] Directions =

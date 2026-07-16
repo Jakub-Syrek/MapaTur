@@ -45,4 +45,22 @@ public sealed class TerrainMeshOptions
     /// radius (only curvature is averaged out).
     /// </summary>
     public int NormalSmoothingRadius { get; init; } = 1;
+
+    /// <summary>
+    /// Width (in cells, ≥ 0) of a HALO ring the raster carries around the region actually being drawn: those cells
+    /// are read when computing normals but are NOT emitted as vertices. 0 (default) = no halo, the whole raster is
+    /// drawn — every existing path meshes exactly as before.
+    ///
+    /// A raster meshed without a halo has to CLAMP the normal's central difference at its own edge, so the edge
+    /// vertex gets a one-sided normal. That is invisible for one big raster (its edge is the map's edge), but a
+    /// baked pyramid tile IS its own raster: the clamp lands on the TILE border, and the neighbouring tile — which
+    /// meshes that same welded, bit-identical ground point as its own interior — computes a different normal there.
+    /// The shader lights straight off the normal, so the disagreement draws a bright/dark line along every tile
+    /// border: the "tile grid" visible in the geometry on smooth slopes with the ortho overlay off. Giving the
+    /// mesher one ring of the neighbours' real cells and withholding it from the output removes the clamp, so both
+    /// tiles compute the SAME normal at the shared point and the line has nothing to draw.
+    ///
+    /// Must leave at least 2 interior cells per axis. <see cref="NormalSmoothingRadius"/> 1 needs an apron of 1.
+    /// </summary>
+    public int NormalApronCells { get; init; }
 }

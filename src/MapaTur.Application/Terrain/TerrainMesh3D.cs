@@ -13,7 +13,8 @@ namespace MapaTur.Application.Terrain;
 /// </summary>
 public sealed class TerrainMesh3D
 {
-    private const double MetersPerLatDegree = 111_320.0;
+    // Internal (not private) so sibling builders (neighbour-halo sizing) use the same metric convention.
+    internal const double MetersPerLatDegree = 111_320.0;
 
     /// <summary>Per-vertex world positions in metres.</summary>
     public Vector3[] Vertices { get; }
@@ -209,50 +210,19 @@ public sealed class TerrainMesh3D
     }
 
     /// <summary>
-    /// Returns <paramref name="parts"/>+1 grid-index boundaries splitting [0, count-1] into contiguous
-    /// ranges that share their seam index with the next range (so adjacent meshes have no crack).
+    /// Returns <paramref name="parts"/>+1 grid-index boundaries splitting the INCLUSIVE range
+    /// [<paramref name="first"/>, <paramref name="last"/>] into contiguous ranges that share their seam index with
+    /// the next range (so adjacent meshes have no crack). The range is the raster's drawn interior, which is the
+    /// whole raster unless a normal apron withholds a halo ring from the output.
     /// </summary>
-    private static int[] SplitPoints(int count, int parts)
+    private static int[] SplitPoints(int first, int last, int parts)
     {
         var splits = new int[parts + 1];
         for (int i = 0; i <= parts; i++)
         {
-            splits[i] = (int)Math.Round((double)(count - 1) * i / parts);
+            splits[i] = first + (int)Math.Round((double)(last - first) * i / parts);
         }
         return splits;
-    }
-
-    /// <summary>
-    /// Inclusive tile-edge indices over [0, extent-1] that (a) include every supplied <paramref name="boundaries"/>
-    /// (e.g. ortho cell edges, so no tile straddles one) and (b) keep every segment ≤ <paramref name="step"/>
-    /// (the maxTileSide budget). Consecutive entries are shared seams for <see cref="BuildBlock"/>.
-    /// </summary>
-    private static int[] BuildTileCuts(int extent, int step, SortedSet<int> boundaries)
-    {
-        var anchors = new SortedSet<int> { 0, extent - 1 };
-        foreach (int b in boundaries)
-        {
-            anchors.Add(b);
-        }
-
-        // Split each gap BETWEEN mandatory anchors (raster edges + cell boundaries) into EQUAL parts, each
-        // ≤ step. Equal parts avoid a tiny leftover "sliver" tile next to a boundary (a fixed step grid +
-        // remainder leaves 1–2-column slivers that render as a dashed dark line along the cell edge).
-        var cuts = new SortedSet<int>();
-        var sorted = new List<int>(anchors);
-        for (int i = 0; i < sorted.Count - 1; i++)
-        {
-            int a = sorted[i];
-            int b = sorted[i + 1];
-            int span = b - a;
-            int parts = Math.Max(1, (int)Math.Ceiling((double)span / step));
-            for (int k = 0; k <= parts; k++)
-            {
-                cuts.Add(a + (int)Math.Round((double)span * k / parts));
-            }
-        }
-
-        return cuts.ToArray();
     }
 
     /// <summary>
@@ -397,10 +367,66 @@ public sealed class TerrainMesh3D
         GeoPoint anchor = projectionAnchor ?? rasterCentre;
         Vector3 anchorOffset = LocalTangentProjection.GeoToWorld(rasterCentre, 0f, anchor, 1f);
         MeshFrame frame = ComputeFrame(raster, anchor.Latitude);
+
+        // Withhold the apron ring from the output (it exists only so the normal loop below has real neighbours at
+        // the drawn region's edge instead of clamping). The frame stays computed over the WHOLE raster: the halo is
+        // symmetric, so the centre — and therefore every interior vertex's world position — is unchanged.
+        int apron = ApronFor(raster, options);
         return BuildBlock(
-            raster, options, frame, 0, raster.Columns - 1, 0, raster.Rows - 1, anchor, anchorOffset,
-            orthoCoverage: orthoCoverage, orthoTileIndexOffset: orthoTileIndexOffset, detailGrid: detailGrid);
+            raster, options, frame, apron, raster.Columns - 1 - apron, apron, raster.Rows - 1 - apron,
+            anchor, anchorOffset, orthoCell: InteriorCell(raster, apron),
+            orthoCoverage: orthoCoverage, orthoTileIndexOffset: orthoTileIndexOffset, detailGrid: detailGrid,
+            emitBounds: InteriorBounds(raster, apron));
     }
+
+    /// <summary>
+    /// Validated apron width for <paramref name="raster"/>: the ring of cells read for normals but not drawn.
+    /// </summary>
+    /// <exception cref="ArgumentException">The apron would leave fewer than 2 interior cells on an axis.</exception>
+    private static int ApronFor(DemRaster raster, TerrainMeshOptions options)
+    {
+        int apron = Math.Max(0, options.NormalApronCells);
+        if (apron == 0)
+        {
+            return 0;
+        }
+
+        if (raster.Columns - (2 * apron) < 2 || raster.Rows - (2 * apron) < 2)
+        {
+            throw new ArgumentException(
+                $"A normal apron of {apron} cell(s) leaves no meshable interior in a {raster.Columns}×{raster.Rows} "
+                + "raster (needs at least 2 interior cells per axis).",
+                nameof(raster));
+        }
+
+        return apron;
+    }
+
+    /// <summary>
+    /// The geographic extent of the DRAWN region — the raster inset by <paramref name="apron"/> cells. The mesh must
+    /// report this rather than the halo's bounds: the halo is another tile's ground, and a consumer that trusts
+    /// Bounds (ortho placement, coverage reasoning) would otherwise think this mesh owns it.
+    /// </summary>
+    private static MapBounds InteriorBounds(DemRaster raster, int apron)
+    {
+        if (apron == 0)
+        {
+            return raster.Bounds;
+        }
+
+        double lonPitch = (raster.East - raster.West) / (raster.Columns - 1);
+        double latPitch = (raster.North - raster.South) / (raster.Rows - 1);
+        return new MapBounds(
+            new GeoPoint(raster.South + (latPitch * apron), raster.West + (lonPitch * apron)),
+            new GeoPoint(raster.North - (latPitch * apron), raster.East - (lonPitch * apron)));
+    }
+
+    // The legacy full-extent ortho cell spans "the whole raster" — which, with a halo, is more ground than this mesh
+    // draws. Span the INTERIOR instead so local UV still runs 0→1 across the drawn surface exactly as it does today.
+    private static OrthoCell InteriorCell(DemRaster raster, int apron)
+        => apron == 0
+            ? default
+            : new OrthoCell(apron, raster.Columns - 1 - apron, apron, raster.Rows - 1 - apron, 0, true);
 
     /// <summary>
     /// Builds a high-resolution terrain as a set of mesh tiles, each bounded by <paramref name="maxTileSide"/>, so a
@@ -478,6 +504,16 @@ public sealed class TerrainMesh3D
         int cols = raster.Columns;
         int rows = raster.Rows;
 
+        // Halo ring (read for normals, never drawn) — see TerrainMeshOptions.NormalApronCells. The cut planning
+        // below runs over the INTERIOR only; BuildBlock's normal loop still samples the full raster, so a block
+        // sitting on the interior's edge reads the halo's real cells instead of clamping.
+        int apron = ApronFor(raster, options);
+        int colFirst = apron;
+        int colLast = cols - 1 - apron;
+        int rowFirst = apron;
+        int rowLast = rows - 1 - apron;
+        MapBounds emitBounds = InteriorBounds(raster, apron);
+
         var tiles = new List<TerrainMesh3D>();
 
         // Geo-referenced ortho (ortho-on-LOD): this raster is a SUB-REGION of a larger ortho, so UV is mapped
@@ -518,8 +554,8 @@ public sealed class TerrainMesh3D
                 }
             }
 
-            int[] colCuts = BuildTileCuts(cols, maxTileSide, colBoundaries);
-            int[] rowCuts = BuildTileCuts(rows, maxTileSide, rowBoundaries);
+            int[] colCuts = CutsWithCellBoundaries(colFirst, colLast, maxTileSide, colBoundaries);
+            int[] rowCuts = CutsWithCellBoundaries(rowFirst, rowLast, maxTileSide, rowBoundaries);
             for (int ri = 0; ri < rowCuts.Length - 1; ri++)
             {
                 int r0 = rowCuts[ri];
@@ -529,7 +565,7 @@ public sealed class TerrainMesh3D
                     tiles.Add(BuildBlock(
                         raster, options, frame, colCuts[ci], colCuts[ci + 1], r0, r1, anchor, anchorOffset,
                         OrthoCell.Full(cols, rows), edgeHeightSource, edgeMatchRows, orthoCoverage, orthoTileIndexOffset,
-                        detailGrid: detailGrid));
+                        detailGrid: detailGrid, emitBounds: emitBounds));
                 }
             }
 
@@ -540,8 +576,8 @@ public sealed class TerrainMesh3D
         // ortho cell with UV local to that cell. Cells share their seam row/column with the neighbour, and
         // mesh sub-tiles use inclusive ranges, so there are no cracks and textures meet seamlessly under
         // ClampToEdge. orthoGrid 1×1 → one cell over the whole raster (the legacy single-texture path).
-        int[] colSplits = SplitPoints(cols, orthoGridCols);
-        int[] rowSplits = SplitPoints(rows, orthoGridRows);
+        int[] colSplits = SplitPoints(colFirst, colLast, orthoGridCols);
+        int[] rowSplits = SplitPoints(rowFirst, rowLast, orthoGridRows);
 
         for (int gy = 0; gy < orthoGridRows; gy++)
         {
@@ -559,7 +595,7 @@ public sealed class TerrainMesh3D
                     for (int c0 = cellC0; c0 < cellC1; c0 += maxTileSide)
                     {
                         int c1 = Math.Min(c0 + maxTileSide, cellC1);
-                        tiles.Add(BuildBlock(raster, options, frame, c0, c1, r0, r1, anchor, anchorOffset, cell, edgeHeightSource, edgeMatchRows, orthoTileIndexOffset: orthoTileIndexOffset, detailGrid: detailGrid));
+                        tiles.Add(BuildBlock(raster, options, frame, c0, c1, r0, r1, anchor, anchorOffset, cell, edgeHeightSource, edgeMatchRows, orthoTileIndexOffset: orthoTileIndexOffset, detailGrid: detailGrid, emitBounds: emitBounds));
                     }
                 }
             }
@@ -791,7 +827,8 @@ public sealed class TerrainMesh3D
         int edgeRatioWest = 1,
         int edgeRatioEast = 1,
         int step = 1,
-        float[]? detailGrid = null)
+        float[]? detailGrid = null,
+        MapBounds? emitBounds = null)
     {
         int cols = raster.Columns;
         int rows = raster.Rows;
@@ -1083,7 +1120,7 @@ public sealed class TerrainMesh3D
             anchorOffset,
             frame.HorizontalExtent,
             exaggeration,
-            raster.Bounds,
+            emitBounds ?? raster.Bounds,
             options.LightDirection,
             options.AmbientFactor,
             geoTileIndex,
@@ -1168,8 +1205,9 @@ public sealed class TerrainMesh3D
     // ±2 native cells (~5-8 m at 1-1.6 m/px) — a small, local window; NativeDetailGain/Cap deliberately keep the
     // result FAR below what the same window's raw RMS would read as real relief (see StepResidualRms) — this is
     // extrapolation below the source data's own resolution, not a measurement, so it must never be mistaken for
-    // (or overpower) genuine large-scale shape.
-    private const int NativeDetailWindowStep = 4;
+    // (or overpower) genuine large-scale shape. Internal (not private) so a neighbour-halo builder can size the
+    // halo to cover this window's reach (step/2 cells) — an undersized halo re-clamps the window at tile borders.
+    internal const int NativeDetailWindowStep = 4;
     private const float NativeDetailGain = 0.75f;
     private const float NativeDetailCap = 0.9f;
 

@@ -508,9 +508,14 @@ public sealed class BakedTileStreamingManager
                 return;
             }
 
+            // Pass the tile loader as the neighbour source: the mesher rings the tile with one cell of its
+            // neighbours' real heights so its border normals match the adjacent tile's (removing the shading line
+            // along every tile seam — the "grid in the geometry"). loadTile is the RAM-cached loader, so the eight
+            // neighbour lookups are memory hits for any tile whose neighbours are also resident; a missing neighbour
+            // (pyramid rim / uncached) or a NoData void falls back to the tile's own clamped edge — today's look.
             IReadOnlyList<TerrainMesh3D> meshes = BakedTileMeshBuilder.BuildCut(
                 tile, this.projectionAnchor, this.meshOptions, this.skirtDepthMeters(key),
-                this.orthoCoverage, this.orthoTileIndexOffset);
+                this.orthoCoverage, this.orthoTileIndexOffset, this.loadTile);
             slots[i] = (key, meshes, IsHoleFree(tile));
         });
 
