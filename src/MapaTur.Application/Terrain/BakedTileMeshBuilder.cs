@@ -75,9 +75,16 @@ public static class BakedTileMeshBuilder
         // parallel to Heights, so it feeds the mesher's per-vertex detail with the same cell indexing. Null on the
         // finest level ⇒ per-vertex detail 0 (relief already in geometry). Faded by zoom (see
         // FadeDetailForZoom) so a coarse, far-picked tile doesn't out-bump a fine, near-picked one.
-        (TerrainMeshOptions meshOptions, DemRaster raster, float[]? detailGrid) =
+        (TerrainMeshOptions meshOptions, DemRaster raster, float[]? detailGrid, bool pooled) =
             PrepareFor(tile, options, skirtDepthMeters, neighbourSource);
-        return TerrainMesh3D.Build(raster, meshOptions, projectionAnchor, orthoCoverage, orthoTileIndexOffset, detailGrid);
+        try
+        {
+            return TerrainMesh3D.Build(raster, meshOptions, projectionAnchor, orthoCoverage, orthoTileIndexOffset, detailGrid);
+        }
+        finally
+        {
+            ReturnScratch(raster, detailGrid, pooled);
+        }
     }
 
     /// <summary>
@@ -119,27 +126,48 @@ public static class BakedTileMeshBuilder
                 nameof(tile), $"A baked tile needs at least 2×2 samples to mesh (got {tile.Columns}×{tile.Rows}).");
         }
 
-        (TerrainMeshOptions meshOptions, DemRaster raster, float[]? detailGrid) =
+        (TerrainMeshOptions meshOptions, DemRaster raster, float[]? detailGrid, bool pooled) =
             PrepareFor(tile, options, skirtDepthMeters, neighbourSource);
-
-        // No ortho ⇒ no UV to clamp ⇒ a single block is correct (and cheapest). With ortho, route through
-        // BuildTiles, which cuts at the coverage's cell boundaries (CutsWithCellBoundaries) so no sub-block
-        // straddles a cell — the same anti-stripe cut the live detail/base meshing uses.
-        if (orthoCoverage is null)
+        try
         {
-            return new[] { TerrainMesh3D.Build(raster, meshOptions, projectionAnchor, orthoCoverage, orthoTileIndexOffset, detailGrid) };
+            // No ortho ⇒ no UV to clamp ⇒ a single block is correct (and cheapest). With ortho, route through
+            // BuildTiles, which cuts at the coverage's cell boundaries (CutsWithCellBoundaries) so no sub-block
+            // straddles a cell — the same anti-stripe cut the live detail/base meshing uses.
+            if (orthoCoverage is null)
+            {
+                return new[] { TerrainMesh3D.Build(raster, meshOptions, projectionAnchor, orthoCoverage, orthoTileIndexOffset, detailGrid) };
+            }
+
+            // 32-bit indices, so a 256×256 baked tile (+ skirt) fits in ONE mesh — no sub-block split needed. Keep
+            // maxTileSide at the full 256-sample side so BuildTiles cuts ONLY at ortho-cell boundaries (the anti-stripe
+            // cut), not into 4 arbitrary draw-call-multiplying blocks. A tile fully inside one cell → a single mesh;
+            // tile-to-tile edges are already welded by the baker, and any cell-boundary sub-block shares its source
+            // heights with its neighbour so it doesn't crack. (Was a 128 split forced by the old 16-bit limit — the
+            // ×4 draw-call cost that bound FPS; removing it is the P1 win.)
+            const int maxTileSide = 255;
+            return TerrainMesh3D.BuildTiles(
+                raster, meshOptions, maxTileSide, orthoGridCols: 1, orthoGridRows: 1, projectionAnchor,
+                edgeHeightSource: null, edgeMatchRows: 1, orthoCoverage, orthoTileIndexOffset, detailGrid);
+        }
+        finally
+        {
+            ReturnScratch(raster, detailGrid, pooled);
+        }
+    }
+
+    // The halo raster and the padded detail grid are BUILD SCRATCH: TerrainMesh3D copies what it needs into the
+    // meshes and retains no reference to either (verified — its ctor stores only vertex/index arrays), so a
+    // pooled build hands them back the moment the meshes exist. NEVER pooled without the halo: the un-haloed
+    // AsRaster path SHARES tile.Heights with the RAM tile cache — returning that array would corrupt the cache.
+    private static void ReturnScratch(DemRaster raster, float[]? detailGrid, bool pooled)
+    {
+        if (!pooled)
+        {
+            return;
         }
 
-        // 32-bit indices, so a 256×256 baked tile (+ skirt) fits in ONE mesh — no sub-block split needed. Keep
-        // maxTileSide at the full 256-sample side so BuildTiles cuts ONLY at ortho-cell boundaries (the anti-stripe
-        // cut), not into 4 arbitrary draw-call-multiplying blocks. A tile fully inside one cell → a single mesh;
-        // tile-to-tile edges are already welded by the baker, and any cell-boundary sub-block shares its source
-        // heights with its neighbour so it doesn't crack. (Was a 128 split forced by the old 16-bit limit — the
-        // ×4 draw-call cost that bound FPS; removing it is the P1 win.)
-        const int maxTileSide = 255;
-        return TerrainMesh3D.BuildTiles(
-            raster, meshOptions, maxTileSide, orthoGridCols: 1, orthoGridRows: 1, projectionAnchor,
-            edgeHeightSource: null, edgeMatchRows: 1, orthoCoverage, orthoTileIndexOffset, detailGrid);
+        MeshBufferPool.Shared.Return(raster.Samples);
+        MeshBufferPool.Shared.Return(detailGrid);
     }
 
     // z13/z14/z15 (the only levels that carry DetailRms) grow coarser as the quadtree LOD selector picks them for
@@ -168,8 +196,11 @@ public static class BakedTileMeshBuilder
 
     // Everything the halo decision touches, resolved once: the halo width, the (possibly haloed) raster, the
     // matching apron in the mesh options, and the detail grid padded to the same dimensions. No neighbour source
-    // ⇒ no halo ⇒ no apron: the tile meshes as its own standalone raster, precisely as before.
-    private static (TerrainMeshOptions Options, DemRaster Raster, float[]? Detail) PrepareFor(
+    // ⇒ no halo ⇒ no apron: the tile meshes as its own standalone raster, precisely as before. `Pooled` marks
+    // that the raster/detail arrays are BUILD SCRATCH rented from the MeshBufferPool (a flight rebuilds dozens
+    // of tiles per second; the z17 halo raster alone is ~553 KB — pure LOH churn when allocated per build) and
+    // must go back via ReturnScratch once the meshes exist.
+    private static (TerrainMeshOptions Options, DemRaster Raster, float[]? Detail, bool Pooled) PrepareFor(
         BakedDemTile tile,
         TerrainMeshOptions? options,
         float skirtDepthMeters,
@@ -178,10 +209,11 @@ public static class BakedTileMeshBuilder
         int haloCells = neighbourSource is null ? 0 : HaloCellsFor(tile, options);
         return (
             MeshOptionsFor(options, skirtDepthMeters, haloCells),
-            haloCells > 0 ? AsRasterWithHalo(tile, neighbourSource!, haloCells) : AsRaster(tile),
+            haloCells > 0 ? BuildHaloRaster(tile, neighbourSource!, haloCells, rentScratch: true) : AsRaster(tile),
             haloCells > 0
-                ? HaloDetail(FadeDetailForZoom(tile), tile.Columns, tile.Rows, haloCells)
-                : FadeDetailForZoom(tile));
+                ? HaloDetail(FadeDetailForZoom(tile), tile.Columns, tile.Rows, haloCells, rentScratch: true)
+                : FadeDetailForZoom(tile),
+            haloCells > 0);
     }
 
     /// <summary>
@@ -271,6 +303,14 @@ public static class BakedTileMeshBuilder
     /// <exception cref="ArgumentNullException"><paramref name="tile"/> or <paramref name="neighbourSource"/> is null.</exception>
     public static DemRaster AsRasterWithHalo(
         BakedDemTile tile, Func<DemTileKey, BakedDemTile?> neighbourSource, int haloCells = 1)
+        => BuildHaloRaster(tile, neighbourSource, haloCells, rentScratch: false);
+
+    // rentScratch: the mesh-build path rents the heights buffer from the MeshBufferPool (returned by
+    // ReturnScratch right after the meshes exist); external callers (the virtual-tile synthesizer) get a plain
+    // allocation they own outright. Every cell of the buffer is written below (interior copy + full ring scan),
+    // so a dirty rented buffer needs no clearing.
+    private static DemRaster BuildHaloRaster(
+        BakedDemTile tile, Func<DemTileKey, BakedDemTile?> neighbourSource, int haloCells, bool rentScratch)
     {
         ArgumentNullException.ThrowIfNull(tile);
         ArgumentNullException.ThrowIfNull(neighbourSource);
@@ -280,7 +320,9 @@ public static class BakedTileMeshBuilder
         int k = Math.Clamp(haloCells, 1, Math.Min(cols, rows) - 1);
         int hCols = cols + (2 * k);
         int hRows = rows + (2 * k);
-        var heights = new float[hCols * hRows];
+        float[] heights = rentScratch
+            ? MeshBufferPool.Shared.RentSingle(hCols * hRows)
+            : new float[hCols * hRows];
 
         // Interior: the tile's own grid, untouched, offset by the halo.
         for (int r = 0; r < rows; r++)
@@ -374,8 +416,9 @@ public static class BakedTileMeshBuilder
     }
 
     // DetailRms is indexed with the RASTER's dimensions, so a haloed raster needs a haloed detail grid or every
-    // lookup misaligns. The halo band's own values are never read (those vertices aren't emitted), so zeros do.
-    private static float[]? HaloDetail(float[]? detail, int cols, int rows, int haloCells)
+    // lookup misaligns. The halo band's own values are NEVER read (the apron withholds those vertices from the
+    // output), so a rented buffer's dirty band is harmless and zeros are only cosmetic on the allocating path.
+    private static float[]? HaloDetail(float[]? detail, int cols, int rows, int haloCells, bool rentScratch = false)
     {
         if (detail is null)
         {
@@ -384,7 +427,8 @@ public static class BakedTileMeshBuilder
 
         int k = Math.Clamp(haloCells, 1, Math.Min(cols, rows) - 1);
         int hCols = cols + (2 * k);
-        var padded = new float[hCols * (rows + (2 * k))];
+        int length = hCols * (rows + (2 * k));
+        float[] padded = rentScratch ? MeshBufferPool.Shared.RentSingle(length) : new float[length];
         for (int r = 0; r < rows; r++)
         {
             Array.Copy(detail, r * cols, padded, ((r + k) * hCols) + k, cols);

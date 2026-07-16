@@ -9,6 +9,18 @@ public interface IOrthoDetailComposer
 {
     /// <summary>Composed RGBA8 buffer for cell (ci,cj), or null if the cell is entirely nodata/missing.</summary>
     byte[]? Compose(int ci, int cj);
+
+    /// <summary>
+    /// As <see cref="Compose(int, int)"/> but composing INTO a caller-owned (pooled) destination buffer —
+    /// the cell buffer is 64/256 MiB, and allocating one per compose was the dominant LOH churn of a slow
+    /// traverse. An implementation that honours the destination returns the SAME array instance (cleared and
+    /// filled); the default falls back to the allocating overload (the caller must then treat its rented
+    /// buffer as unused and return it — compare by reference, never assume).
+    /// </summary>
+    /// <param name="ci">Cell column.</param>
+    /// <param name="cj">Cell row.</param>
+    /// <param name="destination">Reusable CellPx²·4 buffer, or null to allocate.</param>
+    byte[]? Compose(int ci, int cj, byte[]? destination) => Compose(ci, cj);
 }
 
 /// <summary>The GPU side of detail streaming (uploading/evicting cell textures), behind an interface so the

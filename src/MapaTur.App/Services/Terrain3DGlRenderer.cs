@@ -2058,12 +2058,31 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         public uint StagingTexture;          // allocated empty, filled row-by-row; 0 = no upload in progress
         public int UploadedRows;
         public byte[]? Pending;              // composed buffer awaiting strip-upload
+        public byte[]? Rented;               // pooled cell buffer lent to the in-flight compose (owner: this cell until returned)
         public Task<byte[]?>? Compose;       // off-thread composition in flight
         public long DesiredTick;             // last frame the cell was desired (LRU eviction key)
         public bool Empty;                   // compose returned null (outside the fetched footprint) — no texture
         public double ComposeMs;             // wall-clock of the off-thread compose (decode + assemble)
         public double UploadMs;              // cumulative GL strip-upload time (sliced across frames)
         public double MipmapMs;              // GenerateMipmap time at completion
+    }
+
+    // Releases the cell's compose buffer back to the shared pool and clears both ownership fields. Invariant:
+    // `Rented` tracks the buffer the cell OWNS from the compose kick all the way through the strip-upload
+    // (harvest re-points it at the composer's result). Legal call sites: the post-mipmap promote (the final
+    // TexSubImage2D copies synchronously — the buffer is dead the moment that call returns) and cell disposal.
+    // NEVER while `Compose` is alive — the task is still writing into the buffer (the 2026-07-15 eviction
+    // lesson); the guard below turns such a call into a deliberate drop-on-the-floor (GC reclaims it, the
+    // pool refills by allocation) rather than a use-after-return corruption.
+    private static void ReleaseCellBuffer(DetailCellGpu cell)
+    {
+        byte[]? owned = cell.Rented;
+        cell.Rented = null;
+        cell.Pending = null;
+        if (owned is not null && cell.Compose is null)
+        {
+            MapaTur.Application.Terrain.MeshBufferPool.Shared.Return(owned);
+        }
     }
     private System.Numerics.Vector2 orthoCoverageMin;
     private System.Numerics.Vector2 orthoCoverageMax;
@@ -3064,10 +3083,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 MapaTur.Application.Terrain.IOrthoDetailComposer composer = det05Composer;
                 DetailCellGpu capture = cell;
                 det05ComposeInFlight++;
+                // Pooled compose destination (the 256 MiB det05 cell buffer per compose was the single
+                // largest LOH churn of a covered-strip walk). Ownership: the cell, until ReleaseCellBuffer.
+                byte[] rented = MapaTur.Application.Terrain.MeshBufferPool.Shared.RentBytes(
+                    det05Grid.CellPx * det05Grid.CellPx * 4);
+                cell.Rented = rented;
                 cell.Compose = Task.Run(() =>
                 {
                     var swc = System.Diagnostics.Stopwatch.StartNew();
-                    byte[]? buf = composer.Compose(ci, cj);
+                    byte[]? buf = composer.Compose(ci, cj, rented);
                     capture.ComposeMs = swc.Elapsed.TotalMilliseconds;
                     return buf;
                 });
@@ -3084,10 +3108,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 if (buf is null)
                 {
                     cell.Empty = true;
+                    ReleaseCellBuffer(cell); // the pooled destination goes straight back — nothing to upload
                 }
                 else
                 {
+                    if (cell.Rented is { } r && !ReferenceEquals(buf, r))
+                    {
+                        MapaTur.Application.Terrain.MeshBufferPool.Shared.Return(r);
+                    }
+
                     cell.Pending = buf;
+                    cell.Rented = buf; // ownership continues through the strip-upload to promote/dispose
                     if (!det05UploadQueue.Contains(cell.Key))
                     {
                         det05UploadQueue.Add(cell.Key);
@@ -3128,7 +3159,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
     private void DisposeDet05Cell(GL gl, DetailCellGpu cell)
     {
-        if (cell.Compose is not null)
+        // Capture liveness BEFORE the safety-net nulls Compose: a live task is still WRITING into the pooled
+        // buffer, so it must be dropped on the floor (GC), never returned — returning it would hand the pool
+        // an array another cell rents while the orphaned task keeps writing (silent pixel corruption).
+        bool composeAlive = cell.Compose is not null;
+        if (composeAlive)
         {
             det05ComposeInFlight = Math.Max(0, det05ComposeInFlight - 1); // release slot on mid-compose eviction (see DisposeDet25Cell)
             cell.Compose = null;
@@ -3147,7 +3182,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             cell.StagingTexture = 0;
         }
 
-        cell.Pending = null; cell.UploadedRows = 0;
+        if (composeAlive)
+        {
+            cell.Rented = null; cell.Pending = null; // deliberate drop — the orphaned task owns the buffer now
+        }
+        else
+        {
+            ReleaseCellBuffer(cell);
+        }
+
+        cell.UploadedRows = 0;
         det05UploadQueue.Remove(cell.Key);
     }
 
@@ -3219,7 +3263,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
                 cell.Texture = cell.StagingTexture;
                 cell.StagingTexture = 0;
-                cell.Pending = null;
+                ReleaseCellBuffer(cell); // the final TexSubImage2D has copied — recycle the pooled buffer
                 det05ResidentBytes += OrthoVramBudget.CellResidentBytes(w, h);
                 det05UploadQueue.RemoveAt(0);
                 Log.Information("[Det05] cell ({Ci},{Cj}) compose {C:F0}ms | {Px}px resident", cell.Ci, cell.Cj, cell.ComposeMs, w);
@@ -3388,10 +3432,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 MapaTur.Application.Terrain.IOrthoDetailComposer composer = det25Composer;
                 DetailCellGpu capture = cell;
                 det25ComposeInFlight++;
+                // Pooled compose destination (the 64 MiB cell buffer allocated per compose was gigabytes of
+                // LOH churn per traverse). Ownership: the cell, tracked via Rented until ReleaseCellBuffer.
+                byte[] rented = MapaTur.Application.Terrain.MeshBufferPool.Shared.RentBytes(
+                    det25Grid.CellPx * det25Grid.CellPx * 4);
+                cell.Rented = rented;
                 cell.Compose = Task.Run(() =>
                 {
                     var swc = System.Diagnostics.Stopwatch.StartNew();
-                    byte[]? buf = composer.Compose(ci, cj);
+                    byte[]? buf = composer.Compose(ci, cj, rented);
                     capture.ComposeMs = swc.Elapsed.TotalMilliseconds; // diagnostic; benign cross-thread write
                     return buf;
                 });
@@ -3409,10 +3458,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 if (buf is null)
                 {
                     cell.Empty = true; // outside the fetched footprint — no texture, never recomposed
+                    ReleaseCellBuffer(cell); // the pooled destination goes straight back — nothing to upload
                 }
                 else
                 {
+                    if (cell.Rented is { } r && !ReferenceEquals(buf, r))
+                    {
+                        // The composer ignored the destination (allocating fallback) — recycle the unused rent.
+                        MapaTur.Application.Terrain.MeshBufferPool.Shared.Return(r);
+                    }
+
                     cell.Pending = buf;
+                    cell.Rented = buf; // ownership continues through the strip-upload to promote/dispose
                     if (!det25UploadQueue.Contains(cell.Key))
                     {
                         det25UploadQueue.Add(cell.Key);
@@ -3463,7 +3520,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
     private void DisposeDet25Cell(GL gl, DetailCellGpu cell)
     {
-        if (cell.Compose is not null)
+        // Capture liveness BEFORE the safety-net nulls Compose (see DisposeDet05Cell): a live task still
+        // writes into the pooled buffer — it must be dropped, never returned to the pool.
+        bool composeAlive = cell.Compose is not null;
+        if (composeAlive)
         {
             // Evicting a cell mid-compose: release its concurrency slot (the running task's result is discarded),
             // else the in-flight counter LEAKS up to the cap and the streamer stops kicking — the ring stalls
@@ -3485,7 +3545,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             cell.StagingTexture = 0;
         }
 
-        cell.Pending = null; cell.UploadedRows = 0;
+        if (composeAlive)
+        {
+            cell.Rented = null; cell.Pending = null; // deliberate drop — the orphaned task owns the buffer now
+        }
+        else
+        {
+            ReleaseCellBuffer(cell); // nulls Pending (queue guard reads it) and recycles the pooled buffer
+        }
+
+        cell.UploadedRows = 0;
         det25UploadQueue.Remove(cell.Key);
     }
 
@@ -3565,7 +3634,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
                 cell.Texture = cell.StagingTexture;
                 cell.StagingTexture = 0;
-                cell.Pending = null;
+                ReleaseCellBuffer(cell); // the final TexSubImage2D has copied — recycle the pooled buffer
                 det25ResidentBytes += OrthoVramBudget.CellResidentBytes(w, h);
                 det25UploadQueue.RemoveAt(0);
                 Log.Information("[Det25] cell ({Ci},{Cj}) compose {C:F0}ms | upload {U:F1}ms | mipmap {M:F1}ms | {Px}px",

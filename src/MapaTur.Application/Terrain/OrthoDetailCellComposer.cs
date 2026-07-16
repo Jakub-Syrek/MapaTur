@@ -35,7 +35,18 @@ public sealed class OrthoDetailCellComposer : IOrthoDetailComposer
 
     /// <summary>Composes cell (<paramref name="ci"/>, <paramref name="cj"/>) into an RGBA8 buffer, or null when
     /// the cell has no on-disk tile and no base sampler (nothing to overlay → base ortho shows through).</summary>
-    public byte[]? Compose(int ci, int cj)
+    public byte[]? Compose(int ci, int cj) => Compose(ci, cj, destination: null);
+
+    /// <summary>
+    /// As <see cref="Compose(int, int)"/> but composing INTO a caller-owned (pooled) buffer — the cell buffer
+    /// is 64/256 MiB and allocating one per compose was the dominant LOH churn of a slow traverse. The
+    /// destination is cleared by the assembler, so on the null return (all-missing cell) it is left fully
+    /// transparent and safe to return to the pool.
+    /// </summary>
+    /// <param name="ci">Cell column.</param>
+    /// <param name="cj">Cell row.</param>
+    /// <param name="destination">Reusable CellPx²·4 buffer; null allocates (the legacy behaviour).</param>
+    public byte[]? Compose(int ci, int cj, byte[]? destination)
     {
         int present = 0;
         byte[]? Counting(int i, int j)
@@ -49,7 +60,7 @@ public sealed class OrthoDetailCellComposer : IOrthoDetailComposer
             return tile;
         }
 
-        byte[] buffer = this.assembler.Compose(ci, cj, Counting, this.baseFill);
+        byte[] buffer = this.assembler.Compose(ci, cj, Counting, this.baseFill, destination);
 
         // No tile present and no base sampler → the whole buffer is transparent black. Return null so the manager
         // skips it (base ortho covers the cell) instead of paying VRAM for an empty texture that the alpha-aware

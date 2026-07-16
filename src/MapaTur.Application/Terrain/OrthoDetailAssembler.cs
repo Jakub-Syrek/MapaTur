@@ -33,11 +33,48 @@ public sealed class OrthoDetailAssembler
         int ci, int cj,
         Func<int, int, byte[]?> tileProvider,
         Func<double, double, (byte R, byte G, byte B)?>? baseFill)
+        => Compose(ci, cj, tileProvider, baseFill, destination: null);
+
+    /// <summary>
+    /// As <see cref="Compose(int, int, Func{int, int, byte[]}, Func{double, double, ValueTuple{byte, byte, byte}?})"/>
+    /// but composing INTO <paramref name="destination"/> (a pooled buffer) instead of allocating: the cell
+    /// buffer is 64 MiB at det25 / 256 MiB at det05, and allocating one per compose was gigabytes of LOH
+    /// garbage per traverse. The destination is CLEARED first — this composer's hole/nodata semantics rely on
+    /// zeroed pixels (holes are skipped, not written), and a pooled buffer arrives dirty with the previous
+    /// cell's pixels, which would otherwise ghost through every hole.
+    /// </summary>
+    /// <param name="ci">Cell column.</param>
+    /// <param name="cj">Cell row.</param>
+    /// <param name="tileProvider">Decoded 512×512 RGBA8 tile by global lattice index, or null.</param>
+    /// <param name="baseFill">Optional base sampler for holes/nodata.</param>
+    /// <param name="destination">Reusable CellPx²·4 buffer to compose into; null allocates a fresh one.</param>
+    /// <exception cref="ArgumentException"><paramref name="destination"/> has the wrong length.</exception>
+    public byte[] Compose(
+        int ci, int cj,
+        Func<int, int, byte[]?> tileProvider,
+        Func<double, double, (byte R, byte G, byte B)?>? baseFill,
+        byte[]? destination)
     {
         ArgumentNullException.ThrowIfNull(tileProvider);
 
         int cellPx = grid.CellPx;
-        var cell = new byte[cellPx * cellPx * 4];
+        byte[] cell;
+        if (destination is null)
+        {
+            cell = new byte[cellPx * cellPx * 4];
+        }
+        else
+        {
+            if (destination.Length != cellPx * cellPx * 4)
+            {
+                throw new ArgumentException(
+                    $"Expected a {cellPx * cellPx * 4}-byte cell buffer, got {destination.Length}.",
+                    nameof(destination));
+            }
+
+            cell = destination;
+            Array.Clear(cell);
+        }
         MapBounds b = grid.CellBounds(ci, cj);
         double west = b.SouthWest.Longitude, east = b.NorthEast.Longitude;
         double north = b.NorthEast.Latitude, south = b.SouthWest.Latitude;
