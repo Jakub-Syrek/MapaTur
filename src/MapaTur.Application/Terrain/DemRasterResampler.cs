@@ -34,11 +34,40 @@ public static class DemRasterResampler
     {
         ArgumentNullException.ThrowIfNull(raster);
 
+        double rowFloat = (raster.North - latitude) / (raster.North - raster.South) * (raster.Rows - 1);
+        double colFloat = (longitude - raster.West) / (raster.East - raster.West) * (raster.Columns - 1);
+        return SampleCore(raster, colFloat, rowFloat, longitude, latitude);
+    }
+
+    /// <summary>
+    /// Samples the raster at a GRID position (fractional node coordinates, edge-clamped) with the same
+    /// separable Catmull-Rom as <see cref="SampleCatmullRom"/>. For a caller whose sample positions are exact
+    /// grid fractions by construction (the virtual-tile synthesizer: child nodes sit on dyadic fractions of
+    /// the parent grid), this skips the geo round-trip entirely — a position that IS a node samples at t = 0
+    /// exactly and reproduces the node value bit-for-bit, which is what keeps welded-parent seams bit-exact.
+    /// </summary>
+    /// <param name="raster">The raster to sample.</param>
+    /// <param name="colFloat">Fractional column (node 0 = west edge; clamped to [0, Columns−1]).</param>
+    /// <param name="rowFloat">Fractional row (node 0 = north edge; clamped to [0, Rows−1]).</param>
+    /// <returns>The interpolated elevation, or <see cref="DemRaster.NoDataValue"/> when nothing valid covers
+    /// the point.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="raster"/> is null.</exception>
+    public static double SampleCatmullRomAt(DemRaster raster, double colFloat, double rowFloat)
+    {
+        ArgumentNullException.ThrowIfNull(raster);
+
+        // Geo equivalent of the grid position — used ONLY by the NoData degradation path below (the bilinear
+        // fallback is geo-addressed). The main Catmull-Rom path never touches it.
+        double longitude = raster.West + (colFloat / (raster.Columns - 1) * (raster.East - raster.West));
+        double latitude = raster.North - (rowFloat / (raster.Rows - 1) * (raster.North - raster.South));
+        return SampleCore(raster, colFloat, rowFloat, longitude, latitude);
+    }
+
+    private static double SampleCore(
+        DemRaster raster, double colFloat, double rowFloat, double fallbackLongitude, double fallbackLatitude)
+    {
         int cols = raster.Columns;
         int rows = raster.Rows;
-
-        double rowFloat = (raster.North - latitude) / (raster.North - raster.South) * (rows - 1);
-        double colFloat = (longitude - raster.West) / (raster.East - raster.West) * (cols - 1);
         rowFloat = Math.Clamp(rowFloat, 0.0, rows - 1.0);
         colFloat = Math.Clamp(colFloat, 0.0, cols - 1.0);
 
@@ -61,7 +90,7 @@ public static class DemRasterResampler
                 {
                     // A sentinel under a (possibly negative) cubic weight would poison the surface — degrade
                     // this sample to the NoData-aware bilinear blend instead.
-                    return raster.SampleBilinear(longitude, latitude);
+                    return raster.SampleBilinear(fallbackLongitude, fallbackLatitude);
                 }
 
                 taps[j] = v;
