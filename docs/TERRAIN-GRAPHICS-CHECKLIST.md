@@ -133,19 +133,49 @@ chain, called by every path, so coverage can't drift. **TODO: this consolidation
    the light sum by `mix(1, vColor.a, uAoStrength)` AFTER the anti-black floor — an enclosed gully floor is
    SUPPOSED to sit below the open-ground floor; readability is guaranteed by the bake's own `MinAo = 0.4`.
    Probe radii are METRIC (6/18/45 m), so the coarse base and the 1 m tiles shade consistently.
+10a. **★★ ORTHO SHOWS NO BURNT-IN FLIGHT SHADOWS — EVER (hard user rule, 2026-07-16).** The renderer's CSM
+   generates the shadows; a static flight shadow (blue, sky-lit) fights the dynamic sun and reads as garbage.
+   EVERY ortho layer — base, det25, det05, sk20, and every FUTURE fetch/bake — must be shadow-corrected
+   before the user sees it: baked on disk (§3.13 `ortho-deblue-shadow.py`) or corrected in the shader
+   (`uOrthoDetailColorMode` default 1 for ALL detail paths; key `9` = raw diagnostics only). Gate:
+   `testdata/maps/audit-ortho-blue-cast.py` after every ortho production run. The violation this rule
+   encodes: det25/det05 shipped raw next to the de-blued base = the blue-vs-green shadow patchwork.
+10. **★ Per-tile meshing MUST carry a neighbour HALO as wide as the widest neighbourhood-sampling pass**
+   (2026-07-15, "tile grid / few-metre groove" root cause). A baked tile meshed as its own standalone raster
+   clamps THREE passes at the tile border: normals (±`NormalSmoothingRadius`), **curvature AO (rings to 45 m —
+   ~58 cells at z17; MEASURED on the real pyramid: a ±0.08 AO step at every border = ~15% brightness, p95 0.20,
+   in 6/17/44 m bands — the visible grid of "grooves" on smooth slopes, ortho-independent, persistent)** and
+   micro-detail RMS (±2 cells). Fix: `BakedTileMeshBuilder.AsRasterWithHalo(tile, loader, K)` +
+   `TerrainMeshOptions.NormalApronCells=K` with `K = HaloCellsFor(tile)` (max of the three reaches; AO term =
+   `TerrainCurvatureAo.MaxProbeRadiusMeters`). If you add ANY new per-vertex pass that samples a neighbourhood,
+   extend `HaloCellsFor` or the border seam returns. Heights are NOT the groove: z16/z17 seams are bit-identical
+   (audit `testdata/maps/audit-tile-border-grooves.py`); the only data-side border artefact is a ~±9 mm median
+   gradient kink at z17 from the per-tile-clamped supersample kernel (`DemTileSupersampler.LowPassDownsample`) —
+   sub-visual next to the AO step, bake-side, NOT fixed by the halo (see TILE-PRODUCTION §2.5).
 
 ---
 
 ## D. KNOWN DATA GAPS (GUGiK 1 m flat-0 — confirmed: re-fetch returns `0..0`)
 
-From the full z16 cache audit (7749 tiles): 12 thin strips (guard bridges) + 1427 wide-void tiles in 6
-regions. Wide voids are base-backfilled (real macro-relief); over tarns the water mesh covers them.
+⚠️ **STATUS UPDATE (2026-07-13): the z16 gaps below were REPAIRED 2026-07-01/02** (per-pixel DMR5 merge —
+`merge-sk-into-partial-tiles.py` + `sk-force-bake-tile.py`; z16 over the Mięguszowieckie ROI now scans
+0% void). **The SAME class then resurfaced at z17** (the sub-1m bake era): border/sheet-boundary zero
+strips + 8 tiles with NO source at all (GUGiK all-zero rejected by the cache guard AND skipped by the
+DMR5 bake's Poland-mask — the gap BETWEEN the two campaigns' gates) → the smooth "blob" in the Mięgusz
+cirque. **Repaired 2026-07-13** (682 merged files + 850 created tiles from DMR5, cross-validated ~1 m
+against the GUGiK opendata NMT sheet) — full recipe + lessons in `docs/TILE-PRODUCTION.md §7`
+(`repair-z17-border-dmr5.py`). Root WCS fact (still true today): the GRID1 mosaic itself lacks sheet
+M-34-101-A-c-3-4 (E edge 20.0625, N edge 49.1875) — a re-fetch can never fix that area; DMR5 is the fill
+source. **If a new zoom level is ever baked, run the border DMR5-merge for that zoom BEFORE baking.**
+
+Historical z16 audit (7749 tiles): 12 thin strips (guard bridges) + 1427 wide-void tiles in 6 regions.
+Wide voids are base-backfilled (real macro-relief); over tarns the water mesh covers them.
 
 | ~lat,lon | extent | note |
 |---|---|---|
 | 49.137, 19.215 | 1400 tiles | W/S coverage edge (Slovak/west — no PL 1 m). Expected. |
 | 49.223, 19.907 | 10 tiles | W Tatra (Bystra/Starorobociańska) |
-| 49.185, 20.053 | 7 tiles | Czarny Staw / Mięguszowieckie (the "square") |
+| 49.185, 20.053 | 7 tiles | Czarny Staw / Mięguszowieckie (the "square") — ✅ z16+z17 repaired, see above |
 | 49.230, 19.951 | 7 tiles | W Tatra (Kościeliska/Tomanowa) |
 | 49.255, 19.781 | 2 tiles | west (Bobrowiec/Osobita) |
 | 49.264, 19.781 | 1 tile | west |
