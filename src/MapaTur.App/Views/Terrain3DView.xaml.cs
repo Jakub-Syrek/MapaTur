@@ -6209,6 +6209,21 @@ public partial class Terrain3DView : ContentView
                 case Windows.System.VirtualKey.Number1: r.BakedShadowComp = 0f; Serilog.Log.Information("[BakedShadow] comp=0"); e.Handled = true; return;
                 case Windows.System.VirtualKey.Number2: r.BakedShadowComp = 0.5f; Serilog.Log.Information("[BakedShadow] comp=0.5"); e.Handled = true; return;
                 case Windows.System.VirtualKey.Number3: r.BakedShadowComp = 1.0f; Serilog.Log.Information("[BakedShadow] comp=1.0"); e.Handled = true; return;
+                // '0' toggles the hi-res ortho detail overlay (A/B): OFF = the plain base ortho everywhere.
+                case Windows.System.VirtualKey.Number0:
+                    r.OrthoDetailEnabled = !r.OrthoDetailEnabled;
+                    Serilog.Log.Information("[OrthoDetailSlice] overlay {State}", r.OrthoDetailEnabled ? "ON" : "OFF");
+                    e.Handled = true; return;
+                // '9' cycles the detail colour variant: raw detail <-> the base ortho's de-blue transform.
+                case Windows.System.VirtualKey.Number9:
+                    r.OrthoDetailColorMode = r.OrthoDetailColorMode == 0 ? 1 : 0;
+                    Serilog.Log.Information("[OrthoDetailSlice] colour = {Mode}", r.OrthoDetailColorMode == 1 ? "DE-BLUE (base-matched)" : "RAW");
+                    e.Handled = true; return;
+                // '8' toggles the cell-boundary outline (diagnostics).
+                case Windows.System.VirtualKey.Number8:
+                    r.OrthoDetailDebugBounds = !r.OrthoDetailDebugBounds;
+                    Serilog.Log.Information("[OrthoDetailSlice] cell-bounds outline {State}", r.OrthoDetailDebugBounds ? "ON" : "OFF");
+                    e.Handled = true; return;
             }
         }
 
@@ -7542,6 +7557,7 @@ public partial class Terrain3DView : ContentView
         }
 
         string signature = string.Join("|", paths);
+        TryLoadOrthoDetailPoc(renderer, paths);
         if (signature == cachedOrthoSignature && cachedOrthoDecoded is not null)
         {
             renderer.SetOrthoTextures(cachedOrthoDecoded);
@@ -7644,6 +7660,269 @@ public partial class Terrain3DView : ContentView
         cachedOrthoSignature = null; // bypass the path-keyed cache; cells are the source of truth now
         cachedOrthoDecoded = null;
         renderer.SetOrthoTextures(decoded);
+    }
+
+    // The accepted 5 cm HighResolution Morskie-Oko demo: det05 + det25 mosaics → the sharp hut (yesterday's
+    // state). Decodes off the UI thread; absent files = silent no-op.
+    // Wire the det25 (25 cm) streaming: an OrthoTileDecodeCache in front of the SkiaSharp WebP decode of the
+    // on-disk tile pyramid (dem/ortho-detail/tatry/det25/<i>/<j>.webp), the OrthoDetailCellComposer that assembles
+    // cells from it, and the ring policy. The renderer then composes/uploads cells off-thread and binds them
+    // per-draw. baseFill is null (holes stay transparent → the shader resolves them against the base ortho).
+    private void SetupOrthoDetailStreaming(Services.Terrain3DGlRenderer renderer, IReadOnlyList<string>? basePaths)
+    {
+        string? demDir = basePaths is { Count: > 0 } ? System.IO.Path.GetDirectoryName(basePaths[0]) : null;
+        string? tilesDir = demDir is null ? null : System.IO.Path.Combine(demDir, "ortho-detail", "tatry", "det25");
+        if (tilesDir is null || !System.IO.Directory.Exists(tilesDir))
+        {
+            string alt = System.IO.Path.Combine(
+                Microsoft.Maui.Storage.FileSystem.AppDataDirectory, "dem", "ortho-detail", "tatry", "det25");
+            if (System.IO.Directory.Exists(alt))
+            {
+                tilesDir = alt;
+            }
+        }
+
+        if (tilesDir is null || !System.IO.Directory.Exists(tilesDir))
+        {
+            Serilog.Log.Information("[OrthoDetailStream] det25 tiles dir not found ({Dir}) — streaming off", tilesDir);
+            return;
+        }
+
+        string dir = tilesDir;
+        var grid = new MapaTur.Application.Terrain.OrthoDetailGrid();
+        var cache = new MapaTur.Application.Terrain.OrthoTileDecodeCache(
+            (i, j) =>
+            {
+                string p = System.IO.Path.Combine(
+                    dir, i.ToString(System.Globalization.CultureInfo.InvariantCulture), $"{j}.webp");
+                return DecodeOrtho(p) is { Width: 512, Height: 512 } t ? t.Rgba : null;
+            },
+            maxBytes: 384L << 20); // 384 MB of decoded 512² tiles (measured peak 553 MB @ 14-way; 4-way needs far less)
+        var composer = new MapaTur.Application.Terrain.OrthoDetailCellComposer(grid, cache.Get, baseFill: null);
+        var policy = new MapaTur.Application.Terrain.OrthoDetailResidencyPolicy(
+            grid, ringRadiusMeters: 1500.0, fastMotionSpeedMps: 25.0, prefetchLeadMeters: 400.0);
+        renderer.SetOrthoDetailStreaming(grid, policy, composer, cache);
+        Serilog.Log.Information("[OrthoDetailStream] det25 streaming wired from {Dir}", dir);
+    }
+
+    // Wire the det05 (5 cm) SECOND streamed level on unit 11, coverage-gated: a tile decode cache over the det05
+    // pyramid, the composer, and the covered-cell set (_coverage.txt = cells with ≥95% source, so 5 cm only
+    // streams where the tiles exist — the 07-14 map showed 5 cm is a partial strip). Behind MAPATUR_DET05_STREAM=1.
+    private void SetupDet05Streaming(Services.Terrain3DGlRenderer renderer, IReadOnlyList<string>? basePaths)
+    {
+        string? demDir = basePaths is { Count: > 0 } ? System.IO.Path.GetDirectoryName(basePaths[0]) : null;
+        string? tilesDir = demDir is null ? null : System.IO.Path.Combine(demDir, "ortho-detail", "tatry", "det05");
+        if (tilesDir is null || !System.IO.Directory.Exists(tilesDir))
+        {
+            string alt = System.IO.Path.Combine(
+                Microsoft.Maui.Storage.FileSystem.AppDataDirectory, "dem", "ortho-detail", "tatry", "det05");
+            if (System.IO.Directory.Exists(alt))
+            {
+                tilesDir = alt;
+            }
+        }
+
+        if (tilesDir is null || !System.IO.Directory.Exists(tilesDir))
+        {
+            Serilog.Log.Warning("[OrthoDetail05] det05 tiles dir not found ({Dir}) — 5 cm streaming off", tilesDir);
+            return;
+        }
+
+        string dir = tilesDir;
+        var coveredKeys = new HashSet<int>();
+        string covFile = System.IO.Path.Combine(dir, "_coverage.txt");
+        if (System.IO.File.Exists(covFile))
+        {
+            foreach (string line in System.IO.File.ReadLines(covFile))
+            {
+                if (int.TryParse(line.Trim(), out int k))
+                {
+                    coveredKeys.Add(k);
+                }
+            }
+        }
+
+        if (coveredKeys.Count == 0)
+        {
+            Serilog.Log.Warning("[OrthoDetail05] no coverage cells in {File} — 5 cm streaming off", covFile);
+            return;
+        }
+
+        var grid = new MapaTur.Application.Terrain.OrthoDetailGrid(resMeters: 0.05, coverageTiles: 16, pitchTiles: 6);
+        var cache = new MapaTur.Application.Terrain.OrthoTileDecodeCache(
+            (i, j) =>
+            {
+                string p = System.IO.Path.Combine(
+                    dir, i.ToString(System.Globalization.CultureInfo.InvariantCulture), $"{j}.webp");
+                return DecodeOrtho(p) is { Width: 512, Height: 512 } t ? t.Rgba : null;
+            },
+            maxBytes: 512L << 20); // a det05 cell is 256 tiles; hold a few cells' worth in RAM
+        var composer = new MapaTur.Application.Terrain.OrthoDetailCellComposer(grid, cache.Get, baseFill: null);
+        bool Coverage(int ci, int cj) => coveredKeys.Contains(grid.CellKey(ci, cj));
+        renderer.SetOrthoDetail05Streaming(grid, composer, cache, Coverage);
+        Serilog.Log.Information("[OrthoDetail05] det05 streaming wired from {Dir} ({N} covered cells)", dir, coveredKeys.Count);
+    }
+
+    private void LoadOrthoDetailMosaics(Services.Terrain3DGlRenderer renderer, IReadOnlyList<string>? basePaths)
+    {
+        var candidates = new List<string>();
+        if (basePaths is { Count: > 0 })
+        {
+            string? d = System.IO.Path.GetDirectoryName(basePaths[0]);
+            if (!string.IsNullOrEmpty(d))
+            {
+                candidates.Add(System.IO.Path.Combine(d, "ortho-detail", "morskie-oko"));
+                candidates.Add(System.IO.Path.Combine(d, "dem", "ortho-detail", "morskie-oko"));
+            }
+        }
+        candidates.Add(System.IO.Path.Combine(Microsoft.Maui.Storage.FileSystem.AppDataDirectory, "dem", "ortho-detail", "morskie-oko"));
+
+        string? dir = candidates.FirstOrDefault(c => System.IO.File.Exists(System.IO.Path.Combine(c, "mosaics.json")));
+        if (dir is null)
+        {
+            Serilog.Log.Information("[OrthoDetailPoc] mosaics.json not found (looked in {Dirs})", string.Join(" ; ", candidates));
+            return;
+        }
+
+        string mosaicsDir = dir;
+        Task.Run(() =>
+        {
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(
+                    System.IO.File.ReadAllText(System.IO.Path.Combine(mosaicsDir, "mosaics.json")));
+                System.Text.Json.JsonElement levels = doc.RootElement.GetProperty("levels");
+                System.Text.Json.JsonElement d05 = levels.GetProperty("det05");
+
+                // det05 ONLY: the 5 cm Morskie-Oko showcase stays the static mosaic on unit 11. det25 is no longer
+                // a static mosaic here — it is STREAMED per-draw over the whole massif (SetupOrthoDetailStreaming).
+                var t05 = DecodeOrtho(System.IO.Path.Combine(mosaicsDir, d05.GetProperty("file").GetString() ?? "det05_mosaic.png"));
+                if (t05 is not { } m05)
+                {
+                    Serilog.Log.Warning("[OrthoDetailPoc] det05 mosaic decode failed");
+                    return;
+                }
+
+                static MapaTur.Domain.Geography.GeoPoint Sw(System.Text.Json.JsonElement e) =>
+                    new(e.GetProperty("south").GetDouble(), e.GetProperty("west").GetDouble());
+                static MapaTur.Domain.Geography.GeoPoint Ne(System.Text.Json.JsonElement e) =>
+                    new(e.GetProperty("north").GetDouble(), e.GetProperty("east").GetDouble());
+
+                renderer.SetOrthoDetailDet05Mosaic(m05.Rgba, m05.Width, m05.Height, Sw(d05), Ne(d05));
+                Serilog.Log.Information("[OrthoDetailPoc] loaded 5cm Morskie-Oko det05 {W05}x{H05} from {Dir}",
+                    m05.Width, m05.Height, mosaicsDir);
+                MainThread.BeginInvokeOnMainThread(() => Canvas.InvalidateSurface());
+            }
+            catch (Exception ex)
+            {
+                Serilog.Log.Warning(ex, "[OrthoDetailPoc] load failed");
+            }
+        });
+    }
+
+    // R3 vertical slice — feature flag MAPATUR_ORTHO_SLICE=1, DEFAULT OFF. Composes TWO adjacent detail cells
+    // (53,29)+(54,29) from the fetched det25 tiles via the REAL OrthoDetailGrid/OrthoDetailAssembler and hands
+    // them to the renderer's detail-overlay path — so we can judge the detail↔detail and detail↔base transitions,
+    // UV/mip/filtering, upload, and the raw-vs-de-blued colour variants in-app before any full streaming wiring.
+    // Off the UI thread; a normal run (no flag) loads no detail at all.
+    private bool orthoDetailPocLoaded;
+    private void TryLoadOrthoDetailPoc(Services.Terrain3DGlRenderer renderer, IReadOnlyList<string>? basePaths)
+    {
+        if (orthoDetailPocLoaded)
+        {
+            return;
+        }
+
+        orthoDetailPocLoaded = true; // one attempt regardless of outcome
+        if (Environment.GetEnvironmentVariable("MAPATUR_ORTHO_SLICE") != "1")
+        {
+            // DEFAULT: stream det25 (25 cm) cells over the whole massif on unit 10 (SetupOrthoDetailStreaming),
+            // UNDER the accepted static 5 cm Morskie-Oko det05 showcase on unit 11 (finest-wins, unit 11 untouched).
+            // MAPATUR_ORTHO_SLICE=1 keeps the old static 2-cell debug slice instead.
+            SetupOrthoDetailStreaming(renderer, basePaths);
+            if (Environment.GetEnvironmentVariable("MAPATUR_DET05_STREAM") == "1")
+            {
+                // Opt-in: streamed 5 cm on unit 11 (coverage-gated), REPLACES the static showcase for A/B.
+                SetupDet05Streaming(renderer, basePaths);
+            }
+            else
+            {
+                LoadOrthoDetailMosaics(renderer, basePaths); // accepted static 5 cm Morskie-Oko showcase
+            }
+
+            return;
+        }
+
+        string? demDir = basePaths is { Count: > 0 } ? System.IO.Path.GetDirectoryName(basePaths[0]) : null;
+        string? tilesDir = demDir is null
+            ? null : System.IO.Path.Combine(demDir, "ortho-detail", "tatry", "det25");
+        if (tilesDir is null || !System.IO.Directory.Exists(tilesDir))
+        {
+            Serilog.Log.Warning("[OrthoDetailSlice] det25 tiles dir not found: {Dir}", tilesDir);
+            return;
+        }
+
+        Task.Run(() =>
+        {
+            try
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                var grid = new MapaTur.Application.Terrain.OrthoDetailGrid();
+                var asm = new MapaTur.Application.Terrain.OrthoDetailAssembler(grid);
+                int decoded = 0, missing = 0;
+
+                // Cell pair (default a TEXTURED moraine/rock pair just south of Morskie Oko — NOT the smooth
+                // lake). Override with MAPATUR_ORTHO_SLICE_CELLS="ci1,cj1,ci2,cj2" to re-point without a rebuild.
+                int a0 = 53, a1 = 30, b0 = 54, b1 = 30;
+                string? cellsSpec = Environment.GetEnvironmentVariable("MAPATUR_ORTHO_SLICE_CELLS");
+                if (cellsSpec is not null)
+                {
+                    string[] parts = cellsSpec.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length == 4
+                        && int.TryParse(parts[0], out int p0) && int.TryParse(parts[1], out int p1)
+                        && int.TryParse(parts[2], out int p2) && int.TryParse(parts[3], out int p3))
+                    {
+                        (a0, a1, b0, b1) = (p0, p1, p2, p3);
+                    }
+                }
+
+                byte[]? Provide(int i, int j)
+                {
+                    string p = System.IO.Path.Combine(
+                        tilesDir, i.ToString(System.Globalization.CultureInfo.InvariantCulture), $"{j}.webp");
+                    if (DecodeOrtho(p) is { } t)
+                    {
+                        System.Threading.Interlocked.Increment(ref decoded);
+                        return t.Rgba;
+                    }
+
+                    System.Threading.Interlocked.Increment(ref missing);
+                    return null;
+                }
+
+                byte[] ca = asm.Compose(a0, a1, Provide, null);
+                byte[] cb = asm.Compose(b0, b1, Provide, null);
+                MapaTur.Domain.Geography.MapBounds ba = grid.CellBounds(a0, a1);
+                MapaTur.Domain.Geography.MapBounds bb = grid.CellBounds(b0, b1);
+                renderer.SetOrthoDetailPoc(
+                    ca, grid.CellPx, grid.CellPx, ba.SouthWest, ba.NorthEast,
+                    cb, grid.CellPx, grid.CellPx, bb.SouthWest, bb.NorthEast);
+                renderer.OrthoDetailEnabled = true;
+                sw.Stop();
+                long vramMb = (2L * grid.CellPx * grid.CellPx * 4 * 4 / 3) / (1024 * 1024);
+                Serilog.Log.Information(
+                    "[OrthoDetailSlice] cells ({A0},{A1})+({B0},{B1}) composed in {Ms}ms | tiles decoded={D} missing={M} " +
+                    "| geo W{W:F4} S{S:F4} E{E:F4} N{N:F4} | cellPx={Px} resident=2 vram~{Vram}MB | keys: 0=on/off 9=colour 8=bounds",
+                    a0, a1, b0, b1, sw.ElapsedMilliseconds, decoded, missing,
+                    ba.SouthWest.Longitude, ba.SouthWest.Latitude, bb.NorthEast.Longitude, ba.NorthEast.Latitude,
+                    grid.CellPx, vramMb);
+                MainThread.BeginInvokeOnMainThread(() => Canvas.InvalidateSurface());
+            }
+            catch (Exception ex)
+            {
+                Serilog.Log.Warning(ex, "[OrthoDetailSlice] failed");
+            }
+        });
     }
 
     private static (byte[] Rgba, int Width, int Height)? DecodeOrtho(string path)

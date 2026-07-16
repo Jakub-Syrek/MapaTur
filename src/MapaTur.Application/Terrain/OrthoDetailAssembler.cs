@@ -61,12 +61,21 @@ public sealed class OrthoDetailAssembler
                     {
                         int to = ((ty * T) + tx) * 4;
                         byte r = tile[to], g = tile[to + 1], bl = tile[to + 2];
-                        bool nodata = Math.Max(r, Math.Max(g, bl)) < 16 || Math.Min(r, Math.Min(g, bl)) > 244;
-                        if (!nodata || baseFill is null)
+                        // WMS out-of-coverage flat-fill (opaque black/white; the flight-campaign block edges
+                        // run DIAGONALLY across tiles, so partially-covered tiles carry it in one half). It is
+                        // NOT ground. Black threshold 8: real photography never reaches flat 0 (sensor noise
+                        // keeps deep shadow above it), so genuinely dark pixels are data and stay.
+                        bool nodata = Math.Max(r, Math.Max(g, bl)) < 8 || Math.Min(r, Math.Min(g, bl)) > 244;
+                        if (!nodata)
                         {
                             cell[co] = r; cell[co + 1] = g; cell[co + 2] = bl; cell[co + 3] = 255;
                             continue;
                         }
+
+                        // nodata + no base sampler: fall through and LEAVE THE PIXEL TRANSPARENT, exactly like
+                        // a missing tile, so the shader resolves it against the base ortho. (Writing it opaque
+                        // — the pre-2026-07-16 behaviour — rendered the fill as jagged black patches on the
+                        // massif wherever the campaign boundary crossed the fetched footprint.)
                     }
 
                     if (baseFill is null)
