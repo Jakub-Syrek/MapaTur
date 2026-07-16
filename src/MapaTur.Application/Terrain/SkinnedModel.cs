@@ -41,13 +41,15 @@ public sealed class SkinnedModel
     private readonly ArmatureInstance armature;
     private readonly Matrix4x4[] bindLocals;             // each armature node's bind-pose local matrix
     private readonly Dictionary<string, int> nodeByName; // bone name → armature node index
+    private readonly int[] parentByNode;                 // armature node index → parent index (−1 = root)
     private Matrix4x4[]? blendLocals;                    // scratch: clip-A locals captured during a PoseBlend
 
     private SkinnedModel(
         IReadOnlyList<Primitive> primitives,
         SceneInstance instance,
         IReadOnlyList<(string Name, float Duration)> animations,
-        byte[]? baseColorImageBytes)
+        byte[]? baseColorImageBytes,
+        IReadOnlyDictionary<string, string?>? parentNameByNodeName = null)
     {
         Primitives = primitives;
         this.instance = instance;
@@ -65,6 +67,26 @@ public sealed class SkinnedModel
             if (!string.IsNullOrEmpty(node.Name))
             {
                 this.nodeByName[node.Name] = i;
+            }
+        }
+
+        // Own copy of the hierarchy (from the glTF schema, matched by node name): the runtime's lazy
+        // ModelMatrix cache is read-order sensitive after LocalMatrix writes, so IK-style read/write loops
+        // must use our own forward kinematics instead (see ComputeBoneModelMatrix).
+        this.parentByNode = new int[count];
+        Array.Fill(this.parentByNode, -1);
+        if (parentNameByNodeName is not null)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                string? name = this.armature.LogicalNodes[i].Name;
+                if (!string.IsNullOrEmpty(name)
+                    && parentNameByNodeName.TryGetValue(name, out string? parentName)
+                    && parentName is not null
+                    && this.nodeByName.TryGetValue(parentName, out int parentIndex))
+                {
+                    this.parentByNode[i] = parentIndex;
+                }
             }
         }
     }
@@ -198,7 +220,16 @@ public sealed class SkinnedModel
         Scene scene = model.DefaultScene ?? model.LogicalScenes[0];
         SceneInstance instance = SceneTemplate.Create(scene).CreateInstance();
 
-        var result = new SkinnedModel(primitives, instance, animations, baseColor);
+        var parentNames = new Dictionary<string, string?>();
+        foreach (Node node in model.LogicalNodes)
+        {
+            if (!string.IsNullOrEmpty(node.Name))
+            {
+                parentNames[node.Name] = node.VisualParent?.Name;
+            }
+        }
+
+        var result = new SkinnedModel(primitives, instance, animations, baseColor, parentNames);
 
         // Bounds must be measured from the SKINNED bind pose, not the raw POSITION accessors: on a rigged mesh
         // the joint matrices carry the real scale/placement (bones sit metres from origin while the raw vertices
@@ -319,6 +350,71 @@ public sealed class SkinnedModel
         }
 
         return this.armature.LogicalNodes[idx].ModelMatrix.Translation;
+    }
+
+    /// <summary>
+    /// Full model-space matrix of a bone in the CURRENT pose, or null when the rig has no such bone.
+    /// Computed by OUR forward kinematics (live LocalMatrix values multiplied up the recorded parent
+    /// chain), never by the runtime's ModelMatrix — that one caches lazily and returns stale descendants
+    /// depending on read order after a LocalMatrix write, which corrupts iterative IK.
+    /// </summary>
+    public Matrix4x4? GetBoneModelMatrix(string boneName) =>
+        this.nodeByName.TryGetValue(boneName, out int idx) ? ComputeBoneModelMatrix(idx) : null;
+
+    /// <summary>Model-space bone position from our own forward kinematics — the safe read for IK loops.</summary>
+    public Vector3? GetBonePosedPositionStrict(string boneName) =>
+        this.nodeByName.TryGetValue(boneName, out int idx) ? ComputeBoneModelMatrix(idx).Translation : null;
+
+    private Matrix4x4 ComputeBoneModelMatrix(int idx)
+    {
+        Matrix4x4 m = this.armature.LogicalNodes[idx].LocalMatrix;
+        int parent = this.parentByNode[idx];
+        while (parent >= 0)
+        {
+            m *= this.armature.LogicalNodes[parent].LocalMatrix;
+            parent = this.parentByNode[parent];
+        }
+
+        return m;
+    }
+
+    /// <summary>
+    /// Rotates a bone (and its subtree) by a MODEL-SPACE rotation about the bone's own joint origin — the
+    /// primitive behind contact IK. The model rotation is conjugated into the bone's local frame as a pure
+    /// quaternion (local = q_bone · q_model · q_bone⁻¹) and composed via <see cref="RotateBoneOverlay"/>,
+    /// so repeated IK iterations can never shear or stretch the skeleton the way a matrix sandwich with
+    /// inversions would. No-op if the bone name isn't in the rig. Returns true if applied.
+    /// </summary>
+    public bool RotateBoneModelSpace(string boneName, Quaternion modelRotation)
+    {
+        if (!this.nodeByName.TryGetValue(boneName, out int idx))
+        {
+            return false;
+        }
+
+        Matrix4x4 modelMatrix = ComputeBoneModelMatrix(idx);
+        Quaternion boneRotation = ExtractRotation(modelMatrix);
+        Quaternion localDelta = Quaternion.Normalize(Quaternion.Concatenate(
+            Quaternion.Concatenate(boneRotation, modelRotation),
+            Quaternion.Inverse(boneRotation)));
+        return RotateBoneOverlay(boneName, localDelta);
+    }
+
+    // Orthonormalized rotation of a (possibly uniformly scaled) bone model matrix, row-vector basis.
+    private static Quaternion ExtractRotation(Matrix4x4 m)
+    {
+        var x = new Vector3(m.M11, m.M12, m.M13);
+        var y = new Vector3(m.M21, m.M22, m.M23);
+        Vector3 xn = x.LengthSquared() > 1e-12f ? Vector3.Normalize(x) : Vector3.UnitX;
+        Vector3 yOrthogonal = y - (Vector3.Dot(y, xn) * xn);
+        Vector3 yn = yOrthogonal.LengthSquared() > 1e-12f ? Vector3.Normalize(yOrthogonal) : Vector3.UnitY;
+        Vector3 zn = Vector3.Cross(xn, yn);
+        var rotation = new Matrix4x4(
+            xn.X, xn.Y, xn.Z, 0f,
+            yn.X, yn.Y, yn.Z, 0f,
+            zn.X, zn.Y, zn.Z, 0f,
+            0f, 0f, 0f, 1f);
+        return Quaternion.Normalize(Quaternion.CreateFromRotationMatrix(rotation));
     }
 
     /// <summary>
