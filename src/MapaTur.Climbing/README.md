@@ -13,3 +13,6 @@ Hard rules for callers:
   Vertical exaggeration must never reach this project — convert with `ClimbSpaceTransform`.
 - Hold identity must be stable across terrain LOD swaps (no vertex/triangle indices).
 - No MAUI, OpenGL, DEM, or rig-format dependencies may be added here.
+- Licensed climber models (`data/climber/`, gitignored) are **local-only, not for
+  redistribution**: never commit them, embed them in `Resources/Raw`, or add them to the
+  installer / offline data packages. The only redistributable rig is the CC0 `hiker.glb`.
