@@ -71,6 +71,7 @@ public sealed class ClimbSession
     private readonly Dictionary<ClimbLimb, string> plannerCameFrom = []; // anti ping-pong (planner only)
     private float climbDistanceSincePiton;
     private float ropeHangFeetElevation = float.NaN;
+    private ClimbState? stateBeforeGrab;
 
     private ClimbSession(IClimbSurface surface, ClimbSessionOptions options, ClimbState initialState)
     {
@@ -237,6 +238,7 @@ public sealed class ClimbSession
         }
 
         string originHoldId = State.Contacts[limb].Hold.Id;
+        stateBeforeGrab = State; // hard-constraint verification (anatomy/collision) may revert this grab
         var contacts = State.Contacts.ToDictionary(pair => pair.Key, pair => pair.Value);
         contacts[limb] = new LimbContact(
             limb, hold, MathF.Min(1f, State.Contacts[limb].Fatigue + 0.03f));
@@ -265,6 +267,25 @@ public sealed class ClimbSession
         LastBlockReason = null;
         plannerCameFrom[limb] = originHoldId;
         TrackTravelForPitons(Vector3.Distance(State.Pelvis, previousPelvis));
+        return true;
+    }
+
+    /// <summary>
+    /// Reverts the most recent <see cref="TryGrabHold"/> — called when the whole-body verification finds
+    /// the resulting pose violates a HARD constraint (anatomy envelope, body-wall clearance, contact
+    /// error). Per the Climber3d methodology, manual moves skip soft stability gates but never hard ones.
+    /// </summary>
+    public bool RevertLastGrab()
+    {
+        if (stateBeforeGrab is null)
+        {
+            return false;
+        }
+
+        State = stateBeforeGrab;
+        stateBeforeGrab = null;
+        LastAppliedLimb = null;
+        LastAppliedHoldId = null;
         return true;
     }
 

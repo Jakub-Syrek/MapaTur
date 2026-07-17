@@ -296,17 +296,53 @@ internal sealed class GripClimbController
 
         if (session.TryGrabHold(selected, hit))
         {
-            poseDirty = true;
-            Serilog.Log.Information(
-                "[Climb] climb.move_applied (click) {Limb} -> {Hold} pelvisZ={Z:F1}",
-                selected, hit.Id, session.State.Pelvis.Z);
-            ClearSelection();
+            if (VerifyHardConstraintsAfterGrab(selected, hit.Id, exaggeration))
+            {
+                Serilog.Log.Information(
+                    "[Climb] climb.move_applied (click) {Limb} -> {Hold} pelvisZ={Z:F1}",
+                    selected, hit.Id, session.State.Pelvis.Z);
+                ClearSelection();
+            }
         }
         else
         {
             Serilog.Log.Information(
                 "[Climb] climb.move_blocked (click) hold={Hold} reason={Reason}", hit.Id, session.LastBlockReason);
         }
+    }
+
+    /// <summary>
+    /// The Climber3d methodology: a manual grab skips the SOFT gates (stability margin, risk) but may
+    /// never violate the HARD ones — SMPL-X anatomy envelopes, body-wall clearance, contact integrity.
+    /// The whole-body solve verifies the grabbed configuration; a violating grab is reverted.
+    /// </summary>
+    private bool VerifyHardConstraintsAfterGrab(ClimbLimb limb, string holdId, float exaggeration)
+    {
+        ClimbWholeBodySolveResult? result = SolveAndPose(exaggeration);
+        poseDirty = false;
+        if (result is null || session is null)
+        {
+            return true; // no solver context — nothing to verify against
+        }
+
+        bool anatomyOk = result.PoseAssessment.IsInsideHardLimits;
+        bool clearanceOk = result.Pose.MinimumBodyClearanceMeters >= 0.015f;
+        bool contactOk = result.MaximumContactErrorMeters <= 0.16f;
+        if (anatomyOk && clearanceOk && contactOk)
+        {
+            return true;
+        }
+
+        session.RevertLastGrab();
+        SolveAndPose(exaggeration); // restore the previous, valid pose on screen
+        poseDirty = false;
+        string violations = string.Join(
+            ", ",
+            result.PoseAssessment.HardViolations.Select(v => $"{v.Feature}={v.ValueDegrees:F0}°"));
+        Serilog.Log.Information(
+            "[Climb] climb.move_rejected_hard {Limb} -> {Hold}: anatomy={Anatomy} ({Violations}) clearance={Clearance:F3} m contactErr={Err:F3} m",
+            limb, holdId, anatomyOk, violations, result.Pose.MinimumBodyClearanceMeters, result.MaximumContactErrorMeters);
+        return false;
     }
 
     public void ClearSelection()
@@ -403,11 +439,11 @@ internal sealed class GripClimbController
         }
     }
 
-    private void SolveAndPose(float exaggeration)
+    private ClimbWholeBodySolveResult? SolveAndPose(float exaggeration)
     {
         if (session is null || rig is null || surface is null || solver is null || renderModel is null)
         {
-            return;
+            return null;
         }
 
         rig.SetClimbContext(surface, session.State.Contacts, ClimbWorld.Gravity);
@@ -447,6 +483,7 @@ internal sealed class GripClimbController
         rotation.Translation = Vector3.Zero;
         HumanoidRotationMatrix = NormalizeRotation(rotation);
         HasPose = true;
+        return result;
     }
 
     private static void CopyPosedBuffers(ClimberSkinnedModel from, SkinnedModel to)
