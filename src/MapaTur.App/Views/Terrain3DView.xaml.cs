@@ -2953,7 +2953,7 @@ public partial class Terrain3DView : ContentView
         foreach (MapaTur.Application.Terrain.WalkPhysics.PitonPoint piton in w.Pitons)
         {
             var at = new Vector3(piton.PositionXY.X, piton.PositionXY.Y, piton.Elevation * exaggeration);
-            pitonMarkers.Add(new(at, new Vector3(1f, 0.55f, 0.1f), 0.5f)); // orange piton
+            pitonMarkers.Add(new(at, new Vector3(1f, 0.55f, 0.1f), 0.18f)); // orange piton (real-piton sized, not a boulder)
             rope.Add(at);
         }
 
@@ -6096,12 +6096,20 @@ public partial class Terrain3DView : ContentView
             return;
         }
 
-        // Walk mode: RIGHT-drag = look around. The LEFT button is free again — the legacy ciupaga
-        // swing/hold was retired with the hold-by-hold climbing takeover (a latched left click used to
-        // swallow every UI click and read as "the old climb mode turning on").
+        // Walk mode: RIGHT-drag = look around; while climbing, LEFT = pick a hold (the PoC's manual
+        // mouse mode). Otherwise the LEFT button falls through to the UI — the legacy ciupaga swing
+        // retired with the hold-by-hold takeover.
         if (walkActive)
         {
             lastPointerPosition = e.GetCurrentPoint(element).Position;
+            if (props.IsLeftButtonPressed && gripClimb.IsActive)
+            {
+                var clickAt = e.GetCurrentPoint(element).Position;
+                TryClimbHoldClick((float)clickAt.X, (float)clickAt.Y, element);
+                e.Handled = true;
+                return;
+            }
+
             if (props.IsRightButtonPressed)
             {
                 walkRmbHeld = true;
@@ -6119,6 +6127,28 @@ public partial class Terrain3DView : ContentView
             element.CapturePointer(e.Pointer);
             e.Handled = true;
         }
+    }
+
+    // Builds a view ray from a click position (camera basis + vertical FOV; walk camera never rolls,
+    // so world-Z is a safe up reference) and hands it to the climb controller's hold picking.
+    private void TryClimbHoldClick(float pixelX, float pixelY, Microsoft.UI.Xaml.UIElement element)
+    {
+        if (WorldFrame is not { } frame || element is not Microsoft.UI.Xaml.FrameworkElement fe
+            || fe.ActualWidth < 1 || fe.ActualHeight < 1)
+        {
+            return;
+        }
+
+        Vector3 forward = Vector3.Normalize(Camera.Target - Camera.Position);
+        Vector3 right = Vector3.Normalize(Vector3.Cross(forward, Vector3.UnitZ));
+        Vector3 up = Vector3.Cross(right, forward);
+        float ndcX = (float)((2.0 * pixelX / fe.ActualWidth) - 1.0);
+        float ndcY = (float)(1.0 - (2.0 * pixelY / fe.ActualHeight));
+        float tanY = MathF.Tan(Camera.FieldOfViewYRadians * 0.5f);
+        float tanX = tanY * (float)(fe.ActualWidth / fe.ActualHeight);
+        Vector3 direction = Vector3.Normalize(
+            forward + (right * (ndcX * tanX)) + (up * (ndcY * tanY)));
+        gripClimb.TryClickHold(Camera.Position, direction, frame.VerticalExaggeration);
     }
 
     private void OnPlatformPointerMoved(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)

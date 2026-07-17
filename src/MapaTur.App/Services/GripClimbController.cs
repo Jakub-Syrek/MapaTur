@@ -142,10 +142,10 @@ internal sealed class GripClimbController
             InitialGripStaminaSeconds = walker.GripStamina
         };
         var pelvis = new Vector3(origin.X, origin.Y, walker.FeetElevation + rigAdapter.PelvisHeightMeters);
-        ClimbSession? started = ClimbSession.TryStart(wall, pelvis, options);
+        ClimbSession? started = ClimbSession.TryStart(wall, pelvis, options, out string? failReason);
         if (started is null)
         {
-            Serilog.Log.Information("[Climb] no usable hold set at this spot");
+            Serilog.Log.Information("[Climb] climb.start_refused: {Reason}", failReason);
             return false;
         }
 
@@ -227,6 +227,66 @@ internal sealed class GripClimbController
         }
 
         MirrorInto(walker);
+    }
+
+    /// <summary>
+    /// Manual hold selection (the PoC's mouse mode): picks the hold nearest to the view ray and moves
+    /// the most suitable limb onto it (nearest limbs tried first, solver validates each). Ray and pick
+    /// happen in RENDER space (hold Z multiplied by the exaggeration).
+    /// </summary>
+    public bool TryClickHold(Vector3 rayOriginRender, Vector3 rayDirectionRender, float exaggeration)
+    {
+        if (session is null || surface is null)
+        {
+            return false;
+        }
+
+        ClimbHold? best = null;
+        float bestMiss = float.MaxValue;
+        foreach (ClimbHold hold in surface.Patch.Holds)
+        {
+            var p = new Vector3(hold.Position.X, hold.Position.Y, hold.Position.Z * exaggeration);
+            float t = Vector3.Dot(p - rayOriginRender, rayDirectionRender);
+            if (t <= 0f)
+            {
+                continue;
+            }
+
+            float miss = Vector3.Distance(p, rayOriginRender + (rayDirectionRender * t));
+            float tolerance = 0.30f + (0.012f * t); // a screen-space-ish slack that grows with distance
+            if (miss <= tolerance && miss < bestMiss)
+            {
+                bestMiss = miss;
+                best = hold;
+            }
+        }
+
+        if (best is null)
+        {
+            return false; // no hold under the cursor — ignore the click silently
+        }
+
+        foreach ((ClimbLimb limb, LimbContact contact) in session.State.Contacts
+                     .OrderBy(pair => Vector3.Distance(pair.Value.Hold.Position, best.Position)))
+        {
+            if (contact.Hold.Id == best.Id)
+            {
+                continue; // that limb already holds it
+            }
+
+            if (session.TryMoveLimb(limb, best))
+            {
+                poseDirty = true;
+                Serilog.Log.Information(
+                    "[Climb] climb.move_applied (click) {Limb} -> {Hold} pelvisZ={Z:F1}",
+                    limb, best.Id, session.State.Pelvis.Z);
+                return true;
+            }
+        }
+
+        Serilog.Log.Information(
+            "[Climb] climb.move_blocked (click) hold={Hold} reason={Reason}", best.Id, session.LastBlockReason);
+        return false;
     }
 
     /// <summary>Climb holds + the active contacts as debug markers (positions already exaggerated).</summary>

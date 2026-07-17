@@ -65,6 +65,7 @@ public sealed class ClimbSession
     private readonly ClimbSessionOptions options;
     private readonly ClimbSolver solver;
     private readonly List<WalkPhysics.PitonPoint> pitons = [];
+    private readonly Dictionary<ClimbLimb, string> plannerCameFrom = []; // anti ping-pong (planner only)
     private float climbDistanceSincePiton;
     private float ropeHangFeetElevation = float.NaN;
 
@@ -120,9 +121,14 @@ public sealed class ClimbSession
     /// the caller stays in walk mode.
     /// </summary>
     public static ClimbSession? TryStart(IClimbSurface surface, Vector3 pelvisClimb, ClimbSessionOptions options)
+        => TryStart(surface, pelvisClimb, options, out _);
+
+    public static ClimbSession? TryStart(
+        IClimbSurface surface, Vector3 pelvisClimb, ClimbSessionOptions options, out string? failReason)
     {
         ArgumentNullException.ThrowIfNull(surface);
         ArgumentNullException.ThrowIfNull(options);
+        failReason = null;
 
         ClimbSurfaceFrame frame = surface.SampleSurface(pelvisClimb, options.Gravity);
         Vector3 basePoint = surface.ProjectToSurface(pelvisClimb);
@@ -164,6 +170,7 @@ public sealed class ClimbSession
 
             if (best is null || bestDistance > options.ArmReachMeters + options.LegReachMeters)
             {
+                failReason = $"no reachable start hold for {limb} (nearest {bestDistance:F1} m from its ideal spot)";
                 return null;
             }
 
@@ -173,9 +180,13 @@ public sealed class ClimbSession
 
         float handTop = (contacts[ClimbLimb.LeftHand].Hold.Position.Z + contacts[ClimbLimb.RightHand].Hold.Position.Z) * 0.5f;
         float footTop = (contacts[ClimbLimb.LeftFoot].Hold.Position.Z + contacts[ClimbLimb.RightFoot].Hold.Position.Z) * 0.5f;
-        if (handTop <= footTop + 0.2f)
+        if (handTop <= footTop + 0.55f)
         {
-            return null; // degenerate start (no vertical band for a body)
+            // The climbing physics is calibrated for WALLS: hands must sit clearly above the feet in
+            // gravity-Z or the pelvis has no viable band and every hand move gets rejected. A gentle
+            // slope fails here honestly instead of starting a session that cannot move.
+            failReason = $"terrain too flat to climb here (hand/foot vertical span {handTop - footTop:F2} m < 0.55 m)";
+            return null;
         }
 
         Vector3 pelvis = basePoint + (frame.Normal * 0.52f);
@@ -191,6 +202,7 @@ public sealed class ClimbSession
             return false;
         }
 
+        string originHoldId = State.Contacts[limb].Hold.Id;
         ClimbMoveResult result = solver.TryMove(State, limb, hold);
         if (!result.Succeeded)
         {
@@ -200,6 +212,7 @@ public sealed class ClimbSession
 
         LastAppliedLimb = limb;
         LastAppliedHoldId = hold.Id;
+        plannerCameFrom[limb] = originHoldId; // the planner must not instantly undo an explicit move
         Apply(result);
         return true;
     }
@@ -224,6 +237,7 @@ public sealed class ClimbSession
         ClimbMoveResult? best = null;
         ClimbLimb bestLimb = ClimbLimb.LeftHand;
         string? bestHoldId = null;
+        string? bestFromHoldId = null;
         float bestScore = float.MinValue;
         string? reason = null;
         foreach ((ClimbLimb limb, LimbContact contact) in State.Contacts)
@@ -232,6 +246,13 @@ public sealed class ClimbSession
             foreach (ClimbHold candidate in surface.FindHolds(searchCentre, CandidateSearchRadiusMeters))
             {
                 if (occupied.Contains(candidate.Id) || !candidate.SupportsLimb(limb))
+                {
+                    continue;
+                }
+
+                // Anti ping-pong: never send a limb straight back to the hold it just left — that read
+                // as "one foot flapping between two holds" while every other limb was blocked.
+                if (plannerCameFrom.TryGetValue(limb, out string? cameFrom) && cameFrom == candidate.Id)
                 {
                     continue;
                 }
@@ -256,6 +277,7 @@ public sealed class ClimbSession
                     best = result;
                     bestLimb = limb;
                     bestHoldId = candidate.Id;
+                    bestFromHoldId = contact.Hold.Id;
                 }
             }
         }
@@ -268,6 +290,11 @@ public sealed class ClimbSession
 
         LastAppliedLimb = bestLimb;
         LastAppliedHoldId = bestHoldId;
+        if (bestFromHoldId is not null)
+        {
+            plannerCameFrom[bestLimb] = bestFromHoldId;
+        }
+
         Apply(best);
         return true;
     }
