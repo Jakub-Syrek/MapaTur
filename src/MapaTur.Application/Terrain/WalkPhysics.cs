@@ -97,6 +97,41 @@ public sealed class WalkPhysics
     /// The caller multiplies by the vertical-exaggeration to get the world-Z for the camera.</summary>
     public float EyeElevation => FeetElevation + p.EyeHeightMeters;
 
+    /// <summary>
+    /// Accepts the body state back from a grip-climbing <see cref="ClimbSession"/> — the ONE legal external
+    /// position write besides <see cref="Teleport"/> (the session owns the body while climbing; two owners
+    /// mutating position was ruled out by the integration contract). Protection carries over: pitons are
+    /// restored (capped) and <paramref name="roped"/> resumes the rope arrest in <see cref="Step"/>.
+    /// </summary>
+    public void SyncFromClimb(
+        Vector2 positionXY,
+        float feetElevation,
+        IReadOnlyList<PitonPoint> newPitons,
+        float gripStamina,
+        bool roped)
+    {
+        ArgumentNullException.ThrowIfNull(newPitons);
+        PositionXY = positionXY;
+        FeetElevation = feetElevation;
+        VerticalVelocity = 0f;
+        IsGrounded = false;
+        IsSliding = false;
+        IsClimbing = false;
+        IsHanging = roped;
+        IsRoped = roped;
+        this.pitons.Clear();
+        this.pitons.AddRange(newPitons);
+        while (this.pitons.Count > this.p.MaxPitons)
+        {
+            this.pitons.RemoveAt(0);
+        }
+
+        this.climbDistanceSincePiton = 0f;
+        GripStamina = Math.Clamp(gripStamina, 0f, this.p.MaxGripStaminaSeconds);
+        this.gripEngaged = false;
+        this.jumpsUsed = 0;
+    }
+
     /// <summary>Drops the walker at <paramref name="positionXY"/> and re-grounds it on the terrain there (feet on
     /// the ground, no vertical velocity). Used when entering walk mode or when the camera is repositioned.</summary>
     public void Teleport(Vector2 positionXY)
@@ -303,6 +338,24 @@ public sealed class WalkPhysics
     {
         VerticalVelocity -= this.p.GravityMetersPerSecondSquared * dt;
         FeetElevation += VerticalVelocity * dt;
+
+        // Rope arrest also mid-air: a protected fall is caught a rope-length below the top piton instead of
+        // dropping past the protection to the base (previously only the sliding path was caught). Landing
+        // still wins when the ground sits above the hang point.
+        if (this.pitons.Count > 0 && VerticalVelocity <= 0f)
+        {
+            float ropeHang = TopPitonElevation() - this.p.RopeLengthMeters;
+            float groundBelow = this.sampleGround(PositionXY) ?? float.MinValue;
+            if (FeetElevation <= ropeHang + 1e-3f && ropeHang > groundBelow)
+            {
+                FeetElevation = ropeHang;
+                VerticalVelocity = 0f;
+                IsHanging = true;
+                IsRoped = true;
+                GripStamina = MathF.Min(this.p.MaxGripStaminaSeconds, GripStamina + (this.p.GripRegenPerSecond * dt));
+                return;
+            }
+        }
 
         // Horizontal control while airborne — but NOT into a steep face: refuse a step whose ground sits above
         // the feet (+ a small lip), or the walker ends up embedded in the wall with the eye under the texture
