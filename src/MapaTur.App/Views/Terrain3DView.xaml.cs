@@ -1891,7 +1891,6 @@ public partial class Terrain3DView : ContentView
     private int walkDetailTick;
     private bool walkSwinging;          // a ciupaga swing (left click) is playing
     private double walkSwingStartSeconds;
-    private bool walkLmbDown;           // LEFT mouse held → ciupaga self-arrest (hang) while airborne against rock
     private const float CiupagaSwingSeconds = 0.5f; // one strike + recover
     // Held-movement state, set by the Windows key handlers and polled by the (cross-platform) tick. Plain bools
     // so the tick never references the Windows-only VirtualKey type.
@@ -2327,7 +2326,6 @@ public partial class Terrain3DView : ContentView
         walkLookPitchRadians = 0f; // start looking at the horizon
         walkFwd = walkBack = walkStrafeLeft = walkStrafeRight = walkRun = false;
         walkJumpQueued = false;
-        walkLmbDown = false;
         walkRmbHeld = false;
         walkCamYawOffset = 0f;
         walkCamPitchFree = 0f;
@@ -6098,27 +6096,19 @@ public partial class Terrain3DView : ContentView
             return;
         }
 
-        // Walk mode: LEFT = swing the ciupaga (a strike), RIGHT-drag = look around. So the left button never
-        // starts a look-drag while walking.
+        // Walk mode: RIGHT-drag = look around. The LEFT button is free again — the legacy ciupaga
+        // swing/hold was retired with the hold-by-hold climbing takeover (a latched left click used to
+        // swallow every UI click and read as "the old climb mode turning on").
         if (walkActive)
         {
-            // LEFT = grab the ciupagas (climb/hang). RIGHT = free-look. Both can be held together — the actual
-            // look/free-look is driven from the LIVE button flags in PointerMoved (a second mouse button does not
-            // reliably fire PointerPressed on Windows). Here we just latch the holds + the drag baseline.
             lastPointerPosition = e.GetCurrentPoint(element).Position;
-            if (props.IsLeftButtonPressed && !walkLmbDown)
-            {
-                walkLmbDown = true; // held = ciupaga self-arrest / climb
-                StartCiupagaSwing();
-            }
-
             if (props.IsRightButtonPressed)
             {
                 walkRmbHeld = true;
+                element.CapturePointer(e.Pointer); // capture so the release reliably clears the hold
+                e.Handled = true;
             }
 
-            element.CapturePointer(e.Pointer); // capture so releases reliably clear each hold
-            e.Handled = true;
             return;
         }
 
@@ -6221,12 +6211,8 @@ public partial class Terrain3DView : ContentView
         var released = (Microsoft.UI.Xaml.UIElement)sender;
         var relProps = e.GetCurrentPoint(released).Properties;
 
-        // Only drop the hold whose button actually came up — left and right can be held together while climbing.
-        if (!relProps.IsLeftButtonPressed)
-        {
-            walkLmbDown = false; // releasing the left button lets the ciupaga go — the climb/hang drops
-        }
-
+        // Only drop the hold whose button actually came up (RMB = free-look; LMB is free since the
+        // legacy ciupaga swing/hold retired with the hold-by-hold climbing takeover).
         if (!relProps.IsRightButtonPressed)
         {
             walkRmbHeld = false;
