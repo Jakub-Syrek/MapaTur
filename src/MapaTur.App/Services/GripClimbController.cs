@@ -62,9 +62,10 @@ internal sealed class GripClimbController
         {
             climberModelLoad ??= Task.Run(static () =>
             {
+                // AppDataDirectory already ENDS with the \Data segment on Windows — do not append another.
                 string path = Environment.GetEnvironmentVariable("MAPATUR_CLIMBER_MODEL")
                     ?? Path.Combine(
-                        Microsoft.Maui.Storage.FileSystem.AppDataDirectory, "Data", "models", "RockClimber_Realistic.glb");
+                        Microsoft.Maui.Storage.FileSystem.AppDataDirectory, "models", "RockClimber_Realistic.glb");
                 try
                 {
                     if (!File.Exists(path))
