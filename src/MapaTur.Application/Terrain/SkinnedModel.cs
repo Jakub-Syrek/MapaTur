@@ -35,6 +35,13 @@ public sealed class SkinnedModel
 
         /// <summary>Skinned normals written by the last <see cref="Pose"/>.</summary>
         public Vector3[] PosedNormals { get; init; } = Array.Empty<Vector3>();
+
+        /// <summary>
+        /// This primitive's own base-colour image (multi-material rigs like the realistic climber carry a
+        /// different atlas per body part). Primitives sharing a material share the SAME array instance, so a
+        /// reference-keyed texture cache uploads each atlas once. Null = use the model-level texture.
+        /// </summary>
+        public byte[]? BaseColorImageBytes { get; init; }
     }
 
     private readonly SceneInstance instance;
@@ -162,6 +169,7 @@ public sealed class SkinnedModel
     {
         var primitives = new List<Primitive>();
         byte[]? baseColor = null;
+        var baseColorByMaterial = new Dictionary<int, byte[]?>(); // shared array per material → shared GL texture
 
         foreach (Mesh mesh in model.LogicalMeshes)
         {
@@ -197,6 +205,13 @@ public sealed class SkinnedModel
                     ? idx.ToArray()
                     : SequentialIndices(n);
 
+                int materialKey = prim.Material?.LogicalIndex ?? -1;
+                if (!baseColorByMaterial.TryGetValue(materialKey, out byte[]? primBaseColor))
+                {
+                    primBaseColor = TryReadBaseColor(prim.Material);
+                    baseColorByMaterial[materialKey] = primBaseColor;
+                }
+
                 primitives.Add(new Primitive
                 {
                     BindPositions = bindPos,
@@ -207,9 +222,10 @@ public sealed class SkinnedModel
                     MeshIndex = mesh.LogicalIndex,
                     PosedPositions = new Vector3[n],
                     PosedNormals = new Vector3[n],
+                    BaseColorImageBytes = primBaseColor,
                 });
 
-                baseColor ??= TryReadBaseColor(prim.Material);
+                baseColor ??= primBaseColor;
             }
         }
 

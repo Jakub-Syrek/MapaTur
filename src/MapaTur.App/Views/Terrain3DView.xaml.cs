@@ -2719,10 +2719,24 @@ public partial class Terrain3DView : ContentView
         humanoidModelLoading = true;
         try
         {
-            await using Stream s = await Microsoft.Maui.Storage.FileSystem.OpenAppPackageFileAsync("hiker.glb").ConfigureAwait(false);
-            using var ms = new MemoryStream();
-            await s.CopyToAsync(ms).ConfigureAwait(false);
-            var model = MapaTur.Application.Terrain.SkinnedModel.LoadGlb(ms.ToArray());
+            // The realistic climber (Mixamo-rigged walk build with the original textures, local-only data)
+            // is the DEFAULT avatar; the bundled KayKit hiker is the fallback when the file is absent.
+            MapaTur.Application.Terrain.SkinnedModel model;
+            string climberWalkPath = Path.Combine(
+                Microsoft.Maui.Storage.FileSystem.AppDataDirectory, "models", "RockClimber_Walk.glb");
+            if (File.Exists(climberWalkPath))
+            {
+                model = await Task.Run(() => MapaTur.Application.Terrain.SkinnedModel.Load(climberWalkPath)).ConfigureAwait(false);
+                Serilog.Log.Information("[Walk] avatar = realistic climber ({Path})", climberWalkPath);
+            }
+            else
+            {
+                await using Stream s = await Microsoft.Maui.Storage.FileSystem.OpenAppPackageFileAsync("hiker.glb").ConfigureAwait(false);
+                using var ms = new MemoryStream();
+                await s.CopyToAsync(ms).ConfigureAwait(false);
+                model = MapaTur.Application.Terrain.SkinnedModel.LoadGlb(ms.ToArray());
+                Serilog.Log.Information("[Walk] avatar = bundled hiker (no climber walk model found)");
+            }
 
             int idle = -1, walk = -1, run = -1, shoot = -1, jumpIdle = -1, jumpLand = -1;
             for (int i = 0; i < model.Animations.Count; i++)

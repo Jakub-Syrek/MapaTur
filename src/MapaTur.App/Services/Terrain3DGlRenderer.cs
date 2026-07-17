@@ -8821,17 +8821,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.Uniform3(dragonTintLoc, 1f, 1f, 1f);
         g.Uniform1(dragonFireCountLoc, 0f); // the walker is never lit by dragon fire
 
-        uint tex = EnsureAiDragonTexture(g, model.BaseColorImageBytes);
-        bool hasTex = tex != 0;
-        if (hasTex)
-        {
-            g.ActiveTexture(TextureUnit.Texture9);
-            g.BindTexture(TextureTarget.Texture2D, tex);
-            g.ActiveTexture(TextureUnit.Texture0);
-        }
-
         g.Uniform1(dragonTexLoc, 9);
-        g.Uniform1(dragonHasTexLoc, hasTex ? 1f : 0f);
 
         g.Enable(EnableCap.DepthTest);
         g.DepthFunc(DepthFunction.Lequal);
@@ -8839,7 +8829,24 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.Disable(EnableCap.Blend);
         g.Disable(EnableCap.CullFace); // model winding varies — draw both faces so it's never see-through
         g.BindVertexArray(dragonVao);
-        UploadAndDrawDragonPrimitives(g, model);
+
+        // Per-primitive base colours: a multi-material rig (the realistic climber) carries a different atlas
+        // per body part; single-atlas models (KayKit) fall back to the model-level texture on every primitive.
+        foreach (MapaTur.Application.Terrain.SkinnedModel.Primitive p in model.Primitives)
+        {
+            uint tex = EnsureAiDragonTexture(g, p.BaseColorImageBytes ?? model.BaseColorImageBytes);
+            bool hasTex = tex != 0;
+            if (hasTex)
+            {
+                g.ActiveTexture(TextureUnit.Texture9);
+                g.BindTexture(TextureTarget.Texture2D, tex);
+                g.ActiveTexture(TextureUnit.Texture0);
+            }
+
+            g.Uniform1(dragonHasTexLoc, hasTex ? 1f : 0f);
+            UploadAndDrawOnePrimitive(g, p);
+        }
+
         g.BindVertexArray(0);
     }
 
@@ -8900,10 +8907,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     {
         foreach (MapaTur.Application.Terrain.SkinnedModel.Primitive p in model.Primitives)
         {
+            UploadAndDrawOnePrimitive(g, p);
+        }
+    }
+
+    private void UploadAndDrawOnePrimitive(GL g, MapaTur.Application.Terrain.SkinnedModel.Primitive p)
+    {
+        {
             int n = p.PosedPositions.Length;
             if (n == 0)
             {
-                continue;
+                return;
             }
 
             if (dragonPosScratch.Length < n * 3)
