@@ -2454,7 +2454,11 @@ public partial class Terrain3DView : ContentView
         }
         else
         {
-            w.Step(dt, wish, speed, jump, hangHeld: walkLmbDown);
+            // hangHeld stays FALSE: the legacy continuous ciupaga-climb (LMB glue-to-slope + sinusoidal
+            // arm wave) is replaced by the hold-by-hold ClimbSession on C. Mixing both let the walker
+            // enter the old climb at the same wall and fight the session for the body. The rope arrest
+            // in WalkPhysics still protects falls after a session lets go.
+            w.Step(dt, wish, speed, jump, hangHeld: false);
         }
 
         float exaggeration = frame.VerticalExaggeration;
