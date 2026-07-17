@@ -266,15 +266,18 @@ internal sealed class GripClimbController
             return false; // no hold under the cursor — ignore the click silently
         }
 
-        foreach ((ClimbLimb limb, LimbContact contact) in session.State.Contacts
-                     .OrderBy(pair => Vector3.Distance(pair.Value.Hold.Position, best.Position)))
-        {
-            if (contact.Hold.Id == best.Id)
-            {
-                continue; // that limb already holds it
-            }
+        // Limb choice: hands for holds above the pelvis, feet below; then the limb whose current hold
+        // is nearest to the target. The permissive grab path applies the first valid one.
+        bool targetAbovePelvis = best.Position.Z >= session.State.Pelvis.Z - 0.1f;
+        IEnumerable<(ClimbLimb Limb, LimbContact Contact)> ordered = session.State.Contacts
+            .Select(pair => (Limb: pair.Key, Contact: pair.Value))
+            .Where(entry => entry.Contact.Hold.Id != best.Id)
+            .OrderByDescending(entry => (entry.Limb is ClimbLimb.LeftHand or ClimbLimb.RightHand) == targetAbovePelvis)
+            .ThenBy(entry => Vector3.Distance(entry.Contact.Hold.Position, best.Position));
 
-            if (session.TryMoveLimb(limb, best))
+        foreach ((ClimbLimb limb, LimbContact _) in ordered)
+        {
+            if (session.TryGrabHold(limb, best))
             {
                 poseDirty = true;
                 Serilog.Log.Information(

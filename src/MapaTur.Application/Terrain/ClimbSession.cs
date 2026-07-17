@@ -133,16 +133,21 @@ public sealed class ClimbSession
         ClimbSurfaceFrame frame = surface.SampleSurface(pelvisClimb, options.Gravity);
         Vector3 basePoint = surface.ProjectToSurface(pelvisClimb);
         Vector3 up = frame.UpAlongSurface;
-        Vector3 side = frame.SideAlongSurface;
+
+        // Left/right must be the CHARACTER's left/right, not the surface frame's side axis — its sign is
+        // arbitrary relative to the climber and a flipped sign started every session with crossed limbs.
+        var facing = new Vector3(-frame.Normal.X, -frame.Normal.Y, 0f);
+        facing = facing.LengthSquared() > 1e-6f ? Vector3.Normalize(facing) : new Vector3(0f, -1f, 0f);
+        Vector3 characterLeft = Vector3.Normalize(Vector3.Cross(Vector3.UnitZ, facing));
+
         float shoulderUp = options.LeftShoulderOffsetMeters.Z;
         float hipUp = options.LeftHipOffsetMeters.Z;
-
         var ideals = new Dictionary<ClimbLimb, Vector3>
         {
-            [ClimbLimb.LeftHand] = basePoint + (up * (shoulderUp + (0.55f * options.ArmReachMeters))) + (side * 0.28f),
-            [ClimbLimb.RightHand] = basePoint + (up * (shoulderUp + (0.55f * options.ArmReachMeters))) - (side * 0.28f),
-            [ClimbLimb.LeftFoot] = basePoint + (up * (hipUp - (0.65f * options.LegReachMeters))) + (side * 0.20f),
-            [ClimbLimb.RightFoot] = basePoint + (up * (hipUp - (0.65f * options.LegReachMeters))) - (side * 0.20f)
+            [ClimbLimb.LeftHand] = basePoint + (up * (shoulderUp + (0.55f * options.ArmReachMeters))) + (characterLeft * 0.28f),
+            [ClimbLimb.RightHand] = basePoint + (up * (shoulderUp + (0.55f * options.ArmReachMeters))) - (characterLeft * 0.28f),
+            [ClimbLimb.LeftFoot] = basePoint + (up * (hipUp - (0.65f * options.LegReachMeters))) + (characterLeft * 0.20f),
+            [ClimbLimb.RightFoot] = basePoint + (up * (hipUp - (0.65f * options.LegReachMeters))) - (characterLeft * 0.20f)
         };
 
         float searchRadius = shoulderUp + options.ArmReachMeters + options.LegReachMeters + 1f;
@@ -180,12 +185,9 @@ public sealed class ClimbSession
 
         float handTop = (contacts[ClimbLimb.LeftHand].Hold.Position.Z + contacts[ClimbLimb.RightHand].Hold.Position.Z) * 0.5f;
         float footTop = (contacts[ClimbLimb.LeftFoot].Hold.Position.Z + contacts[ClimbLimb.RightFoot].Hold.Position.Z) * 0.5f;
-        if (handTop <= footTop + 0.55f)
+        if (handTop <= footTop + 0.4f)
         {
-            // The climbing physics is calibrated for WALLS: hands must sit clearly above the feet in
-            // gravity-Z or the pelvis has no viable band and every hand move gets rejected. A gentle
-            // slope fails here honestly instead of starting a session that cannot move.
-            failReason = $"terrain too flat to climb here (hand/foot vertical span {handTop - footTop:F2} m < 0.55 m)";
+            failReason = $"terrain too flat to climb here (hand/foot vertical span {handTop - footTop:F2} m < 0.4 m)";
             return null;
         }
 
@@ -194,7 +196,78 @@ public sealed class ClimbSession
         return new ClimbSession(surface, options, ClimbState.Create(pelvis, contacts.Values));
     }
 
-    /// <summary>Explicitly move one limb onto a hold (manual/debug flow, mirrors the PoC mouse mode).</summary>
+    /// <summary>
+    /// Manual GRAB for the click flow: occupancy and a generous reach check ONLY — the strict
+    /// quasi-static gates (pelvis band, stability, fall risk) stay on the direction planner. A click
+    /// within arm's/leg's reach always takes the hold; the pelvis re-centres on the new contact set.
+    /// </summary>
+    public bool TryGrabHold(ClimbLimb limb, ClimbHold hold)
+    {
+        ArgumentNullException.ThrowIfNull(hold);
+        if (IsFinished)
+        {
+            return false;
+        }
+
+        if (!hold.SupportsLimb(limb))
+        {
+            LastBlockReason = $"{hold.Id} ({hold.Type}) cannot be used by {limb}.";
+            return false;
+        }
+
+        ClimbLimb[] occupants = State.Contacts.Values
+            .Where(contact => contact.Limb != limb && contact.Hold.Id == hold.Id)
+            .Select(contact => contact.Limb)
+            .ToArray();
+        if (!hold.CanAcceptContact(limb, occupants))
+        {
+            LastBlockReason = $"{hold.Id} has no free slot for {limb} (occupied by {string.Join(", ", occupants)}).";
+            return false;
+        }
+
+        float generousReach = limb.IsHand()
+            ? options.LeftShoulderOffsetMeters.Z + options.ArmReachMeters + 0.40f
+            : MathF.Abs(options.LeftHipOffsetMeters.Z) + options.LegReachMeters + 0.45f;
+        float distance = Vector3.Distance(hold.Position, State.Pelvis);
+        if (distance > generousReach)
+        {
+            LastBlockReason = $"{hold.Id} is out of reach for {limb} ({distance:F1} m > {generousReach:F1} m).";
+            return false;
+        }
+
+        string originHoldId = State.Contacts[limb].Hold.Id;
+        var contacts = State.Contacts.ToDictionary(pair => pair.Key, pair => pair.Value);
+        contacts[limb] = new LimbContact(
+            limb, hold, MathF.Min(1f, State.Contacts[limb].Fatigue + 0.03f));
+
+        // Re-centre the pelvis on the new contact set (clamped between feet and hands when possible).
+        Vector3 centroid = Vector3.Zero;
+        float handAverage = 0f, footAverage = 0f;
+        foreach (LimbContact contact in contacts.Values)
+        {
+            centroid += contact.Hold.Position;
+            if (contact.Limb.IsHand()) { handAverage += contact.Hold.Position.Z * 0.5f; }
+            else { footAverage += contact.Hold.Position.Z * 0.5f; }
+        }
+
+        centroid /= contacts.Count;
+        ClimbSurfaceFrame frame = surface.SampleSurface(centroid, options.Gravity);
+        Vector3 pelvis = centroid + (frame.Normal * 0.5f);
+        float lower = footAverage + 0.35f;
+        float upper = MathF.Max(handAverage - 0.35f, lower);
+        pelvis.Z = Math.Clamp((handAverage + footAverage) * 0.5f, lower, upper);
+
+        Vector3 previousPelvis = State.Pelvis;
+        State = ClimbState.Create(pelvis, contacts.Values);
+        LastAppliedLimb = limb;
+        LastAppliedHoldId = hold.Id;
+        LastBlockReason = null;
+        plannerCameFrom[limb] = originHoldId;
+        TrackTravelForPitons(Vector3.Distance(State.Pelvis, previousPelvis));
+        return true;
+    }
+
+    /// <summary>Explicitly move one limb onto a hold (mirrors the PoC mouse mode; full solver gates).</summary>
     public bool TryMoveLimb(ClimbLimb limb, ClimbHold hold)
     {
         if (IsFinished)
@@ -352,9 +425,15 @@ public sealed class ClimbSession
 
     private void Apply(ClimbMoveResult result)
     {
-        climbDistanceSincePiton += Vector3.Distance(result.State.Pelvis, State.Pelvis);
+        float travelled = Vector3.Distance(result.State.Pelvis, State.Pelvis);
         State = result.State;
         LastBlockReason = null;
+        TrackTravelForPitons(travelled);
+    }
+
+    private void TrackTravelForPitons(float metersTravelled)
+    {
+        climbDistanceSincePiton += metersTravelled;
         if (climbDistanceSincePiton >= options.WalkParameters.PitonSpacingMeters)
         {
             climbDistanceSincePiton = 0f;
