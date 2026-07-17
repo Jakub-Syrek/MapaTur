@@ -99,6 +99,11 @@ public sealed class ClimbSession
 
     public string? LastBlockReason { get; private set; }
 
+    /// <summary>Limb and hold of the most recently APPLIED move (for structured logging).</summary>
+    public ClimbLimb? LastAppliedLimb { get; private set; }
+
+    public string? LastAppliedHoldId { get; private set; }
+
     public Vector2 PositionXY => new(State.Pelvis.X, State.Pelvis.Y);
 
     /// <summary>Real feet elevation for the WalkPhysics handoff: hanging on the rope after a catch,
@@ -193,6 +198,8 @@ public sealed class ClimbSession
             return false;
         }
 
+        LastAppliedLimb = limb;
+        LastAppliedHoldId = hold.Id;
         Apply(result);
         return true;
     }
@@ -215,6 +222,8 @@ public sealed class ClimbSession
 
         HashSet<string> occupied = State.Contacts.Values.Select(contact => contact.Hold.Id).ToHashSet();
         ClimbMoveResult? best = null;
+        ClimbLimb bestLimb = ClimbLimb.LeftHand;
+        string? bestHoldId = null;
         float bestScore = float.MinValue;
         string? reason = null;
         foreach ((ClimbLimb limb, LimbContact contact) in State.Contacts)
@@ -245,6 +254,8 @@ public sealed class ClimbSession
                 {
                     bestScore = score;
                     best = result;
+                    bestLimb = limb;
+                    bestHoldId = candidate.Id;
                 }
             }
         }
@@ -255,6 +266,8 @@ public sealed class ClimbSession
             return false;
         }
 
+        LastAppliedLimb = bestLimb;
+        LastAppliedHoldId = bestHoldId;
         Apply(best);
         return true;
     }

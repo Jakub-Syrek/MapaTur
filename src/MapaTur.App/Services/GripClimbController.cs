@@ -38,6 +38,7 @@ internal sealed class GripClimbController
     private bool firstSolveDone;
     private bool poseDirty;
     private float moveCooldown;
+    private float blockLogCooldown;
 
     private sealed record ClimberAssets(ClimberSkinnedModel PoseModel, SkinnedModel RenderModel);
 
@@ -179,10 +180,27 @@ internal sealed class GripClimbController
         }
 
         moveCooldown = MathF.Max(0f, moveCooldown - dt);
-        if (intent.LengthSquared() > 1e-4f && moveCooldown <= 0f && session.TryMoveToward(intent))
+        if (intent.LengthSquared() > 1e-4f && moveCooldown <= 0f)
         {
-            moveCooldown = MoveRepeatSeconds;
-            poseDirty = true;
+            if (session.TryMoveToward(intent))
+            {
+                moveCooldown = MoveRepeatSeconds;
+                poseDirty = true;
+                Serilog.Log.Information(
+                    "[Climb] climb.move_applied {Limb} -> {Hold} pelvisZ={Z:F1} grip={Grip:F0}s",
+                    session.LastAppliedLimb, session.LastAppliedHoldId, session.State.Pelvis.Z, session.GripStamina);
+            }
+            else
+            {
+                blockLogCooldown -= dt;
+                if (blockLogCooldown <= 0f)
+                {
+                    blockLogCooldown = 1.5f;
+                    Serilog.Log.Information(
+                        "[Climb] climb.move_blocked intent=({X:F0},{Y:F0}) reason={Reason}",
+                        intent.X, intent.Y, session.LastBlockReason);
+                }
+            }
         }
 
         session.Update(dt);
@@ -193,6 +211,10 @@ internal sealed class GripClimbController
 
         if (session.IsFinished)
         {
+            Serilog.Log.Information(
+                "[Climb] climb.session_finished exit={Exit} at ({X:F0},{Y:F0}) feet={Feet:F0} grip={Grip:F0}s pitons={Pitons}",
+                session.Exit, session.PositionXY.X, session.PositionXY.Y,
+                session.FeetElevation, session.GripStamina, session.Pitons.Count);
             session.HandBackTo(walker);
             Clear();
             return;
@@ -251,7 +273,11 @@ internal sealed class GripClimbController
             RootSearchStepScale = 0.6f,
             OptimizeOrientation = !firstSolveDone
         };
+        var solveTimer = Stopwatch.StartNew();
         ClimbWholeBodySolveResult result = solver.Solve(request, rig);
+        Serilog.Log.Information(
+            "[Climb] climb.whole_body_solved {Ms} ms feasible={Feasible} contactErr={Err:F3} m evals={Evals}",
+            solveTimer.ElapsedMilliseconds, result.IsFeasible, result.MaximumContactErrorMeters, result.EvaluationCount);
         displayedRoot = result.Pose.RootPose;
         firstSolveDone = true;
 

@@ -6477,7 +6477,13 @@ public partial class Terrain3DView : ContentView
                 walkShootQueued = true; // F = fire the crossbow (the avatar plays its one-shot ranged clip)
                 break;
             case Windows.System.VirtualKey.C:
-                walkClimbToggleQueued = true; // C = grab the wall ahead (hold-by-hold climbing) / let go
+                // C = grab the wall ahead (hold-by-hold climbing) / let go. Key auto-repeat must NOT
+                // toggle the session on/off in a loop while held — accept only the initial press.
+                if (!e.KeyStatus.WasKeyDown)
+                {
+                    walkClimbToggleQueued = true;
+                }
+
                 break;
         }
 
