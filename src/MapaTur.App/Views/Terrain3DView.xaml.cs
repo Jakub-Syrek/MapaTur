@@ -5040,6 +5040,7 @@ public partial class Terrain3DView : ContentView
             DrawAiDragonMarkers(canvas, e.Info.Width, e.Info.Height);
             if (!walkThirdPerson) { DrawWalkViewmodel(canvas, e.Info.Width, e.Info.Height); }
             DrawClimbStaminaHud(canvas, e.Info.Width, e.Info.Height);
+            DrawClimbSelectionOverlay(canvas, e.Info.Width, e.Info.Height);
             DrawDragon(canvas, e.Info.Width, e.Info.Height);
             if (dragonActive)
             {
@@ -6148,7 +6149,65 @@ public partial class Terrain3DView : ContentView
         float tanX = tanY * (float)(fe.ActualWidth / fe.ActualHeight);
         Vector3 direction = Vector3.Normalize(
             forward + (right * (ndcX * tanX)) + (up * (ndcY * tanY)));
-        gripClimb.TryClickHold(Camera.Position, direction, frame.VerticalExaggeration);
+        gripClimb.HandleClick(Camera.Position, direction, frame.VerticalExaggeration);
+    }
+
+    // Two-click climbing UI: outlines every hold the SELECTED limb can take (green = the strict solver
+    // approves, orange = permissive-only) with a small risk % under each, plus a white ring on the
+    // selected limb's current hold. Drawn on the Skia overlay after the HUD.
+    private void DrawClimbSelectionOverlay(SKCanvas canvas, int width, int height)
+    {
+        if (!gripClimb.IsActive || WorldFrame is not { } frame || gripClimb.SelectedLimb is null)
+        {
+            return;
+        }
+
+        float exaggeration = frame.VerticalExaggeration;
+        Matrix4x4 viewProjection = Camera.BuildViewMatrix() * Camera.BuildProjectionMatrix((float)width / height);
+        using var ringOk = new SKPaint
+        { IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 2.5f, Color = new SKColor(90, 255, 130) };
+        using var ringRisky = new SKPaint
+        { IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 2.5f, Color = new SKColor(255, 175, 60) };
+        using var ringSelected = new SKPaint
+        { IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 3.5f, Color = SKColors.White };
+        using var textFill = new SKPaint { IsAntialias = true, Color = SKColors.White };
+        using var textHalo = new SKPaint
+        { IsAntialias = true, Color = new SKColor(0, 0, 0, 200), Style = SKPaintStyle.Stroke, StrokeWidth = 3f };
+        using var statFont = new SKFont { Size = 12f };
+
+        foreach (GripClimbController.ClimbCandidateInfo candidate in gripClimb.Candidates)
+        {
+            Vector3 world = candidate.Hold.Position;
+            world.Z *= exaggeration;
+            if (Camera.ProjectToScreen(world, viewProjection, width, height) is not { } screen)
+            {
+                continue;
+            }
+
+            SKPaint ring = candidate.PlannerOk ? ringOk : ringRisky;
+            canvas.DrawCircle(screen.X, screen.Y, 10f, ring);
+            string stat = $"{candidate.RiskPercent:0}%";
+            canvas.DrawText(stat, screen.X, screen.Y + 24f, SKTextAlign.Center, statFont, textHalo);
+            canvas.DrawText(stat, screen.X, screen.Y + 24f, SKTextAlign.Center, statFont, textFill);
+        }
+
+        if (gripClimb.SelectedHoldPosition is { } selectedPos)
+        {
+            selectedPos.Z *= exaggeration;
+            if (Camera.ProjectToScreen(selectedPos, viewProjection, width, height) is { } screen)
+            {
+                canvas.DrawCircle(screen.X, screen.Y, 13f, ringSelected);
+                string limbLabel = gripClimb.SelectedLimb switch
+                {
+                    MapaTur.Climbing.ClimbLimb.LeftHand => "L ręka",
+                    MapaTur.Climbing.ClimbLimb.RightHand => "P ręka",
+                    MapaTur.Climbing.ClimbLimb.LeftFoot => "L noga",
+                    _ => "P noga",
+                };
+                canvas.DrawText(limbLabel, screen.X, screen.Y - 18f, SKTextAlign.Center, statFont, textHalo);
+                canvas.DrawText(limbLabel, screen.X, screen.Y - 18f, SKTextAlign.Center, statFont, textFill);
+            }
+        }
     }
 
     private void OnPlatformPointerMoved(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)

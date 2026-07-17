@@ -186,6 +186,7 @@ internal sealed class GripClimbController
             {
                 moveCooldown = MoveRepeatSeconds;
                 poseDirty = true;
+                ClearSelection(); // candidate stats are stale after any move
                 Serilog.Log.Information(
                     "[Climb] climb.move_applied {Limb} -> {Hold} pelvisZ={Z:F1} grip={Grip:F0}s",
                     session.LastAppliedLimb, session.LastAppliedHoldId, session.State.Pelvis.Z, session.GripStamina);
@@ -229,16 +230,119 @@ internal sealed class GripClimbController
         MirrorInto(walker);
     }
 
+    /// <summary>A hold the selected limb can take, annotated with the strict solver's verdict.</summary>
+    public sealed record ClimbCandidateInfo(ClimbHold Hold, float RiskPercent, bool PlannerOk);
+
+    /// <summary>Currently selected limb of the two-click flow (click 1 = a held hold picks its limb).</summary>
+    public ClimbLimb? SelectedLimb { get; private set; }
+
+    private readonly List<ClimbCandidateInfo> candidateHolds = [];
+
+    /// <summary>Holds the selected limb can reach right now (for outlines + per-hold stats).</summary>
+    public IReadOnlyList<ClimbCandidateInfo> Candidates => candidateHolds;
+
+    /// <summary>Climb-space position of the selected limb's current hold (highlight anchor).</summary>
+    public Vector3? SelectedHoldPosition =>
+        SelectedLimb is { } limb && session is not null ? session.State.Contacts[limb].Hold.Position : null;
+
     /// <summary>
-    /// Manual hold selection (the PoC's mouse mode): picks the hold nearest to the view ray and moves
-    /// the most suitable limb onto it (nearest limbs tried first, solver validates each). Ray and pick
-    /// happen in RENDER space (hold Z multiplied by the exaggeration).
+    /// The two-click flow: click 1 on a HELD hold selects that limb (its reachable holds get outlined,
+    /// each with the solver's risk); click 2 on a candidate moves the limb there. Clicking another held
+    /// hold switches the selection; clicking empty rock clears it.
     /// </summary>
-    public bool TryClickHold(Vector3 rayOriginRender, Vector3 rayDirectionRender, float exaggeration)
+    public void HandleClick(Vector3 rayOriginRender, Vector3 rayDirectionRender, float exaggeration)
     {
         if (session is null || surface is null)
         {
-            return false;
+            return;
+        }
+
+        ClimbHold? hit = PickHold(rayOriginRender, rayDirectionRender, exaggeration);
+        if (hit is null)
+        {
+            ClearSelection();
+            return;
+        }
+
+        ClimbLimb? owner = session.State.Contacts
+            .Where(pair => pair.Value.Hold.Id == hit.Id)
+            .Select(pair => (ClimbLimb?)pair.Key)
+            .FirstOrDefault();
+        if (owner is { } heldLimb)
+        {
+            SelectLimb(heldLimb);
+            return;
+        }
+
+        if (SelectedLimb is not { } selected)
+        {
+            Serilog.Log.Information("[Climb] click ignored — select a limb first (click one of its held holds)");
+            return;
+        }
+
+        if (session.TryGrabHold(selected, hit))
+        {
+            poseDirty = true;
+            Serilog.Log.Information(
+                "[Climb] climb.move_applied (click) {Limb} -> {Hold} pelvisZ={Z:F1}",
+                selected, hit.Id, session.State.Pelvis.Z);
+            ClearSelection();
+        }
+        else
+        {
+            Serilog.Log.Information(
+                "[Climb] climb.move_blocked (click) hold={Hold} reason={Reason}", hit.Id, session.LastBlockReason);
+        }
+    }
+
+    public void ClearSelection()
+    {
+        SelectedLimb = null;
+        candidateHolds.Clear();
+    }
+
+    private void SelectLimb(ClimbLimb limb)
+    {
+        if (session is null || surface is null)
+        {
+            return;
+        }
+
+        SelectedLimb = limb;
+        candidateHolds.Clear();
+        string currentHoldId = session.State.Contacts[limb].Hold.Id;
+        float reach = session.GenerousReachMeters(limb);
+        foreach (ClimbHold hold in surface.Patch.Holds)
+        {
+            if (hold.Id == currentHoldId
+                || !hold.SupportsLimb(limb)
+                || Vector3.Distance(hold.Position, session.State.Pelvis) > reach)
+            {
+                continue;
+            }
+
+            ClimbLimb[] occupants = session.State.Contacts.Values
+                .Where(contact => contact.Limb != limb && contact.Hold.Id == hold.Id)
+                .Select(contact => contact.Limb)
+                .ToArray();
+            if (!hold.CanAcceptContact(limb, occupants))
+            {
+                continue;
+            }
+
+            (bool plannerOk, float risk) = session.AssessMove(limb, hold);
+            candidateHolds.Add(new ClimbCandidateInfo(hold, risk * 100f, plannerOk));
+        }
+
+        Serilog.Log.Information(
+            "[Climb] limb selected: {Limb} — {Count} reachable holds", limb, candidateHolds.Count);
+    }
+
+    private ClimbHold? PickHold(Vector3 rayOriginRender, Vector3 rayDirectionRender, float exaggeration)
+    {
+        if (surface is null)
+        {
+            return null;
         }
 
         ClimbHold? best = null;
@@ -253,7 +357,7 @@ internal sealed class GripClimbController
             }
 
             float miss = Vector3.Distance(p, rayOriginRender + (rayDirectionRender * t));
-            float tolerance = 0.30f + (0.012f * t); // a screen-space-ish slack that grows with distance
+            float tolerance = 0.30f + (0.012f * t); // screen-space-ish slack that grows with distance
             if (miss <= tolerance && miss < bestMiss)
             {
                 bestMiss = miss;
@@ -261,35 +365,7 @@ internal sealed class GripClimbController
             }
         }
 
-        if (best is null)
-        {
-            return false; // no hold under the cursor — ignore the click silently
-        }
-
-        // Limb choice: hands for holds above the pelvis, feet below; then the limb whose current hold
-        // is nearest to the target. The permissive grab path applies the first valid one.
-        bool targetAbovePelvis = best.Position.Z >= session.State.Pelvis.Z - 0.1f;
-        IEnumerable<(ClimbLimb Limb, LimbContact Contact)> ordered = session.State.Contacts
-            .Select(pair => (Limb: pair.Key, Contact: pair.Value))
-            .Where(entry => entry.Contact.Hold.Id != best.Id)
-            .OrderByDescending(entry => (entry.Limb is ClimbLimb.LeftHand or ClimbLimb.RightHand) == targetAbovePelvis)
-            .ThenBy(entry => Vector3.Distance(entry.Contact.Hold.Position, best.Position));
-
-        foreach ((ClimbLimb limb, LimbContact _) in ordered)
-        {
-            if (session.TryGrabHold(limb, best))
-            {
-                poseDirty = true;
-                Serilog.Log.Information(
-                    "[Climb] climb.move_applied (click) {Limb} -> {Hold} pelvisZ={Z:F1}",
-                    limb, best.Id, session.State.Pelvis.Z);
-                return true;
-            }
-        }
-
-        Serilog.Log.Information(
-            "[Climb] climb.move_blocked (click) hold={Hold} reason={Reason}", best.Id, session.LastBlockReason);
-        return false;
+        return best;
     }
 
     /// <summary>Climb holds + the active contacts as debug markers (positions already exaggerated).</summary>
@@ -507,5 +583,7 @@ internal sealed class GripClimbController
         solver = null;
         ActiveModel = null;
         HasPose = false;
+        SelectedLimb = null;
+        candidateHolds.Clear();
     }
 }

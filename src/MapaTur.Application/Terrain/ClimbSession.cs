@@ -225,9 +225,7 @@ public sealed class ClimbSession
             return false;
         }
 
-        float generousReach = limb.IsHand()
-            ? options.LeftShoulderOffsetMeters.Z + options.ArmReachMeters + 0.40f
-            : MathF.Abs(options.LeftHipOffsetMeters.Z) + options.LegReachMeters + 0.45f;
+        float generousReach = GenerousReachMeters(limb);
         float distance = Vector3.Distance(hold.Position, State.Pelvis);
         if (distance > generousReach)
         {
@@ -265,6 +263,22 @@ public sealed class ClimbSession
         plannerCameFrom[limb] = originHoldId;
         TrackTravelForPitons(Vector3.Distance(State.Pelvis, previousPelvis));
         return true;
+    }
+
+    /// <summary>Reach used by the manual grab flow (looser than the planner's solver gates).</summary>
+    public float GenerousReachMeters(ClimbLimb limb) => limb.IsHand()
+        ? options.LeftShoulderOffsetMeters.Z + options.ArmReachMeters + 0.40f
+        : MathF.Abs(options.LeftHipOffsetMeters.Z) + options.LegReachMeters + 0.45f;
+
+    /// <summary>
+    /// Pure what-if: how would the STRICT solver judge moving <paramref name="limb"/> onto
+    /// <paramref name="hold"/>? Does not mutate the session — used to annotate candidate holds in the UI.
+    /// </summary>
+    public (bool PlannerOk, float Risk) AssessMove(ClimbLimb limb, ClimbHold hold)
+    {
+        ArgumentNullException.ThrowIfNull(hold);
+        ClimbMoveResult result = solver.TryMove(State, limb, hold);
+        return (result.Succeeded, Math.Clamp(result.Assessment.Risk, 0f, 1f));
     }
 
     /// <summary>Explicitly move one limb onto a hold (mirrors the PoC mouse mode; full solver gates).</summary>
