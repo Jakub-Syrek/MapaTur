@@ -271,6 +271,19 @@ internal sealed class GripClimbController
             .FirstOrDefault();
         if (owner is { } heldLimb)
         {
+            // Match gesture first (the PoC rule): with a limb selected, clicking a hold HELD BY ANOTHER
+            // limb tries to SHARE it — both hands on a wide jug, both feet on a wide ledge. Only when the
+            // share is not possible does the click switch the selection to that limb.
+            if (SelectedLimb is { } matchLimb && matchLimb != heldLimb && session.TryGrabHold(matchLimb, hit))
+            {
+                poseDirty = true;
+                Serilog.Log.Information(
+                    "[Climb] climb.hand_match_gesture {Limb} joins {Other} on {Hold}",
+                    matchLimb, heldLimb, hit.Id);
+                ClearSelection();
+                return;
+            }
+
             SelectLimb(heldLimb);
             return;
         }
@@ -547,7 +560,9 @@ internal sealed class GripClimbController
                     _ => ClimbHoldType.FootEdge
                 };
                 float quality = 0.65f + (0.3f * Hash(p.X + 3.3f, p.Y + 7.7f));
-                holds.Add(new ClimbHold($"terrain-{p.X:F1}-{p.Y:F1}-{p.Z:F1}", p, normal, quality, type));
+                // Foot edges are generated wide enough for a deliberate two-feet share (Core: >= 0.30 m).
+                float? width = type == ClimbHoldType.FootEdge ? 0.36f : null;
+                holds.Add(new ClimbHold($"terrain-{p.X:F1}-{p.Y:F1}-{p.Z:F1}", p, normal, quality, type, width));
             }
         }
 

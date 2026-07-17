@@ -56,6 +56,13 @@ public sealed record ClimbHold
         _ => UsableWidthMeters >= 0.32f ? 2 : 1
     };
 
+    /// <summary>Number of feet that can share the hold (both feet on one wide ledge/edge).</summary>
+    public int FootContactCapacity => Type switch
+    {
+        ClimbHoldType.Pocket or ClimbHoldType.Pinch => 1,
+        _ => UsableWidthMeters >= 0.30f ? 2 : 1
+    };
+
     /// <summary>World-space distance from the wall surface to the palm/toe contact point.</summary>
     public float ContactOffsetMeters => Type switch
     {
@@ -128,9 +135,14 @@ public sealed record ClimbHold
             return true;
         }
 
-        return incoming.IsHand()
-            && others.All(limb => limb.IsHand())
-            && others.Length + 1 <= HandContactCapacity;
+        // Same-kind sharing only: two hands may match a wide hand feature, two feet may share a wide
+        // ledge. A hand and a foot never silently overlap one physical slot.
+        if (incoming.IsHand())
+        {
+            return others.All(limb => limb.IsHand()) && others.Length + 1 <= HandContactCapacity;
+        }
+
+        return others.All(limb => limb.IsFoot()) && others.Length + 1 <= FootContactCapacity;
     }
 
     /// <summary>
@@ -141,8 +153,12 @@ public sealed record ClimbHold
         IEnumerable<ClimbLimb> occupants,
         Vector3 gravity)
     {
-        ClimbLimb[] hands = occupants.Where(candidate => candidate.IsHand()).Distinct().ToArray();
-        if (!limb.IsHand() || hands.Length < 2 || HandContactCapacity < 2)
+        ClimbLimb[] sameKind = occupants
+            .Where(candidate => candidate.IsHand() == limb.IsHand())
+            .Distinct()
+            .ToArray();
+        int capacity = limb.IsHand() ? HandContactCapacity : FootContactCapacity;
+        if (sameKind.Length < 2 || capacity < 2)
         {
             return Vector3.Zero;
         }
