@@ -139,7 +139,8 @@ internal sealed class GripClimbController
             rigAdapter.PelvisHeightMeters,
             ClimbWorld.Gravity)
         {
-            InitialGripStaminaSeconds = walker.GripStamina
+            InitialGripStaminaSeconds = walker.GripStamina,
+            DrainGripStamina = false, // tuning (user): no energy metering while climbing for now
         };
         var pelvis = new Vector3(origin.X, origin.Y, walker.FeetElevation + rigAdapter.PelvisHeightMeters);
         ClimbSession? started = ClimbSession.TryStart(wall, pelvis, options, out string? failReason);

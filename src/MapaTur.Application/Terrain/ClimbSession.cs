@@ -46,6 +46,9 @@ public sealed record ClimbSessionOptions(
 {
     /// <summary>Grip seconds carried over from walk mode; NaN = start with a full reserve.</summary>
     public float InitialGripStaminaSeconds { get; init; } = float.NaN;
+
+    /// <summary>False = grip does not drain while climbing (no exhaustion rope-catch); tuning decision.</summary>
+    public bool DrainGripStamina { get; init; } = true;
 }
 
 /// <summary>
@@ -390,7 +393,7 @@ public sealed class ClimbSession
     /// auto-belay can catch, otherwise into a free fall (both end the session).</summary>
     public void Update(float dt)
     {
-        if (IsFinished || dt <= 0f)
+        if (IsFinished || dt <= 0f || !options.DrainGripStamina)
         {
             return;
         }
