@@ -22,7 +22,7 @@ internal sealed class GripClimbController
     private const float PatchBackMeters = 2f;
     private const float GridStepMeters = 0.5f;
     private const float MinForwardSlopeGrade = 0.75f;    // ~37 deg — flatter than this is walking, not climbing
-    private const float HoldDensityPerVertex = 0.34f;
+    private const float HoldDensityPerVertex = 0.62f;    // ~2.5 holds/m2 — dense enough to always have options
     private const float MoveRepeatSeconds = 0.45f;
     private const float ClimberHeightMeters = 1.85f;
 
