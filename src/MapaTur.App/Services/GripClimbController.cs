@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Numerics;
 
 using MapaTur.Application.Terrain;
@@ -8,9 +9,11 @@ namespace MapaTur.App.Services;
 /// <summary>
 /// Runtime glue for hold-by-hold climbing in the app: builds a climbable triangle patch from the terrain
 /// in front of the walker (real metres — the MVP "steep DEM + procedural micro-holds" level), owns the
-/// <see cref="ClimbSession"/> and the <see cref="ClimberRigKinematics"/> whole-body pose, mirrors position
-/// into <see cref="WalkPhysics"/> for the camera/HUD, and hands the body back on exit. Keeps
-/// Terrain3DView down to a handful of call sites instead of another monolith block.
+/// <see cref="ClimbSession"/> and poses the taken-over realistic climber through
+/// <see cref="RealisticClimberRig"/> (the PROVEN Climber3d rig). The posed/skinned buffers are copied into
+/// a render-side <see cref="SkinnedModel"/> twin of the same GLB, so the existing renderer path draws the
+/// climber unchanged. Climbing requires the licensed model (local data, never redistributed); without it
+/// the C key does nothing except log why.
 /// </summary>
 internal sealed class GripClimbController
 {
@@ -21,18 +24,27 @@ internal sealed class GripClimbController
     private const float MinForwardSlopeGrade = 0.75f;    // ~37 deg — flatter than this is walking, not climbing
     private const float HoldDensityPerVertex = 0.34f;
     private const float MoveRepeatSeconds = 0.45f;
+    private const float ClimberHeightMeters = 1.85f;
+
+    private static readonly object ClimberModelGate = new();
+    private static Task<ClimberAssets?>? climberModelLoad;
 
     private ClimbSession? session;
     private TrianglePatchClimbSurface? surface;
-    private ClimberRigKinematics? rig;
-    private SkinnedModel? humanoid;
+    private RealisticClimberRig? rig;
+    private SkinnedModel? renderModel;
     private SequentialWholeBodyClimbSolver? solver;
     private ClimbWholeBodyRootPose displayedRoot;
     private bool firstSolveDone;
     private bool poseDirty;
     private float moveCooldown;
 
+    private sealed record ClimberAssets(ClimberSkinnedModel PoseModel, SkinnedModel RenderModel);
+
     public bool IsActive => session is not null;
+
+    /// <summary>The render-side model the active session poses; the renderer must draw THIS while climbing.</summary>
+    public SkinnedModel? ActiveModel { get; private set; }
 
     public Matrix4x4 HumanoidWorldMatrix { get; private set; } = Matrix4x4.Identity;
 
@@ -41,18 +53,63 @@ internal sealed class GripClimbController
     public bool HasPose { get; private set; }
 
     /// <summary>
-    /// Tries to start climbing at the walker's position: probes the slope ahead, tessellates it into a
-    /// patch with procedurally scattered holds, and grabs the wall. False = no climbable rock here.
+    /// Kicks off the one-time async load of the licensed realistic climber (pose rig + its render twin).
+    /// Call when walk mode starts so the model is ready before the first wall.
     /// </summary>
-    public bool TryEnter(
-        WalkPhysics walker,
-        Func<Vector2, float?> sampleGround,
-        float headingRadians,
-        SkinnedModel humanoidModel)
+    public static void PreloadClimberModel()
+    {
+        lock (ClimberModelGate)
+        {
+            climberModelLoad ??= Task.Run(static () =>
+            {
+                string path = Environment.GetEnvironmentVariable("MAPATUR_CLIMBER_MODEL")
+                    ?? Path.Combine(
+                        Microsoft.Maui.Storage.FileSystem.AppDataDirectory, "Data", "models", "RockClimber_Realistic.glb");
+                try
+                {
+                    if (!File.Exists(path))
+                    {
+                        Serilog.Log.Warning("[Climb] climber model missing at {Path} — climbing is unavailable", path);
+                        return (ClimberAssets?)null;
+                    }
+
+                    var stopwatch = Stopwatch.StartNew();
+                    var poseModel = ClimberSkinnedModel.Load(path);
+                    var renderTwin = SkinnedModel.Load(path);
+                    Serilog.Log.Information(
+                        "[Climb] climber model loaded in {Ms} ms: {Verts} verts, {Bones} bones, contactIk={Ik} ({Path})",
+                        stopwatch.ElapsedMilliseconds,
+                        poseModel.VertexCount,
+                        poseModel.BoneCount,
+                        poseModel.SupportsContactIk,
+                        path);
+                    return poseModel.SupportsContactIk ? new ClimberAssets(poseModel, renderTwin) : null;
+                }
+                catch (Exception ex)
+                {
+                    Serilog.Log.Warning(ex, "[Climb] climber model failed to load — climbing is unavailable");
+                    return null;
+                }
+            });
+        }
+    }
+
+    /// <summary>
+    /// Tries to start climbing at the walker's position: probes the slope ahead, tessellates it into a
+    /// patch with procedurally scattered holds, and grabs the wall with the realistic climber.
+    /// False = no climbable rock here or the climber model is not available.
+    /// </summary>
+    public bool TryEnter(WalkPhysics walker, Func<Vector2, float?> sampleGround, float headingRadians)
     {
         if (IsActive)
         {
             return true;
+        }
+
+        if (climberModelLoad is not { IsCompletedSuccessfully: true, Result: { } assets })
+        {
+            Serilog.Log.Information("[Climb] climber model not ready/available — cannot start a session");
+            return false;
         }
 
         var forward = new Vector2(MathF.Cos(headingRadians), MathF.Sin(headingRadians));
@@ -67,7 +124,10 @@ internal sealed class GripClimbController
         }
 
         TrianglePatchClimbSurface wall = BuildTerrainPatch(origin, forward, sampleGround);
-        var rigAdapter = new ClimberRigKinematics(humanoidModel, ClimberRigProfile.CreateDefault(), 1.7f);
+        var rigAdapter = new RealisticClimberRig(assets.PoseModel, ClimberHeightMeters);
+        Serilog.Log.Information(
+            "[Climb] rig = RockClimber_Realistic, armReach={Arm:F2} m, legReach={Leg:F2} m, pelvisHeight={Pelvis:F2} m",
+            rigAdapter.ArmReachMeters, rigAdapter.LegReachMeters, rigAdapter.PelvisHeightMeters);
         var options = new ClimbSessionOptions(
             new WalkParameters(),
             rigAdapter.ArmReachMeters,
@@ -83,13 +143,15 @@ internal sealed class GripClimbController
         ClimbSession? started = ClimbSession.TryStart(wall, pelvis, options);
         if (started is null)
         {
+            Serilog.Log.Information("[Climb] no usable hold set at this spot");
             return false;
         }
 
         session = started;
         surface = wall;
         rig = rigAdapter;
-        humanoid = humanoidModel;
+        renderModel = assets.RenderModel;
+        ActiveModel = assets.RenderModel;
         solver = new SequentialWholeBodyClimbSolver(
             SmplxPosePriorProfile.CreateBootstrap(),
             new ClimbMechanicsConfiguration { Gravity = ClimbWorld.Gravity });
@@ -104,7 +166,7 @@ internal sealed class GripClimbController
 
     /// <summary>
     /// One walk-tick of climbing: applies the movement intent (X = sideways along the wall, Y = up),
-    /// drains grip, poses the humanoid after contact changes, and finishes the session on release or
+    /// drains grip, poses the climber after contact changes, and finishes the session on release or
     /// grip exhaustion (rope catch / fall). While active the session is the only owner of the body;
     /// the walker is a read-only mirror for the camera, HUD and rope markers.
     /// </summary>
@@ -167,7 +229,7 @@ internal sealed class GripClimbController
 
     private void SolveAndPose(float exaggeration)
     {
-        if (session is null || rig is null || surface is null || solver is null || humanoid is null)
+        if (session is null || rig is null || surface is null || solver is null || renderModel is null)
         {
             return;
         }
@@ -193,7 +255,8 @@ internal sealed class GripClimbController
         firstSolveDone = true;
 
         rig.Evaluate(displayedRoot); // restore the WINNING pose in the bones (Solve probes many candidates)
-        humanoid.Skin();
+        rig.Skin();
+        CopyPosedBuffers(rig.Model, renderModel);
 
         Matrix4x4 world = rig.BuildWorldMatrix(displayedRoot);
         Vector3 translation = world.Translation;
@@ -204,6 +267,23 @@ internal sealed class GripClimbController
         rotation.Translation = Vector3.Zero;
         HumanoidRotationMatrix = NormalizeRotation(rotation);
         HasPose = true;
+    }
+
+    private static void CopyPosedBuffers(ClimberSkinnedModel from, SkinnedModel to)
+    {
+        int count = Math.Min(from.Primitives.Count, to.Primitives.Count);
+        for (int index = 0; index < count; index++)
+        {
+            ClimberSkinnedModel.Primitive source = from.Primitives[index];
+            SkinnedModel.Primitive destination = to.Primitives[index];
+            if (source.PosedPositions.Length != destination.PosedPositions.Length)
+            {
+                continue; // primitive enumeration should match (same GLB, same loader rules); skip if not
+            }
+
+            Array.Copy(source.PosedPositions, destination.PosedPositions, source.PosedPositions.Length);
+            Array.Copy(source.PosedNormals, destination.PosedNormals, source.PosedNormals.Length);
+        }
     }
 
     private void MirrorInto(WalkPhysics walker)
@@ -333,8 +413,9 @@ internal sealed class GripClimbController
         session = null;
         surface = null;
         rig = null;
-        humanoid = null;
+        renderModel = null;
         solver = null;
+        ActiveModel = null;
         HasPose = false;
     }
 }

@@ -2315,6 +2315,7 @@ public partial class Terrain3DView : ContentView
         var startXY = carryXY ?? new System.Numerics.Vector2(Camera.Position.X, Camera.Position.Y);
         walker = new MapaTur.Application.Terrain.WalkPhysics(startXY, SampleWalkGround);
         walkPrevXY = startXY;
+        MapaTur.App.Services.GripClimbController.PreloadClimberModel(); // ready before the first wall grab
         Serilog.Log.Information(
             "[Walk] enter from={From} startXY=({X:F0},{Y:F0}) ground={G} feet={F:F0} grounded={Gr} dragonElev={DE}",
             carryXY is not null ? "dragon" : "orbit", startXY.X, startXY.Y,
@@ -2436,8 +2437,7 @@ public partial class Terrain3DView : ContentView
             {
                 releaseClimb = true;
             }
-            else if (humanoidModel3D is { } hmClimb
-                && gripClimb.TryEnter(w, SampleWalkGround, walkHeadingRadians, hmClimb))
+            else if (gripClimb.TryEnter(w, SampleWalkGround, walkHeadingRadians))
             {
                 Serilog.Log.Information(
                     "[Climb] climb.session_started at ({X:F0},{Y:F0}) elev={E:F0} m",
@@ -7510,7 +7510,9 @@ public partial class Terrain3DView : ContentView
             // Push the 3rd-person walk avatar into the same GL pass (visible only while walking AND the model has
             // streamed in). Walk and dragon are mutually exclusive, so at most one of these is ever visible.
             bool humanoid3DVisible = walkActive && humanoidModel3D is not null;
-            glRenderer.SetHumanoid(humanoidModel3D, humanoidWorldMatrix, humanoidNormalMatrix, dragonLight, humanoid3DVisible);
+            glRenderer.SetHumanoid(
+                gripClimb is { IsActive: true, HasPose: true, ActiveModel: { } climberModel } ? climberModel : humanoidModel3D,
+                humanoidWorldMatrix, humanoidNormalMatrix, dragonLight, humanoid3DVisible);
             glRenderer.SetArrows(
                 walkActive ? arrowModel3D : null,
                 walkActive ? arrowWorlds : null,
