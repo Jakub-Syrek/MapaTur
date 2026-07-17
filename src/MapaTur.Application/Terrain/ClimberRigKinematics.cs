@@ -81,6 +81,7 @@ public sealed class ClimberRigKinematics : IClimbWholeBodyKinematics
         // a stylized rig can have arms/legs far shorter than its nominal height suggests.
         ArmReachMeters = ChainLength(leftArm, includeTip: true) * scale;   // contact = palm
         LegReachMeters = ChainLength(leftLeg, includeTip: false) * scale;  // contact = ankle (lifted target)
+        PelvisHeightMeters = hipsBind.Y * scale;
         LeftShoulderOffsetMeters = ToClimbOffset(BonePosition(leftArm.Root) - hipsBind);
         LeftHipOffsetMeters = ToClimbOffset(BonePosition(leftLeg.Root) - hipsBind);
 
@@ -107,6 +108,9 @@ public sealed class ClimberRigKinematics : IClimbWholeBodyKinematics
 
     /// <summary>Hip→ankle chain length in metres, measured on the actual rig.</summary>
     public float LegReachMeters { get; }
+
+    /// <summary>Standing pelvis height above the feet in metres, measured on the actual rig.</summary>
+    public float PelvisHeightMeters { get; }
 
     /// <summary>Left shoulder relative to the pelvis in climb frame at yaw 0 (left = +X); mirror X for the right.</summary>
     public Vector3 LeftShoulderOffsetMeters { get; }

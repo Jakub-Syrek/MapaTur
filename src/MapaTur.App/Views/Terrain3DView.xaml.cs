@@ -2038,6 +2038,8 @@ public partial class Terrain3DView : ContentView
     // rendered-mesh point (where the feet SHOULD land). Cleared when not perched.
     private readonly List<MapaTur.App.Services.Terrain3DGlRenderer.DebugMarker> dragonDebugMarkers = [];
     private readonly List<MapaTur.App.Services.Terrain3DGlRenderer.DebugMarker> pitonMarkers = []; // climb auto-belay: pitons + rope
+    private readonly MapaTur.App.Services.GripClimbController gripClimb = new(); // hold-by-hold climbing (C toggles)
+    private bool walkClimbToggleQueued;
 
     // ── AI DRAGON FLOCK ── a small mixed-species flock that circles the nearby peaks (ambient) and drifts toward
     // the player's dragon when it flies close. Each member owns its OWN posed model instance (independent pose),
@@ -2424,7 +2426,36 @@ public partial class Terrain3DView : ContentView
             });
         }
 
-        w.Step(dt, wish, speed, jump, hangHeld: walkLmbDown);
+        // Hold-by-hold climbing: C grabs the wall ahead (or lets go). While a session is active it is the
+        // ONLY owner of the body — WalkPhysics is not stepped, just mirrored for the camera/HUD/rope.
+        bool releaseClimb = jump;
+        if (walkClimbToggleQueued)
+        {
+            walkClimbToggleQueued = false;
+            if (gripClimb.IsActive)
+            {
+                releaseClimb = true;
+            }
+            else if (humanoidModel3D is { } hmClimb
+                && gripClimb.TryEnter(w, SampleWalkGround, walkHeadingRadians, hmClimb))
+            {
+                Serilog.Log.Information(
+                    "[Climb] climb.session_started at ({X:F0},{Y:F0}) elev={E:F0} m",
+                    w.PositionXY.X, w.PositionXY.Y, w.FeetElevation);
+            }
+        }
+
+        if (gripClimb.IsActive)
+        {
+            var climbIntent = new System.Numerics.Vector2(
+                (walkStrafeRight ? 1f : 0f) - (walkStrafeLeft ? 1f : 0f),
+                (walkFwd ? 1f : 0f) - (walkBack ? 1f : 0f));
+            gripClimb.Tick(dt, climbIntent, releaseClimb, frame.VerticalExaggeration, w);
+        }
+        else
+        {
+            w.Step(dt, wish, speed, jump, hangHeld: walkLmbDown);
+        }
 
         float exaggeration = frame.VerticalExaggeration;
 
@@ -2435,11 +2466,22 @@ public partial class Terrain3DView : ContentView
         walkPrevXY = w.PositionXY;
         if (humanoidModel3D is { } hm)
         {
-            PoseAndSeatHumanoid(hm, w, exaggeration, dt, groundSpeed, shootThisTick);
+            if (gripClimb.IsActive && gripClimb.HasPose)
+            {
+                // The climb controller already posed + skinned the model from the whole-body solve;
+                // just take its transforms instead of the walk seat/pose path.
+                humanoidWorldMatrix = gripClimb.HumanoidWorldMatrix;
+                humanoidNormalMatrix = gripClimb.HumanoidRotationMatrix;
+            }
+            else
+            {
+                PoseAndSeatHumanoid(hm, w, exaggeration, dt, groundSpeed, shootThisTick);
+            }
         }
 
         AdvanceAndBuildArrows(exaggeration, dt);
         BuildPitonRopeMarkers(w, exaggeration);
+        gripClimb.AppendHoldMarkers(pitonMarkers, exaggeration);
 
         // Third-person camera: the eye sits a fixed boom BEHIND and ABOVE the walker (so it never dives into the
         // ground), and the GAZE pitches freely with the look input — so you can crane the view UP at a wall or peak
@@ -6419,6 +6461,9 @@ public partial class Terrain3DView : ContentView
                 break;
             case Windows.System.VirtualKey.F:
                 walkShootQueued = true; // F = fire the crossbow (the avatar plays its one-shot ranged clip)
+                break;
+            case Windows.System.VirtualKey.C:
+                walkClimbToggleQueued = true; // C = grab the wall ahead (hold-by-hold climbing) / let go
                 break;
         }
 
