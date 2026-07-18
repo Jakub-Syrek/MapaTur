@@ -454,7 +454,11 @@ public sealed class ClimberSkinnedModel
             neutralToe,
             desiredToe,
             ankleEnvelope.HardMinimumDegrees,
-            ankleEnvelope.HardMaximumDegrees);
+            ankleEnvelope.HardMaximumDegrees,
+            // Keep the shoe near its natural forward-down heading: on a big stem to a far side hold the
+            // toe was allowed to swing 45° off neutral, which read as a twisted / inverted foot. 22° keeps
+            // it edging naturally instead of contorting.
+            maximumRotationFromNeutralDegrees: 22f);
         RotateBoneToward(ankle, toe, anklePosition + (constrainedDirection * toeLength));
     }
 

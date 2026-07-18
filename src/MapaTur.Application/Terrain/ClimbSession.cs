@@ -64,7 +64,7 @@ public sealed class ClimbSession
     private const float CandidateSearchRadiusMeters = 0.60f;
     private const float MinimumProgressMeters = 0.05f;
 
-    private readonly IClimbSurface surface;
+    private IClimbSurface surface; // replaceable mid-session: the terrain patch grows as the climber nears its edge
     private readonly ClimbSessionOptions options;
     private readonly ClimbSolver solver;
     private readonly List<WalkPhysics.PitonPoint> pitons = [];
@@ -198,6 +198,34 @@ public sealed class ClimbSession
         Vector3 pelvis = basePoint + (frame.Normal * 0.52f);
         pelvis.Z = ((handTop + footTop) * 0.5f) - 0.05f;
         return new ClimbSession(surface, options, ClimbState.Create(pelvis, contacts.Values));
+    }
+
+    /// <summary>
+    /// Swaps the wall for a LARGER tessellation of the same rock mid-session (the terrain patch grows as
+    /// the climber nears its edge, so holds never "run out"). The new surface must reproduce every held
+    /// hold — the same stable id at the same spot (the procedural generator is deterministic in world
+    /// position); otherwise the swap is refused and the session keeps the current wall.
+    /// </summary>
+    public bool TryReplaceSurface(IClimbSurface newSurface)
+    {
+        ArgumentNullException.ThrowIfNull(newSurface);
+
+        var remapped = new Dictionary<ClimbLimb, LimbContact>();
+        foreach ((ClimbLimb limb, LimbContact contact) in State.Contacts)
+        {
+            ClimbHold? match = newSurface.FindHolds(contact.Hold.Position, 0.05f)
+                .FirstOrDefault(candidate => candidate.Id == contact.Hold.Id);
+            if (match is null)
+            {
+                return false;
+            }
+
+            remapped[limb] = contact with { Hold = match };
+        }
+
+        surface = newSurface;
+        State = ClimbState.Create(State.Pelvis, remapped.Values);
+        return true;
     }
 
     /// <summary>

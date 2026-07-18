@@ -59,4 +59,45 @@ public static class TerrainOcclusion
         // occluded when a ridge is hit clearly before the marker.
         return hitDistance >= distance - SelfHitMarginMeters;
     }
+
+    // Self-hit margin for the FINE march: the detailed surface is sharp, so the marker's own rock is met
+    // within a much tighter band than the coarse raster's 120 m.
+    private const float SelfHitMarginFineMeters = 25f;
+
+    /// <summary>
+    /// As <see cref="IsVisible"/>, but marches the ray against the SAME detailed surface the terrain is
+    /// rendered from (via <paramref name="sampleGround"/>: fine 1 m detail where streamed, coarse base
+    /// otherwise), instead of the coarse raster. On sharp towers (Mnich needle) the coarse DEM sits tens
+    /// of metres below the rendered rock, so a coarse raycast lets labels "punch through" the detailed
+    /// wall; this catches them. Steps finely in the near field (the detailed rock in front of the camera)
+    /// and coarsens far out where only big ridges matter. <paramref name="sampleGround"/> returns RAW
+    /// elevation in metres (Z scaling is applied here).
+    /// </summary>
+    public static bool IsVisibleFine(
+        Vector3 cameraWorld, Vector3 markerWorld, Func<Vector2, float?> sampleGround, float verticalExaggeration)
+    {
+        ArgumentNullException.ThrowIfNull(sampleGround);
+
+        Vector3 toMarker = markerWorld - cameraWorld;
+        float distance = toMarker.Length();
+        if (distance < 1f)
+        {
+            return true;
+        }
+
+        Vector3 dir = toMarker / distance;
+        float limit = distance - SelfHitMarginFineMeters;
+        for (float t = 6f; t < limit;)
+        {
+            Vector3 p = cameraWorld + (dir * t);
+            if (sampleGround(new Vector2(p.X, p.Y)) is { } ground && p.Z < (ground * verticalExaggeration) - 1f)
+            {
+                return false; // the ray dips below the rendered surface before reaching the marker → occluded
+            }
+
+            t += t < 800f ? 6f : 30f; // fine near (detailed rock), coarse far (ridges only)
+        }
+
+        return true;
+    }
 }

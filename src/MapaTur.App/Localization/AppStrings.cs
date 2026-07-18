@@ -427,6 +427,8 @@ public static class AppStrings
     public static string LayerNightSky => Get(nameof(LayerNightSky));
     /// <summary>"Contours" layer chip.</summary>
     public static string LayerContours => Get(nameof(LayerContours));
+    /// <summary>"Climbing routes" layer toggle.</summary>
+    public static string LayerClimbingRoutes => Get(nameof(LayerClimbingRoutes));
     /// <summary>"Range" label for the peak-name radius slider.</summary>
     public static string PeakRangeLabel => Get(nameof(PeakRangeLabel));
     /// <summary>Accessibility hint for the peak-name radius slider.</summary>

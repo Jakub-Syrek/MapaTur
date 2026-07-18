@@ -3902,6 +3902,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             sceneFboThisFrame = 0;
             markerProgram = 0; // debug-marker pass rebuilds with the dragon
             markerVao = 0;
+            gearRibbonProgram = 0; // climb-gear pass rebuilds the same way
+            gearRingProgram = 0;
+            gearRibbonVao = 0;
+            gearRingVao = 0;
             moonProgram = 0;
             moonViewProjLocation = -1;
             moonDirLocation = -1;
@@ -4986,8 +4990,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         GpuBegin(gl, GpuPass.Dragons); // 4 CPU-skinned models + fire — was the UNTIMED gap between passes
         DrawDragon(gl, mvp);
         DrawAiDragons(gl, mvp); // autonomous flock, same depth-tested scene
-        DrawHumanoid(gl, mvp); // 3rd-person walk-mode avatar (mutually exclusive with the dragon)
         DrawArrows(gl, mvp); // crossbow bolts in flight
+        // Climbing layer order (back → front): route lines → hold dots → the climber. So the routes read
+        // UNDER the hold points, and the climber is drawn LAST → always over the points (user's request).
+        DrawClimbGear(gl, mvp, camera, vpHeight); // auto-belay rope + quickdraws + route topo lines (depth-tested)
+        DrawClimbHoldMarkers(gl, mvp, camera); // climb hold dots (depth-tested, depth-write off)
+        DrawHumanoid(gl, mvp); // 3rd-person avatar LAST — drawn over the hold dots
         // Soft particles (B1): resolve the scene depth NOW — terrain AND both dragons are in, so the fire
         // fades into rock and dragon bellies instead of a hard sprite cut. The x-ray line gate below reuses
         // this same resolve (fire writes no depth, so it stays valid).
@@ -8634,7 +8642,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             "out vec2 vUv;\n" +
             "out vec3 vColor;\n" +
             "void main(){ vec3 wp = aCenter + ((uRight * aCorner.x) + (uUp * aCorner.y)) * aRadius;\n" +
-            "  vUv = aCorner; vColor = aColor; gl_Position = uMvp * vec4(wp, 1.0); }\n";
+            "  vUv = aCorner; vColor = aColor; gl_Position = uMvp * vec4(wp, 1.0);\n" +
+            "  gl_Position.z -= 0.0015; }\n"; // small clip bias so depth-tested hold dots win the z-fight with the wall they sit on
         const string fs =
             "#version 300 es\n" +
             "precision highp float;\n" +
@@ -8688,13 +8697,33 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.BindVertexArray(0);
     }
 
+    /// <summary>Climb-session hold dots — drawn DEPTH-TESTED (terrain occludes them; they read as sitting
+    /// ON the wall) and depth-write OFF so the climber, drawn AFTER, always renders over them.</summary>
+    public void SetClimbHoldMarkers(IReadOnlyList<DebugMarker>? markers) => climbHoldMarkers = markers;
+
+    private IReadOnlyList<DebugMarker>? climbHoldMarkers;
+
+    // Always-on-top diagnostic markers (dragon-foot probes, calibration grid): no depth test.
     private void DrawDebugMarkers(GL g, Matrix4x4 mvp, Camera3D camera)
     {
-        if (debugMarkers is not { Count: > 0 } markers)
+        if (debugMarkers is { Count: > 0 } markers)
         {
-            return;
+            DrawMarkerList(g, mvp, camera, markers, depthTested: false);
         }
+    }
 
+    // Climb hold dots: depth-tested (occluded by rock + the climber body), so the climber sits over them
+    // and routes read under them. Drawn between the route lines and the climber in the frame.
+    private void DrawClimbHoldMarkers(GL g, Matrix4x4 mvp, Camera3D camera)
+    {
+        if (climbHoldMarkers is { Count: > 0 } markers)
+        {
+            DrawMarkerList(g, mvp, camera, markers, depthTested: true);
+        }
+    }
+
+    private void DrawMarkerList(GL g, Matrix4x4 mvp, Camera3D camera, IReadOnlyList<DebugMarker> markers, bool depthTested)
+    {
         EnsureMarkerProgram(g);
 
         Vector3 fwd = Vector3.Normalize(camera.Target - camera.Position);
@@ -8740,8 +8769,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.Uniform3(markerRightLoc, right.X, right.Y, right.Z);
         g.Uniform3(markerUpLoc, up.X, up.Y, up.Z);
 
-        // Opaque, but always-on-top: depth-test OFF so every probe dot is visible regardless of occluders.
-        g.Disable(EnableCap.DepthTest);
+        // Depth-tested hold dots: rock occludes them, but depth-write OFF so the later climber draws over
+        // them. Diagnostic markers: depth-test OFF (always on top).
+        if (depthTested)
+        {
+            g.Enable(EnableCap.DepthTest);
+        }
+        else
+        {
+            g.Disable(EnableCap.DepthTest);
+        }
+
         g.DepthMask(false);
         g.Disable(EnableCap.Blend);
         g.Disable(EnableCap.CullFace);
@@ -8752,6 +8790,350 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.BindVertexArray(0);
         g.Enable(EnableCap.DepthTest);
         g.DepthMask(true);
+    }
+
+    // ── CLIMB GEAR (auto-belay rope + quickdraws, depth-tested world-width geometry) ───────────────────────
+    /// <summary>One rope/sling polyline drawn as a camera-facing ribbon. With <paramref name="ScreenSpace"/>
+    /// false the width is constant WORLD metres (<paramref name="HalfWidthMeters"/>) with fake-cylinder
+    /// shading — a physical rope. With ScreenSpace true the width is a constant SCREEN size: HalfWidthMeters
+    /// is then read as half-width in PIXELS, so the line stays a thin thread at any zoom (climbing-route
+    /// topo overlay). RopeTwist false = a smooth glowing line instead of the kern-strand pattern.</summary>
+    public readonly record struct GearRibbon(
+        IReadOnlyList<Vector3> Points, Vector3 Color, float HalfWidthMeters, bool RopeTwist = true, bool ScreenSpace = false);
+
+    /// <summary>One carabiner (ring) or bolt hanger (solid disc, InnerFraction 0) as a camera-facing billboard:
+    /// vertical half-axis RadiusMeters, horizontal squeezed by AspectX — the oval of a real biner.</summary>
+    public readonly record struct GearRing(Vector3 Center, Vector3 Color, float RadiusMeters, float InnerFraction, float AspectX);
+
+    private uint gearRibbonProgram, gearRingProgram;
+    private int gearRibbonMvpLoc = -1, gearRingMvpLoc = -1, gearRingRightLoc = -1, gearRingUpLoc = -1;
+    private uint gearRibbonVao, gearRibbonVbo, gearRingVao, gearRingVbo;
+    private IReadOnlyList<GearRibbon>? gearRibbons;
+    private IReadOnlyList<GearRing>? gearRings;
+    private float[] gearScratch = Array.Empty<float>();
+
+    /// <summary>Sets this frame's climb-protection geometry (null/empty hides the pass).</summary>
+    public void SetClimbGear(IReadOnlyList<GearRibbon>? ribbons, IReadOnlyList<GearRing>? rings)
+    {
+        gearRibbons = ribbons;
+        gearRings = rings;
+    }
+
+    private void EnsureGearPrograms(GL g)
+    {
+        if (gearRibbonProgram != 0 && g.IsProgram(gearRibbonProgram))
+        {
+            return;
+        }
+
+        // Both shaders subtract a small CLIP-space constant from z (same trick as the trail lines): the bias is
+        // C/w in NDC — strong enough up close to win the depth tie against the wall the gear hangs on, and
+        // vanishing with distance so the rope never punches through genuinely intervening ridges.
+        const string ribbonVs =
+            "#version 300 es\n" +
+            "layout(location=0) in vec3 aPos;\n" +
+            "layout(location=1) in vec3 aOffset;\n" +
+            "layout(location=2) in float aU;\n" +
+            "layout(location=3) in float aAlong;\n" +
+            "layout(location=4) in vec3 aColor;\n" +
+            "layout(location=5) in float aSmooth;\n" + // 0 = rope kern twist, 1 = smooth glow line (topo)
+            "uniform mat4 uMvp;\n" +
+            "out float vU;\n" +
+            "out float vAlong;\n" +
+            "out vec3 vColor;\n" +
+            "out float vSmooth;\n" +
+            "void main(){ vU = aU; vAlong = aAlong; vColor = aColor; vSmooth = aSmooth;\n" +
+            "  gl_Position = uMvp * vec4(aPos + aOffset, 1.0);\n" +
+            "  gl_Position.z -= 0.03; }\n";
+        const string ribbonFs =
+            "#version 300 es\n" +
+            "precision highp float;\n" +
+            "in float vU;\n" +
+            "in float vAlong;\n" +
+            "in vec3 vColor;\n" +
+            "in float vSmooth;\n" +
+            "out vec4 frag;\n" +
+            "void main(){\n" +
+            "  float cyl = sqrt(max(0.0, 1.0 - (vU * vU)));\n" +               // fake round cross-section
+            "  float twist = 0.88 + 0.12 * sin((vAlong * 42.0) + (vU * 2.4));\n" + // kern strands, ~15 cm pitch
+            "  twist = mix(twist, 1.0, vSmooth);\n" +                          // topo lines: no kern pattern
+            "  float body = mix(0.40 + 0.60 * cyl, 0.55 + 0.65 * cyl, vSmooth);\n" + // topo: brighter, glowing core
+            "  frag = vec4(vColor * body * twist, 1.0);\n" +
+            "}\n";
+
+        const string ringVs =
+            "#version 300 es\n" +
+            "layout(location=0) in vec3 aCenter;\n" +
+            "layout(location=1) in vec2 aCorner;\n" +
+            "layout(location=2) in float aRadius;\n" +
+            "layout(location=3) in float aInner;\n" +
+            "layout(location=4) in float aAspect;\n" +
+            "layout(location=5) in vec3 aColor;\n" +
+            "uniform mat4 uMvp;\n" +
+            "uniform vec3 uRight;\n" +
+            "uniform vec3 uUp;\n" +
+            "out vec2 vUv;\n" +
+            "out float vInner;\n" +
+            "out vec3 vColor;\n" +
+            "void main(){ vUv = aCorner; vInner = aInner; vColor = aColor;\n" +
+            "  vec3 wp = aCenter + (uRight * (aCorner.x * aRadius * aAspect)) + (uUp * (aCorner.y * aRadius));\n" +
+            "  gl_Position = uMvp * vec4(wp, 1.0);\n" +
+            "  gl_Position.z -= 0.03; }\n";
+        const string ringFs =
+            "#version 300 es\n" +
+            "precision highp float;\n" +
+            "in vec2 vUv;\n" +
+            "in float vInner;\n" +
+            "in vec3 vColor;\n" +
+            "out vec4 frag;\n" +
+            "void main(){\n" +
+            "  float r = length(vUv);\n" +
+            "  if (r > 1.0 || r < vInner) discard;\n" +                        // vInner 0 → solid disc (bolt hanger)
+            "  float rim = smoothstep(0.90, 1.0, r);\n" +
+            "  if (vInner > 0.0) rim = max(rim, 1.0 - smoothstep(vInner, vInner + 0.10, r));\n" +
+            "  vec3 col = vColor * (0.78 + 0.22 * clamp(vUv.y + 0.5, 0.0, 1.0));\n" + // soft top light
+            "  frag = vec4(mix(col, vec3(0.06), rim * 0.75), 1.0);\n" +        // dark rims keep it readable on rock
+            "}\n";
+
+        gearRibbonProgram = LinkGearProgram(g, ribbonVs, ribbonFs);
+        gearRibbonMvpLoc = g.GetUniformLocation(gearRibbonProgram, "uMvp");
+        gearRingProgram = LinkGearProgram(g, ringVs, ringFs);
+        gearRingMvpLoc = g.GetUniformLocation(gearRingProgram, "uMvp");
+        gearRingRightLoc = g.GetUniformLocation(gearRingProgram, "uRight");
+        gearRingUpLoc = g.GetUniformLocation(gearRingProgram, "uUp");
+
+        gearRibbonVao = g.GenVertexArray();
+        gearRibbonVbo = g.GenBuffer();
+        g.BindVertexArray(gearRibbonVao);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, gearRibbonVbo);
+        const int ribbonStride = 12 * sizeof(float); // pos3 + offset3 + u + along + color3 + smooth
+        g.EnableVertexAttribArray(0);
+        g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, ribbonStride, (void*)0);
+        g.EnableVertexAttribArray(1);
+        g.VertexAttribPointer(1, 3, VertexAttribPointerType.Float, false, ribbonStride, (void*)(3 * sizeof(float)));
+        g.EnableVertexAttribArray(2);
+        g.VertexAttribPointer(2, 1, VertexAttribPointerType.Float, false, ribbonStride, (void*)(6 * sizeof(float)));
+        g.EnableVertexAttribArray(3);
+        g.VertexAttribPointer(3, 1, VertexAttribPointerType.Float, false, ribbonStride, (void*)(7 * sizeof(float)));
+        g.EnableVertexAttribArray(4);
+        g.VertexAttribPointer(4, 3, VertexAttribPointerType.Float, false, ribbonStride, (void*)(8 * sizeof(float)));
+        g.EnableVertexAttribArray(5);
+        g.VertexAttribPointer(5, 1, VertexAttribPointerType.Float, false, ribbonStride, (void*)(11 * sizeof(float)));
+
+        gearRingVao = g.GenVertexArray();
+        gearRingVbo = g.GenBuffer();
+        g.BindVertexArray(gearRingVao);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, gearRingVbo);
+        const int ringStride = 12 * sizeof(float); // center3 + corner2 + radius + inner + aspect + color3 + pad
+        g.EnableVertexAttribArray(0);
+        g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, ringStride, (void*)0);
+        g.EnableVertexAttribArray(1);
+        g.VertexAttribPointer(1, 2, VertexAttribPointerType.Float, false, ringStride, (void*)(3 * sizeof(float)));
+        g.EnableVertexAttribArray(2);
+        g.VertexAttribPointer(2, 1, VertexAttribPointerType.Float, false, ringStride, (void*)(5 * sizeof(float)));
+        g.EnableVertexAttribArray(3);
+        g.VertexAttribPointer(3, 1, VertexAttribPointerType.Float, false, ringStride, (void*)(6 * sizeof(float)));
+        g.EnableVertexAttribArray(4);
+        g.VertexAttribPointer(4, 1, VertexAttribPointerType.Float, false, ringStride, (void*)(7 * sizeof(float)));
+        g.EnableVertexAttribArray(5);
+        g.VertexAttribPointer(5, 3, VertexAttribPointerType.Float, false, ringStride, (void*)(8 * sizeof(float)));
+        g.BindVertexArray(0);
+    }
+
+    private static uint LinkGearProgram(GL g, string vsSource, string fsSource)
+    {
+        uint v = CompileShader(g, ShaderType.VertexShader, vsSource);
+        uint f = CompileShader(g, ShaderType.FragmentShader, fsSource);
+        uint program = g.CreateProgram();
+        g.AttachShader(program, v);
+        g.AttachShader(program, f);
+        g.LinkProgram(program);
+        g.GetProgram(program, ProgramPropertyARB.LinkStatus, out int linked);
+        g.DetachShader(program, v);
+        g.DetachShader(program, f);
+        g.DeleteShader(v);
+        g.DeleteShader(f);
+        if (linked == 0)
+        {
+            string log = g.GetProgramInfoLog(program);
+            g.DeleteProgram(program);
+            throw new InvalidOperationException("Climb-gear program link failed: " + log);
+        }
+
+        return program;
+    }
+
+    // Side vector for ribbon point i: perpendicular to both the local tangent and the view direction, so the
+    // strip always faces the camera. Falls back to a Z-up side when the rope points straight at the eye.
+    private static Vector3 GearSideAt(IReadOnlyList<Vector3> pts, int i, Vector3 viewDir, float halfWidth)
+    {
+        Vector3 tangent = pts[Math.Min(i + 1, pts.Count - 1)] - pts[Math.Max(i - 1, 0)];
+        Vector3 side = Vector3.Cross(tangent, viewDir);
+        if (side.LengthSquared() < 1e-10f)
+        {
+            side = Vector3.Cross(tangent, Vector3.UnitZ);
+        }
+
+        if (side.LengthSquared() < 1e-10f)
+        {
+            side = Vector3.UnitX;
+        }
+
+        return Vector3.Normalize(side) * halfWidth;
+    }
+
+    private void DrawClimbGear(GL g, Matrix4x4 mvp, Camera3D camera, int viewportHeight)
+    {
+        bool anyRibbon = gearRibbons is { Count: > 0 };
+        bool anyRing = gearRings is { Count: > 0 };
+        if (!anyRibbon && !anyRing)
+        {
+            return;
+        }
+
+        EnsureGearPrograms(g);
+
+        // Metres-per-pixel at unit distance: multiply by a point's camera distance to get the world size
+        // of one screen pixel there → constant screen-space width for ScreenSpace ribbons (thin at any zoom).
+        float pxToWorldAtUnitDist = 2f * MathF.Tan(camera.FieldOfViewYRadians * 0.5f) / Math.Max(1, viewportHeight);
+        Vector3 camPos = camera.Position;
+
+        Vector3 fwd = Vector3.Normalize(camera.Target - camera.Position);
+        Vector3 right = Vector3.Normalize(Vector3.Cross(fwd, Vector3.UnitZ));
+        if (!float.IsFinite(right.X))
+        {
+            right = Vector3.UnitX;
+        }
+
+        Vector3 up = Vector3.Cross(right, fwd);
+        WriteMat4(dragonMat4, mvp);
+
+        // Real geometry hanging on the wall: opaque, depth-tested and depth-written (occluded by ridges,
+        // occludes nothing important itself), unlike the always-on-top debug markers.
+        g.Enable(EnableCap.DepthTest);
+        g.DepthMask(true);
+        g.Disable(EnableCap.Blend);
+        g.Disable(EnableCap.CullFace);
+
+        if (anyRibbon)
+        {
+            int vertexCount = 0;
+            foreach (GearRibbon ribbon in gearRibbons!)
+            {
+                if (ribbon.Points is { Count: >= 2 } pts)
+                {
+                    vertexCount += (pts.Count - 1) * 6;
+                }
+            }
+
+            if (vertexCount > 0)
+            {
+                int floats = vertexCount * 12;
+                if (gearScratch.Length < floats)
+                {
+                    gearScratch = new float[floats];
+                }
+
+                int w = 0;
+                void Emit(Vector3 p, Vector3 off, float u, float along, Vector3 c, float smooth)
+                {
+                    gearScratch[w++] = p.X; gearScratch[w++] = p.Y; gearScratch[w++] = p.Z;
+                    gearScratch[w++] = off.X; gearScratch[w++] = off.Y; gearScratch[w++] = off.Z;
+                    gearScratch[w++] = u;
+                    gearScratch[w++] = along;
+                    gearScratch[w++] = c.X; gearScratch[w++] = c.Y; gearScratch[w++] = c.Z;
+                    gearScratch[w++] = smooth;
+                }
+
+                foreach (GearRibbon ribbon in gearRibbons!)
+                {
+                    if (ribbon.Points is not { Count: >= 2 } pts)
+                    {
+                        continue;
+                    }
+
+                    float smooth = ribbon.RopeTwist ? 0f : 1f;
+
+                    // ScreenSpace: HalfWidthMeters is read as half-PIXELS; the world half-width at each
+                    // vertex = pixels · cameraDistance · pxToWorld, so the strip holds a constant screen size.
+                    float HalfWidthAt(Vector3 p) => ribbon.ScreenSpace
+                        ? ribbon.HalfWidthMeters * Vector3.Distance(p, camPos) * pxToWorldAtUnitDist
+                        : ribbon.HalfWidthMeters;
+
+                    Vector3 prevPos = pts[0];
+                    Vector3 prevSide = GearSideAt(pts, 0, fwd, 1f) * HalfWidthAt(prevPos);
+                    float prevAlong = 0f;
+                    for (int i = 1; i < pts.Count; i++)
+                    {
+                        Vector3 pos = pts[i];
+                        Vector3 side = GearSideAt(pts, i, fwd, 1f) * HalfWidthAt(pos);
+                        float along = prevAlong + Vector3.Distance(pos, prevPos);
+                        Emit(prevPos, -prevSide, -1f, prevAlong, ribbon.Color, smooth);
+                        Emit(prevPos, prevSide, 1f, prevAlong, ribbon.Color, smooth);
+                        Emit(pos, side, 1f, along, ribbon.Color, smooth);
+                        Emit(prevPos, -prevSide, -1f, prevAlong, ribbon.Color, smooth);
+                        Emit(pos, side, 1f, along, ribbon.Color, smooth);
+                        Emit(pos, -side, -1f, along, ribbon.Color, smooth);
+                        prevPos = pos;
+                        prevSide = side;
+                        prevAlong = along;
+                    }
+                }
+
+                g.UseProgram(gearRibbonProgram);
+                g.UniformMatrix4(gearRibbonMvpLoc, 1, false, dragonMat4);
+                g.BindVertexArray(gearRibbonVao);
+                g.BindBuffer(BufferTargetARB.ArrayBuffer, gearRibbonVbo);
+                g.BufferData<float>(BufferTargetARB.ArrayBuffer, new ReadOnlySpan<float>(gearScratch, 0, w), BufferUsageARB.DynamicDraw);
+                g.DrawArrays(PrimitiveType.Triangles, 0, (uint)vertexCount);
+            }
+        }
+
+        if (anyRing)
+        {
+            IReadOnlyList<GearRing> rings = gearRings!;
+            int floats = rings.Count * 6 * 12;
+            if (gearScratch.Length < floats)
+            {
+                gearScratch = new float[floats];
+            }
+
+            Span<(float X, float Y)> corners = stackalloc (float, float)[6]
+            {
+                (-1f, -1f), (1f, -1f), (1f, 1f),
+                (-1f, -1f), (1f, 1f), (-1f, 1f),
+            };
+            int w = 0;
+            foreach (GearRing ring in rings)
+            {
+                foreach ((float cx, float cy) in corners)
+                {
+                    gearScratch[w++] = ring.Center.X;
+                    gearScratch[w++] = ring.Center.Y;
+                    gearScratch[w++] = ring.Center.Z;
+                    gearScratch[w++] = cx;
+                    gearScratch[w++] = cy;
+                    gearScratch[w++] = ring.RadiusMeters;
+                    gearScratch[w++] = ring.InnerFraction;
+                    gearScratch[w++] = ring.AspectX;
+                    gearScratch[w++] = ring.Color.X;
+                    gearScratch[w++] = ring.Color.Y;
+                    gearScratch[w++] = ring.Color.Z;
+                    gearScratch[w++] = 0f; // pad to the 12-float stride
+                }
+            }
+
+            g.UseProgram(gearRingProgram);
+            g.UniformMatrix4(gearRingMvpLoc, 1, false, dragonMat4);
+            g.Uniform3(gearRingRightLoc, right.X, right.Y, right.Z);
+            g.Uniform3(gearRingUpLoc, up.X, up.Y, up.Z);
+            g.BindVertexArray(gearRingVao);
+            g.BindBuffer(BufferTargetARB.ArrayBuffer, gearRingVbo);
+            g.BufferData<float>(BufferTargetARB.ArrayBuffer, new ReadOnlySpan<float>(gearScratch, 0, w), BufferUsageARB.DynamicDraw);
+            g.DrawArrays(PrimitiveType.Triangles, 0, (uint)(rings.Count * 6));
+        }
+
+        g.BindVertexArray(0);
     }
 
     private void DrawDragon(GL g, Matrix4x4 mvp)
@@ -11686,6 +12068,21 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             markerProgram = 0;
             markerVao = 0;
             markerVbo = 0;
+        }
+        if (gearRibbonProgram != 0)
+        {
+            gl.DeleteProgram(gearRibbonProgram);
+            gl.DeleteProgram(gearRingProgram);
+            gl.DeleteVertexArray(gearRibbonVao);
+            gl.DeleteVertexArray(gearRingVao);
+            gl.DeleteBuffer(gearRibbonVbo);
+            gl.DeleteBuffer(gearRingVbo);
+            gearRibbonProgram = 0;
+            gearRingProgram = 0;
+            gearRibbonVao = 0;
+            gearRingVao = 0;
+            gearRibbonVbo = 0;
+            gearRingVbo = 0;
         }
         foreach (uint tex in aiDragonTextures.Values)
         {

@@ -21,6 +21,12 @@ internal sealed class GripClimbController
     private const float PatchForwardMeters = 10f;
     private const float PatchBackMeters = 2f;
     private const float GridStepMeters = 0.5f;
+    // Mid-session patch growth: rebuild a LARGER patch (same origin/heading, so the deterministic hold
+    // lattice — and every id — is reproduced verbatim) whenever the pelvis gets close to an edge. Steps
+    // are a multiple of GridStepMeters to keep the grid aligned; the span cap is a runaway guard.
+    private const float PatchGrowTriggerMeters = 4f;
+    private const float PatchGrowStepMeters = 8f;
+    private const float PatchMaxSpanMeters = 400f;
     private const float MinForwardSlopeGrade = 0.75f;    // ~37 deg — flatter than this is walking, not climbing
     private const float HoldDensityPerVertex = 0.62f;    // ~2.5 holds/m2 — dense enough to always have options
     private const float MoveRepeatSeconds = 0.45f;
@@ -31,6 +37,14 @@ internal sealed class GripClimbController
 
     private ClimbSession? session;
     private TrianglePatchClimbSurface? surface;
+    private IReadOnlyList<WorldClimbingRoute>? climbingRoutes; // catalogued topo (e.g. Mnich) — guaranteed hold ladders
+    private Vector2 patchOrigin;                       // fixed for the whole session — the hold lattice anchor
+    private Vector2 patchForwardDir;
+    private Func<Vector2, float?>? patchSampleGround;  // kept so the patch can be rebuilt larger mid-session
+    private float patchBack;
+    private float patchForward;
+    private float patchHalfWidth;
+    private bool patchGrowDisabled;
     private RealisticClimberRig? rig;
     private SkinnedModel? renderModel;
     private SequentialWholeBodyClimbSolver? solver;
@@ -43,6 +57,10 @@ internal sealed class GripClimbController
     private sealed record ClimberAssets(ClimberSkinnedModel PoseModel, SkinnedModel RenderModel);
 
     public bool IsActive => session is not null;
+
+    /// <summary>Catalogued climbing routes in world XY (topo lines). Patches built under them get a
+    /// guaranteed ladder of holds along each line, so those classics are always climbable.</summary>
+    public void SetClimbingRoutes(IReadOnlyList<WorldClimbingRoute>? routes) => climbingRoutes = routes;
 
     /// <summary>The render-side model the active session poses; the renderer must draw THIS while climbing.</summary>
     public SkinnedModel? ActiveModel { get; private set; }
@@ -125,7 +143,8 @@ internal sealed class GripClimbController
             return false;
         }
 
-        TrianglePatchClimbSurface wall = BuildTerrainPatch(origin, forward, sampleGround);
+        TrianglePatchClimbSurface wall = BuildTerrainPatch(
+            origin, forward, sampleGround, PatchBackMeters, PatchForwardMeters, PatchHalfWidthMeters, climbingRoutes);
         var rigAdapter = new RealisticClimberRig(assets.PoseModel, ClimberHeightMeters);
         Serilog.Log.Information(
             "[Climb] rig = RockClimber_Realistic, armReach={Arm:F2} m, legReach={Leg:F2} m, pelvisHeight={Pelvis:F2} m",
@@ -152,6 +171,13 @@ internal sealed class GripClimbController
 
         session = started;
         surface = wall;
+        patchOrigin = origin;
+        patchForwardDir = forward;
+        patchSampleGround = sampleGround;
+        patchBack = PatchBackMeters;
+        patchForward = PatchForwardMeters;
+        patchHalfWidth = PatchHalfWidthMeters;
+        patchGrowDisabled = false;
         rig = rigAdapter;
         renderModel = assets.RenderModel;
         ActiveModel = assets.RenderModel;
@@ -179,6 +205,8 @@ internal sealed class GripClimbController
         {
             return;
         }
+
+        GrowPatchIfNearEdge(); // BEFORE the move intent, so a step at the old edge already sees new holds
 
         moveCooldown = MathF.Max(0f, moveCooldown - dt);
         if (intent.LengthSquared() > 1e-4f && moveCooldown <= 0f)
@@ -265,26 +293,31 @@ internal sealed class GripClimbController
             return;
         }
 
-        ClimbLimb? owner = session.State.Contacts
+        // ALL limbs currently on the clicked hold — a matched pair (two hands / two feet) shares one wide
+        // hold, so a click must be able to reach either occupant. Stable order keeps the cycle predictable.
+        ClimbLimb[] owners = session.State.Contacts
             .Where(pair => pair.Value.Hold.Id == hit.Id)
-            .Select(pair => (ClimbLimb?)pair.Key)
-            .FirstOrDefault();
-        if (owner is { } heldLimb)
+            .Select(pair => pair.Key)
+            .OrderBy(limb => limb)
+            .ToArray();
+        if (owners.Length > 0)
         {
-            // Match gesture first (the PoC rule): with a limb selected, clicking a hold HELD BY ANOTHER
-            // limb tries to SHARE it — both hands on a wide jug, both feet on a wide ledge. Only when the
-            // share is not possible does the click switch the selection to that limb.
-            if (SelectedLimb is { } matchLimb && matchLimb != heldLimb && session.TryGrabHold(matchLimb, hit))
+            // Match gesture first (the PoC rule): with a limb selected that is NOT already on this hold,
+            // clicking it tries to SHARE — both hands on a wide jug, both feet on a wide ledge. Only when
+            // the share is not possible does the click move the selection here.
+            if (SelectedLimb is { } matchLimb && !owners.Contains(matchLimb) && session.TryGrabHold(matchLimb, hit))
             {
                 poseDirty = true;
                 Serilog.Log.Information(
                     "[Climb] climb.hand_match_gesture {Limb} joins {Other} on {Hold}",
-                    matchLimb, heldLimb, hit.Id);
+                    matchLimb, owners[0], hit.Id);
                 ClearSelection();
                 return;
             }
 
-            SelectLimb(heldLimb);
+            // Click 1 selects an occupant; clicking the SAME shared hold again cycles to the other one
+            // (matched pair: first click = one limb, second click = the other).
+            SelectLimb(ClimbLimbSelection.PickOwner(owners, SelectedLimb));
             return;
         }
 
@@ -327,7 +360,11 @@ internal sealed class GripClimbController
 
         bool anatomyOk = result.PoseAssessment.IsInsideHardLimits;
         bool clearanceOk = result.Pose.MinimumBodyClearanceMeters >= 0.015f;
-        bool contactOk = result.MaximumContactErrorMeters <= 0.16f;
+        // A limb that misses its hold by more than ~9 cm is rendered STRETCHED to bridge the gap — the
+        // "tak się człowiek nie składa" pose. The old 0.16 m gate let 9–15 cm gaps through. Require the
+        // grabbed limb to actually reach (feasible solves in practice land at 0–0.09 m; the distorted ones
+        // sit at 0.09–0.15 m), so only clean poses are accepted; a too-far click reverts with a reason.
+        bool contactOk = result.MaximumContactErrorMeters <= 0.09f;
         if (anatomyOk && clearanceOk && contactOk)
         {
             return true;
@@ -340,8 +377,8 @@ internal sealed class GripClimbController
             ", ",
             result.PoseAssessment.HardViolations.Select(v => $"{v.Feature}={v.ValueDegrees:F0}°"));
         Serilog.Log.Information(
-            "[Climb] climb.move_rejected_hard {Limb} -> {Hold}: anatomy={Anatomy} ({Violations}) clearance={Clearance:F3} m contactErr={Err:F3} m",
-            limb, holdId, anatomyOk, violations, result.Pose.MinimumBodyClearanceMeters, result.MaximumContactErrorMeters);
+            "[Climb] climb.move_rejected_hard {Limb} -> {Hold}: anatomy={Anatomy} ({Violations}) feasible={Feasible} clearance={Clearance:F3} m contactErr={Err:F3} m",
+            limb, holdId, anatomyOk, violations, result.IsFeasible, result.Pose.MinimumBodyClearanceMeters, result.MaximumContactErrorMeters);
         return false;
     }
 
@@ -532,20 +569,24 @@ internal sealed class GripClimbController
     private static TrianglePatchClimbSurface BuildTerrainPatch(
         Vector2 origin,
         Vector2 forward,
-        Func<Vector2, float?> sampleGround)
+        Func<Vector2, float?> sampleGround,
+        float backMeters,
+        float forwardMeters,
+        float halfWidthMeters,
+        IReadOnlyList<WorldClimbingRoute>? routes)
     {
         var right = new Vector2(forward.Y, -forward.X);
-        int columns = (int)(2f * PatchHalfWidthMeters / GridStepMeters) + 1;
-        int rows = (int)((PatchForwardMeters + PatchBackMeters) / GridStepMeters) + 1;
+        int columns = (int)(2f * halfWidthMeters / GridStepMeters) + 1;
+        int rows = (int)((forwardMeters + backMeters) / GridStepMeters) + 1;
 
         var vertices = new Vector3[columns * rows];
         List<ClimbHold> holds = [];
         for (int j = 0; j < rows; j++)
         {
-            float v = -PatchBackMeters + (j * GridStepMeters);
+            float v = -backMeters + (j * GridStepMeters);
             for (int i = 0; i < columns; i++)
             {
-                float u = -PatchHalfWidthMeters + (i * GridStepMeters);
+                float u = -halfWidthMeters + (i * GridStepMeters);
                 Vector2 xy = origin + (right * u) + (forward * v);
                 float z = sampleGround(xy) ?? 0f;
                 vertices[(j * columns) + i] = new Vector3(xy.X, xy.Y, z);
@@ -603,8 +644,105 @@ internal sealed class GripClimbController
             }
         }
 
+        // Catalogued topo lines crossing this patch get a guaranteed ladder of good holds along the route
+        // (ClimbingRouteHoldSeeder — deterministic ids, so patch growth reproduces them verbatim).
+        if (routes is { Count: > 0 })
+        {
+            bool InsidePatch(Vector2 xy)
+            {
+                Vector2 rel = xy - origin;
+                float v = Vector2.Dot(rel, forward);
+                float u = Vector2.Dot(rel, right);
+                return v >= -backMeters + GridStepMeters
+                    && v <= forwardMeters - GridStepMeters
+                    && MathF.Abs(u) <= halfWidthMeters - GridStepMeters;
+            }
+
+            // Cheap prefilter: skip routes nowhere near the patch (all waypoints farther than the patch
+            // reach + the longest topo segment), so patches away from the massif cost nothing.
+            float reach = backMeters + forwardMeters + halfWidthMeters + 40f;
+            foreach (WorldClimbingRoute route in routes)
+            {
+                bool near = false;
+                foreach (Vector2 waypoint in route.PathXY)
+                {
+                    if (Vector2.Distance(waypoint, origin) <= reach)
+                    {
+                        near = true;
+                        break;
+                    }
+                }
+
+                if (near)
+                {
+                    ClimbingRouteHoldSeeder.SeedHolds(route, sampleGround, InsidePatch, holds);
+                }
+            }
+        }
+
         return new TrianglePatchClimbSurface(
             new ClimbSurfacePatch($"terrain-{origin.X:F0}-{origin.Y:F0}", vertices, indices, holds));
+    }
+
+    /// <summary>
+    /// Grows the climbable patch when the pelvis nears one of its edges, so holds never "run out"
+    /// mid-route: rebuilds the SAME deterministic lattice from the session's fixed origin/heading with a
+    /// larger extent (every existing hold reappears with an identical id) and swaps it into the session.
+    /// </summary>
+    private void GrowPatchIfNearEdge()
+    {
+        if (session is null || patchSampleGround is null || patchGrowDisabled)
+        {
+            return;
+        }
+
+        var right = new Vector2(patchForwardDir.Y, -patchForwardDir.X);
+        Vector2 rel = session.PositionXY - patchOrigin;
+        float alongForward = Vector2.Dot(rel, patchForwardDir);
+        float alongRight = Vector2.Dot(rel, right);
+
+        float newForward = patchForward + (alongForward > patchForward - PatchGrowTriggerMeters ? PatchGrowStepMeters : 0f);
+        float newBack = patchBack + (alongForward < -patchBack + PatchGrowTriggerMeters ? PatchGrowStepMeters : 0f);
+        float newHalfWidth = patchHalfWidth
+            + (MathF.Abs(alongRight) > patchHalfWidth - PatchGrowTriggerMeters ? PatchGrowStepMeters : 0f);
+        if (newForward == patchForward && newBack == patchBack && newHalfWidth == patchHalfWidth)
+        {
+            return;
+        }
+
+        if (newForward + newBack > PatchMaxSpanMeters || 2f * newHalfWidth > PatchMaxSpanMeters)
+        {
+            patchGrowDisabled = true; // runaway guard — finish this session on the current wall
+            Serilog.Log.Warning(
+                "[Climb] climb.patch_grow_capped at back={Back:F0} m forward={Fwd:F0} m halfWidth={Half:F0} m",
+                patchBack, patchForward, patchHalfWidth);
+            return;
+        }
+
+        long t0 = Stopwatch.GetTimestamp();
+        TrianglePatchClimbSurface grown = BuildTerrainPatch(
+            patchOrigin, patchForwardDir, patchSampleGround, newBack, newForward, newHalfWidth, climbingRoutes);
+        if (!session.TryReplaceSurface(grown))
+        {
+            // Should be impossible (the lattice is deterministic) — disable growth rather than retry every tick.
+            patchGrowDisabled = true;
+            Serilog.Log.Warning("[Climb] climb.patch_grow_refused — a held hold was not reproduced by the larger patch");
+            return;
+        }
+
+        surface = grown;
+        patchBack = newBack;
+        patchForward = newForward;
+        patchHalfWidth = newHalfWidth;
+        if (SelectedLimb is { } selected)
+        {
+            SelectLimb(selected); // refresh the candidate outlines from the larger hold set
+        }
+
+        Serilog.Log.Information(
+            "[Climb] climb.patch_grown back={Back:F0} m forward={Fwd:F0} m halfWidth={Half:F0} m holds={Holds} in {Ms:F1} ms",
+            newBack, newForward, newHalfWidth, grown.Patch.Holds.Count,
+            Stopwatch.GetElapsedTime(t0).TotalMilliseconds);
     }
 
     /// <summary>Deterministic 0..1 hash of a world position (no Random: same rock, same holds, every run).</summary>
@@ -631,6 +769,7 @@ internal sealed class GripClimbController
     {
         session = null;
         surface = null;
+        patchSampleGround = null;
         rig = null;
         renderModel = null;
         solver = null;
