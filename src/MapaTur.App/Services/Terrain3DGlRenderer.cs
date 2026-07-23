@@ -698,10 +698,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Hi-res detail overlay ON TOP of the base ortho colour (before coverage/biome/rock so everything
         // downstream — coverage fade, biomes, granite, lighting, AO — applies to the detailed colour). det25
         // first then det05 so the finest wins where both AABBs overlap.
-        "    float det25Fade = 1.0 - smoothstep(uDet25FadeInner, uDet25FadeOuter, length(vStableWorldPos.xy - uDet25EyeXY));\n" +
-        "    c = applyOrthoDetail(uOrthoDet25, uUseDet25, uDet25MinXY, uDet25MaxXY, uDetailBlendMeters, vStableWorldPos.xy, c, det25Fade);\n" +
-        "    c = applyOrthoDetail(uOrthoDet05, uUseDet05, uDet05MinXY, uDet05MaxXY, uDetailBlendMeters, vStableWorldPos.xy, c, 1.0);\n" + // static 5 cm mosaic fallback (non-streaming installs)
-        "    c = applyOrthoDet05Array(vStableWorldPos.xy, c, uDetailBlendMeters);\n" + // streamed det05: every resident cell paints (KONTRAKT-ORTO)
+        // H5b (2026-07-23): the MIRROR skips the det25/det05 layers entirely — at half-res with the 2 % ripple
+        // wobble and blue tint the reflected walls cannot resolve 25/5 cm anyway, while sampling them (16-slot
+        // AABB walk + bicubic) doubled the mirror's fragment cost (refl 13.8 → 26.9 ms once 16 cells were
+        // resident). The mirror shows base ortho; the REAL view keeps every detail layer.
+        "    if (uReflectionPass < 0.5) {\n" +
+        "      float det25Fade = 1.0 - smoothstep(uDet25FadeInner, uDet25FadeOuter, length(vStableWorldPos.xy - uDet25EyeXY));\n" +
+        "      c = applyOrthoDetail(uOrthoDet25, uUseDet25, uDet25MinXY, uDet25MaxXY, uDetailBlendMeters, vStableWorldPos.xy, c, det25Fade);\n" +
+        "      c = applyOrthoDetail(uOrthoDet05, uUseDet05, uDet05MinXY, uDet05MaxXY, uDetailBlendMeters, vStableWorldPos.xy, c, 1.0);\n" + // static 5 cm mosaic fallback (non-streaming installs)
+        "      c = applyOrthoDet05Array(vStableWorldPos.xy, c, uDetailBlendMeters);\n" + // streamed det05: every resident cell paints (KONTRAKT-ORTO)
+        "    }\n" +
 
         // Coverage blend: beyond the ortho's geographic coverage, fade ortho -> hypsometric (vColor) over
         // uOrthoBlendMeters; fully outside = hypsometric. Stable world frame so it's camera-relative-correct.
@@ -2484,10 +2490,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             long best = 0;
             foreach (string sub in cls?.GetSubKeyNames() ?? Array.Empty<string>())
             {
-                using var k = cls!.OpenSubKey(sub);
-                if (k?.GetValue("HardwareInformation.qwMemorySize") is long qw && qw > best)
+                try
                 {
-                    best = qw;
+                    using var k = cls!.OpenSubKey(sub);
+                    if (k?.GetValue("HardwareInformation.qwMemorySize") is long qw && qw > best)
+                    {
+                        best = qw;
+                    }
+                }
+                catch (System.Security.SecurityException)
+                {
+                    // The class key mixes adapter subkeys with ACL-protected ones ("Properties") — a protected
+                    // subkey must not abort the whole scan (2026-07-23: it silently floored the budget to 4 GB).
                 }
             }
 
@@ -3517,14 +3531,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     }
                 }
 
-                if (dPx >= 2048)
-                {
-                    System.Threading.Tasks.Parallel.For(0, dPx, DownRow);
-                }
-                else
-                {
-                    for (int y = 0; y < dPx; y++) { DownRow(y); }
-                }
+                // SEQUENTIAL on purpose (2026-07-23 lesson): a Parallel.For here saturated every core on each
+                // promote, preempting the GL thread AND the mesh-build workers — measured as clumped
+                // pendingUploads bursts (91 × ~190 ms warm gaps at cap 16). One background core for ~0.7 s per
+                // cell is invisible; a full-box stampede is not.
+                for (int y = 0; y < dPx; y++) { DownRow(y); }
 
                 src = dst;
                 dst += (long)dPx * dPx * 4;
@@ -5272,14 +5283,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             foreach (KeyValuePair<TerrainMesh3D, TileBuffers> entry in tileBuffers)
             {
                 // H5 (2026-07-23): the mirror used to draw EVERY resident tile — the whole-Tatra base ring,
-                // ~1000 draws ≈ 32 ms GPU warm — with no culling at all. A lake reflection at half-res with
-                // the 2 % ripple wobble resolves only the nearby walls; terrain beyond this radius lands in
-                // a couple of pixels at the water horizon. Cheap XY distance-to-AABB cull from the camera
-                // (WorldMin/Max are precomputed at mesh build). Verified before/after on the F9 bench.
+                // ~1000 draws ≈ 32 ms GPU warm — with no culling at all. Two-stage cull: (1) XY distance —
+                // a half-res, ripple-wobbled reflection resolves only the nearby walls; (2) H7: frustum test
+                // against the MIRRORED MVP, so tiles behind/outside the reflected view don't submit vertices
+                // (the mirror cost proved DRAW-bound, not fragment-bound — v2-final bench).
                 Vector3 wmin = entry.Key.WorldMin, wmax = entry.Key.WorldMax;
                 float rdx = Math.Max(0f, Math.Max(wmin.X - cameraWorldPos.X, cameraWorldPos.X - wmax.X));
                 float rdy = Math.Max(0f, Math.Max(wmin.Y - cameraWorldPos.Y, cameraWorldPos.Y - wmax.Y));
-                if ((rdx * rdx) + (rdy * rdy) > ReflectionMaxDistanceMeters * ReflectionMaxDistanceMeters)
+                if ((rdx * rdx) + (rdy * rdy) > ReflectionMaxDistanceMeters * ReflectionMaxDistanceMeters
+                    || !MapaTur.Application.Terrain.FrustumCuller.IsAabbVisible(reflMvp, wmin, wmax))
                 {
                     continue;
                 }
@@ -5458,6 +5470,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         GpuBegin(gl, GpuPass.Terrain);
         foreach (KeyValuePair<TerrainMesh3D, TileBuffers> entry in tileBuffers)
         {
+            // H7 (2026-07-23): frustum-cull the MAIN terrain draws. The resident set is the whole streamed
+            // massif (≈1000 tiles warm) but the camera sees a slice of it; drawing every resident tile scaled
+            // the terrain pass 6 → 24 ms as residency grew. Same conservative test the shadow cascades already
+            // use; the absolute `mvp` matches the shader (camera-relative offset cancels: vertex + uModelOffset
+            // then Translate(R)·mvp ≡ absolute mvp).
+            if (!MapaTur.Application.Terrain.FrustumCuller.IsAabbVisible(mvp, entry.Key.WorldMin, entry.Key.WorldMax))
+            {
+                continue;
+            }
+
             TileBuffers tile = entry.Value;
             float isBaseSkin = entry.Key.IsBaseSkin ? 1f : 0f;
             if (isBaseSkin != lastIsBaseSkin)
