@@ -8651,6 +8651,12 @@ public partial class Terrain3DView : ContentView
             maxBytes: OperatingSystem.IsWindows() ? 16384L << 20 : 512L << 20);
         var composer = new MapaTur.Application.Terrain.OrthoDetailCellComposer(grid, cache.Get, baseFill: null);
         bool Coverage(int ci, int cj) => coveredKeys.Contains(grid.CellKey(ci, cj));
+        // BC1 GPU-cell cache (2026-07-23, ZASADA 11): composed+encoded cells persist next to the tile data —
+        // every revisit is a ~15 ms read instead of a 3–5 s WebP decode storm. Keyed by the SOURCE dir name,
+        // so the deshadow-preview overlay and raw det05 never share cached pixels.
+        renderer.Det05GpuCacheDir = System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(dir) ?? dir, "gpu-cache",
+            dsDir is not null ? System.IO.Path.GetFileName(dsDir) + "-over-det05" : System.IO.Path.GetFileName(dir));
         renderer.SetOrthoDetail05Streaming(grid, composer, cache, Coverage);
         Serilog.Log.Information("[OrthoDetail05] det05 streaming wired from {Dir} ({N} covered cells)", dir, coveredKeys.Count);
         return true;
