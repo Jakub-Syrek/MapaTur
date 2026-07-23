@@ -678,3 +678,13 @@ Zakres: to pełny prebake WARSTW det25 + det1m; det05 pozostaje późniejszym et
 **Korekta det1m (2026-07-23, po poprawce pokrycia):** strony tylko nad realnym źródłem — 54 pakiety,
 **2 790/2 790 stron CRC OK** (720 czarnych stron spoza pokrycia odrzuconych względem pierwszego bake'u),
 0,56 GB; przyrostowy bieg z `--det1m-out` buduje fragmenty także dla pominiętych grup (dekod bez re-enkodu).
+
+## §10. Pełny prebake v2 (DXT1a z alfą) — WSZYSTKIE warstwy (2026-07-23 wieczór, ZMIERZONE)
+
+Po regresji „czarnych dziur" (BC1-RGB gubił alfę bramkującą pokrycie) format v2 = DXT1a punch-through
+(0x83F1); wersje mtgc/opk 1→2, stare pliki odrzucane (samonaprawa).
+
+- det25+det1m v2: 684+54 pakietów, **12,1 min**, 7,86+0,56 GB; verify-full: 40 535 + 2 790 stron OK
+- **det05 v2: 1 412 pakietów, 344 489 stron (343 077 kafli + 1 412 taili), 67,07 GB, 60,0 min**;
+  verify-full: 344 489/344 489 CRC OK, layout/klucze/bijekcja czyste (7,3 min)
+- Razem: pełny prebake Tatr (det05+det25+det1m) = **~75,5 GB / ~72 min** jednorazowo, przyrostowość po srcHash
