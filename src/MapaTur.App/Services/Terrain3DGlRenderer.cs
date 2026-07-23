@@ -3833,6 +3833,51 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             });
     }
 
+    // ── det25 ARRAY path (krok 4): per-tile bind → texture array + per-fragment wybór (wzorzec det05).
+    // Per-tile bind pokazywał JEDNĄ celę na kafel terenu (patchwork na dużych/odległych kaflach). BC1 czyni
+    // array tanim: 32 × 4096² z mipami ≈ 342 MB w JEDNEJ teksturze. Aktywne tylko na ścieżce BC1 (desktop);
+    // fallback RGBA zostaje na starym per-tile bindzie.
+    private uint det25ArrayTexture;
+    private readonly Stack<int> det25ArrFreeLayers = new();
+    private const int Det25ArrLayers = 32;
+    // Lokacje uniformów ścieżki array dojdą z wiringiem shadera (kontynuacja kroku 4 — patrz task #10).
+
+    private unsafe void EnsureDet25Array(GL gl)
+    {
+        if (det25ArrayTexture != 0 || !det05Bc1On)
+        {
+            return;
+        }
+
+        while (gl.GetError() != GLEnum.NoError) { }
+        det25ArrayTexture = gl.GenTexture();
+        gl.BindTexture(TextureTarget.Texture2DArray, det25ArrayTexture);
+        gl.TexStorage3D(TextureTarget.Texture2DArray, 13,
+            (SizedInternalFormat)GlCompressedRgbS3tcDxt1, 4096, 4096, Det25ArrLayers);
+        GLEnum err = gl.GetError();
+        if (err != GLEnum.NoError)
+        {
+            Log.Warning("[Det25Arr] TexStorage3D odmówił (GL 0x{E:X}) — zostaje per-tile bind", (int)err);
+            gl.DeleteTexture(det25ArrayTexture);
+            det25ArrayTexture = 0;
+            return;
+        }
+
+        gl.TexParameter(TextureTarget.Texture2DArray, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
+        gl.TexParameter(TextureTarget.Texture2DArray, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+        gl.TexParameter(TextureTarget.Texture2DArray, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+        gl.TexParameter(TextureTarget.Texture2DArray, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+        gl.BindTexture(TextureTarget.Texture2DArray, 0);
+        det25ArrFreeLayers.Clear();
+        for (int i = Det25ArrLayers - 1; i >= 0; i--)
+        {
+            det25ArrFreeLayers.Push(i);
+        }
+
+        Log.Information("[Det25Arr] array {L}×4096² BC1+mipy = {MB} MB VRAM — per-fragment wybór celi",
+            Det25ArrLayers, (long)Det25ArrLayers * MapaTur.Application.Terrain.GpuCellCache.ChainSize(4096) / (1024 * 1024));
+    }
+
     // ── det1m RESIDENT TIER (krok 3, ARCHITEKTURA-STREAMING §3 + ANEKS A) ────────────────────────────
     // Warstwa 1 m/px domykająca lukę 2-8 km panoramy: ~54 pakiety .opk (4096² BC1, pełne mipy) ładowane
     // RAZ na starcie z prebake'u i REZYDENTNE NA STAŁE — żaden ruch/obrót nie może ich wybić. A/B (klawisz)
