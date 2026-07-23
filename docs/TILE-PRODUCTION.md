@@ -667,3 +667,10 @@ tail = kompozyt grupy 8×8 → 2048↓) + 54 pakiety det1m (downsample 4× grup)
 - rozmiar: 7,86 GB det25 + 0,67 GB det1m (BC1 bez zstd — v1)
 - czas pełnego bake'u z pustym wyjściem: **10,4 min** (14 rdzeni; det25 7,4 min + det1m)
 - przyrostowość: ponowny bieg = 684/684 pominięte po srcHash, 0,1 min
+
+**Pełna walidacja (2026-07-23, `--verify-full`; domknięcie kamienia — poprzednie 128/128 było próbką):**
+- det25: 684 pakiety, **40 535/40 535 stron CRC OK** (39 851 kafli + 684 taile), offsety/długości rozłączne
+  i w granicach plików, 0 duplikatów pageId, 0 plików poza indeksem — 1,0 min
+- det1m: 54 pakiety, **3 510/3 510 stron CRC OK**, wszystkie kontrole czyste — 0,1 min
+
+Zakres: to pełny prebake WARSTW det25 + det1m; det05 pozostaje późniejszym etapem (krok 6 migracji).

@@ -24,10 +24,59 @@ string? GetArg(string name)
 }
 
 string layer = GetArg("--layer") ?? "det25";
-string src = GetArg("--src") ?? throw new ArgumentException("--src wymagane");
+string? srcArg = GetArg("--src"); // wymagane tylko dla bake'u (walidowane za gałęzią --verify-full)
 string outDir = GetArg("--out") ?? throw new ArgumentException("--out wymagane");
 string? det1mOut = GetArg("--det1m-out");
 int parallelism = int.TryParse(GetArg("--parallel"), out int p) ? p : Math.Max(2, Environment.ProcessorCount - 2);
+
+// ── Tryb --verify-full: PEŁNA walidacja warstwy (bez bake'u) ─────────────────────────────────────────
+// CRC KAŻDEJ strony, offsety/długości (rozłączne, w granicach pliku, payload za TOC), unikalność pageId
+// w pakiecie i kluczy (gi,gj) w indeksie, bijekcja indeks ↔ pliki .opk na dysku.
+if (args.Contains("--verify-full"))
+{
+    string dir = GetArg("--out") ?? throw new ArgumentException("--out wymagane dla --verify-full");
+    OrthoPackIndex? idx = OrthoPackIndex.Load(Path.Combine(dir, "index.bin"));
+    if (idx is null) { Console.Error.WriteLine("[verify-full] index.bin nie ładuje się"); return 1; }
+
+    var swv = Stopwatch.StartNew();
+    var keySet = new HashSet<(int, int)>();
+    long pagesOk = 0, pagesBad = 0, layoutBad = 0, dupIds = 0;
+    foreach (OrthoPackIndex.CellEntry c in idx.Cells)
+    {
+        if (!keySet.Add((c.Ci, c.Cj)))
+        {
+            Console.Error.WriteLine($"[verify-full] DUPLIKAT klucza w indeksie: ({c.Ci},{c.Cj})");
+            return 1;
+        }
+
+        string pk = Path.Combine(dir, $"{c.Ci}_{c.Cj}.opk");
+        using OrthoPagePack? pack = OrthoPagePack.Open(pk, c.CellPx);
+        if (pack is null) { Console.Error.WriteLine($"[verify-full] pakiet nie otwiera się: {pk}"); return 1; }
+        if (pack.PageCount != c.PageCount) { Console.Error.WriteLine($"[verify-full] pageCount mismatch: {pk}"); return 1; }
+
+        long fileLen = new FileInfo(pk).Length;
+        var ids = new HashSet<ushort>();
+        var regions = new List<(long Start, long End)>();
+        foreach (OrthoPagePack.Entry e in pack.Entries)
+        {
+            if (!ids.Add(e.PageId)) { dupIds++; }
+            long len = e.ZstdBytes > 0 ? e.ZstdBytes : e.RawBytes;
+            if (e.Offset < 32 || e.Offset + len > fileLen || e.RawBytes <= 0) { layoutBad++; }
+            regions.Add((e.Offset, e.Offset + len));
+            if (pack.TryReadPage(e.PageId, out _)) { pagesOk++; } else { pagesBad++; }
+        }
+
+        regions.Sort();
+        for (int i = 1; i < regions.Count; i++)
+        {
+            if (regions[i].Start < regions[i - 1].End) { layoutBad++; }
+        }
+    }
+
+    int orphanFiles = Directory.EnumerateFiles(dir, "*.opk").Count() - idx.Cells.Count;
+    Console.WriteLine($"[verify-full] pakiety={idx.Cells.Count} strony: OK={pagesOk} BAD={pagesBad} | layoutBad={layoutBad} dupPageId={dupIds} | pliki-poza-indeksem={orphanFiles} | czas={swv.Elapsed.TotalMinutes:F1} min");
+    return pagesBad == 0 && layoutBad == 0 && dupIds == 0 && orphanFiles == 0 ? 0 : 1;
+}
 
 if (layer != "det25")
 {
@@ -35,6 +84,7 @@ if (layer != "det25")
     return 2;
 }
 
+string src = srcArg ?? throw new ArgumentException("--src wymagane");
 var sw = Stopwatch.StartNew();
 
 // ── 1. Skan źródła: kafle {ti}/{tj}.webp → grupy dysjunktywne ────────────────────────────────────────
