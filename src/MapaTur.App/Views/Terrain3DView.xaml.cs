@@ -943,7 +943,11 @@ public partial class Terrain3DView : ContentView
 #endif
 
         animationTimer = Dispatcher.CreateTimer();
-        animationTimer.Interval = TimeSpan.FromMilliseconds(66); // ~15 fps
+        // Desktop 30 fps (2026-07-23): the 66 ms (~15 fps) cadence was THE perceived frame rate whenever the
+        // camera sat still with atmosphere on — the HUD read "13 FPS" on an idle RTX 5080 because nothing else
+        // invalidated. After the pano-streaming pass sumGpu is 10–23 ms, so 33 ms comfortably fits. Mobile
+        // keeps 66 ms (battery). Walk/dragon vsync loop is untouched (it self-invalidates per frame).
+        animationTimer.Interval = TimeSpan.FromMilliseconds(OperatingSystem.IsWindows() ? 33 : 66);
         animationTimer.Tick += OnAnimationTick;
         animationTimer.Start();
 
