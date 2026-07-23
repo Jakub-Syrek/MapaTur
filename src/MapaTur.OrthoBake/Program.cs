@@ -13,8 +13,6 @@ using SkiaSharp;
 // zestawem hashy jest pomijany. Wyjście: {out}/{gi}_{gj}.opk + index.bin; weryfikacja liczbowa na końcu.
 
 const int TilePx = 512;
-const int GroupTiles = 8;            // det25: 8×8 kafli = 4096 px
-const int GroupPx = TilePx * GroupTiles;
 const int Det1mPackFragments = 4;    // 4×4 fragmenty (każdy = grupa det25 zdownsamplowana 4× do 1024 px) = pakiet det1m 4096 px
 
 string? GetArg(string name)
@@ -78,9 +76,18 @@ if (args.Contains("--verify-full"))
     return pagesBad == 0 && layoutBad == 0 && dupIds == 0 && orphanFiles == 0 ? 0 : 1;
 }
 
-if (layer != "det25")
+if (layer != "det25" && layer != "det05")
 {
-    Console.Error.WriteLine($"Warstwa '{layer}' jeszcze nieobsługiwana (krok 6 = det05).");
+    Console.Error.WriteLine($"Warstwa '{layer}' nieobsługiwana (det25|det05).");
+    return 2;
+}
+
+// det05: dysjunktywna grupa 16×16 kafli = 8192 px (ANEKS A); det25: 8×8 = 4096 px. det1m tylko z det25.
+int GroupTiles = layer == "det05" ? 16 : 8;
+int GroupPx = TilePx * GroupTiles;
+if (layer == "det05" && det1mOut is not null)
+{
+    Console.Error.WriteLine("--det1m-out działa tylko z --layer det25");
     return 2;
 }
 
