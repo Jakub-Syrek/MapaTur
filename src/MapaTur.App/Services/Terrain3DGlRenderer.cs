@@ -128,6 +128,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // regularnej siatki (bez pętli po AABB). uUseDet1m = wyłącznie A/B — dane zostają rezydentne.
         "uniform highp sampler2DArray uOrthoDet1m;\n" + // GLES: sampler2DArray nie ma domyślnej precyzji
         "uniform highp sampler2D uOrthoDet1mCov;\n" +
+        // det25 ARRAY (krok 4): per-fragment wybór celi jak det05 — koniec patchworku per-tile bind.
+        "uniform highp sampler2DArray uOrthoDet25Arr;\n" +
+        "uniform vec4 uDet25Aabb[32];\n" +
+        "uniform float uDet25AlphaArr[32];\n" +
+        "uniform int uUseDet25Arr;\n" +
         "uniform int uUseDet1m;\n" +
         "uniform vec2 uDet1mMinXmaxY;\n" +   // (minX świata, maxY świata) — v rośnie na południe jak wiersze tekstury
         "uniform vec2 uDet1mInvSize;\n" +
@@ -366,6 +371,27 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // det1m: tier między bazą a det25. Fallback konstrukcyjny: poza siatką / cov≈0 / slice==-1 → baseC
         // (nigdy czerń). Kolor: mode-1 de-blue jak det25 (ta sama radiometria — det1m to downsample det25);
         // harmonizacja tonalna zbędna (warstwa NAD nim, det25, i tak wygrywa tam gdzie rezydentna).
+        // det25 array: najbliższa ZAWIERAJĄCA cela wygrywa (nakładkowa siatka pitch-6 — wiele cel może
+        // zawierać punkt; bierzemy tę o środku najbliżej, jak per-tile CellForPoint, ale per FRAGMENT).
+        // Kolor: mode-1 de-blue jak stara ścieżka det25. Alpha = fade-in promocji (anty-pop).
+        "vec3 applyOrthoDet25Arr(vec2 wxy, vec3 baseC){\n" +
+        "  if (uUseDet25Arr == 0) { return baseC; }\n" +
+        "  int best = -1; float bestD = 1e30;\n" +
+        "  for (int i = 0; i < 32; i++) {\n" +
+        "    vec4 bb = uDet25Aabb[i];\n" +
+        "    if (wxy.x < bb.x || wxy.y < bb.y || wxy.x > bb.z || wxy.y > bb.w) { continue; }\n" +
+        "    vec2 cen = 0.5 * (bb.xy + bb.zw); float d = dot(wxy - cen, wxy - cen);\n" +
+        "    if (d < bestD) { bestD = d; best = i; }\n" +
+        "  }\n" +
+        "  if (best < 0) { return baseC; }\n" +
+        "  vec4 bb = uDet25Aabb[best];\n" +
+        "  vec2 uv = vec2((wxy.x - bb.x) / (bb.z - bb.x), (bb.w - wxy.y) / (bb.w - bb.y));\n" +
+        "  vec3 dc = texture(uOrthoDet25Arr, vec3(uv, float(best))).rgb;\n" +
+        "  if (uOrthoDetailColorMode == 1) { dc = deblueShadow(dc); }\n" +
+        "  vec2 cd = min(wxy - bb.xy, bb.zw - wxy);\n" +
+        "  float wgt = clamp(min(cd.x, cd.y) / max(uDetailBlendMeters, 0.001), 0.0, 1.0) * uDet25AlphaArr[best];\n" +
+        "  return mix(baseC, dc, wgt);\n" +
+        "}\n" +
         "vec3 applyOrthoDet1m(vec2 wxy, vec3 baseC){\n" +
         "  if (uUseDet1m == 0) { return baseC; }\n" +
         "  vec2 uv = vec2((wxy.x - uDet1mMinXmaxY.x) * uDet1mInvSize.x, (uDet1mMinXmaxY.y - wxy.y) * uDet1mInvSize.y);\n" +
@@ -733,7 +759,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    if (uReflectionPass < 0.5) {\n" +
         "      c = applyOrthoDet1m(vStableWorldPos.xy, c);\n" + // najgrubszy tier pierwszy — det25/det05 wygrywają nad nim
         "      float det25Fade = 1.0 - smoothstep(uDet25FadeInner, uDet25FadeOuter, length(vStableWorldPos.xy - uDet25EyeXY));\n" +
-        "      c = applyOrthoDetail(uOrthoDet25, uUseDet25, uDet25MinXY, uDet25MaxXY, uDetailBlendMeters, vStableWorldPos.xy, c, det25Fade);\n" +
+        "      c = applyOrthoDetail(uOrthoDet25, uUseDet25, uDet25MinXY, uDet25MaxXY, uDetailBlendMeters, vStableWorldPos.xy, c, det25Fade);\n" + // stary per-tile path (fallback RGBA)
+        "      c = applyOrthoDet25Arr(vStableWorldPos.xy, c);\n" + // krok 4: per-fragment det25 (BC1 array)
         "      c = applyOrthoDetail(uOrthoDet05, uUseDet05, uDet05MinXY, uDet05MaxXY, uDetailBlendMeters, vStableWorldPos.xy, c, 1.0);\n" + // static 5 cm mosaic fallback (non-streaming installs)
         "      c = applyOrthoDet05Array(vStableWorldPos.xy, c, uDetailBlendMeters);\n" + // streamed det05: every resident cell paints (KONTRAKT-ORTO)
         "    }\n" +
@@ -3840,7 +3867,62 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private uint det25ArrayTexture;
     private readonly Stack<int> det25ArrFreeLayers = new();
     private const int Det25ArrLayers = 32;
-    // Lokacje uniformów ścieżki array dojdą z wiringiem shadera (kontynuacja kroku 4 — patrz task #10).
+    private int det25ArrSamplerLoc = -1, det25ArrAabbLoc = -1, det25ArrAlphaLoc = -1, useDet25ArrLoc = -1;
+    private long det25ArrUniformsTick = -1;
+
+    // Raz na klatkę: sloty AABB+alpha warstw det25 (wzorzec BindDet05ForTile). Unit 10 przejęty po starym
+    // per-tile bindzie (ten sam typ konfliktowałby — dlatego gdy array aktywny, stary sampler2D idzie na 15).
+    private unsafe void BindDet25ArrOncePerFrame(GL gl, TerrainMesh3D anchorMesh)
+    {
+        if (det25ArrayTexture == 0 || det25ArrUniformsTick == det25FrameTick)
+        {
+            return;
+        }
+
+        det25ArrUniformsTick = det25FrameTick;
+        Span<float> aabb = stackalloc float[32 * 4];
+        Span<float> alpha = stackalloc float[32];
+        alpha.Clear();
+        for (int i = 0; i < aabb.Length; i += 4)
+        {
+            aabb[i] = 1e9f; aabb[i + 1] = 1e9f; aabb[i + 2] = -1e9f; aabb[i + 3] = -1e9f; // pusty slot
+        }
+
+        int ready = 0;
+        double nowMs = frameClock.ElapsedMilliseconds;
+        foreach (DetailCellGpu cell in det25Cells.Values)
+        {
+            if (!cell.LayerReady || cell.Layer < 0 || cell.Layer >= Det25ArrLayers)
+            {
+                continue;
+            }
+
+            Vector3 sw = anchorMesh.GeoToWorld(cell.Bounds.SouthWest, 0f);
+            Vector3 ne = anchorMesh.GeoToWorld(cell.Bounds.NorthEast, 0f);
+            int o = cell.Layer * 4;
+            aabb[o] = Math.Min(sw.X, ne.X);
+            aabb[o + 1] = Math.Min(sw.Y, ne.Y);
+            aabb[o + 2] = Math.Max(sw.X, ne.X);
+            aabb[o + 3] = Math.Max(sw.Y, ne.Y);
+            alpha[cell.Layer] = (float)Math.Clamp((nowMs - cell.PromoteMs) / 300.0, 0.0, 1.0);
+            ready++;
+        }
+
+        if (ready > 0)
+        {
+            gl.ActiveTexture(TextureUnit.Texture10);
+            gl.BindTexture(TextureTarget.Texture2DArray, det25ArrayTexture);
+            gl.ActiveTexture(TextureUnit.Texture0);
+            gl.Uniform1(det25ArrSamplerLoc, 10);
+            fixed (float* p = aabb) { gl.Uniform4(det25ArrAabbLoc, 32, p); }
+            fixed (float* p = alpha) { gl.Uniform1(det25ArrAlphaLoc, 32, p); }
+            gl.Uniform1(useDet25ArrLoc, 1);
+        }
+        else
+        {
+            gl.Uniform1(useDet25ArrLoc, 0);
+        }
+    }
 
     private unsafe void EnsureDet25Array(GL gl)
     {
@@ -4645,7 +4727,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
             if (det25Cells.TryGetValue(key, out DetailCellGpu? cell)
                 && cell.Compose is null && !cell.Empty
-                && cell.Texture == 0 && cell.StagingTexture == 0 && cell.Pending is null)
+                && cell.Texture == 0 && cell.StagingTexture == 0 && cell.Pending is null
+                && !cell.LayerReady && cell.PendingBc1 is null) // array path (krok 4): warstwa gotowa/w drodze ≠ re-kick
             {
                 int ci = cell.Ci, cj = cell.Cj;
                 MapaTur.Application.Terrain.IOrthoDetailComposer composer = det25Composer;
@@ -4829,6 +4912,20 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             cell.Texture = 0;
         }
 
+        // Array path (krok 4): warstwa wraca do puli, ledger schodzi po tej samej liczbie co promote.
+        if (cell.LayerReady)
+        {
+            det25ResidentBytes -= cell.ResidentBytesLedger;
+            cell.ResidentBytesLedger = 0;
+            cell.LayerReady = false;
+        }
+
+        if (cell.Layer >= 0)
+        {
+            det25ArrFreeLayers.Push(cell.Layer);
+            cell.Layer = -1;
+        }
+
         if (cell.StagingTexture != 0)
         {
             gl.DeleteTexture(cell.StagingTexture);
@@ -4879,7 +4976,29 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             byte[]? rgba = cell.Pending;
             byte[]? bc1 = cell.PendingBc1;
             int w = cell.Px, h = cell.Px;
-            if (cell.StagingTexture == 0)
+            if (bc1 is not null)
+            {
+                EnsureDet25Array(gl);
+            }
+
+            bool arr = bc1 is not null && det25ArrayTexture != 0; // krok 4: BC1 → warstwa arraya (per-fragment wybór)
+            if (arr)
+            {
+                if (cell.Layer < 0)
+                {
+                    if (!det25ArrFreeLayers.TryPop(out int layer))
+                    {
+                        break; // warstwy zajęte — eviction zwolni w późniejszej klatce
+                    }
+
+                    cell.Layer = layer;
+                    cell.UploadedRows = 0;
+                    cell.UploadLevel = 0;
+                }
+
+                gl.BindTexture(TextureTarget.Texture2DArray, det25ArrayTexture);
+            }
+            else if (cell.StagingTexture == 0)
             {
                 cell.StagingTexture = gl.GenTexture();
                 cell.UploadedRows = 0;
@@ -4929,8 +5048,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     long srcOff = lvOffset + ((long)cell.UploadedRows * rowBytesBlk);
                     fixed (byte* p = &bc1[srcOff])
                     {
-                        gl.CompressedTexSubImage2D(TextureTarget.Texture2D, lv, 0, yoff,
-                            (uint)lPx, height, (InternalFormat)GlCompressedRgbS3tcDxt1, (uint)bytes, p);
+                        if (arr)
+                        {
+                            gl.CompressedTexSubImage3D(TextureTarget.Texture2DArray, lv, 0, yoff, cell.Layer,
+                                (uint)lPx, height, 1, (InternalFormat)GlCompressedRgbS3tcDxt1, (uint)bytes, p);
+                        }
+                        else
+                        {
+                            gl.CompressedTexSubImage2D(TextureTarget.Texture2D, lv, 0, yoff,
+                                (uint)lPx, height, (InternalFormat)GlCompressedRgbS3tcDxt1, (uint)bytes, p);
+                        }
                     }
 
                     cell.UploadedRows += rows;
@@ -4973,7 +5100,21 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
             cell.UploadMs += frameClock.ElapsedMilliseconds - upStart;
 
-            if (complete)
+            if (complete && arr)
+            {
+                // Array path (krok 4): warstwa gotowa — slot AABB w BindDet25ForTile ją podniesie; brak
+                // per-cell tekstur, mipy z chaina, ledger = rozmiar chaina.
+                cell.LayerReady = true;
+                cell.PromoteMs = frameClock.ElapsedMilliseconds;
+                long rb = MapaTur.Application.Terrain.GpuCellCache.ChainSize(w);
+                cell.ResidentBytesLedger = rb;
+                det25ResidentBytes += rb;
+                ReleaseCellBuffer(cell);
+                det25UploadQueue.RemoveAt(0);
+                Log.Information("[Det25] cell ({Ci},{Cj}) compose {C:F0}ms{Cache} | ARR layer {Layer} resident (BC1)",
+                    cell.Ci, cell.Cj, cell.ComposeMs, cell.FromCache ? " [CACHE-HIT]" : string.Empty, cell.Layer);
+            }
+            else if (complete)
             {
                 double mmStart = frameClock.ElapsedMilliseconds;
                 if (bc1 is null)
@@ -5054,6 +5195,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private void BindDet25ForTile(GL gl, TerrainMesh3D mesh, TerrainMesh3D anchorMesh)
     {
         BindDet1mOncePerFrame(gl, anchorMesh); // tier det1m współdzieli miejsce bindów detali (gate per klatkę)
+        BindDet25ArrOncePerFrame(gl, anchorMesh); // krok 4: sloty arraya det25
+        if (det25ArrayTexture != 0)
+        {
+            // Array aktywny: stary per-tile bind wyłączony; jego sampler2D wskazuje unit 15 (ten sam TYP co
+            // maska det1m — nigdy nie samplowany przy useDet25==0, a walidator GL nie widzi konfliktu typów
+            // na unit 10, który zajmuje teraz sampler2DArray).
+            gl.Uniform1(det25SamplerLocation, 15);
+            gl.Uniform1(useDet25Location, 0);
+            return;
+        }
+
         if (det25Grid is null)
         {
             gl.Uniform1(useDet25Location, 0);
@@ -5231,6 +5383,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             detailBlendLocation = -1;
             detailColorModeLocation = -1;
             det05ArrRawLocation = -1;
+            det25ArrSamplerLoc = -1; det25ArrAabbLoc = -1; det25ArrAlphaLoc = -1; useDet25ArrLoc = -1;
+            det25ArrayTexture = 0; det25ArrFreeLayers.Clear(); // kontekst padł — cele wrócą przez desired/kick
             det1mSamplerLoc = -1; det1mCovLoc = -1; useDet1mLoc = -1;
             det1mMinXyLoc = -1; det1mInvSizeLoc = -1; det1mGridDimLoc = -1; det1mSliceIdxLoc = -1;
             det1mArrayTexture = 0; det1mCovTexture = 0; det1mReady = false; det1mUploadCursor = 0; // kontekst padł — realokacja w PumpDet1m
@@ -8812,6 +8966,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         detailBlendLocation = g.GetUniformLocation(program, "uDetailBlendMeters");
         detailColorModeLocation = g.GetUniformLocation(program, "uOrthoDetailColorMode");
         det05ArrRawLocation = g.GetUniformLocation(program, "uOrthoDet05ArrRaw");
+        det25ArrSamplerLoc = g.GetUniformLocation(program, "uOrthoDet25Arr");
+        det25ArrAabbLoc = g.GetUniformLocation(program, "uDet25Aabb[0]");
+        det25ArrAlphaLoc = g.GetUniformLocation(program, "uDet25AlphaArr[0]");
+        useDet25ArrLoc = g.GetUniformLocation(program, "uUseDet25Arr");
         det1mSamplerLoc = g.GetUniformLocation(program, "uOrthoDet1m");
         det1mCovLoc = g.GetUniformLocation(program, "uOrthoDet1mCov");
         useDet1mLoc = g.GetUniformLocation(program, "uUseDet1m");
