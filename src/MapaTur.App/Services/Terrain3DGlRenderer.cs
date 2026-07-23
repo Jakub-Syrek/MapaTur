@@ -386,10 +386,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  if (best < 0) { return baseC; }\n" +
         "  vec4 bb = uDet25Aabb[best];\n" +
         "  vec2 uv = vec2((wxy.x - bb.x) / (bb.z - bb.x), (bb.w - wxy.y) / (bb.w - bb.y));\n" +
-        "  vec3 dc = texture(uOrthoDet25Arr, vec3(uv, float(best))).rgb;\n" +
+        "  vec4 dcs = texture(uOrthoDet25Arr, vec3(uv, float(best)));\n" + // DXT1a: a=0 = brak pokrycia
+        "  vec3 dc = dcs.rgb;\n" +
         "  if (uOrthoDetailColorMode == 1) { dc = deblueShadow(dc); }\n" +
         "  vec2 cd = min(wxy - bb.xy, bb.zw - wxy);\n" +
-        "  float wgt = clamp(min(cd.x, cd.y) / max(uDetailBlendMeters, 0.001), 0.0, 1.0) * uDet25AlphaArr[best];\n" +
+        "  float wgt = clamp(min(cd.x, cd.y) / max(uDetailBlendMeters, 0.001), 0.0, 1.0) * dcs.a * uDet25AlphaArr[best];\n" +
         "  return mix(baseC, dc, wgt);\n" +
         "}\n" +
         "vec3 applyOrthoDet1m(vec2 wxy, vec3 baseC){\n" +
@@ -403,9 +404,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  int slice = uDet1mSliceIdx[(g.y * uDet1mGridDim.x) + g.x];\n" +
         "  if (slice < 0) { return baseC; }\n" +
         "  vec2 cellUv = fract(uv * vec2(uDet1mGridDim));\n" +
-        "  vec3 dc = texture(uOrthoDet1m, vec3(cellUv, float(slice))).rgb;\n" +
+        "  vec4 dcs = texture(uOrthoDet1m, vec3(cellUv, float(slice)));\n" + // DXT1a: a=0 = brak pokrycia
+        "  vec3 dc = dcs.rgb;\n" +
         "  if (uOrthoDetailColorMode == 1) { dc = deblueShadow(dc); }\n" +
-        "  return mix(baseC, dc, cov);\n" +
+        "  return mix(baseC, dc, cov * dcs.a);\n" +
         "}\n" +
         "vec3 applyOrthoDetail(sampler2D tex, int use, vec2 mn, vec2 mx, float blendM, vec2 wxy, vec3 baseC, float rangeFade){\n" +
         "  if (use != 1) return baseC;\n" +
