@@ -18,7 +18,7 @@ public sealed class OrthoPagePack : IDisposable
     public const ushort TailPageId = 0xFFFF;
 
     private const uint Magic = 0x504F544D; // "MTOP" little-endian
-    private const ushort Version = 1;
+    private const ushort Version = 2; // v2 = DXT1a z alfą (v1-RGB malowało czerń na brzegach pokrycia)
     private const ushort FormatBc1 = 1;
     private const int HeaderBytes = 32;
     private const int TocEntryBytes = 32;

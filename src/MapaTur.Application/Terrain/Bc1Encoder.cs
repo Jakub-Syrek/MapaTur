@@ -24,7 +24,7 @@ public static class Bc1Encoder
 
         int bw = Math.Max(1, (width + 3) / 4);
         int bh = Math.Max(1, (height + 3) / 4);
-        Span<byte> px = stackalloc byte[16 * 3]; // gathered 4×4 RGB block (edge-clamped)
+        Span<byte> px = stackalloc byte[16 * 4]; // gathered 4×4 RGBA block (edge-clamped)
         for (int by = 0; by < bh; by++)
         {
             for (int bx = 0; bx < bw; bx++)
@@ -37,10 +37,11 @@ public static class Bc1Encoder
                     {
                         int sx = Math.Min((bx * 4) + tx, width - 1);
                         int so = ((sy * width) + sx) * 4;
-                        int po = ((ty * 4) + tx) * 3;
+                        int po = ((ty * 4) + tx) * 4;
                         px[po] = rgba[so];
                         px[po + 1] = rgba[so + 1];
                         px[po + 2] = rgba[so + 2];
+                        px[po + 3] = rgba[so + 3];
                     }
                 }
 
@@ -51,6 +52,24 @@ public static class Bc1Encoder
 
     private static void EncodeBlock(ReadOnlySpan<byte> px, Span<byte> outBlock)
     {
+        // ALPHA (2026-07-23, „czarne dziury"): texel z alpha < 128 = brak pokrycia. Blok z JAKĄKOLWIEK
+        // przezroczystością wychodzi w trybie 3-kolorowym DXT1a (c0 <= c1, indeks 3 = przezroczysta czerń) —
+        // dokładnie ta semantyka, którą miało RGBA (shader bramkuje po .a i baza prześwituje).
+        int transparentMask = 0;
+        for (int i = 0; i < 16; i++)
+        {
+            if (px[(i * 4) + 3] < 128)
+            {
+                transparentMask |= 1 << i;
+            }
+        }
+
+        if (transparentMask != 0)
+        {
+            EncodePunchThrough(px, transparentMask, outBlock);
+            return;
+        }
+
         // Range fit: project every texel on the block's principal extent (max−min per channel) and take the
         // two extreme texels as endpoints. For photographic content this is within a hair of PCA quality at a
         // fraction of the cost. A slight inset pulls the endpoints toward each other, which counteracts the
@@ -58,7 +77,7 @@ public static class Bc1Encoder
         int minR = 255, minG = 255, minB = 255, maxR = 0, maxG = 0, maxB = 0;
         for (int i = 0; i < 16; i++)
         {
-            int r = px[i * 3], g = px[(i * 3) + 1], b = px[(i * 3) + 2];
+            int r = px[i * 4], g = px[(i * 4) + 1], b = px[(i * 4) + 2];
             if (r < minR) { minR = r; }
             if (g < minG) { minG = g; }
             if (b < minB) { minB = b; }
@@ -71,14 +90,14 @@ public static class Bc1Encoder
         int loIdx = 0, hiIdx = 0, loDot = int.MaxValue, hiDot = int.MinValue;
         for (int i = 0; i < 16; i++)
         {
-            int dot = (px[i * 3] * axR) + (px[(i * 3) + 1] * axG) + (px[(i * 3) + 2] * axB);
+            int dot = (px[i * 4] * axR) + (px[(i * 4) + 1] * axG) + (px[(i * 4) + 2] * axB);
             if (dot < loDot) { loDot = dot; loIdx = i; }
             if (dot > hiDot) { hiDot = dot; hiIdx = i; }
         }
 
         // Endpoint inset by 1/16 of the range per channel (compensates 565 rounding; no-op on solid blocks).
-        int e0R = px[hiIdx * 3], e0G = px[(hiIdx * 3) + 1], e0B = px[(hiIdx * 3) + 2];
-        int e1R = px[loIdx * 3], e1G = px[(loIdx * 3) + 1], e1B = px[(loIdx * 3) + 2];
+        int e0R = px[hiIdx * 4], e0G = px[(hiIdx * 4) + 1], e0B = px[(hiIdx * 4) + 2];
+        int e1R = px[loIdx * 4], e1G = px[(loIdx * 4) + 1], e1B = px[(loIdx * 4) + 2];
         int insR = (e0R - e1R) >> 4, insG = (e0G - e1G) >> 4, insB = (e0B - e1B) >> 4;
         e0R -= insR; e0G -= insG; e0B -= insB;
         e1R += insR; e1G += insG; e1B += insB;
@@ -114,7 +133,7 @@ public static class Bc1Encoder
         uint indices = 0;
         for (int i = 0; i < 16; i++)
         {
-            int r = px[i * 3], g = px[(i * 3) + 1], b = px[(i * 3) + 2];
+            int r = px[i * 4], g = px[(i * 4) + 1], b = px[(i * 4) + 2];
             int best = 0, bestD = int.MaxValue;
             for (int p = 0; p < 4; p++)
             {
@@ -136,6 +155,75 @@ public static class Bc1Encoder
 
     // Proper rounding INTO the expanded-565 space ((v*31+127)/255, not v>>3): truncation put solid 200 at
     // expanded 206 (+6 error) where the nearest representable value is 198 (−2) — the TDD solid-block gate.
+    // Tryb 3-kolorowy DXT1a: c0 <= c1, paleta [c0, c1, (c0+c1)/2, PRZEZROCZYSTA CZERŃ]. Kryjące texele
+    // dopasowują się do 3 kolorów, przezroczyste dostają indeks 3 — brzeg pokrycia celi przepuszcza bazę.
+    private static void EncodePunchThrough(ReadOnlySpan<byte> px, int transparentMask, Span<byte> outBlock)
+    {
+        int minR = 255, minG = 255, minB = 255, maxR = 0, maxG = 0, maxB = 0;
+        bool anyOpaque = false;
+        for (int i = 0; i < 16; i++)
+        {
+            if ((transparentMask & (1 << i)) != 0) { continue; }
+            anyOpaque = true;
+            int r = px[i * 4], g = px[(i * 4) + 1], b = px[(i * 4) + 2];
+            if (r < minR) { minR = r; }
+            if (g < minG) { minG = g; }
+            if (b < minB) { minB = b; }
+            if (r > maxR) { maxR = r; }
+            if (g > maxG) { maxG = g; }
+            if (b > maxB) { maxB = b; }
+        }
+
+        if (!anyOpaque)
+        {
+            outBlock.Clear(); // c0 = c1 = 0 (c0 <= c1 → tryb 3-kolorowy)
+            outBlock[4] = 0xFF; outBlock[5] = 0xFF; outBlock[6] = 0xFF; outBlock[7] = 0xFF; // wszystkie indeksy 3
+            return;
+        }
+
+        ushort c0 = To565(minR, minG, minB);
+        ushort c1 = To565(maxR, maxG, maxB);
+        if (c0 > c1)
+        {
+            (c0, c1) = (c1, c0); // wymuszenie c0 <= c1 = tryb z przezroczystością
+        }
+
+        Span<int> palR = stackalloc int[3];
+        Span<int> palG = stackalloc int[3];
+        Span<int> palB = stackalloc int[3];
+        (palR[0], palG[0], palB[0]) = Expand565(c0);
+        (palR[1], palG[1], palB[1]) = Expand565(c1);
+        palR[2] = (palR[0] + palR[1]) / 2; palG[2] = (palG[0] + palG[1]) / 2; palB[2] = (palB[0] + palB[1]) / 2;
+
+        uint indices = 0;
+        for (int i = 0; i < 16; i++)
+        {
+            if ((transparentMask & (1 << i)) != 0)
+            {
+                indices |= 3u << (i * 2);
+                continue;
+            }
+
+            int r = px[i * 4], g = px[(i * 4) + 1], b = px[(i * 4) + 2];
+            int best = 0, bestD = int.MaxValue;
+            for (int p = 0; p < 3; p++)
+            {
+                int dr = r - palR[p], dg = g - palG[p], db = b - palB[p];
+                int d = (dr * dr) + (dg * dg) + (db * db);
+                if (d < bestD) { bestD = d; best = p; }
+            }
+
+            indices |= (uint)best << (i * 2);
+        }
+
+        outBlock[0] = (byte)(c0 & 0xFF); outBlock[1] = (byte)(c0 >> 8);
+        outBlock[2] = (byte)(c1 & 0xFF); outBlock[3] = (byte)(c1 >> 8);
+        outBlock[4] = (byte)(indices & 0xFF);
+        outBlock[5] = (byte)((indices >> 8) & 0xFF);
+        outBlock[6] = (byte)((indices >> 16) & 0xFF);
+        outBlock[7] = (byte)(indices >> 24);
+    }
+
     private static ushort To565(int r, int g, int b)
         => (ushort)(((((Math.Clamp(r, 0, 255) * 31) + 127) / 255) << 11)
             | ((((Math.Clamp(g, 0, 255) * 63) + 127) / 255) << 5)

@@ -116,6 +116,57 @@ public sealed class Bc1EncoderTests
         Math.Abs(b - 40).Should().BeLessThanOrEqualTo(5);
     }
 
+    [Fact]
+    public void Encode_TransparentBlock_UsesPunchThroughAlpha()
+    {
+        // Regresja 2026-07-23 („czarne dziury"): RGBA miało alpha=0 na niepokrytych obszarach celi i baza
+        // prześwitywała; BC1-RGB malował je czernią. Blok w pełni przezroczysty MUSI wyjść w trybie
+        // 3-kolorowym (c0 <= c1) z indeksami 3 = przezroczysta czerń (DXT1a punch-through).
+        byte[] rgba = new byte[4 * 4 * 4]; // wszystko 0, w tym alpha
+        byte[] dest = new byte[Bc1Encoder.EncodedSize(4, 4)];
+
+        Bc1Encoder.Encode(rgba, 4, 4, dest);
+
+        ushort c0 = (ushort)(dest[0] | (dest[1] << 8));
+        ushort c1 = (ushort)(dest[2] | (dest[3] << 8));
+        (c0 <= c1).Should().BeTrue("tryb 3-kolorowy sygnalizuje przezroczystość w DXT1a");
+        uint idx = (uint)(dest[4] | (dest[5] << 8) | (dest[6] << 16) | (dest[7] << 24));
+        idx.Should().Be(0xFFFFFFFFu, "każdy texel = indeks 3 = przezroczysty");
+    }
+
+    [Fact]
+    public void Encode_MixedAlphaBlock_KeepsOpaqueColourAndTransparentHoles()
+    {
+        // Lewa połowa kryjąca zieleń, prawa przezroczysta (brzeg pokrycia celi).
+        byte[] rgba = new byte[4 * 4 * 4];
+        for (int y = 0; y < 4; y++)
+        {
+            for (int x = 0; x < 2; x++)
+            {
+                int o = ((y * 4) + x) * 4;
+                rgba[o] = 40; rgba[o + 1] = 180; rgba[o + 2] = 60; rgba[o + 3] = 255;
+            }
+        }
+
+        byte[] dest = new byte[Bc1Encoder.EncodedSize(4, 4)];
+        Bc1Encoder.Encode(rgba, 4, 4, dest);
+
+        uint idx = (uint)(dest[4] | (dest[5] << 8) | (dest[6] << 16) | (dest[7] << 24));
+        for (int t = 0; t < 16; t++)
+        {
+            int sel = (int)((idx >> (t * 2)) & 0x3);
+            bool transparent = (t % 4) >= 2;
+            if (transparent)
+            {
+                sel.Should().Be(3, "przezroczysty texel = indeks 3");
+            }
+            else
+            {
+                sel.Should().NotBe(3, "kryjący texel nie może wpaść w przezroczystość");
+            }
+        }
+    }
+
     private static byte[] SolidRgba(int w, int h, byte r, byte g, byte b)
     {
         byte[] rgba = new byte[w * h * 4];

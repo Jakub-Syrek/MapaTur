@@ -14,7 +14,7 @@ namespace MapaTur.Application.Terrain;
 public static class GpuCellCache
 {
     private const uint Magic = 0x4347544D; // "MTGC" little-endian
-    private const ushort Version = 1;
+    private const ushort Version = 2; // v2 = DXT1a z alfą (v1-RGB malowało czerń na brzegach pokrycia)
     private const ushort FormatBc1 = 1;
     private const int HeaderBytes = 16;
 

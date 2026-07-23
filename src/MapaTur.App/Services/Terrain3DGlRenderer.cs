@@ -2238,7 +2238,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // disk cache serves every revisit in ~15 ms) and uploaded compressed. 1/8 the bytes end-to-end: a det05
     // cell drops 357 → ~45 MB (VRAM ledger + PCIe + disk alike). Probed once per context; s3tc absent
     // (never on desktop ANGLE) → the RGBA path below still runs unchanged.
-    private const uint GlCompressedRgbS3tcDxt1 = 0x83F0;
+    // 0x83F1 = COMPRESSED_RGBA_S3TC_DXT1_EXT (DXT1a, punch-through alpha): ten sam koszt 8 B/blok co RGB,
+    // ale texel może być przezroczysty — brzeg pokrycia celi przepuszcza bazę zamiast malować czerń
+    // (regresja „czarnych dziur" 2026-07-23; RGB-wariant 0x83F0 porzucony).
+    private const uint GlCompressedRgbS3tcDxt1 = 0x83F1;
     private bool det05Bc1On;
     private bool s3tcProbed;
 
