@@ -646,3 +646,24 @@ cj 144–158): schodek przesunął się o ~2–6 cel na płd.-zach. — pas gran
 
 **Uwaga na przyszłość:** próg 16 = kompromis; cela z <16 kaflami (≈<6%) nadal odpada (nie warto slotu
 341 MB dla pojedynczych kafli). Mądrzejszy model kosztu (priorytet wg fill-fraction) = ewentualny F2.
+
+## §9. Prebake pakietów GPU `.opk` — det25 + det1m (2026-07-23, ARCHITEKTURA-STREAMING §8 + ANEKS A)
+
+Narzędzie: `src/MapaTur.OrthoBake` (konsolowe; runtime NIGDY nie pisze `.opk`).
+
+```
+dotnet run --project src/MapaTur.OrthoBake -- --layer det25 \
+  --src "<AppData>/Data/dem/ortho-detail/tatry/det25" \
+  --out "<AppData>/Data/dem/ortho-detail/tatry/opk/det25" \
+  --det1m-out "<AppData>/Data/dem/ortho-detail/tatry/opk/det1m"
+```
+
+Wejście: 39 851 kafli WebP 512² det25. Wyjście: 684 pakiety det25 (strona = kafel 1:1 BC1 mip 512+256,
+tail = kompozyt grupy 8×8 → 2048↓) + 54 pakiety det1m (downsample 4× grup) + `index.bin` per warstwa.
+
+**Weryfikacja liczbowa (ZMIERZONA 2026-07-23):**
+- strony(TOC) − taile = 39 851 == kafle źródłowe (0 błędów dekodu) → ZGODNE
+- próbka CRC 128/128 OK
+- rozmiar: 7,86 GB det25 + 0,67 GB det1m (BC1 bez zstd — v1)
+- czas pełnego bake'u z pustym wyjściem: **10,4 min** (14 rdzeni; det25 7,4 min + det1m)
+- przyrostowość: ponowny bieg = 684/684 pominięte po srcHash, 0,1 min
