@@ -8541,8 +8541,13 @@ public partial class Terrain3DView : ContentView
             // ~30 cells so the coarse ring never re-decodes on a pan (same stutter cause as det05, smaller scale).
             maxBytes: OperatingSystem.IsWindows() ? 2048L << 20 : 384L << 20);
         var composer = new MapaTur.Application.Terrain.OrthoDetailCellComposer(grid, cache.Get, baseFill: null);
+        // TIER REBALANCE (2026-07-23): desktop ring 1500 → 5000 m so the 28-cell det25 midground actually has
+        // candidates to fill (a 1500 m ring holds ~7 cells — the raised cap was starved at the source).
         var policy = new MapaTur.Application.Terrain.OrthoDetailResidencyPolicy(
-            grid, ringRadiusMeters: 1500.0, fastMotionSpeedMps: 25.0, prefetchLeadMeters: 400.0);
+            grid, ringRadiusMeters: OperatingSystem.IsWindows() ? 5000.0 : 1500.0,
+            fastMotionSpeedMps: 25.0, prefetchLeadMeters: 400.0);
+        renderer.Det25GpuCacheDir = System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(dir) ?? dir, "gpu-cache", System.IO.Path.GetFileName(dir) + "-25");
         renderer.SetOrthoDetailStreaming(grid, policy, composer, cache);
         Serilog.Log.Information("[OrthoDetailStream] det25 streaming wired from {Dir}", dir);
     }

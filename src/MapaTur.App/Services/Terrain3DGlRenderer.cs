@@ -2189,6 +2189,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// <summary>Directory of the det05 GPU-cell cache (BC1 chains). Null/empty = no disk cache (encode-only).</summary>
     public string? Det05GpuCacheDir { get; set; }
 
+    /// <summary>Directory of the det25 GPU-cell cache (BC1 chains) — same contract as det05's.</summary>
+    public string? Det25GpuCacheDir { get; set; }
+
+    private string? Det25CachePath(int ci, int cj)
+        => string.IsNullOrEmpty(Det25GpuCacheDir) ? null : System.IO.Path.Combine(Det25GpuCacheDir, $"{ci}_{cj}.mtgc");
+
     private void ProbeS3tc(GL gl)
     {
         if (s3tcProbed)
@@ -3389,7 +3395,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                             }
 
                             try { System.IO.File.Delete(cachePath); } catch (System.IO.IOException) { }
-                            return ComposeEncodeCacheDet05(composer, ci, cj, cellPx, rentedBc1, cachePath, capture);
+                            return ComposeEncodeCacheCell(composer, ci, cj, cellPx, rentedBc1, cachePath, capture);
                         });
                     }
                     else
@@ -3397,7 +3403,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                         cell.Compose = Task.Run(() =>
                         {
                             var swc = System.Diagnostics.Stopwatch.StartNew();
-                            byte[]? outChain = ComposeEncodeCacheDet05(composer, ci, cj, cellPx, rentedBc1, cachePath, capture);
+                            byte[]? outChain = ComposeEncodeCacheCell(composer, ci, cj, cellPx, rentedBc1, cachePath, capture);
                             capture.ComposeMs = swc.Elapsed.TotalMilliseconds;
                             return outChain;
                         });
@@ -3696,7 +3702,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // BC1 full path, runs ON THE WORKER: compose RGBA → box-filter mips → encode the whole chain → atomic
     // cache write (next visit = ~15 ms read). All scratch buffers are task-local and pooled; the destination
     // chain is the cell's RentedBc1 (owned by the cell through the upload). Null = composer says empty.
-    private byte[]? ComposeEncodeCacheDet05(
+    private byte[]? ComposeEncodeCacheCell(
         MapaTur.Application.Terrain.IOrthoDetailComposer composer,
         int ci, int cj, int cellPx, byte[] destChain, string? cachePath, DetailCellGpu capture)
     {
@@ -4170,6 +4176,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         det25FrameTick++;
+        ProbeS3tc(gl); // BC1 capability must be known BEFORE any compose kick (kick picks the payload format)
 
         // Near-field clamp: pull the focus back along the view ray so a background peak never claims the
         // ring; the clamped point's XY lands over the foreground terrain the screen is actually full of.
@@ -4317,18 +4324,58 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 MapaTur.Application.Terrain.IOrthoDetailComposer composer = det25Composer;
                 DetailCellGpu capture = cell;
                 det25ComposeInFlight++;
-                // Pooled compose destination (the 64 MiB cell buffer allocated per compose was gigabytes of
-                // LOH churn per traverse). Ownership: the cell, tracked via Rented until ReleaseCellBuffer.
-                byte[] rented = MapaTur.Application.Terrain.MeshBufferPool.Shared.RentBytes(
-                    det25Grid.CellPx * det25Grid.CellPx * 4);
-                cell.Rented = rented;
-                cell.Compose = Task.Run(() =>
+                int cellPx25 = det25Grid.CellPx;
+                if (det05Bc1On)
                 {
-                    var swc = System.Diagnostics.Stopwatch.StartNew();
-                    byte[]? buf = composer.Compose(ci, cj, rented);
-                    capture.ComposeMs = swc.Elapsed.TotalMilliseconds; // diagnostic; benign cross-thread write
-                    return buf;
-                });
+                    // BC1 pipeline for det25 too (2026-07-23): the midground tier is 28 cells after the tier
+                    // rebalance — with the disk cache a revisit fills the whole panorama in tens of ms.
+                    string? cachePath = Det25CachePath(ci, cj);
+                    byte[] rentedBc1 = MapaTur.Application.Terrain.MeshBufferPool.Shared.RentBytes(
+                        MapaTur.Application.Terrain.GpuCellCache.ChainSize(cellPx25));
+                    cell.RentedBc1 = rentedBc1;
+                    if (cachePath is not null && System.IO.File.Exists(cachePath))
+                    {
+                        cell.Compose = Task.Run(() =>
+                        {
+                            var swc = System.Diagnostics.Stopwatch.StartNew();
+                            bool ok = MapaTur.Application.Terrain.GpuCellCache.TryRead(cachePath, cellPx25, rentedBc1, out _);
+                            capture.ComposeMs = swc.Elapsed.TotalMilliseconds;
+                            capture.FromCache = ok;
+                            if (ok)
+                            {
+                                return rentedBc1;
+                            }
+
+                            try { System.IO.File.Delete(cachePath); } catch (System.IO.IOException) { }
+                            return ComposeEncodeCacheCell(composer, ci, cj, cellPx25, rentedBc1, cachePath, capture);
+                        });
+                    }
+                    else
+                    {
+                        cell.Compose = Task.Run(() =>
+                        {
+                            var swc = System.Diagnostics.Stopwatch.StartNew();
+                            byte[]? outChain = ComposeEncodeCacheCell(composer, ci, cj, cellPx25, rentedBc1, cachePath, capture);
+                            capture.ComposeMs = swc.Elapsed.TotalMilliseconds;
+                            return outChain;
+                        });
+                    }
+                }
+                else
+                {
+                    // Pooled compose destination (the 64 MiB cell buffer allocated per compose was gigabytes of
+                    // LOH churn per traverse). Ownership: the cell, tracked via Rented until ReleaseCellBuffer.
+                    byte[] rented = MapaTur.Application.Terrain.MeshBufferPool.Shared.RentBytes(
+                        cellPx25 * cellPx25 * 4);
+                    cell.Rented = rented;
+                    cell.Compose = Task.Run(() =>
+                    {
+                        var swc = System.Diagnostics.Stopwatch.StartNew();
+                        byte[]? buf = composer.Compose(ci, cj, rented);
+                        capture.ComposeMs = swc.Elapsed.TotalMilliseconds; // diagnostic; benign cross-thread write
+                        return buf;
+                    });
+                }
             }
         }
 
@@ -4344,6 +4391,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 {
                     cell.Empty = true; // outside the fetched footprint — no texture, never recomposed
                     ReleaseCellBuffer(cell); // the pooled destination goes straight back — nothing to upload
+                }
+                else if (det05Bc1On)
+                {
+                    // BC1 path: the payload IS the compressed chain (== RentedBc1).
+                    cell.PendingBc1 = buf;
+                    if (!det25UploadQueue.Contains(cell.Key))
+                    {
+                        det25UploadQueue.Add(cell.Key);
+                    }
                 }
                 else
                 {
@@ -4438,7 +4494,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         if (cell.Texture != 0)
         {
             gl.DeleteTexture(cell.Texture);
-            det25ResidentBytes -= OrthoVramBudget.CellResidentBytes(cell.Px, cell.Px);
+            // Subtract exactly what the promote added (BC1 chain vs RGBA differ 8× — see the ledger field).
+            det25ResidentBytes -= cell.ResidentBytesLedger != 0
+                ? cell.ResidentBytesLedger
+                : OrthoVramBudget.CellResidentBytes(cell.Px, cell.Px);
+            cell.ResidentBytesLedger = 0;
             cell.Texture = 0;
         }
 
@@ -4450,7 +4510,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         if (composeAlive)
         {
-            cell.Rented = null; cell.Pending = null; // deliberate drop — the orphaned task owns the buffer now
+            // deliberate drop — the orphaned task owns every buffer now
+            cell.Rented = null; cell.Pending = null;
+            cell.RentedBc1 = null; cell.PendingBc1 = null;
         }
         else
         {
@@ -4480,51 +4542,118 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         while (det25UploadQueue.Count > 0)
         {
             int key = det25UploadQueue[0];
-            if (!det25Cells.TryGetValue(key, out DetailCellGpu? cell) || cell.Pending is not { } rgba)
+            if (!det25Cells.TryGetValue(key, out DetailCellGpu? cell)
+                || (cell.Pending is null && cell.PendingBc1 is null))
             {
                 det25UploadQueue.RemoveAt(0);
                 continue;
             }
 
+            byte[]? rgba = cell.Pending;
+            byte[]? bc1 = cell.PendingBc1;
             int w = cell.Px, h = cell.Px;
             if (cell.StagingTexture == 0)
             {
                 cell.StagingTexture = gl.GenTexture();
                 cell.UploadedRows = 0;
+                cell.UploadLevel = 0;
                 gl.BindTexture(TextureTarget.Texture2D, cell.StagingTexture);
-                gl.TexImage2D(TextureTarget.Texture2D, 0, (int)InternalFormat.Rgba8, (uint)w, (uint)h, 0,
-                    PixelFormat.Rgba, PixelType.UnsignedByte, null);
+                if (bc1 is not null)
+                {
+                    // Immutable BC1 storage with the full mip chain — filled level-by-level below.
+                    gl.TexStorage2D(TextureTarget.Texture2D, (uint)(Math.ILogB(w) + 1),
+                        (SizedInternalFormat)GlCompressedRgbS3tcDxt1, (uint)w, (uint)h);
+                }
+                else
+                {
+                    gl.TexImage2D(TextureTarget.Texture2D, 0, (int)InternalFormat.Rgba8, (uint)w, (uint)h, 0,
+                        PixelFormat.Rgba, PixelType.UnsignedByte, null);
+                }
             }
             else
             {
                 gl.BindTexture(TextureTarget.Texture2D, cell.StagingTexture);
             }
 
-            int rowBytes = w * 4;
-            int rowsPerChunk = Math.Max(1, OrthoUploadBytesPerChunk / Math.Max(1, rowBytes));
             double upStart = frameClock.ElapsedMilliseconds;
-            while (cell.UploadedRows < h)
+            bool complete;
+            if (bc1 is not null)
             {
-                int rows = Math.Min(rowsPerChunk, h - cell.UploadedRows);
-                fixed (byte* p = &rgba[(long)cell.UploadedRows * rowBytes])
+                int totalLevels = Math.ILogB(w) + 1;
+                while (cell.UploadLevel < totalLevels)
                 {
-                    gl.TexSubImage2D(TextureTarget.Texture2D, 0, 0, cell.UploadedRows, (uint)w, (uint)rows,
-                        PixelFormat.Rgba, PixelType.UnsignedByte, p);
+                    int lv = cell.UploadLevel;
+                    int lPx = Math.Max(1, w >> lv);
+                    int blockRows = Math.Max(1, (lPx + 3) / 4);
+                    int rowBytesBlk = Math.Max(1, lPx / 4) * 8;
+                    int lvOffset = 0;
+                    for (int j = 0; j < lv; j++)
+                    {
+                        int p = Math.Max(1, w >> j);
+                        lvOffset += MapaTur.Application.Terrain.Bc1Encoder.EncodedSize(p, p);
+                    }
+
+                    int rowsPerChunk = Math.Max(1, OrthoUploadBytesPerChunk / rowBytesBlk);
+                    int rows = Math.Min(rowsPerChunk, blockRows - cell.UploadedRows);
+                    int bytes = Math.Min(rows * rowBytesBlk,
+                        MapaTur.Application.Terrain.Bc1Encoder.EncodedSize(lPx, lPx) - (cell.UploadedRows * rowBytesBlk));
+                    int yoff = cell.UploadedRows * 4;
+                    uint height = (uint)Math.Min(lPx - yoff, rows * 4);
+                    long srcOff = lvOffset + ((long)cell.UploadedRows * rowBytesBlk);
+                    fixed (byte* p = &bc1[srcOff])
+                    {
+                        gl.CompressedTexSubImage2D(TextureTarget.Texture2D, lv, 0, yoff,
+                            (uint)lPx, height, (InternalFormat)GlCompressedRgbS3tcDxt1, (uint)bytes, p);
+                    }
+
+                    cell.UploadedRows += rows;
+                    if (cell.UploadedRows >= blockRows)
+                    {
+                        cell.UploadLevel++;
+                        cell.UploadedRows = 0;
+                    }
+
+                    if (frameClock.ElapsedMilliseconds - start >= Det25UploadBudgetMsPerFrame)
+                    {
+                        break;
+                    }
                 }
 
-                cell.UploadedRows += rows;
-                if (frameClock.ElapsedMilliseconds - start >= Det25UploadBudgetMsPerFrame)
+                complete = cell.UploadLevel >= totalLevels;
+            }
+            else
+            {
+                int rowBytes = w * 4;
+                int rowsPerChunk = Math.Max(1, OrthoUploadBytesPerChunk / Math.Max(1, rowBytes));
+                while (cell.UploadedRows < h)
                 {
-                    break;
+                    int rows = Math.Min(rowsPerChunk, h - cell.UploadedRows);
+                    fixed (byte* p = &rgba![(long)cell.UploadedRows * rowBytes])
+                    {
+                        gl.TexSubImage2D(TextureTarget.Texture2D, 0, 0, cell.UploadedRows, (uint)w, (uint)rows,
+                            PixelFormat.Rgba, PixelType.UnsignedByte, p);
+                    }
+
+                    cell.UploadedRows += rows;
+                    if (frameClock.ElapsedMilliseconds - start >= Det25UploadBudgetMsPerFrame)
+                    {
+                        break;
+                    }
                 }
+
+                complete = cell.UploadedRows >= h;
             }
 
             cell.UploadMs += frameClock.ElapsedMilliseconds - upStart;
 
-            if (cell.UploadedRows >= h)
+            if (complete)
             {
                 double mmStart = frameClock.ElapsedMilliseconds;
-                gl.GenerateMipmap(TextureTarget.Texture2D);
+                if (bc1 is null)
+                {
+                    gl.GenerateMipmap(TextureTarget.Texture2D); // RGBA fallback only — BC1 chains carry their mips
+                }
+
                 cell.MipmapMs = frameClock.ElapsedMilliseconds - mmStart;
                 gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
                 gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
@@ -4537,11 +4666,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
                 cell.Texture = cell.StagingTexture;
                 cell.StagingTexture = 0;
-                ReleaseCellBuffer(cell); // the final TexSubImage2D has copied — recycle the pooled buffer
-                det25ResidentBytes += OrthoVramBudget.CellResidentBytes(w, h);
+                long residentBytes = bc1 is not null
+                    ? MapaTur.Application.Terrain.GpuCellCache.ChainSize(w)
+                    : OrthoVramBudget.CellResidentBytes(w, h);
+                cell.ResidentBytesLedger = residentBytes;
+                det25ResidentBytes += residentBytes;
+                ReleaseCellBuffer(cell); // the final upload has copied — recycle the pooled buffer
                 det25UploadQueue.RemoveAt(0);
-                Log.Information("[Det25] cell ({Ci},{Cj}) compose {C:F0}ms | upload {U:F1}ms | mipmap {M:F1}ms | {Px}px",
-                    cell.Ci, cell.Cj, cell.ComposeMs, cell.UploadMs, cell.MipmapMs, w);
+                Log.Information("[Det25] cell ({Ci},{Cj}) compose {C:F0}ms{Cache} | upload {U:F1}ms | mipmap {M:F1}ms | {Px}px ({Fmt})",
+                    cell.Ci, cell.Cj, cell.ComposeMs, cell.FromCache ? " [CACHE-HIT]" : string.Empty,
+                    cell.UploadMs, cell.MipmapMs, w, bc1 is not null ? "BC1" : "RGBA");
             }
 
             if (frameClock.ElapsedMilliseconds - start >= Det25UploadBudgetMsPerFrame)
