@@ -1227,6 +1227,50 @@ public partial class Terrain3DView : ContentView
         Canvas.InvalidateSurface();
     }
 
+    // ── KONTRAKT-ORTO §4: anchor camera presets (MAPATUR_CAM_PRESET) ─────────────────────────────
+    // Deterministic start-up views of the four anchor spots, so render changes can be verified with
+    // passive before/after screenshots WITHOUT the user driving the camera. Applied once, when the
+    // world frame is first available. docs/ORTO-CONTRACT.md defines the anchor list.
+    private bool cameraPresetApplied;
+
+    private static readonly Dictionary<string, (GeoPoint Geo, float DistanceMeters)> CameraPresets =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["mo"] = (new GeoPoint(49.1997, 20.0716), 900f),        // (a) MO shelter — 5 cm showcase
+            ["mnich"] = (new GeoPoint(49.19253, 20.05485), 500f),   // (b) Mnich face up close
+            ["dolinka"] = (new GeoPoint(49.1875, 20.0435), 700f),   // (c) Dolinka za Mnichem — survey seam
+            ["panorama"] = (new GeoPoint(49.19253, 20.05485), 6000f), // (d) massif-scale tone coherence
+            ["rysy"] = (new GeoPoint(49.1795, 20.0870), 900f)       // Czarny Staw pod Rysami — shadow blue-cast check
+        };
+
+    private void ApplyCameraPresetFromEnv()
+    {
+        if (cameraPresetApplied || WorldFrame is null)
+        {
+            return;
+        }
+
+        cameraPresetApplied = true; // one shot — even when unset, so the lookup runs once
+        string? preset = Environment.GetEnvironmentVariable("MAPATUR_CAM_PRESET");
+        if (string.IsNullOrWhiteSpace(preset))
+        {
+            return;
+        }
+
+        if (!CameraPresets.TryGetValue(preset.Trim(), out (GeoPoint Geo, float DistanceMeters) anchor))
+        {
+            Serilog.Log.Warning(
+                "[CamPreset] unknown preset '{Preset}' — expected one of: {Known}",
+                preset, string.Join(", ", CameraPresets.Keys));
+            return;
+        }
+
+        FocusOnGeo(anchor.Geo, anchor.DistanceMeters);
+        Serilog.Log.Information(
+            "[CamPreset] applied '{Preset}' — target ({Lat:F5},{Lon:F5}) distance {D:F0} m",
+            preset, anchor.Geo.Latitude, anchor.Geo.Longitude, anchor.DistanceMeters);
+    }
+
     /// <summary>
     /// Centres the camera on a geographic point (seated on the terrain), at a close framing distance.
     /// Used to fly to the first route stop when the user finishes planning.
@@ -2097,6 +2141,7 @@ public partial class Terrain3DView : ContentView
     private float climbRouteOverlayExaggeration = float.NaN; // rebuild the overlay when the Pion slider changes
     private readonly MapaTur.App.Services.GripClimbController gripClimb = new(); // hold-by-hold climbing (C toggles)
     private bool walkClimbToggleQueued;
+    private bool walkBelayReleaseQueued; // X — deliberately drop the auto-belay (hanging → free fall)
 
     // ── AI DRAGON FLOCK ── a small mixed-species flock that circles the nearby peaks (ambient) and drifts toward
     // the player's dragon when it flies close. Each member owns its OWN posed model instance (independent pose),
@@ -2481,6 +2526,26 @@ public partial class Terrain3DView : ContentView
                 Vel = dir * ArrowSpeedMetersPerSecond,
                 Age = 0f,
             });
+        }
+
+        // X — deliberate belay release. While the grip session owns the body its own pitons travel with it
+        // (no removal API — by design), so X applies only to WalkPhysics: hanging on the rope → free fall.
+        if (walkBelayReleaseQueued)
+        {
+            walkBelayReleaseQueued = false;
+            if (gripClimb.IsActive)
+            {
+                Serilog.Log.Information("[Walk] belay release (X) ignored — a grip session is active (let go first: C/Space)");
+            }
+            else if (w.Pitons.Count > 0 || w.IsRoped)
+            {
+                bool wasRoped = w.IsRoped;
+                w.ReleaseProtection();
+                Serilog.Log.Information(
+                    "[Walk] belay released (X) at ({X:F0},{Y:F0}) feet={Feet:F0} m{Fall}",
+                    w.PositionXY.X, w.PositionXY.Y, w.FeetElevation,
+                    wasRoped ? " — free fall from the rope" : " (gear dropped)");
+            }
         }
 
         // Hold-by-hold climbing: C grabs the wall ahead (or lets go). While a session is active it is the
@@ -6821,8 +6886,15 @@ public partial class Terrain3DView : ContentView
         dragonRmbHeld = false; // release the dragon attitude hold → pitch auto-levels again
     }
 
+    private object? _lastKeyDownArgs;
     private void OnPlatformKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
     {
+        // DEDUP (2026-07-21): this handler is registered on BOTH this element AND the window root
+        // (handledEventsToo:true, see ~6500/6511) so it can receive keys the focus system pre-marks handled —
+        // but the SAME KeyDown args then bubble through twice, firing us twice per press, so TOGGLE keys (9, 0)
+        // cancel themselves out (net no change). Ignore the second fire of the same args object.
+        if (ReferenceEquals(e, _lastKeyDownArgs)) { return; }
+        _lastKeyDownArgs = e;
         // The handler also listens at the window root, so ignore keys unless 3D mode is actually showing.
         if (!IsVisible)
         {
@@ -6853,7 +6925,7 @@ public partial class Terrain3DView : ContentView
                 // '9' cycles the detail colour variant: raw detail <-> the base ortho's de-blue transform.
                 case Windows.System.VirtualKey.Number9:
                     r.OrthoDetailColorMode = r.OrthoDetailColorMode == 0 ? 1 : 0;
-                    Serilog.Log.Information("[OrthoDetailSlice] colour = {Mode}", r.OrthoDetailColorMode == 1 ? "DE-BLUE (base-matched)" : "RAW");
+                    Serilog.Log.Information("[OrthoDetailSlice] colour = {Mode}", r.OrthoDetailColorMode == 1 ? "TONE-FROM-BASE (detail = fine frequencies only)" : "RAW");
                     e.Handled = true; return;
                 // '8' toggles the cell-boundary outline (diagnostics).
                 case Windows.System.VirtualKey.Number8:
@@ -7077,6 +7149,15 @@ public partial class Terrain3DView : ContentView
                 if (!e.KeyStatus.WasKeyDown)
                 {
                     walkClimbToggleQueued = true;
+                }
+
+                break;
+            case Windows.System.VirtualKey.X:
+                // X = wypnij się: drop the auto-belay (pitons + rope). Hanging on the rope this is a
+                // deliberate free fall; on the ground it just clears the gear. Initial press only.
+                if (!e.KeyStatus.WasKeyDown)
+                {
+                    walkBelayReleaseQueued = true;
                 }
 
                 break;
@@ -8151,7 +8232,12 @@ public partial class Terrain3DView : ContentView
             glRenderer.SetDebugMarkers(debugMarkersRender.Count > 0 ? debugMarkersRender : null);
             // Climb hold dots go through the DEPTH-TESTED pass so the climber draws over them and the routes
             // read under them (drawn between the route lines and the climber).
+            ApplyCameraPresetFromEnv(); // KONTRAKT-ORTO §4: one-shot anchor view once the frame exists
             glRenderer.SetClimbHoldMarkers(walkActive && climbMarkers.Count > 0 ? climbMarkers : null);
+            // Sculpted rock skin around the climber: buffer lives in climb space, the shader applies the
+            // Pion exaggeration — so a slider move needs no geometry rebuild.
+            glRenderer.SetClimbRockSkin(
+                walkActive ? gripClimb.RockSkin : null, WorldFrame?.VerticalExaggeration ?? 1f);
             EnsureClimbingRoutes();
             // Topo passage lines render through the same climb-gear ribbon pass as the rope/quickdraws —
             // always visible (not only while walking), with the session gear appended on top of them.
@@ -8389,7 +8475,9 @@ public partial class Terrain3DView : ContentView
                     dir, i.ToString(System.Globalization.CultureInfo.InvariantCulture), $"{j}.webp");
                 return DecodeOrtho(p) is { Width: 512, Height: 512 } t ? t.Rgba : null;
             },
-            maxBytes: 384L << 20); // 384 MB of decoded 512² tiles (measured peak 553 MB @ 14-way; 4-way needs far less)
+            // 2 GB desktop / 384 MB phone (2026-07-20): det25 cell = 64 decoded 512² tiles ≈ 64 MB; 2 GB holds
+            // ~30 cells so the coarse ring never re-decodes on a pan (same stutter cause as det05, smaller scale).
+            maxBytes: OperatingSystem.IsWindows() ? 2048L << 20 : 384L << 20);
         var composer = new MapaTur.Application.Terrain.OrthoDetailCellComposer(grid, cache.Get, baseFill: null);
         var policy = new MapaTur.Application.Terrain.OrthoDetailResidencyPolicy(
             grid, ringRadiusMeters: 1500.0, fastMotionSpeedMps: 25.0, prefetchLeadMeters: 400.0);
@@ -8442,14 +8530,60 @@ public partial class Terrain3DView : ContentView
         }
 
         var grid = new MapaTur.Application.Terrain.OrthoDetailGrid(resMeters: 0.05, coverageTiles: 16, pitchTiles: 6);
+        // DESHADOW PREVIEW (env-gated, 2026-07-21): with MAPATUR_DET05_DESHADOW_PREVIEW=1, serve the corrected
+        // tile from a sibling deshadow dir when it exists, else fall back to the original det05 tile.
+        //   MAPATUR_DET05_DESHADOW_DIR selects the override dir (default "det05-deshadow" = Rysy PoC rollback;
+        //   set to "det05-deshadow-mo-v2" for the whole-cirque V2 preview). Fallback is ALWAYS raw det05.
+        // Coverage (_coverage.txt) stays the ORIGINAL det05's; sources are untouched; env-unset = identical
+        // behaviour. VIEW in OrthoDetailColorMode=0 (key 9): these tiles are de-shadowed ON DISK — mode 1 (the
+        // shader de-blue) would double-correct. This is a PREVIEW overlay, NOT yet a production shader-bypass layer.
+        string? dsDir = Environment.GetEnvironmentVariable("MAPATUR_DET05_DESHADOW_PREVIEW") == "1"
+            ? System.IO.Path.Combine(System.IO.Path.GetDirectoryName(dir) ?? dir,
+                Environment.GetEnvironmentVariable("MAPATUR_DET05_DESHADOW_DIR") ?? "det05-deshadow")
+            : null;
+        if (dsDir is not null)
+        {
+            // These tiles are de-shadowed ON DISK, so force the correct viewing config so the preview shows the
+            // baked correction as-is (no double-correction): shader de-blue OFF (colour mode 0 = RAW) and the
+            // runtime baked-shadow compensation OFF. User can still toggle to compare (keys 9/1/F2/F1).
+            renderer.OrthoDetailColorMode = 0;
+            renderer.BakedShadowComp = 0f;
+            Serilog.Log.Information(
+                "[OrthoDetail05] DESHADOW PREVIEW ON — overlay {DsDir} over fallback {Dir}; forced OrthoDetailColorMode=0 + BakedShadowComp=0",
+                dsDir, dir);
+        }
+        int dsHits = 0, dsFallback = 0;
         var cache = new MapaTur.Application.Terrain.OrthoTileDecodeCache(
             (i, j) =>
             {
+                if (dsDir is not null)
+                {
+                    string pd = System.IO.Path.Combine(
+                        dsDir, i.ToString(System.Globalization.CultureInfo.InvariantCulture), $"{j}.webp");
+                    if (System.IO.File.Exists(pd)
+                        && DecodeOrtho(pd) is { Width: 512, Height: 512 } td)
+                    {
+                        int served = System.Threading.Interlocked.Increment(ref dsHits);
+                        if ((served + dsFallback) % 256 == 0)
+                        {
+                            Serilog.Log.Information(
+                                "[OrthoDetail05] deshadow-preview served: {Hits} from det05-deshadow, {Fallback} fallback det05",
+                                served, dsFallback);
+                        }
+                        return td.Rgba;
+                    }
+                }
                 string p = System.IO.Path.Combine(
                     dir, i.ToString(System.Globalization.CultureInfo.InvariantCulture), $"{j}.webp");
+                if (dsDir is not null) { System.Threading.Interlocked.Increment(ref dsFallback); }
                 return DecodeOrtho(p) is { Width: 512, Height: 512 } t ? t.Rgba : null;
             },
-            maxBytes: 512L << 20); // a det05 cell is 256 tiles; hold a few cells' worth in RAM
+            // 16 GB desktop (2026-07-20, "mając 64 GB RAM"): a det05 cell = 256 decoded 512² tiles ≈ 268 MB;
+            // 16 GB holds ~60 cells = the WHOLE Morskie-Oko cirque decoded. Root cause of the pan stutter was
+            // this cache at 2 GB (~7 cells): every camera revisit re-DECODED 256 WebP tiles (~1.4 s/cell, 767
+            // re-composes in one session). Cached, a revisit re-composes from RAM (memcpy, ~ms) — no re-decode.
+            // Phone stays tight (RAM-constrained). This is system RAM, not the 4.29 GB per-GPU-resource limit.
+            maxBytes: OperatingSystem.IsWindows() ? 16384L << 20 : 512L << 20);
         var composer = new MapaTur.Application.Terrain.OrthoDetailCellComposer(grid, cache.Get, baseFill: null);
         bool Coverage(int ci, int cj) => coveredKeys.Contains(grid.CellKey(ci, cj));
         renderer.SetOrthoDetail05Streaming(grid, composer, cache, Coverage);

@@ -53,11 +53,27 @@ public sealed class TwoLevelDetailResidencyPolicy
     }
 
     /// <summary>
+    /// Ranking positions BEYOND the cap a RESIDENT cell may hold before it is released. A composed 5 cm cell
+    /// costs 2–3 s + ~340 MB to rebuild; the memoryless nearest-first ranking swapped boundary cells on every
+    /// small camera move ("najdrobniejszy ruch przeładowuje orto", 2026-07-20 — 129 recomposes in minutes).
+    /// Within this window a resident cell keeps its slot; newcomers only enter slots that actually free up.
+    /// </summary>
+    private const int StickyMarginCells = 6;
+
+    /// <summary>
     /// The desired resident cells for both levels this frame, given the camera focus + velocity and the base
     /// ortho's already-resident bytes. The coarse fallback under the fine ring is reserved first, then det05 is
-    /// funded from the remainder (gated to covered cells), then det25 takes what is left.
+    /// funded from the remainder (gated to covered cells), then det25 takes what is left. Pass the CURRENTLY
+    /// resident keys per level to enable hysteresis — resident cells hold their slots against marginally
+    /// nearer newcomers (see <see cref="StickyMarginCells"/>); null keeps the memoryless behaviour.
     /// </summary>
-    public TwoLevelDesired Plan(GeoPoint focus, double velEastMps, double velNorthMps, long baseResidentBytes)
+    public TwoLevelDesired Plan(
+        GeoPoint focus,
+        double velEastMps,
+        double velNorthMps,
+        long baseResidentBytes,
+        IReadOnlySet<int>? residentFine = null,
+        IReadOnlySet<int>? residentCoarse = null)
     {
         long free = Math.Max(0, this.totalBudgetBytes - baseResidentBytes);
 
@@ -69,13 +85,13 @@ public sealed class TwoLevelDetailResidencyPolicy
         long freeForFine = Math.Max(0, free - coarseReserve);
 
         int fineCap = NearCap(freeForFine, this.fine.CellBytes, this.fine.HardCap);
-        IReadOnlyList<int> fineCells = Desired(this.fine, focus, velEastMps, velNorthMps, fineCap);
+        IReadOnlyList<int> fineCells = Desired(this.fine, focus, velEastMps, velNorthMps, fineCap, residentFine);
 
         // COARSE takes the remaining budget after the fine cells actually kept; the reserve guarantees this leaves
         // at least coarseBackingCells for it whenever any fine cell was funded.
         long coarseFree = Math.Max(0, free - ((long)fineCells.Count * this.fine.CellBytes));
         int coarseCap = NearCap(coarseFree, this.coarse.CellBytes, this.coarse.HardCap);
-        IReadOnlyList<int> coarseCells = Desired(this.coarse, focus, velEastMps, velNorthMps, coarseCap);
+        IReadOnlyList<int> coarseCells = Desired(this.coarse, focus, velEastMps, velNorthMps, coarseCap, residentCoarse);
 
         return new TwoLevelDesired(fineCells, coarseCells);
     }
@@ -95,17 +111,58 @@ public sealed class TwoLevelDetailResidencyPolicy
     // The nearest-first ring for a level, coverage-FILTERED then capped (never the reverse): a coverage-gated
     // level requests the whole ranked ring, drops uncovered cells, and only then keeps the nearest `cap` — so a
     // covered cell just beyond a nearer hole still fills the budget instead of the ring silently under-filling.
-    private static IReadOnlyList<int> Desired(DetailLevelSpec level, GeoPoint focus, double velE, double velN, int cap)
+    // With `resident` supplied, hysteresis applies to the cap cut: resident cells anywhere inside the sticky
+    // window (cap + StickyMarginCells positions) claim their slots FIRST, and only the remaining slots go to
+    // the nearest non-resident candidates — a small focus shift therefore changes NOTHING, while a real move
+    // that pushes a resident cell out of the window releases it.
+    private static IReadOnlyList<int> Desired(
+        DetailLevelSpec level, GeoPoint focus, double velE, double velN, int cap, IReadOnlySet<int>? resident)
     {
         if (cap <= 0)
         {
             return Array.Empty<int>();
         }
 
-        int requestCap = level.Coverage is null ? cap : int.MaxValue;
+        // Always request the sticky window (not just cap): the window is where resident cells may survive.
+        int requestCap = level.Coverage is null ? cap + StickyMarginCells : int.MaxValue;
         IReadOnlyList<int> ranked = level.Policy.DesiredCells(focus, velE, velN, requestCap);
         IReadOnlyList<int> covered = Filter(level, ranked);
-        return covered.Count <= cap ? covered : covered.Take(cap).ToList();
+        if (covered.Count <= cap)
+        {
+            return covered;
+        }
+
+        if (resident is not { Count: > 0 })
+        {
+            return covered.Take(cap).ToList();
+        }
+
+        int window = Math.Min(covered.Count, cap + StickyMarginCells);
+        var kept = new List<int>(cap);
+        for (int i = 0; i < window && kept.Count < cap; i++)
+        {
+            if (resident.Contains(covered[i]))
+            {
+                kept.Add(covered[i]);
+            }
+        }
+
+        if (kept.Count < cap)
+        {
+            foreach (int key in covered)
+            {
+                if (!kept.Contains(key))
+                {
+                    kept.Add(key);
+                    if (kept.Count >= cap)
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+
+        return kept;
     }
 
     // Keep only cells the level's coverage predicate admits (null = all), preserving the ring's nearest-first

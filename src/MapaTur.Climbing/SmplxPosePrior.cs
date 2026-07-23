@@ -22,6 +22,17 @@ public static class SmplxPoseFeatureNames
     public const string LeftHipTorsoAngle = "leftHipTorsoAngle";
     public const string RightHipTorsoAngle = "rightHipTorsoAngle";
 
+    // Directional hip features (2026-07-19, "uda 120° do tyłu"): the unsigned HipTorsoAngle cannot tell a
+    // legal high step (thigh forward) from hip hyperextension (thigh backward) and its 0–180° hard range
+    // never fires. These are SIGNED in the pelvis frame derived from the landmarks: sagittal (positive =
+    // flexion/forward, negative = extension/backward) and abduction (positive = the leg opening sideways
+    // in the crotch). Deliberately NOT in Required: external profiles exported before these features must
+    // keep loading — a missing envelope simply leaves the feature unconstrained.
+    public const string LeftHipSagittalAngle = "leftHipSagittalAngle";
+    public const string RightHipSagittalAngle = "rightHipSagittalAngle";
+    public const string LeftHipAbductionAngle = "leftHipAbductionAngle";
+    public const string RightHipAbductionAngle = "rightHipAbductionAngle";
+
     public static IReadOnlyList<string> Required { get; } =
     [
         LeftElbowFlexion,
@@ -141,7 +152,13 @@ public sealed class SmplxPosePriorProfile
             [SmplxPoseFeatureNames.LeftShoulderTorsoAngle] = new(8f, 172f, 0f, 180f),
             [SmplxPoseFeatureNames.RightShoulderTorsoAngle] = new(8f, 172f, 0f, 180f),
             [SmplxPoseFeatureNames.LeftHipTorsoAngle] = new(0f, 165f, 0f, 180f),
-            [SmplxPoseFeatureNames.RightHipTorsoAngle] = new(0f, 165f, 0f, 180f)
+            [SmplxPoseFeatureNames.RightHipTorsoAngle] = new(0f, 165f, 0f, 180f),
+            // Hip extension backwards tops out around 20–30° in a human; flexion (high step / heel hook)
+            // reaches ~130–150°. Abduction: a wide stem is ~50–60°, beyond ~65° the crotch tears.
+            [SmplxPoseFeatureNames.LeftHipSagittalAngle] = new(-15f, 130f, -30f, 150f),
+            [SmplxPoseFeatureNames.RightHipSagittalAngle] = new(-15f, 130f, -30f, 150f),
+            [SmplxPoseFeatureNames.LeftHipAbductionAngle] = new(-8f, 50f, -22f, 65f),
+            [SmplxPoseFeatureNames.RightHipAbductionAngle] = new(-8f, 50f, -22f, 65f)
         }
     };
 
@@ -161,7 +178,13 @@ public sealed class SmplxPosePriorProfile
         float softPenalty = 0f;
         foreach ((string feature, float value) in measurements)
         {
-            SmplxJointEnvelope envelope = GetEnvelope(feature);
+            // Optional features (the directional hip set) may be absent from older external profiles —
+            // they are then simply unconstrained, so those profiles keep loading and assessing.
+            if (!Features.TryGetValue(feature, out SmplxJointEnvelope? envelope))
+            {
+                continue;
+            }
+
             softPenalty += OutsidePenalty(value, envelope.TypicalMinimumDegrees, envelope.TypicalMaximumDegrees);
             if (value < envelope.HardMinimumDegrees - 0.25f || value > envelope.HardMaximumDegrees + 0.25f)
             {
@@ -200,7 +223,55 @@ public sealed class SmplxPosePriorProfile
             [SmplxPoseFeatureNames.LeftHipTorsoAngle] = AngleDegrees(torsoDown, pose.LeftKnee - pose.LeftHip),
             [SmplxPoseFeatureNames.RightHipTorsoAngle] = AngleDegrees(torsoDown, pose.RightKnee - pose.RightHip)
         };
+
+        // Directional hip features need a pelvis frame: character-right from the hip line, chest facing
+        // from torso-up × right (right-handed body frame: R = F × U ⇒ F = U × R; the rig tests caught the
+        // flipped order measuring legal forward flexion as hyperextension). Skip on a degenerate skeleton
+        // (coincident joints) — better unconstrained than a made-up frame.
+        Vector3 hipAxis = pose.RightHip - pose.LeftHip;
+        Vector3 forward = Vector3.Cross(torsoUp, hipAxis);
+        if (hipAxis.LengthSquared() > 1e-10f && torsoUp.LengthSquared() > 1e-10f && forward.LengthSquared() > 1e-10f)
+        {
+            Vector3 right = Vector3.Normalize(hipAxis);
+            Vector3 down = -Vector3.Normalize(torsoUp);
+            forward = Vector3.Normalize(forward);
+            measurements[SmplxPoseFeatureNames.LeftHipSagittalAngle] =
+                SagittalDegrees(pose.LeftKnee - pose.LeftHip, forward, down);
+            measurements[SmplxPoseFeatureNames.RightHipSagittalAngle] =
+                SagittalDegrees(pose.RightKnee - pose.RightHip, forward, down);
+            measurements[SmplxPoseFeatureNames.LeftHipAbductionAngle] =
+                AbductionDegrees(pose.LeftKnee - pose.LeftHip, -right);
+            measurements[SmplxPoseFeatureNames.RightHipAbductionAngle] =
+                AbductionDegrees(pose.RightKnee - pose.RightHip, right);
+        }
+
         return new ReadOnlyDictionary<string, float>(measurements);
+    }
+
+    /// <summary>Signed thigh angle in the sagittal plane: 0 = straight down, +90 = horizontal forward
+    /// (flexion), −90 = horizontal backward (hyperextension), beyond ±90 the thigh points upward.</summary>
+    private static float SagittalDegrees(Vector3 thigh, Vector3 forward, Vector3 down)
+    {
+        if (thigh.LengthSquared() < 1e-10f)
+        {
+            return 0f;
+        }
+
+        thigh = Vector3.Normalize(thigh);
+        return MathF.Atan2(Vector3.Dot(thigh, forward), Vector3.Dot(thigh, down)) * (180f / MathF.PI);
+    }
+
+    /// <summary>Signed lateral opening of the thigh: positive = away from the body's midline (abduction),
+    /// negative = crossing it (adduction).</summary>
+    private static float AbductionDegrees(Vector3 thigh, Vector3 outward)
+    {
+        if (thigh.LengthSquared() < 1e-10f)
+        {
+            return 0f;
+        }
+
+        thigh = Vector3.Normalize(thigh);
+        return MathF.Asin(Math.Clamp(Vector3.Dot(thigh, outward), -1f, 1f)) * (180f / MathF.PI);
     }
 
     private void Validate(string sourcePath)

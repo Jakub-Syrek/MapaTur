@@ -65,6 +65,12 @@ internal sealed class GripClimbController
     /// <summary>The render-side model the active session poses; the renderer must draw THIS while climbing.</summary>
     public SkinnedModel? ActiveModel { get; private set; }
 
+    /// <summary>The sculpted rock skin around the climber (climb space; pos3+normal3+tint3 per vertex):
+    /// ONE continuous surface from the shared relief field with every hold blended into it. Rebuilt only
+    /// when the surface changes (start / growth) — the renderer re-uploads on reference change. Null when
+    /// no session is active.</summary>
+    public ClimbRockSkin? RockSkin { get; private set; }
+
     public Matrix4x4 HumanoidWorldMatrix { get; private set; } = Matrix4x4.Identity;
 
     public Matrix4x4 HumanoidRotationMatrix { get; private set; } = Matrix4x4.Identity;
@@ -189,8 +195,36 @@ internal sealed class GripClimbController
         poseDirty = true;
         moveCooldown = 0f;
         HasPose = false;
+        RebuildRockSkin(origin);
         MirrorInto(walker);
         return true;
+    }
+
+    // The visual sculpt window around the climber: dense enough for crack/facet detail, wide enough that
+    // a patch-growth rebuild (every ~8 m of progress) always recentres before the edge comes into view.
+    private const float SkinHalfSpanMeters = 15f;
+    private const float SkinStepMeters = 0.15f;
+
+    /// <summary>
+    /// Rebuilds the sculpted rock skin (ONE continuous surface: shared relief field + holds blended in;
+    /// plan F2a) for a window around <paramref name="centerXY"/>. The lattice is world-aligned, so regrown
+    /// windows agree exactly where they overlap — no shimmer on growth.
+    /// </summary>
+    private void RebuildRockSkin(Vector2 centerXY)
+    {
+        if (surface is null || patchSampleGround is null)
+        {
+            RockSkin = null;
+            return;
+        }
+
+        long t0 = Stopwatch.GetTimestamp();
+        RockSkin = ClimbRockSkinMesh.Build(
+            centerXY, SkinHalfSpanMeters, SkinStepMeters, patchSampleGround, surface.Patch.Holds, ClimbWorld.Gravity);
+        Serilog.Log.Information(
+            "[Climb] climb.rock_skin_built centre=({X:F0},{Y:F0}) tris={Tris} holds={Holds} in {Ms:F1} ms",
+            centerXY.X, centerXY.Y, RockSkin.VertexCount / 3, surface.Patch.Holds.Count,
+            Stopwatch.GetElapsedTime(t0).TotalMilliseconds);
     }
 
     /// <summary>
@@ -455,7 +489,11 @@ internal sealed class GripClimbController
         return best;
     }
 
-    /// <summary>Climb holds + the active contacts as debug markers (positions already exaggerated).</summary>
+    /// <summary>
+    /// UI dots only — the rock skin now carries the visual holds. Gripped holds stay marked (they are the
+    /// click-1 targets of the two-click flow) and the selected limb's candidates get their dots; every
+    /// other hold shows NOTHING, so the wall reads as sculpted rock, not confetti (user verdict on v1).
+    /// </summary>
     public void AppendHoldMarkers(List<Terrain3DGlRenderer.DebugMarker> markers, float exaggeration)
     {
         if (session is null || surface is null)
@@ -463,16 +501,26 @@ internal sealed class GripClimbController
             return;
         }
 
-        HashSet<string> active = session.State.Contacts.Values.Select(contact => contact.Hold.Id).ToHashSet();
-        foreach (ClimbHold hold in surface.Patch.Holds)
+        // Dots ride ON the sculpted surface (the skin morphs to each hold's protrusion): at the raw wall
+        // position they would sit INSIDE the rock and be depth-culled.
+        static Vector3 Apex(ClimbHold hold) => hold.Position
+            + (hold.Normal * (MapaTur.Application.Terrain.ClimbHoldImprintMesh.ProtrusionMeters(hold) + 0.02f));
+
+        foreach (LimbContact contact in session.State.Contacts.Values)
         {
-            var at = new Vector3(hold.Position.X, hold.Position.Y, hold.Position.Z * exaggeration);
-            Vector3 colour = active.Contains(hold.Id)
-                ? new Vector3(0.2f, 1f, 0.35f)                     // gripped — green
-                : hold.Type == ClimbHoldType.FootEdge
-                    ? new Vector3(0.85f, 0.75f, 0.2f)              // foot edge — sand
-                    : new Vector3(0.35f, 0.65f, 1f);               // hand-capable — blue
-            markers.Add(new Terrain3DGlRenderer.DebugMarker(at, colour, active.Contains(hold.Id) ? 0.12f : 0.07f));
+            Vector3 apex = Apex(contact.Hold);
+            markers.Add(new Terrain3DGlRenderer.DebugMarker(
+                new Vector3(apex.X, apex.Y, apex.Z * exaggeration), new Vector3(0.2f, 1f, 0.35f), 0.12f));
+        }
+
+        foreach (ClimbCandidateInfo candidate in candidateHolds)
+        {
+            Vector3 apex = Apex(candidate.Hold);
+            Vector3 colour = candidate.PlannerOk
+                ? new Vector3(0.35f, 0.65f, 1f)                    // solver-approved — blue
+                : new Vector3(0.75f, 0.75f, 0.75f);                // reachable but risky — grey
+            markers.Add(new Terrain3DGlRenderer.DebugMarker(
+                new Vector3(apex.X, apex.Y, apex.Z * exaggeration), colour, 0.07f));
         }
     }
 
@@ -497,7 +545,12 @@ internal sealed class GripClimbController
             RefinementPasses = firstSolveDone ? 1 : 2,
             MaximumImprovementRounds = 2,
             RootSearchStepScale = 0.6f,
-            OptimizeOrientation = !firstSolveDone
+            // Orientation must stay free on EVERY solve ("znow anatomia", 2026-07-19): frozen after the
+            // first grab, the torso could never yaw/roll into a side reach, so the only way to close the
+            // contact was a locked-straight, dislocated-looking arm. The solver clamps orientation to
+            // ±30°/24°/20° around the wall-facing reference and its arm-extension cost (120×) actively
+            // prefers the torso lean — it just needs the degree of freedom unlocked.
+            OptimizeOrientation = true
         };
         var solveTimer = Stopwatch.StartNew();
         ClimbWholeBodySolveResult result = solver.Solve(request, rig);
@@ -734,6 +787,7 @@ internal sealed class GripClimbController
         patchBack = newBack;
         patchForward = newForward;
         patchHalfWidth = newHalfWidth;
+        RebuildRockSkin(session.PositionXY); // recentre the sculpt window on the climber
         if (SelectedLimb is { } selected)
         {
             SelectLimb(selected); // refresh the candidate outlines from the larger hold set
@@ -774,6 +828,7 @@ internal sealed class GripClimbController
         renderModel = null;
         solver = null;
         ActiveModel = null;
+        RockSkin = null;
         HasPose = false;
         SelectedLimb = null;
         candidateHolds.Clear();

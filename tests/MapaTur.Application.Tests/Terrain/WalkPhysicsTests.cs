@@ -504,6 +504,76 @@ public sealed class WalkPhysicsTests
         landed.Should().BeTrue("without a wall, holding the axe does not stop the fall");
     }
 
+    // ── ReleaseProtection (X): deliberately drop the auto-belay — hanging on the rope becomes a free fall ──
+
+    /// <summary>Arranges a walker hanging on the rope high over the base (the post-catch state the climb
+    /// session hands back), using the same entry point the app uses (<see cref="WalkPhysics.SyncFromClimb"/>).</summary>
+    private static WalkPhysics HangingOnRope(out float hangFeet)
+    {
+        var walk = new WalkPhysics(Vector2.Zero, Ground(_ => 1000f), Params);
+        hangFeet = 1040f; // dangling 40 m above the base of the wall
+        walk.SyncFromClimb(
+            Vector2.Zero,
+            hangFeet,
+            [new WalkPhysics.PitonPoint(Vector2.Zero, hangFeet + Params.RopeLengthMeters)],
+            gripStamina: 10f,
+            roped: true);
+        return walk;
+    }
+
+    [Fact]
+    public void ReleaseProtection_WhileHangingOnTheRope_DropsIntoFreeFall()
+    {
+        WalkPhysics walk = HangingOnRope(out float hangFeet);
+
+        walk.ReleaseProtection();
+        for (int i = 0; i < 25; i++)
+        {
+            walk.Step(0.02f, Vector2.Zero, 0f, jumpRequested: false); // 0.5 s of gravity
+        }
+
+        walk.IsRoped.Should().BeFalse("the rope was deliberately released");
+        walk.FeetElevation.Should().BeLessThan(hangFeet - 0.5f, "nothing holds the fall any more");
+    }
+
+    [Fact]
+    public void ReleaseProtection_DropsEveryPiton_SoNothingReCatchesTheFall()
+    {
+        WalkPhysics walk = HangingOnRope(out float hangFeet);
+
+        walk.ReleaseProtection();
+        bool landed = false;
+        for (int i = 0; i < 800 && !landed; i++)
+        {
+            walk.Step(0.02f, Vector2.Zero, 0f, jumpRequested: false);
+            landed = walk.IsGrounded;
+        }
+
+        walk.Pitons.Should().BeEmpty("released protection leaves no anchors on the wall");
+        landed.Should().BeTrue("with no pitons the fall runs all the way to the base");
+        walk.FeetElevation.Should().Be(1000f);
+    }
+
+    [Fact]
+    public void ReleaseProtection_OnSafeGround_OnlyDropsTheGear()
+    {
+        var walk = new WalkPhysics(Vector2.Zero, Ground(_ => 1200f), Params);
+        walk.SyncFromClimb(
+            Vector2.Zero,
+            1200f,
+            [new WalkPhysics.PitonPoint(Vector2.Zero, 1195f)], // gear left BELOW the feet (a finished traverse)
+            gripStamina: 10f,
+            roped: false);
+        walk.Step(0.02f, Vector2.Zero, 0f, jumpRequested: false); // re-grounds on the flat terrain
+
+        walk.ReleaseProtection();
+        walk.Step(0.02f, Vector2.Zero, 0f, jumpRequested: false);
+
+        walk.Pitons.Should().BeEmpty();
+        walk.IsGrounded.Should().BeTrue("standing on the ground, dropping the rope changes nothing else");
+        walk.FeetElevation.Should().Be(1200f);
+    }
+
     [Fact]
     public void ReleasingTheCiupaga_ResumesFalling()
     {

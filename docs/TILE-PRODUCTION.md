@@ -362,6 +362,56 @@ całe światło) = ZAPARKOWANE, `docs/DELIGHT-RESEARCH.md` (prototyp nie złapa�
 zortorektyfikowane → cień DEM nie leży na cieniu orto, patchwork nalotów o różnym słońcu). Ekspozycja renderu
 1.15→1.0 (`TonemapExposure`, `sunCol ×1.15→1.0`) — to była główna „przepalona jasność bazowa".
 
+### 3.14 De-shadow wielo-nalotowy: luminancja 2.0× + chroma 50% (PoC Rysy, 2026-07-21)
+**Następca §3.10/3.13** — usuwa nie tylko niebieski CAST, ale i CIEMNOŚĆ wypalonego cienia, offline na dysku,
+bez utraty detalu/materiału. To ten „prawdziwy de-lighting" z §3.13-KONTEKST — udało się, bo referencję
+oświetlenia bierzemy z **innych roczników orto** (nie z cienia DEM). Pipeline: `dev/ortho-deshadow/` (untracked).
+
+**Metoda (ZATWIERDZONA przez usera etapami 07-21):**
+1. **Maska cienia** z low-pass log-luminancji unii 2015/2022/2024 (`diag.py`): histereza 0.20/0.45, morfologia
+   7 m, komponenty >150 m², feather 15 m, bramka `dark21`. Reaguje na OŚWIETLENIE, nie fakturę skały.
+2. **Luminancja** (`lumfield.py`): ciągłe pole log-gain z unii; confidence per-rocznik = `ss(nadwyżka nad
+   2021, histereza T_LO/T_HI)`; śnieg wykluczony bramką TEKSTURY (gładki=śnieg, faktura=granit); blend gładkimi
+   wagami confidence (NIE argmax), envelope→0 bez referencji; clamp **DOPIERO na końcu do 1 stopa = 2.0×**.
+   Mnożenie liniowego RGB (chroma bez zmian). Rdzeń cienia realnie wymaga 1.5–3 stopy → przy capie 2.0× rdzeń
+   dostaje jednolity max-lift (odcienienie CZĘŚCIOWE, świadomy wybór usera — relief zachowany).
+3. **Chroma** (`chroma.py`): OKLab, tylko a,b; osobne gładkie pole `cast` (chroma cienia po skale − target,
+   wygładzone 32 m); referencja = **median oświetlonej skały 2021** (2015 tylko kontrola); maska = ta z pkt.1;
+   wyklucz śnieg/zieleń/NoData; **rescale liniowego Y** po przesunięciu → `ΔY=4e-16` (luminancja DOKŁADNIE
+   stała), `ΔL(OKLab)=0.0024`. Siła **50%** (25% za mało, 75% za brązowo — wybór usera).
+
+**Bake na kafle** (`bake.py [--write]` → `dem/ortho-detail/tatry/det05-deshadow/{i}/{j}.webp`, WebP lossless):
+- Pole korekcji liczone **GLOBALNIE** na footprincie 440 m (`49.1793,20.0783,HALF=220`), parametry ZAMROŻONE,
+  potem **samplowane per-kafel** (bilinear) — CHECKLIST §C.10: nigdy statystyki per-kafel (=patchwork).
+- Per-piksel: NoData `(0,0,0)` nietknięte; piksele bez korekcji (`gpk<1e-4 & gt<1e-4`) **bajt-identyczne** ze
+  źródłem. Źródła `det05/` **nietknięte** (osobny katalog, odzyskiwalne). PoC = blok 42 kafli (i 1640–1645,
+  j 957–963) straddlujący dolną granicę cień→światło; cały zakres korekcji footprintu = 183 kafle.
+
+**Weryfikacja (`verify.py`, czyta kafle Z DYSKU) — WYKONANA:**
+- **Szew systematyczny** (uśredniony skok w poprzek granicy 512 px): gain **max 0.0016 stopa** (próg
+  widoczności ~0.03), chroma b max 0.0002 → brak szwu. Per-piksel ratio granica/wnętrze 1.78 == ratio
+  SUROWEGO źródła 1.85 → nadwyżka jest wrodzoną własnością kafli det05, bake NIC nie dodaje.
+- **Tożsamość:** kafle w pełni lit **bajt-identyczne**; strefa feather ≤1 bajt (maleńka korekcja).
+- **Blue cast** (`audit-ortho-blue-cast.py --dir …/det05-deshadow`): w cieniu **src 14.4 → baked 9.3/255**
+  (redukcja ~35% = 50% chromy). Residual 9.3 to CELOWY częściowy de-blue.
+
+**★ KONSUMPCJA — WAŻNE:** te kafle są już skorygowane NA DYSKU → oglądać w **`uOrthoDetailColorMode=0`
+(klawisz 9 = raw)**. Mode 1 (shaderowy de-blue) = PODWÓJNA korekcja. Audyt §C.10a flaguje je jako „RAW"
+(oczekuje ~0), bo zatwierdzony wygląd 50% zostawia częściowy cast — to świadome odejście od reguły „usuń CAŁY
+cast"; docelowa semantyka det05-deshadow (mode 0 + residual) = **do potwierdzenia z userem**.
+
+**Podgląd w rendererze (ZAIMPLEMENTOWANE 07-21, env-gated):** `set MAPATUR_DET05_DESHADOW_PREVIEW=1` przed
+startem → loader det05 (`SetupDet05Streaming`, `Terrain3DView.xaml.cs`) dla każdego kafla sprawdza najpierw
+`det05-deshadow/{i}/{j}.webp`, fallback `det05/`. `_coverage.txt` z ORYGINALNEGO det05; źródła nietknięte;
+env-unset = zero zmian. Loguje `deshadow-preview served: {hits} deshadow / {fallback} det05`. **Oglądać w
+`OrthoDetailColorMode=0` (klawisz 9)**; klawisz 0 = detail on/off. Bake podglądowy = **cały footprint 197 kafli**
+(`bake.py --full --write`; blok 42 = `bake.py --write`) — feather domyka się w kaflach → bezszwowo z fallbackiem.
+
+**OTWARTE przed szerszym bakiem:** (a) detektor śniegu roczników źródłowych za restrykcyjny (0–0.2% mimo
+płatów) — poprawić przed gainem >2.0× lub chromą źródeł; (b) przypadek śniegu/zieleni (footprint Rysów = goła
+skała, 0%) — dodać zanim korekcja wyjdzie poza ścianę skalną; (c) nieclampowane pole 1.5–3 stopy NIEzatwierdzone
+do gainu >2.0×.
+
 ---
 
 ## 4. Render (kontekst, nie produkcja): co konsumuje te dane
@@ -572,3 +622,27 @@ Wyjście: `dem/ortho-detail/tatry/det25/<i>/<j>.webp` + `manifest.json` (kotwica
 Weryfikacja walidacji (07-13): pas graniczny 2173 kafli → 815 zapisanych, 1352 sk-side, 1 nodata, 81 partial,
 5×404; tempo realne ~2 kafle/s. StandardResolution 25 cm potwierdzone (residual 25 vs 50 cm: Pięć Stawów 10.8,
 Kasprowy 8.5 — realny detal, nie mus).
+
+## 9. det05 coverage: próg 243→16 z 256 — cele CZĘŚCIOWE streamują (2026-07-20)
+
+**Problem** („10% hires przed sobą, dookoła rozmyte", Mnich z bliska): granica nalotu det05 jest
+SCHODKOWA, a bramka coverage była binarna z progiem 95% (`>=243/256` kafli na celę) — cela z 240/256
+kaflami (94% danych) była odrzucana W CAŁOŚCI. Wokół Mnicha wycinało to cały pas cel częściowych na
+płd.-zach. (widok = mała łata pełnych cel + det25/baza dookoła), mimo pełnej puli VRAM (9/9 cel).
+
+**Fakt architektoniczny**: `OrthoDetailCellComposer` od zawsze komponuje cele częściowe — brakujące
+kafle mają alpha 0, a shader (`w × dcs.a`) robi per-piksel spadek do det25/bazy. Próg 95% był reliktem
+sprzed tej funkcji; degradacja per-PIKSEL >>> odrzut per-CELA (zgodne z KONTRAKT-ORTO §3).
+
+**Proces (powtarzalny):**
+```
+python testdata/maps/regen-det05-coverage.py dem/ortho-detail/tatry/det05 --threshold 16   # ≥6% danych
+copy dem\ortho-detail\tatry\det05\_coverage.txt "<AD>\dem\ortho-detail\tatry\det05\_coverage.txt"
+```
+**Weryfikacja liczbowa (07-20):** 343 077 kafli → cele: 13 485 przeskanowanych, **10 133 covered**
+(było 8 906; +1 227 cel częściowych; 8 812 pełnych 256/256). Log appki po restarcie:
+`det05 streaming wired … (10133 covered cells)`. Mapa ASCII pokrycia wokół Mnicha (ci 253–269 ×
+cj 144–158): schodek przesunął się o ~2–6 cel na płd.-zach. — pas graniczny streamuje.
+
+**Uwaga na przyszłość:** próg 16 = kompromis; cela z <16 kaflami (≈<6%) nadal odpada (nie warto slotu
+341 MB dla pojedynczych kafli). Mądrzejszy model kosztu (priorytet wg fill-fraction) = ewentualny F2.

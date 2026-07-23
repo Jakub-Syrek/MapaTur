@@ -183,4 +183,47 @@ public sealed class TwoLevelDetailResidencyPolicyTests
         d.FineCells.Should().BeEmpty();
         d.CoarseCells.Should().BeEmpty();
     }
+
+    // ── Hysteresis ("najdrobniejszy ruch przeładowuje orto", 2026-07-20): the memoryless nearest-first
+    // ranking swapped boundary cells on every small focus shift — evict + a 2–3 s recompose of a 340 MB
+    // cell for a one-step camera move (129 recomposes in minutes). A RESIDENT cell must keep its slot as
+    // long as it stays near the ring (within the sticky window); newcomers only enter freed slots. ──────
+
+    [Fact]
+    public void Plan_SmallFocusShifts_NeverChurnResidentFineCells()
+    {
+        var policy = new TwoLevelDetailResidencyPolicy(Fine(cellMb: 100, cap: 4), Coarse(cellMb: 50, cap: 12), 4000 * Mb, Backing);
+        TwoLevelDesired first = policy.Plan(Focus, 0, 0, baseResidentBytes: 0);
+        var resident = new HashSet<int>(first.FineCells);
+
+        // "Najdrobniejszy ruch" = shifts well under one cell pitch (153.6 m). Beyond a pitch the ring has
+        // genuinely moved and a swap is CORRECT — hysteresis kills jitter, it must not pin the ring.
+        bool memorylessWouldChurn = false;
+        for (int step = 1; step <= 7; step++)
+        {
+            var shifted = new GeoPoint(Focus.Latitude, Focus.Longitude + (step * 20.0 * 0.0000137)); // ~20 m east per step
+            TwoLevelDesired sticky = policy.Plan(shifted, 0, 0, 0, resident, residentCoarse: null);
+            TwoLevelDesired memoryless = policy.Plan(shifted, 0, 0, 0);
+            memorylessWouldChurn |= !new HashSet<int>(memoryless.FineCells).SetEquals(resident);
+
+            sticky.FineCells.Should().BeEquivalentTo(
+                resident,
+                $"a {step * 20} m focus shift must not evict resident fine cells (sticky window)");
+        }
+
+        memorylessWouldChurn.Should().BeTrue("the walk must be long enough that the memoryless ranking WOULD have churned");
+    }
+
+    [Fact]
+    public void Plan_LargeFocusShift_ReleasesFarResidents()
+    {
+        var policy = new TwoLevelDetailResidencyPolicy(Fine(cellMb: 100, cap: 4), Coarse(cellMb: 50, cap: 12), 4000 * Mb, Backing);
+        TwoLevelDesired first = policy.Plan(Focus, 0, 0, baseResidentBytes: 0);
+        var resident = new HashSet<int>(first.FineCells);
+
+        var far = new GeoPoint(Focus.Latitude, Focus.Longitude + 0.0246); // ~1.8 km east — old ring left behind
+        TwoLevelDesired moved = policy.Plan(far, 0, 0, 0, resident, residentCoarse: null);
+
+        moved.FineCells.Should().NotBeEquivalentTo(resident, "hysteresis must not pin cells the camera abandoned");
+    }
 }

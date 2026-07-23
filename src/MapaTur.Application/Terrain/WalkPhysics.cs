@@ -132,6 +132,25 @@ public sealed class WalkPhysics
         this.jumpsUsed = 0;
     }
 
+    /// <summary>
+    /// Deliberately drops the auto-belay (the X key): every piton comes off the wall and the rope goes with
+    /// them. Hanging on the rope this is the "wypnij się" moment — nothing holds the body any more, so the
+    /// next <see cref="Step"/> integrates a free fall all the way down (no piton = no re-catch). On safe
+    /// ground it merely clears the gear. A later scramble plants fresh pitons as usual.
+    /// </summary>
+    public void ReleaseProtection()
+    {
+        bool wasHeldByRope = IsRoped;
+        ClearPitons();
+        if (wasHeldByRope)
+        {
+            IsHanging = false;
+            IsGrounded = false;
+            IsSliding = false;
+            VerticalVelocity = 0f; // the fall starts from rest at the hang point
+        }
+    }
+
     /// <summary>Drops the walker at <paramref name="positionXY"/> and re-grounds it on the terrain there (feet on
     /// the ground, no vertical velocity). Used when entering walk mode or when the camera is repositioned.</summary>
     public void Teleport(Vector2 positionXY)

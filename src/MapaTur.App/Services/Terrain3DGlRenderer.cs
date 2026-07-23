@@ -91,11 +91,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform vec2 uOrthoMinXY;\n" +     // ortho coverage AABB (world XY about the scene anchor) — beyond it the UV clamps
         "uniform vec2 uOrthoMaxXY;\n" +
         "uniform float uOrthoBlendMeters;\n" + // soft fade ortho→hypsometric at the coverage edge; 0 = no cull (pure ortho)
-        // Hi-res ortho DETAIL overlay (PoC, docs/PLAN-ortho-highres-poc.md): up to two extra resident textures
-        // (det25 ~0.25 m, det05 ~0.05 m) drape over the base ortho colour INSIDE their world-space AABB, finest
-        // last (det05 wins where both cover). Sampled in the STABLE frame (vStableWorldPos.xy), same as the base
-        // ortho coverage test, so the overlay stays pinned when the camera tilts (§C.1). uUseDet* fold in the
-        // PoC master flag on the CPU side, so 0 = strict no-op (base ortho unchanged).
+                                               // Hi-res ortho DETAIL overlay (PoC, docs/PLAN-ortho-highres-poc.md): up to two extra resident textures
+                                               // (det25 ~0.25 m, det05 ~0.05 m) drape over the base ortho colour INSIDE their world-space AABB, finest
+                                               // last (det05 wins where both cover). Sampled in the STABLE frame (vStableWorldPos.xy), same as the base
+                                               // ortho coverage test, so the overlay stays pinned when the camera tilts (§C.1). uUseDet* fold in the
+                                               // PoC master flag on the CPU side, so 0 = strict no-op (base ortho unchanged).
         "uniform sampler2D uOrthoDet25;\n" +
         "uniform sampler2D uOrthoDet05;\n" +
         "uniform int uUseDet25;\n" +
@@ -104,6 +104,19 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform vec2 uDet25MaxXY;\n" +
         "uniform vec2 uDet05MinXY;\n" +
         "uniform vec2 uDet05MaxXY;\n" +
+        // Streamed det05 as a TEXTURE ARRAY (2026-07-20, "10% hires"): the old per-draw single-cell bind
+        // meant a terrain tile straddling 2×2 det05 cells showed 5 cm only on its intersection with the
+        // ONE chosen cell — 9 resident cells, 1 rendered per tile. The array holds EVERY resident cell as
+        // a layer; the fragment picks its best-centred containing cell from the AABB list, so all resident
+        // detail paints everywhere it exists. Slot i = layer i; min>max marks an empty slot.
+        // TWO slices (units 12 + 13): one 12-layer 8192² array with mips is ≈4.295 GB — past the 32-bit
+        // per-resource ceiling that silently killed the context on 07-20. Slice A carries layers 0..7,
+        // slice B the rest; the fragment picks the slice from its slot index (best < 8).
+        "uniform mediump sampler2DArray uOrthoDet05Arr;\n" +
+        "uniform mediump sampler2DArray uOrthoDet05ArrB;\n" +
+        "uniform vec4 uDet05Aabb[16];\n" + // slots ≥ Det05HardCapCells (12 desktop) — headroom without GLSL edits
+        "uniform float uDet05Alpha[16];\n" + // per-slot fade-in after promote (0→1 over ~300 ms) — no popping
+        "uniform int uUseDet05Arr;\n" +
         "uniform float uDetailBlendMeters;\n" + // soft edge fade of the detail AABB back to the base ortho
         "uniform int uOrthoDetailColorMode;\n" + // 0 = raw detail, 1 = base de-blue transform (R3 slice A/B)
         "uniform int uOrthoDetailDebugBounds;\n" + // 1 = outline detail cell AABB edges (diagnostics)
@@ -255,6 +268,83 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  float sy = s.z / (s.z + s.w);\n" +
         "  return mix(mix(s11, s01, sx), mix(s10, s00, sx), sy);\n" +
         "}\n" +
+        // Array-layer twin of texBicubic (same weights, fetches one layer of the det05 array).
+        "vec3 texBicubicArr(mediump sampler2DArray t, vec2 uv, float layer, vec2 ts){\n" +
+        "  vec2 coord = uv * ts - 0.5;\n" +
+        "  vec2 fxy = fract(coord);\n" +
+        "  coord -= fxy;\n" +
+        "  vec4 xc = cubicW(fxy.x);\n" +
+        "  vec4 yc = cubicW(fxy.y);\n" +
+        "  vec4 cx = coord.xxyy + vec2(-0.5, 1.5).xyxy;\n" +
+        "  vec4 s = vec4(xc.xz + xc.yw, yc.xz + yc.yw);\n" +
+        "  vec4 off = cx + vec4(xc.yw, yc.yw) / s;\n" +
+        "  off *= vec4(1.0 / ts.x, 1.0 / ts.x, 1.0 / ts.y, 1.0 / ts.y);\n" +
+        "  vec3 s00 = textureLod(t, vec3(off.x, off.z, layer), 0.0).rgb;\n" +
+        "  vec3 s10 = textureLod(t, vec3(off.y, off.z, layer), 0.0).rgb;\n" +
+        "  vec3 s01 = textureLod(t, vec3(off.x, off.w, layer), 0.0).rgb;\n" +
+        "  vec3 s11 = textureLod(t, vec3(off.y, off.w, layer), 0.0).rgb;\n" +
+        "  float sx = s.x / (s.x + s.y);\n" +
+        "  float sy = s.z / (s.z + s.w);\n" +
+        "  return mix(mix(s11, s01, sx), mix(s10, s00, sx), sy);\n" +
+        "}\n" +
+        // ABSOLUTE de-blue — the HARD RULE ("ORTO bez cieni na KAŻDEJ warstwie", user 07-16/20). Removes the
+        // sky-light blue cast burnt into shadowed GUGiK ortho, PER PIXEL, independent of the base. The 07-20
+        // "conditional tone harmonisation" experiment dropped this and blue bled back through shadowed rock
+        // (Rysy / Czarny Staw). Design constraints learnt the hard way: (a) LUMA-GATE — do nothing in crushed
+        // black, or WebP chroma noise gets amplified into the "zielona breja" za Mnichem; (b) NEVER ADD GREEN
+        // (the old §3.13 `G += ex` was the green-paint bug) — only pull blue DOWN to the R/G level and mildly
+        // desaturate toward neutral; (c) gated by blue-excess, so lit ground and true dark-green forest
+        // (ex≈0) are untouched → the MO showcase is a no-op here. Per-pixel + identical everywhere = seam-safe.
+        "vec3 deblueShadow(vec3 dc){\n" +
+        "  float ex = max(0.0, dc.b - max(dc.r, dc.g));\n" +               // blue excess = shadow sky cast
+        "  float lum = dot(dc, vec3(0.299, 0.587, 0.114));\n" +
+        "  float lift = smoothstep(0.05, 0.16, lum);\n" +                  // crushed black untouched (no noise amp)
+        "  dc.b = clamp(dc.b - (0.85 * ex * lift), 0.0, 1.0);\n" +         // pull blue to R/G level (NO green added)
+        "  float sw = smoothstep(0.005, 0.06, ex);\n" +
+        "  float grey = (dc.r + dc.g + dc.b) / 3.0;\n" +
+        "  return mix(dc, vec3(grey), 0.35 * sw * lift);\n" +             // mild desat toward neutral in shadow
+        "}\n" +
+        // Streamed det05 from the cell ARRAY: pick the best-centred resident cell containing this fragment
+        // (cells overlap — first-hit could sit at a cell edge mid-fade while a neighbour holds the point
+        // centrally), then sample OUTSIDE the loop so the implicit-derivative fetch stays well-defined.
+        // Same colour law as applyOrthoDetail mode 1 (conditional tone harmonisation) — KONTRAKT-ORTO §1.
+        "vec3 applyOrthoDet05Array(vec2 wxy, vec3 baseC, float blendM){\n" +
+        "  if (uUseDet05Arr != 1) return baseC;\n" +
+        "  int best = -1; float bestEdge = 0.0;\n" +
+        "  for (int i = 0; i < 16; i++) {\n" +
+        "    vec2 mn = uDet05Aabb[i].xy; vec2 mx = uDet05Aabb[i].zw;\n" +
+        "    if (mx.x <= mn.x) continue;\n" +
+        "    vec2 cd = min(wxy - mn, mx - wxy);\n" +
+        "    float edge = min(cd.x, cd.y);\n" +
+        "    if (edge > bestEdge) { bestEdge = edge; best = i; }\n" +
+        "  }\n" +
+        "  if (best < 0) return baseC;\n" +
+        "  vec2 mn = uDet05Aabb[best].xy; vec2 mx = uDet05Aabb[best].zw;\n" +
+        "  vec2 uv = vec2((wxy.x - mn.x) / (mx.x - mn.x), (mx.y - wxy.y) / (mx.y - mn.y));\n" +
+        "  vec2 ts = vec2(textureSize(uOrthoDet05Arr, 0).xy);\n" +
+        "  bool inA = best < 8;\n" + // slot index → slice (A: 0..7, B: 8..15); must match Det05ArraySliceLayers
+        "  float lz = inA ? float(best) : float(best - 8);\n" +
+        "  vec4 dcs = inA ? texture(uOrthoDet05Arr, vec3(uv, lz)) : texture(uOrthoDet05ArrB, vec3(uv, lz));\n" +
+        "  vec3 dc = dcs.rgb;\n" +
+        "  vec2 fp = fwidth(uv) * ts;\n" +
+        "  if (max(fp.x, fp.y) < 1.0) { dc = inA ? texBicubicArr(uOrthoDet05Arr, uv, lz, ts) : texBicubicArr(uOrthoDet05ArrB, uv, lz, ts); }\n" +
+        "  if (uOrthoDetailColorMode == 1) {\n" +
+        "    dc = deblueShadow(dc);\n" +                                   // (1) HARD RULE: absolute blue-cast removal
+        "    float toneLod = max(0.0, log2(max(ts.x / (mx.x - mn.x), ts.y / (mx.y - mn.y))));\n" +
+        "    vec3 dRaw = inA ? textureLod(uOrthoDet05Arr, vec3(uv, lz), toneLod).rgb : textureLod(uOrthoDet05ArrB, vec3(uv, lz), toneLod).rgb;\n" +
+        "    vec3 delta = deblueShadow(dRaw) - deblueShadow(baseC);\n" +   // (2) both de-blued → delta = pure exposure seam (never re-adds blue)
+        "    float mism = smoothstep(0.10, 0.28, max(abs(delta.r), max(abs(delta.g), abs(delta.b))));\n" +
+        "    dc = clamp(dc - (delta * mism), 0.0, 1.0);\n" +               //     harmonise only the survey exposure seam
+        "  }\n" +
+        "  vec2 cd = min(wxy - mn, mx - wxy);\n" +
+        "  float w = clamp(min(cd.x, cd.y) / max(blendM, 0.001), 0.0, 1.0) * dcs.a * uDet05Alpha[best];\n" +
+        "  vec3 outc = mix(baseC, dc, w);\n" +
+        "  if (uOrthoDetailDebugBounds == 1) {\n" +
+        "    float edge = min(cd.x, cd.y);\n" +
+        "    if (edge >= 0.0 && edge < 3.0) { outc = vec3(1.0, 0.0, 1.0); }\n" +
+        "  }\n" +
+        "  return outc;\n" +
+        "}\n" +
         // Hi-res ortho detail overlay: replace the base ortho colour with a finer texture where the fragment's
         // stable world XY falls inside [mn,mx], fading back over uDetailBlendMeters at the AABB edge (no hard
         // seam / UV-clamp stripe). `use` is a uniform so the early-out is uniform control flow — the implicit-LOD
@@ -275,18 +365,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // (G > B, ex≈0) and lit ground are untouched; luma is preserved (no washing), the transform is
         // per-pixel and identical everywhere (seam-safe). Mode 0 = raw detail (diagnostics, key '9').
         "  if (uOrthoDetailColorMode == 1) {\n" +
-        // Shadow correction, SURFACE-AWARE (user 07-16): the de-shadowed residue follows what the ground IS.
-        // Greenness of the underlying pixel (G vs R — survives the sky cast) gates the §3.13 green shift:
-        // vegetation in shadow keeps its light-green character (matches the lit neighbours), while ROCK
-        // (G≈R) gets NO added green — "granit skał zieleni nie potrzebuje" — just the blue cast removed and
-        // a stronger pull to neutral grey. Per-pixel, seam-safe, luma preserved.
-        "    float ex = max(0.0, dc.b - max(dc.r, dc.g));\n" +
-        "    float veg = smoothstep(0.01, 0.05, dc.g - dc.r);\n" +
-        "    dc.g = clamp(dc.g + 0.35 * ex * veg, 0.0, 1.0);\n" +
-        "    dc.b = clamp(dc.b - 0.85 * ex, 0.0, 1.0);\n" +
-        "    float sw = smoothstep(0.005, 0.06, ex);\n" +
-        "    float grey = (dc.r + dc.g + dc.b) / 3.0;\n" +
-        "    dc = mix(dc, vec3(grey), (0.3 + 0.4 * (1.0 - veg)) * sw);\n" +
+        // Two-step colour law (2026-07-20, after the Rysy blue-bleed verdict). (1) ABSOLUTE de-blue — the
+        // hard rule, removes the shadow sky-cast per pixel on this layer too. (2) CONDITIONAL tone
+        // harmonisation — pulls the (already de-blued) detail toward the (already de-blued) base ONLY where
+        // their low-frequency tone still deviates (survey EXPOSURE seam, not colour cast). Below threshold
+        // it is an exact identity, so the MO showcase renders verbatim and stays sharp at every distance;
+        // the earlier "tone-from-base" law that reduced distant views to bare base is NOT reinstated.
+        "    dc = deblueShadow(dc);\n" +                                   // (1) HARD RULE: absolute blue-cast removal
+        "    float toneLod = max(0.0, log2(max(ts.x / (mx.x - mn.x), ts.y / (mx.y - mn.y))));\n" +
+        "    vec3 delta = deblueShadow(textureLod(tex, uv, toneLod).rgb) - deblueShadow(baseC);\n" + // (2) both de-blued → delta = pure exposure seam
+        "    float mism = smoothstep(0.10, 0.28, max(abs(delta.r), max(abs(delta.g), abs(delta.b))));\n" +
+        "    dc = clamp(dc - (delta * mism), 0.0, 1.0);\n" +               //     harmonise only the survey exposure seam
         "  }\n" +
         "  vec2 cd = min(wxy - mn, mx - wxy);\n" +                    // >0 inside the AABB on both axes
         "  float w = clamp(min(cd.x, cd.y) / max(blendM, 0.001), 0.0, 1.0) * rangeFade * dcs.a;\n" + // ×alpha: holes (a=0) keep base/coarser tier
@@ -607,7 +696,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // first then det05 so the finest wins where both AABBs overlap.
         "    float det25Fade = 1.0 - smoothstep(uDet25FadeInner, uDet25FadeOuter, length(vStableWorldPos.xy - uDet25EyeXY));\n" +
         "    c = applyOrthoDetail(uOrthoDet25, uUseDet25, uDet25MinXY, uDet25MaxXY, uDetailBlendMeters, vStableWorldPos.xy, c, det25Fade);\n" +
-        "    c = applyOrthoDetail(uOrthoDet05, uUseDet05, uDet05MinXY, uDet05MaxXY, uDetailBlendMeters, vStableWorldPos.xy, c, 1.0);\n" +
+        "    c = applyOrthoDetail(uOrthoDet05, uUseDet05, uDet05MinXY, uDet05MaxXY, uDetailBlendMeters, vStableWorldPos.xy, c, 1.0);\n" + // static 5 cm mosaic fallback (non-streaming installs)
+        "    c = applyOrthoDet05Array(vStableWorldPos.xy, c, uDetailBlendMeters);\n" + // streamed det05: every resident cell paints (KONTRAKT-ORTO)
+
         // Coverage blend: beyond the ortho's geographic coverage, fade ortho -> hypsometric (vColor) over
         // uOrthoBlendMeters; fully outside = hypsometric. Stable world frame so it's camera-relative-correct.
         "    vec2 cd = min(vStableWorldPos.xy - uOrthoMinXY, uOrthoMaxXY - vStableWorldPos.xy);\n" +
@@ -1961,6 +2052,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int det25MaxXyLocation = -1;
     private int det05MinXyLocation = -1;
     private int det05MaxXyLocation = -1;
+    private int det05ArrSamplerLocation = -1;   // sampler2DArray slice A on unit 12 (layers 0..7)
+    private int det05ArrBSamplerLocation = -1;  // sampler2DArray slice B on unit 13 (layers 8..15)
+    private int det05ArrAabbLocation = -1;      // vec4[16] per-LAYER world AABBs
+    private int det05ArrAlphaLocation = -1;     // float[16] per-slot promote fade-in
+    private int useDet05ArrLocation = -1;
     private int detailBlendLocation = -1;
     private int detailColorModeLocation = -1;
     private int detailDebugBoundsLocation = -1;
@@ -2018,7 +2114,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private MapaTur.Domain.Geography.GeoPoint? det25FocusOverride; // MAPATUR_DET25_FOCUS=lat,lon — force the ring focus (perf measurement over a known-covered spot regardless of camera)
     private int det25ComposeInFlight;           // off-thread composes currently running (bounded to avoid CPU saturation)
     private const int Det25MaxConcurrentComposes = 2; // 2 keeps the 89 MB compose-buffer allocation rate down (heap balloon fix)
-    private const int Det25HardCapCells = 8;    // ≈0.7 GB of 89 MB cells — leaves VRAM headroom for the 3 GB terrain mesh
+    // Desktop caps raised 2026-07-20 ("pół Mnicha rozmyte — nie starcza puli"): a 64 GB / discrete-GPU
+    // desktop can hold far more detail than the old one-size caps; phones keep the conservative values.
+    private static readonly int Det25HardCapCells = OperatingSystem.IsWindows() ? 12 : 8; // 89 MB cells
     private const double Det25RingRadiusMeters = 1500.0;
     private const double Det25FastMotionSpeedMps = 25.0; // above this the ring is suppressed (dragon flight)
     private const double Det25PrefetchLeadMeters = 400.0;
@@ -2037,13 +2135,31 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private readonly Dictionary<int, DetailCellGpu> det05Cells = new();
     private readonly List<int> det05UploadQueue = new();
     private long det05ResidentBytes;
-    private uint det05BoundTexture;
     private int det05ComposeInFlight;
     private int det05LastDesired;
     private const int Det05CoverageTiles = 16;  // 8192² cell (409.6 m @ 0.05 m) — 128 m margin, seam-safe for z17
-    private const int Det05HardCapCells = 3;    // 5 cm is a tight near-window; each cell ≈341 MB
-    private const double Det05RingRadiusMeters = 350.0;
-    private const int Det05CoarseBackingCells = 4; // det25 cells reserved to back the det05 ring (no-hole)
+    // Desktop: 12 × ≈357 MB ≈ 4.3 GB of cells — split across TWO array textures (see
+    // Det05ArraySliceLayers): a SINGLE 12-layer 8192² array with mips is ≈4.295 GB, just past the 32-bit
+    // per-RESOURCE ceiling (~4.294 GB) of D3D11/driver size fields — the allocation failed SILENTLY
+    // (nothing checked glGetError) and the sticky error poisoned terrain-tile allocations (white holes,
+    // looping "doczytywanie", 2026-07-20). The card was never full — a 16 GB GPU died on one oversized
+    // resource. Each slice stays ≤8 layers ≈2.86 GB; EnsureDet05Array verifies every allocation.
+    private static readonly int Det05HardCapCells = OperatingSystem.IsWindows() ? 12 : 3;
+
+    /// <summary>Layers per det05 array texture — keeps every single GPU resource ≈2.86 GB, safely under
+    /// the 32-bit (~4.29 GB) per-resource ceiling. Must match the shader's slice constant (best &lt; 8).</summary>
+    private const int Det05ArraySliceLayers = 8;
+    private static readonly double Det05RingRadiusMeters = OperatingSystem.IsWindows() ? 600.0 : 350.0;
+    private static readonly int Det05CoarseBackingCells = OperatingSystem.IsWindows() ? 6 : 4; // det25 cells reserved to back the det05 ring (no-hole)
+
+    // det05 cell TEXTURE ARRAYS (units 12 + 13): allocated lazily on first upload (TexStorage3D, error-
+    // CHECKED — the 07-20 lesson), layer per resident cell, per-fragment cell pick in the shader. Global
+    // layer index L maps to slice A (L < Det05ArraySliceLayers) or slice B (L − slice). Shader slot list
+    // is fixed at 16; smaller caps simply leave the rest as sentinels.
+    private uint det05ArrayTexture;             // slice A (layers 0..7)
+    private uint det05ArrayTextureB;            // slice B (layers 8..15); 0 when the cap fits slice A
+    private readonly Stack<int> det05FreeLayers = new();
+    private long det05ArrayUniformsTick = -1;   // per-frame guard for the AABB uniform upload
 
     /// <summary>One streamed det25 detail cell on the GPU. <see cref="Texture"/> is 0 (never sampled by the draw
     /// path) until the strip-upload completes and promotes the staging texture — mirrors the base-ortho tile.</summary>
@@ -2056,6 +2172,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         public required int Px { get; init; }
         public uint Texture;                 // promoted, drawable; 0 until fully uploaded
         public uint StagingTexture;          // allocated empty, filled row-by-row; 0 = no upload in progress
+        public int Layer = -1;               // det05 ARRAY path: assigned array layer (-1 = none)
+        public bool LayerReady;              // det05 ARRAY path: layer fully uploaded — safe to reference in the AABB list
+        public double PromoteMs;             // det05 ARRAY path: frame-clock ms of the promote (drives the fade-in)
         public int UploadedRows;
         public byte[]? Pending;              // composed buffer awaiting strip-upload
         public byte[]? Rented;               // pooled cell buffer lent to the in-flight compose (owner: this cell until returned)
@@ -2313,7 +2432,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // others were evicted/frustum-culled and drew the un-textured hypsometric GREEN tint. Streaming +
     // eviction only earns its keep for a set far larger than VRAM (future online whole-voivodeship
     // tiles); for a small bundled set StreamOrthoTextures keeps every cell resident (see below).
-    private const long OrthoVramBudgetBytes = 3L * 1024 * 1024 * 1024; // ~3 GB resident ortho cap
+    // Desktop 9 GB (2026-07-20): the raised caps (12 × 357 MB det05 + 12 × 89 MB det25 ≈ 5.4 GB) plus the
+    // ~2 GB base set fit a 16 GB card comfortably. The 07-20 white-holes incident was NOT this ledger —
+    // it was a single >4.29 GB resource (see Det05ArraySliceLayers); the ledger allocates nothing itself.
+    private static readonly long OrthoVramBudgetBytes =
+        OperatingSystem.IsWindows() ? 9L * 1024 * 1024 * 1024 : 3L * 1024 * 1024 * 1024;
     private OrthoResidencyPlanner? orthoPlanner;
     // Per-cell world-space AABB (keyed by OrthoTileIndex), unioned from the mesh tiles that sample it.
     private readonly Dictionary<int, (Vector3 Min, Vector3 Max)> orthoCellBounds = new();
@@ -3061,8 +3184,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 (int ci, int cj) = det05Grid.CellFromKey(key);
                 det05Cells[key] = new DetailCellGpu
                 {
-                    Key = key, Ci = ci, Cj = cj,
-                    Bounds = det05Grid.CellBounds(ci, cj), Px = det05Grid.CellPx,
+                    Key = key,
+                    Ci = ci,
+                    Cj = cj,
+                    Bounds = det05Grid.CellBounds(ci, cj),
+                    Px = det05Grid.CellPx,
                     DesiredTick = det25FrameTick,
                 };
             }
@@ -3077,7 +3203,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
             if (det05Cells.TryGetValue(key, out DetailCellGpu? cell)
                 && cell.Compose is null && !cell.Empty
-                && cell.Texture == 0 && cell.StagingTexture == 0 && cell.Pending is null)
+                && !cell.LayerReady && cell.Pending is null)
             {
                 int ci = cell.Ci, cj = cell.Cj;
                 MapaTur.Application.Terrain.IOrthoDetailComposer composer = det05Composer;
@@ -3169,19 +3295,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             cell.Compose = null;
         }
 
-        if (cell.Texture != 0)
+        if (cell.LayerReady)
         {
-            gl.DeleteTexture(cell.Texture);
             det05ResidentBytes -= OrthoVramBudget.CellResidentBytes(cell.Px, cell.Px);
-            cell.Texture = 0;
         }
 
-        if (cell.StagingTexture != 0)
+        if (cell.Layer >= 0)
         {
-            gl.DeleteTexture(cell.StagingTexture);
-            cell.StagingTexture = 0;
+            det05FreeLayers.Push(cell.Layer); // the array layer is reused; nothing to delete
+            cell.Layer = -1;
         }
 
+        cell.LayerReady = false;
         if (composeAlive)
         {
             cell.Rented = null; cell.Pending = null; // deliberate drop — the orphaned task owns the buffer now
@@ -3195,6 +3320,88 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         det05UploadQueue.Remove(cell.Key);
     }
 
+    // Allocates the det05 cell ARRAYS once (TexStorage3D — immutable storage, full mip chain), split into
+    // ≤Det05ArraySliceLayers-layer slices so no single GPU resource crosses the 32-bit ~4.29 GB ceiling
+    // (the 07-20 white-holes incident: one 12-layer 4.295 GB array failed SILENTLY and its sticky GL error
+    // poisoned terrain-tile allocations). Every allocation is glGetError-VERIFIED; on failure the cap
+    // degrades to whatever allocated instead of poisoning the context.
+    private unsafe void EnsureDet05Array(GL gl)
+    {
+        if (det05ArrayTexture != 0 || det05Grid is null)
+        {
+            return;
+        }
+
+        int px = det05Grid.CellPx;
+        int wanted = Math.Max(1, Det05HardCapCells);
+        int layersA = Math.Min(wanted, Det05ArraySliceLayers);
+        int layersB = Math.Max(0, wanted - layersA);
+
+        while (gl.GetError() != GLEnum.NoError) { } // drain stale errors so the checks below test OUR calls
+
+        det05ArrayTexture = AllocateDet05Slice(gl, px, layersA, "A");
+        if (det05ArrayTexture == 0)
+        {
+            return; // loud log inside; next frame retries — det25/base carry the view meanwhile
+        }
+
+        int allocated = layersA;
+        if (layersB > 0)
+        {
+            det05ArrayTextureB = AllocateDet05Slice(gl, px, layersB, "B");
+            if (det05ArrayTextureB != 0)
+            {
+                allocated += layersB;
+            }
+        }
+
+        det05FreeLayers.Clear();
+        for (int i = allocated - 1; i >= 0; i--)
+        {
+            det05FreeLayers.Push(i);
+        }
+
+        Log.Information(
+            "[Det05] cell ARRAYS allocated: {Px}px, slice A {A} + slice B {B} layers ({GB:F1} GB with mips), glGetError clean — per-fragment cell pick",
+            px, layersA, det05ArrayTextureB != 0 ? layersB : 0,
+            allocated * OrthoVramBudget.CellResidentBytes(px, px) / (1024.0 * 1024.0 * 1024.0));
+    }
+
+    // One ≤2.9 GB slice, error-checked: returns 0 (and deletes the name) if the driver refused the
+    // storage or any parameter call — the caller degrades gracefully instead of sampling a corpse.
+    private uint AllocateDet05Slice(GL gl, int px, int layers, string name)
+    {
+        uint levels = (uint)(Math.ILogB(px) + 1);
+        uint tex = gl.GenTexture();
+        gl.BindTexture(TextureTarget.Texture2DArray, tex);
+        gl.TexStorage3D(TextureTarget.Texture2DArray, levels, SizedInternalFormat.Rgba8, (uint)px, (uint)px, (uint)layers);
+        GLEnum error = gl.GetError();
+        if (error != GLEnum.NoError)
+        {
+            gl.BindTexture(TextureTarget.Texture2DArray, 0);
+            gl.DeleteTexture(tex);
+            Log.Warning(
+                "[Det05] slice {Name} TexStorage3D({Px}px × {Layers}) FAILED: GL 0x{Err:X} — degrading (no crash, coarser tiers carry the view)",
+                name, px, layers, (int)error);
+            return 0;
+        }
+
+        gl.TexParameter(TextureTarget.Texture2DArray, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
+        gl.TexParameter(TextureTarget.Texture2DArray, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+        gl.TexParameter(TextureTarget.Texture2DArray, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+        gl.TexParameter(TextureTarget.Texture2DArray, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+        const GLEnum maxAnisotropyPName = (GLEnum)0x84FF;
+        Span<float> maxAniso = stackalloc float[1] { 1f };
+        gl.GetFloat(maxAnisotropyPName, maxAniso);
+        if (maxAniso[0] > 1f)
+        {
+            gl.TexParameter(TextureTarget.Texture2DArray, (TextureParameterName)0x84FE, maxAniso[0]);
+        }
+
+        gl.BindTexture(TextureTarget.Texture2DArray, 0);
+        return tex;
+    }
+
     private unsafe void DrainDet05Uploads(GL gl)
     {
         if (det05UploadQueue.Count == 0)
@@ -3202,12 +3409,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             return;
         }
 
-        double start = frameClock.ElapsedMilliseconds;
-        const GLEnum maxAnisotropyPName = (GLEnum)0x84FF;
-        Span<float> maxAniso = stackalloc float[1] { 1f };
-        gl.GetFloat(maxAnisotropyPName, maxAniso);
-        float aniso = maxAniso[0] < 1f ? 1f : maxAniso[0];
+        EnsureDet05Array(gl);
+        if (det05ArrayTexture == 0)
+        {
+            return;
+        }
 
+        double start = frameClock.ElapsedMilliseconds;
+        uint bound = 0;
+        bool promotedA = false, promotedB = false;
         while (det05UploadQueue.Count > 0)
         {
             int key = det05UploadQueue[0];
@@ -3218,19 +3428,37 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             }
 
             int w = cell.Px, h = cell.Px;
-            if (cell.StagingTexture == 0)
+            if (cell.Layer < 0)
             {
-                cell.StagingTexture = gl.GenTexture();
+                if (!det05FreeLayers.TryPop(out int layer))
+                {
+                    break; // every layer occupied — eviction frees one on a later frame
+                }
+
+                cell.Layer = layer;
                 cell.UploadedRows = 0;
-                gl.BindTexture(TextureTarget.Texture2D, cell.StagingTexture);
-                gl.TexImage2D(TextureTarget.Texture2D, 0, (int)InternalFormat.Rgba8, (uint)w, (uint)h, 0,
-                    PixelFormat.Rgba, PixelType.UnsignedByte, null);
-            }
-            else
-            {
-                gl.BindTexture(TextureTarget.Texture2D, cell.StagingTexture);
             }
 
+            // Global layer → slice + local z (slice A carries layers 0..slice-1, B the rest).
+            bool inA = cell.Layer < Det05ArraySliceLayers;
+            uint target = inA ? det05ArrayTexture : det05ArrayTextureB;
+            int z = inA ? cell.Layer : cell.Layer - Det05ArraySliceLayers;
+            if (target == 0)
+            {
+                det05UploadQueue.RemoveAt(0); // slice B refused by the driver — cell waits for an A slot
+                det05FreeLayers.Push(cell.Layer);
+                cell.Layer = -1;
+                continue;
+            }
+
+            if (bound != target)
+            {
+                gl.BindTexture(TextureTarget.Texture2DArray, target);
+                bound = target;
+            }
+
+            // Strip-upload straight into the assigned layer: a partial layer is never sampled, because the
+            // fragment shader only sees cells present in the AABB slot list (LayerReady gates that).
             int rowBytes = w * 4;
             int rowsPerChunk = Math.Max(1, OrthoUploadBytesPerChunk / Math.Max(1, rowBytes));
             while (cell.UploadedRows < h)
@@ -3238,8 +3466,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 int rows = Math.Min(rowsPerChunk, h - cell.UploadedRows);
                 fixed (byte* p = &rgba[(long)cell.UploadedRows * rowBytes])
                 {
-                    gl.TexSubImage2D(TextureTarget.Texture2D, 0, 0, cell.UploadedRows, (uint)w, (uint)rows,
-                        PixelFormat.Rgba, PixelType.UnsignedByte, p);
+                    gl.TexSubImage3D(TextureTarget.Texture2DArray, 0, 0, cell.UploadedRows, z,
+                        (uint)w, (uint)rows, 1, PixelFormat.Rgba, PixelType.UnsignedByte, p);
                 }
 
                 cell.UploadedRows += rows;
@@ -3251,22 +3479,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
             if (cell.UploadedRows >= h)
             {
-                gl.GenerateMipmap(TextureTarget.Texture2D);
-                gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
-                gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
-                gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
-                gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
-                if (aniso > 1f)
-                {
-                    gl.TexParameter(TextureTarget.Texture2D, (TextureParameterName)0x84FE, aniso);
-                }
-
-                cell.Texture = cell.StagingTexture;
-                cell.StagingTexture = 0;
-                ReleaseCellBuffer(cell); // the final TexSubImage2D has copied — recycle the pooled buffer
+                cell.LayerReady = true;
+                cell.PromoteMs = frameClock.ElapsedMilliseconds;
+                if (inA) { promotedA = true; } else { promotedB = true; }
+                ReleaseCellBuffer(cell); // the final TexSubImage3D has copied — recycle the pooled buffer
                 det05ResidentBytes += OrthoVramBudget.CellResidentBytes(w, h);
                 det05UploadQueue.RemoveAt(0);
-                Log.Information("[Det05] cell ({Ci},{Cj}) compose {C:F0}ms | {Px}px resident", cell.Ci, cell.Cj, cell.ComposeMs, w);
+                Log.Information(
+                    "[Det05] cell ({Ci},{Cj}) compose {C:F0}ms | layer {Layer} ({Slice}) resident",
+                    cell.Ci, cell.Cj, cell.ComposeMs, cell.Layer, inA ? "A" : "B");
             }
 
             if (frameClock.ElapsedMilliseconds - start >= Det25UploadBudgetMsPerFrame)
@@ -3275,53 +3496,130 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             }
         }
 
-        gl.BindTexture(TextureTarget.Texture2D, 0);
+        // Regenerate mips only for the slice(s) that finished a layer this frame. Layers mid-upload get
+        // garbage mips — harmless, they are not in the slot list yet and get a fresh chain on completion.
+        if (promotedA || promotedB)
+        {
+            double t0 = frameClock.ElapsedMilliseconds;
+            if (promotedA)
+            {
+                gl.BindTexture(TextureTarget.Texture2DArray, det05ArrayTexture);
+                gl.GenerateMipmap(TextureTarget.Texture2DArray);
+            }
+
+            if (promotedB && det05ArrayTextureB != 0)
+            {
+                gl.BindTexture(TextureTarget.Texture2DArray, det05ArrayTextureB);
+                gl.GenerateMipmap(TextureTarget.Texture2DArray);
+            }
+
+            GLEnum mipError = gl.GetError();
+            if (mipError != GLEnum.NoError)
+            {
+                Log.Warning("[Det05] array mip regen GL error 0x{Err:X}", (int)mipError);
+            }
+            else
+            {
+                Log.Information("[Det05] array mip regen {Ms:F0} ms", frameClock.ElapsedMilliseconds - t0);
+            }
+        }
+
+        gl.BindTexture(TextureTarget.Texture2DArray, 0);
     }
 
-    // Per terrain draw: bind the nearest resident det05 cell (containing the tile's centre) to unit 11 (finest-wins
-    // over det25 on unit 10), or gate det05 OFF for this tile so the coarser det25/base shows.
-    private void BindDet05ForTile(GL gl, TerrainMesh3D mesh, TerrainMesh3D anchorMesh)
+    // Streamed det05, ARRAY path (2026-07-20): ONE per-frame upload of every resident cell's world AABB
+    // (slot = array layer) + the array on unit 12 — the FRAGMENT picks its cell, so all resident detail
+    // paints everywhere it exists. Replaces the per-draw single-cell bind whose "one cell per terrain
+    // tile" was the root cause of the 10%-hires patchwork (a tile straddling 2×2 cells showed 5 cm only
+    // on the intersection with its centre cell). Kept per-tile signature/call-site; the frame-tick guard
+    // makes every call after the first a no-op.
+    private unsafe void BindDet05ForTile(GL gl, TerrainMesh3D mesh, TerrainMesh3D anchorMesh)
     {
-        if (det05Grid is null)
+        if (det05Grid is null || det05ArrayTexture == 0)
         {
-            gl.Uniform1(useDet05Location, 0);
+            gl.Uniform1(useDet05ArrLocation, 0);
             return;
         }
 
-        MapaTur.Domain.Geography.MapBounds b = mesh.Bounds;
-        var centre = new MapaTur.Domain.Geography.GeoPoint(
-            (b.SouthWest.Latitude + b.NorthEast.Latitude) * 0.5,
-            (b.SouthWest.Longitude + b.NorthEast.Longitude) * 0.5);
-        (int ci, int cj) = det05Grid.CellForPoint(centre);
-        int key = det05Grid.CellKey(ci, cj);
-
-        if (det05Cells.TryGetValue(key, out DetailCellGpu? cell) && cell.Texture != 0)
+        if (det05ArrayUniformsTick == det25FrameTick)
         {
-            if (cell.Texture != det05BoundTexture)
+            return; // uniforms for this frame are already up
+        }
+
+        det05ArrayUniformsTick = det25FrameTick;
+        Span<float> aabb = stackalloc float[16 * 4];
+        Span<float> alpha = stackalloc float[16];
+        alpha.Clear(); // stackalloc zero-init is not contractual — empty slots must read alpha 0
+        for (int i = 0; i < aabb.Length; i += 4)
+        {
+            aabb[i] = 1e9f; aabb[i + 1] = 1e9f; aabb[i + 2] = -1e9f; aabb[i + 3] = -1e9f; // min>max = empty slot
+        }
+
+        int ready = 0;
+        double nowMs = frameClock.ElapsedMilliseconds;
+        foreach (DetailCellGpu cell in det05Cells.Values)
+        {
+            if (!cell.LayerReady || cell.Layer < 0 || cell.Layer >= 16)
             {
-                gl.ActiveTexture(TextureUnit.Texture11);
-                gl.BindTexture(TextureTarget.Texture2D, cell.Texture);
-                gl.ActiveTexture(TextureUnit.Texture0);
-                det05BoundTexture = cell.Texture;
+                continue;
             }
 
             Vector3 sw = anchorMesh.GeoToWorld(cell.Bounds.SouthWest, 0f);
             Vector3 ne = anchorMesh.GeoToWorld(cell.Bounds.NorthEast, 0f);
-            gl.Uniform1(det05SamplerLocation, 11);
-            gl.Uniform2(det05MinXyLocation, Math.Min(sw.X, ne.X), Math.Min(sw.Y, ne.Y));
-            gl.Uniform2(det05MaxXyLocation, Math.Max(sw.X, ne.X), Math.Max(sw.Y, ne.Y));
-            gl.Uniform1(useDet05Location, 1);
+            int o = cell.Layer * 4;
+            aabb[o] = Math.Min(sw.X, ne.X);
+            aabb[o + 1] = Math.Min(sw.Y, ne.Y);
+            aabb[o + 2] = Math.Max(sw.X, ne.X);
+            aabb[o + 3] = Math.Max(sw.Y, ne.Y);
+            alpha[cell.Layer] = (float)Math.Clamp((nowMs - cell.PromoteMs) / 300.0, 0.0, 1.0); // 300 ms fade-in
+            ready++;
+        }
+
+        if (ready > 0)
+        {
+            gl.ActiveTexture(TextureUnit.Texture12);
+            gl.BindTexture(TextureTarget.Texture2DArray, det05ArrayTexture);
+            gl.ActiveTexture(TextureUnit.Texture13);
+            // Slice B on 13; when the driver refused B (or the cap fits A) alias A there — the branch is
+            // never taken for layers < 8, and an aliased bind keeps the sampler complete on every driver.
+            gl.BindTexture(TextureTarget.Texture2DArray, det05ArrayTextureB != 0 ? det05ArrayTextureB : det05ArrayTexture);
+            gl.ActiveTexture(TextureUnit.Texture0);
+            gl.Uniform1(det05ArrSamplerLocation, 12);
+            gl.Uniform1(det05ArrBSamplerLocation, 13);
+            fixed (float* p = aabb)
+            {
+                gl.Uniform4(det05ArrAabbLocation, 16, p);
+            }
+
+            fixed (float* p = alpha)
+            {
+                gl.Uniform1(det05ArrAlphaLocation, 16, p);
+            }
+
+            gl.Uniform1(useDet05ArrLocation, 1);
         }
         else
         {
-            gl.Uniform1(useDet05Location, 0);
+            gl.Uniform1(useDet05ArrLocation, 0);
         }
     }
+
+    // The detail focus follows the LOOK RAY but clamped to the NEAR FIELD and low-passed in time
+    // (2026-07-20, user: "bliski obiekt ma mieć orto, góry w tle nie; każde drgnięcie myszką
+    // wyładowuje detale"). Raw camera.Target is the centre-screen ray hit — aiming at a background
+    // ridge threw the whole detail ring kilometres away (foreground starved), and every mouse twitch
+    // moved the focus (ring churn + the det25 fade circle visibly sweeping the terrain). Clamping the
+    // focus to ≤ this distance keeps detail funding the terrain that actually fills the screen.
+    private const float DetailFocusMaxMeters = 800f;
+    private const float DetailFocusSmoothTau = 0.45f;   // seconds; jitter dies, intent survives
+    private const float DetailFocusSnapMeters = 2500f;  // a teleport/jump snaps instead of gliding
+    private Vector3 detailFocusSmoothed;
+    private bool detailFocusValid;
 
     // Per frame: pick the desired det25 cell ring around the camera focus, kick composes for new cells off-thread,
     // harvest completed ones, evict LRU past the shared budget, and strip-upload a bounded slice. No GL binds here
     // (those are per-draw in BindDet25ForTile) — this just keeps the resident set + GPU textures current.
-    private void StreamOrthoDetail(GL gl, IReadOnlyList<TerrainMesh3D> tiles, Vector3 cameraTarget)
+    private void StreamOrthoDetail(GL gl, IReadOnlyList<TerrainMesh3D> tiles, Vector3 cameraPosition, Vector3 cameraTarget)
     {
         if (!OrthoDetailEnabled || det25Grid is null || det25Policy is null || det25Composer is null || tiles.Count == 0)
         {
@@ -3330,9 +3628,32 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         det25FrameTick++;
 
-        // Focus + velocity from the camera look-at ground point (mirror base ortho / trail decal: Target, not
-        // Position — an oblique scenic view can float the camera far from what's on screen).
-        MapaTur.Domain.Geography.GeoPoint eye = det25FocusOverride ?? tiles[0].WorldToGeo(cameraTarget);
+        // Near-field clamp: pull the focus back along the view ray so a background peak never claims the
+        // ring; the clamped point's XY lands over the foreground terrain the screen is actually full of.
+        Vector3 toTarget = cameraTarget - cameraPosition;
+        float targetDist = toTarget.Length();
+        Vector3 focusRaw = targetDist > DetailFocusMaxMeters && targetDist > 1e-3f
+            ? cameraPosition + (toTarget * (DetailFocusMaxMeters / targetDist))
+            : cameraTarget;
+
+        // Time smoothing: the ring and the fade circle must not follow mouse jitter. Exponential glide
+        // with a snap for genuine relocations (teleport, preset, route jump).
+        double frameDtSec = det25PrevClockMs >= 0
+            ? Math.Clamp((frameClock.ElapsedMilliseconds - det25PrevClockMs) / 1000.0, 0.001, 0.25)
+            : 0.016;
+        if (!detailFocusValid || Vector3.Distance(focusRaw, detailFocusSmoothed) > DetailFocusSnapMeters)
+        {
+            detailFocusSmoothed = focusRaw;
+            detailFocusValid = true;
+        }
+        else
+        {
+            float k = 1f - MathF.Exp((float)(-frameDtSec / DetailFocusSmoothTau));
+            detailFocusSmoothed += (focusRaw - detailFocusSmoothed) * k;
+        }
+
+        // Focus + velocity from the smoothed near-field look point (NOT the raw target — see above).
+        MapaTur.Domain.Geography.GeoPoint eye = det25FocusOverride ?? tiles[0].WorldToGeo(detailFocusSmoothed);
         det25EyeLat = eye.Latitude; det25EyeLon = eye.Longitude;
         (det25FocusCi, det25FocusCj) = det25Grid.CellForPoint(eye);
 
@@ -3352,11 +3673,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         double velE = 0, velN = 0;
         if (det25PrevTargetValid && det25FocusOverride is null)
         {
-            velE = (cameraTarget.X - det25PrevTarget.X) / dt; // world X = east metres (local tangent)
-            velN = (cameraTarget.Y - det25PrevTarget.Y) / dt; // world Y = north metres
+            // Velocity from the SMOOTHED focus, not the raw target — a look-around used to read as
+            // 100+ m/s "motion" and flap the fast-motion ring suppression on and off.
+            velE = (detailFocusSmoothed.X - det25PrevTarget.X) / dt; // world X = east metres (local tangent)
+            velN = (detailFocusSmoothed.Y - det25PrevTarget.Y) / dt; // world Y = north metres
         }
 
-        det25PrevTarget = cameraTarget; det25PrevTargetValid = true; det25PrevClockMs = nowMs;
+        det25PrevTarget = detailFocusSmoothed; det25PrevTargetValid = true; det25PrevClockMs = nowMs;
 
         // Base ortho already resident in the SHARED 3 GB budget → cap the detail ring on what is left.
         long baseBytes = 0;
@@ -3380,7 +3703,22 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             // Two levels share ONE budget: the policy funds the det05 (fine) ring first (coverage-gated, with a
             // reserved det25 backing so 5 cm always has 25 cm under it), then det25 (coarse) from the remainder.
-            MapaTur.Application.Terrain.TwoLevelDesired plan = twoLevelPolicy.Plan(eye, velE, velN, baseBytes);
+            // Hysteresis: hand the policy the CURRENTLY resident keys, so a small camera move never swaps
+            // boundary cells (each swap = evict + a 2–3 s / 340 MB recompose the user sees as a reload).
+            var residentFine = new HashSet<int>();
+            foreach (DetailCellGpu c in det05Cells.Values)
+            {
+                if (c.LayerReady) { residentFine.Add(c.Key); }
+            }
+
+            var residentCoarse = new HashSet<int>();
+            foreach (DetailCellGpu c in det25Cells.Values)
+            {
+                if (c.Texture != 0) { residentCoarse.Add(c.Key); }
+            }
+
+            MapaTur.Application.Terrain.TwoLevelDesired plan = twoLevelPolicy.Plan(
+                eye, velE, velN, baseBytes, residentFine, residentCoarse);
             fineDesired = plan.FineCells;
             desired = plan.CoarseCells;
             nearCap = Det25HardCapCells;
@@ -3406,8 +3744,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 (int ci, int cj) = det25Grid.CellFromKey(key);
                 det25Cells[key] = new DetailCellGpu
                 {
-                    Key = key, Ci = ci, Cj = cj,
-                    Bounds = det25Grid.CellBounds(ci, cj), Px = det25Grid.CellPx,
+                    Key = key,
+                    Ci = ci,
+                    Cj = cj,
+                    Bounds = det25Grid.CellBounds(ci, cj),
+                    Px = det25Grid.CellPx,
                     DesiredTick = det25FrameTick,
                 };
             }
@@ -3822,6 +4163,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             det25MaxXyLocation = -1;
             det05MinXyLocation = -1;
             det05MaxXyLocation = -1;
+            det05ArrSamplerLocation = -1;
+            det05ArrBSamplerLocation = -1;
+            det05ArrAabbLocation = -1;
+            det05ArrAlphaLocation = -1;
+            useDet05ArrLocation = -1;
             detailBlendLocation = -1;
             detailColorModeLocation = -1;
             detailDebugBoundsLocation = -1;
@@ -4481,7 +4827,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Morskie-Oko showcase) stays the static per-frame mosaic on unit 11 above; det25 replaces the static
         // unit-10 mosaic with N streamed cells. use25 was gated OFF above (no static det25), so the reflection
         // pre-pass shows base+det05 only; the main terrain pass turns det25 on per tile below.
-        StreamOrthoDetail(gl, tiles, camera.Target);
+        StreamOrthoDetail(gl, tiles, camera.Position, camera.Target);
 
         // Per-pixel lighting: the Atmosphere instance, when provided, overrides the per-tile baked
         // light direction + ambient so the time-of-day slider drives shading live. Without an
@@ -4864,7 +5210,6 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform1(orthoSamplerLocation, 0);
         uint boundTexture = 0;
         det25BoundTexture = 0; // per-draw det25 cell bind (unit 10) dedup resets each frame
-        det05BoundTexture = 0; // per-draw det05 cell bind (unit 11) dedup resets each frame
         float lastIsBaseSkin = -1f;
         double dbgTerrainStart = dbgTileSwapFrame ? dbgSwapWatch.Elapsed.TotalMilliseconds : 0;
         GpuBegin(gl, GpuPass.Terrain);
@@ -4918,7 +5263,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform1(useDet25Location, 0); // det25 is per-tile terrain only — don't leak it into lake/forest draws
         if (det05StreamOn)
         {
-            gl.Uniform1(useDet05Location, 0); // same for streamed det05 (static-mosaic path keeps its per-frame bind)
+            gl.Uniform1(useDet05ArrLocation, 0); // det05 array is terrain-only too — no leak into lake/forest draws
         }
         if (dbgTileSwapFrame)
         {
@@ -4991,8 +5336,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         DrawDragon(gl, mvp);
         DrawAiDragons(gl, mvp); // autonomous flock, same depth-tested scene
         DrawArrows(gl, mvp); // crossbow bolts in flight
-        // Climbing layer order (back → front): route lines → hold dots → the climber. So the routes read
-        // UNDER the hold points, and the climber is drawn LAST → always over the points (user's request).
+        // Climbing layer order (back → front): rock skin (the sculpted wall) → route lines → hold dots →
+        // the climber. So the routes read UNDER the hold points, and the climber is drawn LAST → always
+        // over the points (user's request); the skin is part of the wall itself, so everything overlays it.
+        DrawClimbRockSkin(gl, mvp, atmosphere?.SunDirection ?? new Vector3(0.35f, 0.2f, 0.91f));
         DrawClimbGear(gl, mvp, camera, vpHeight); // auto-belay rope + quickdraws + route topo lines (depth-tested)
         DrawClimbHoldMarkers(gl, mvp, camera); // climb hold dots (depth-tested, depth-write off)
         DrawHumanoid(gl, mvp); // 3rd-person avatar LAST — drawn over the hold dots
@@ -6887,9 +7234,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 int r05 = 0, e05 = 0, c05 = 0;
                 foreach (DetailCellGpu c in det05Cells.Values)
                 {
-                    if (c.Texture != 0) { r05++; }
+                    if (c.LayerReady) { r05++; } // array path: residency = a fully uploaded layer
                     else if (c.Empty) { e05++; }
-                    else if (c.Compose is not null || c.Pending is not null || c.StagingTexture != 0) { c05++; }
+                    else if (c.Compose is not null || c.Pending is not null) { c05++; }
                 }
 
                 Log.Information("[Mem] det05 {Cells} cells ~{Mb:F0}MB (resident {Res} composing {Cmp} empty {Emp}) | desired {Des} | queue {Q}",
@@ -7365,6 +7712,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         det25MaxXyLocation = g.GetUniformLocation(program, "uDet25MaxXY");
         det05MinXyLocation = g.GetUniformLocation(program, "uDet05MinXY");
         det05MaxXyLocation = g.GetUniformLocation(program, "uDet05MaxXY");
+        det05ArrSamplerLocation = g.GetUniformLocation(program, "uOrthoDet05Arr");
+        det05ArrBSamplerLocation = g.GetUniformLocation(program, "uOrthoDet05ArrB");
+        det05ArrAabbLocation = g.GetUniformLocation(program, "uDet05Aabb[0]");
+        det05ArrAlphaLocation = g.GetUniformLocation(program, "uDet05Alpha[0]");
+        useDet05ArrLocation = g.GetUniformLocation(program, "uUseDet05Arr");
         detailBlendLocation = g.GetUniformLocation(program, "uDetailBlendMeters");
         detailColorModeLocation = g.GetUniformLocation(program, "uOrthoDetailColorMode");
         detailDebugBoundsLocation = g.GetUniformLocation(program, "uOrthoDetailDebugBounds");
@@ -8790,6 +9142,122 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.BindVertexArray(0);
         g.Enable(EnableCap.DepthTest);
         g.DepthMask(true);
+    }
+
+    // ── CLIMB ROCK SKIN (sculpted wall around the climber, depth-tested + written) ─────────────────────────
+    private uint climbImprintProgram;
+    private int climbImprintMvpLoc = -1, climbImprintZScaleLoc = -1, climbImprintSunLoc = -1;
+    private uint climbImprintVao, climbImprintVbo;
+    private MapaTur.Application.Terrain.ClimbRockSkin? climbRockSkin;
+    private float[]? climbImprintUploaded;
+    private float climbImprintZScale = 1f;
+
+    /// <summary>Sets the sculpted rock skin drawn around the active climb session (climb space; 9 floats
+    /// per vertex: pos3 + faceNormal3 + tint3; null hides the pass). The buffer is immutable per surface —
+    /// re-uploaded only when the array REFERENCE changes (session start / patch growth) — and vertical
+    /// exaggeration is applied in the shader (uZScale), so a Pion slider move needs no rebuild.</summary>
+    public void SetClimbRockSkin(MapaTur.Application.Terrain.ClimbRockSkin? skin, float zScale)
+    {
+        climbRockSkin = skin;
+        climbImprintZScale = zScale;
+    }
+
+    private void EnsureClimbImprintProgram(GL g)
+    {
+        if (climbImprintProgram != 0 && g.IsProgram(climbImprintProgram))
+        {
+            return;
+        }
+
+        // Positions arrive in climb space (real metres); the shader applies the vertical exaggeration to
+        // points (z * uZScale) and to normals with the inverse-transpose rule (z / uZScale) — same law as
+        // ClimbSpaceTransform, so facet shading stays correct at any Pion setting.
+        const string vs =
+            "#version 300 es\n" +
+            "layout(location=0) in vec3 aPos;\n" +
+            "layout(location=1) in vec3 aNormal;\n" +
+            "layout(location=2) in vec3 aColor;\n" +
+            "uniform mat4 uMvp;\n" +
+            "uniform float uZScale;\n" +
+            "out vec3 vNormal;\n" +
+            "out vec3 vColor;\n" +
+            "void main(){\n" +
+            "  vNormal = normalize(vec3(aNormal.xy, aNormal.z / uZScale));\n" +
+            "  vColor = aColor;\n" +
+            "  gl_Position = uMvp * vec4(aPos.x, aPos.y, aPos.z * uZScale, 1.0);\n" +
+            "}\n";
+        const string fs =
+            "#version 300 es\n" +
+            "precision highp float;\n" +
+            "in vec3 vNormal;\n" +
+            "in vec3 vColor;\n" +
+            "uniform vec3 uSunDir;\n" +
+            "out vec4 frag;\n" +
+            "void main(){\n" +
+            "  vec3 n = normalize(vNormal);\n" +
+            "  float diff = max(dot(n, uSunDir), 0.0);\n" +
+            "  float sky = 0.45 + 0.55 * clamp(n.z, 0.0, 1.0);\n" +          // hemispheric fill: up facets brighter
+            "  float day = clamp((uSunDir.z * 3.0) + 0.25, 0.12, 1.0);\n" +  // dusk/night dims with the terrain
+            "  vec3 col = (vColor * ((0.30 * sky) + (0.62 * diff)) * day) + (vColor * 0.08);\n" + // ambient floor: never black facets
+            "  frag = vec4(col, 1.0);\n" +
+            "}\n";
+
+        climbImprintProgram = LinkGearProgram(g, vs, fs);
+        climbImprintMvpLoc = g.GetUniformLocation(climbImprintProgram, "uMvp");
+        climbImprintZScaleLoc = g.GetUniformLocation(climbImprintProgram, "uZScale");
+        climbImprintSunLoc = g.GetUniformLocation(climbImprintProgram, "uSunDir");
+
+        climbImprintVao = g.GenVertexArray();
+        climbImprintVbo = g.GenBuffer();
+        g.BindVertexArray(climbImprintVao);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, climbImprintVbo);
+        const int stride = 9 * sizeof(float); // pos3 + normal3 + tint3
+        g.EnableVertexAttribArray(0);
+        g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, stride, (void*)0);
+        g.EnableVertexAttribArray(1);
+        g.VertexAttribPointer(1, 3, VertexAttribPointerType.Float, false, stride, (void*)(3 * sizeof(float)));
+        g.EnableVertexAttribArray(2);
+        g.VertexAttribPointer(2, 3, VertexAttribPointerType.Float, false, stride, (void*)(6 * sizeof(float)));
+        g.BindVertexArray(0);
+    }
+
+    private void DrawClimbRockSkin(GL g, Matrix4x4 mvp, Vector3 sunDirection)
+    {
+        if (climbRockSkin is not { VertexCount: > 0 } buffer)
+        {
+            return;
+        }
+
+        EnsureClimbImprintProgram(g);
+        g.UseProgram(climbImprintProgram);
+        WriteMat4(dragonMat4, mvp);
+        g.UniformMatrix4(climbImprintMvpLoc, 1, false, dragonMat4);
+        g.Uniform1(climbImprintZScaleLoc, MathF.Max(0.0001f, climbImprintZScale));
+        Vector3 sun = sunDirection.LengthSquared() > 1e-6f
+            ? Vector3.Normalize(sunDirection)
+            : Vector3.Normalize(new Vector3(0.35f, 0.2f, 0.91f));
+        g.Uniform3(climbImprintSunLoc, sun.X, sun.Y, sun.Z);
+
+        // Real rock: opaque, depth-tested AND depth-written, so hold dots/gear/climber depth-resolve
+        // against the imprints exactly like against the terrain. No culling — the soup's winding is
+        // outward, but the seat is open toward the wall and grazing views must not see through it.
+        g.Enable(EnableCap.DepthTest);
+        g.DepthMask(true);
+        g.Disable(EnableCap.Blend);
+        g.Disable(EnableCap.CullFace);
+        g.BindVertexArray(climbImprintVao);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, climbImprintVbo);
+        if (!ReferenceEquals(climbImprintUploaded, buffer.Interleaved))
+        {
+            g.BufferData<float>(
+                BufferTargetARB.ArrayBuffer,
+                new ReadOnlySpan<float>(buffer.Interleaved, 0, buffer.VertexCount * 9),
+                BufferUsageARB.StaticDraw);
+            climbImprintUploaded = buffer.Interleaved;
+        }
+
+        g.DrawArrays(PrimitiveType.Triangles, 0, (uint)buffer.VertexCount);
+        g.BindVertexArray(0);
     }
 
     // ── CLIMB GEAR (auto-belay rope + quickdraws, depth-tested world-width geometry) ───────────────────────
@@ -11951,7 +12419,20 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         det05Cells.Clear();
         det05UploadQueue.Clear();
         det05ResidentBytes = 0;
-        det05BoundTexture = 0;
+        if (det05ArrayTexture != 0)
+        {
+            gl.DeleteTexture(det05ArrayTexture);
+            det05ArrayTexture = 0;
+        }
+
+        if (det05ArrayTextureB != 0)
+        {
+            gl.DeleteTexture(det05ArrayTextureB);
+            det05ArrayTextureB = 0;
+        }
+
+        det05FreeLayers.Clear();
+        det05ArrayUniformsTick = -1;
         foreach (OrthoTile t in orthoTiles)
         {
             if (t.Texture != 0)

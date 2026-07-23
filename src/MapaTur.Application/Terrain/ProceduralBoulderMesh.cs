@@ -84,6 +84,10 @@ public static class ProceduralBoulderMesh
     }
 
     // Unit icosahedron subdivided `subdivisions` times (midpoints re-projected to the sphere).
+    // Internal: ClimbHoldImprintMesh deforms the same base sphere into per-hold rock features.
+    internal static (List<Vector3> Verts, List<(int, int, int)> Faces) IcosphereGeometry(int subdivisions)
+        => Icosphere(subdivisions);
+
     private static (List<Vector3> Verts, List<(int, int, int)> Faces) Icosphere(int subdivisions)
     {
         float t = (1f + MathF.Sqrt(5f)) * 0.5f;
