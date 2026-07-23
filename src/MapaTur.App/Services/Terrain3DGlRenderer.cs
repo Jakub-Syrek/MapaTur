@@ -2338,6 +2338,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // (the hard layer/texture cap must still win — a full slot stack would stall uploads otherwise).
     private Matrix4x4 lastTerrainMvp;
     private bool lastTerrainMvpValid;
+    // Diagnostyka atrybucji czarnych trójkątów przy łączeniu orto: MAPATUR_NO_FRUSTUM_CULL=1 wyłącza cull
+    // drawów głównego passu (rozstrzyga kandydata „cull wycina kafle za sylwetką" w jeden relaunch).
+    private static readonly bool frustumCullOff =
+        Environment.GetEnvironmentVariable("MAPATUR_NO_FRUSTUM_CULL") == "1";
     private TerrainMesh3D? detailAnchorMesh;
 
     private bool CellVisibleLastFrame(MapaTur.Domain.Geography.MapBounds b)
@@ -6461,7 +6465,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             // the terrain pass 6 → 24 ms as residency grew. Same conservative test the shadow cascades already
             // use; the absolute `mvp` matches the shader (camera-relative offset cancels: vertex + uModelOffset
             // then Translate(R)·mvp ≡ absolute mvp).
-            if (!MapaTur.Application.Terrain.FrustumCuller.IsAabbVisible(mvp, entry.Key.WorldMin, entry.Key.WorldMax))
+            if (!frustumCullOff
+                && !MapaTur.Application.Terrain.FrustumCuller.IsAabbVisible(mvp, entry.Key.WorldMin, entry.Key.WorldMax))
             {
                 continue;
             }
