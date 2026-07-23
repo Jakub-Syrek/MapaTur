@@ -387,3 +387,21 @@ odwoływalny — stara ścieżka żyje do końca kroku 8 (never-regress showcase
 
 *Decyzje oznaczone „DECYZJA" w tekście; syntezę oparto o zmierzone fakty z §1 — każdą liczbę
 w tym dokumencie można odtworzyć komendą lub wskazaną linią kodu.*
+---
+
+## ANEKS A (2026-07-23, przed krokiem 2 — korekta §2.2 po weryfikacji w kodzie)
+
+**Fakt z kodu**: runtime'owe cele są NAKŁADKOWE — `OrthoDetailGrid` ma coverage 16 (det05) / 8 (det25)
+kafli przy pitch 6 (`Terrain3DView.xaml.cs:8532/8599`, inwariant `CellContains`). Stąd „10133 cel det05"
+w logu vs 1412 dysjunktywnych grup 16×16 z pomiaru sędziów — OBIE liczby są prawdziwe, opisują co innego.
+Pakiet `.opk` per celę RUNTIME powielałby strony ~(16/6)²≈7× (det05 ≈ 450 GB) — ryzyko „456 GB"
+z werdyktów było zasadne, tylko źle zlokalizowane.
+
+**Rozstrzygnięcie** (nie zmienia P0 ani bramki; strona i tail bez zmian):
+- **Strona = kafel źródłowy 1:1** (bez duplikacji, jak w §2.1).
+- **Pakiet `.opk` = DYSJUNKTYWNA grupa kafli** (det05: 16×16, det25: 8×8; klucz `gi=ti/16, gj=tj/16`).
+  Tail pakietu = kompozyt grupy (2048↓). Liczby pakietów: det05 ≈ 1412, det25 ≈ 684 (jak §1).
+- **Okno runtime** (nakładkowa cela pitch-6) montuje się ze stron ≤4 sąsiednich pakietów; jego
+  mip-tail składany z ≤4 tail-i pakietów (rozdzielczości się zgadzają — tail to downsample grupy).
+- **det1m**: pakiety dysjunktywne 4096 px @ 1 m/px (4096 m), fragmenty = downsample 4× grup det25;
+  warstwa rezydentna na stałe NIE potrzebuje okien nakładkowych w ogóle.

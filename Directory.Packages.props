@@ -13,6 +13,7 @@
     <PackageVersion Include="BruTile" Version="6.0.0" />
     <PackageVersion Include="BruTile.MbTiles" Version="6.0.0" />
     <PackageVersion Include="NetTopologySuite" Version="2.6.0" />
+    <PackageVersion Include="SkiaSharp" Version="3.119.4" />
     <PackageVersion Include="SkiaSharp.Views.Maui.Controls" Version="3.119.4" />
 
     <!-- GPU 3D engine (Windows): raw OpenGL ES bindings rendered on the SKGLView context. -->
