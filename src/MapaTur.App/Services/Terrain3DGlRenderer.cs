@@ -3745,10 +3745,22 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     for (int x = 0; x < dPx; x++)
                     {
                         int o = x * 8, oD = x * 4;
-                        dRow[oD + 0] = (byte)((r0[o + 0] + r0[o + 4] + r1[o + 0] + r1[o + 4] + 2) >> 2);
-                        dRow[oD + 1] = (byte)((r0[o + 1] + r0[o + 5] + r1[o + 1] + r1[o + 5] + 2) >> 2);
-                        dRow[oD + 2] = (byte)((r0[o + 2] + r0[o + 6] + r1[o + 2] + r1[o + 6] + 2) >> 2);
-                        dRow[oD + 3] = (byte)((r0[o + 3] + r0[o + 7] + r1[o + 3] + r1[o + 7] + 2) >> 2);
+                        // ALFA-WAŻONE (czarne trójkąty przy szwie orto, 2026-07-23): kolor tylko z KRYJĄCYCH
+                        // texeli, alfa uśredniana osobno — inaczej głębokie mipy dostają czarną obwódkę,
+                        // która przy binarnym progu DXT1a wychodzi kryjąca.
+                        int a0 = r0[o + 3], a1 = r0[o + 7], a2 = r1[o + 3], a3 = r1[o + 7];
+                        int sumA = a0 + a1 + a2 + a3;
+                        if (sumA == 0)
+                        {
+                            dRow[oD + 0] = 0; dRow[oD + 1] = 0; dRow[oD + 2] = 0; dRow[oD + 3] = 0;
+                        }
+                        else
+                        {
+                            dRow[oD + 0] = (byte)(((r0[o + 0] * a0) + (r0[o + 4] * a1) + (r1[o + 0] * a2) + (r1[o + 4] * a3) + (sumA >> 1)) / sumA);
+                            dRow[oD + 1] = (byte)(((r0[o + 1] * a0) + (r0[o + 5] * a1) + (r1[o + 1] * a2) + (r1[o + 5] * a3) + (sumA >> 1)) / sumA);
+                            dRow[oD + 2] = (byte)(((r0[o + 2] * a0) + (r0[o + 6] * a1) + (r1[o + 2] * a2) + (r1[o + 6] * a3) + (sumA >> 1)) / sumA);
+                            dRow[oD + 3] = (byte)((sumA + 2) >> 2);
+                        }
                     }
                 }
 

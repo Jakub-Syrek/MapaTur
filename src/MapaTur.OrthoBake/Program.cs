@@ -144,10 +144,22 @@ static byte[] Half(byte[] rgbaIn, int pxIn)
         {
             int sx = x * 2;
             int a = ((sy * pxIn) + sx) * 4, b = a + 4, c = a + (pxIn * 4), d = c + 4, o = ((y * pxOut) + x) * 4;
-            outB[o] = (byte)((rgbaIn[a] + rgbaIn[b] + rgbaIn[c] + rgbaIn[d] + 2) >> 2);
-            outB[o + 1] = (byte)((rgbaIn[a + 1] + rgbaIn[b + 1] + rgbaIn[c + 1] + rgbaIn[d + 1] + 2) >> 2);
-            outB[o + 2] = (byte)((rgbaIn[a + 2] + rgbaIn[b + 2] + rgbaIn[c + 2] + rgbaIn[d + 2] + 2) >> 2);
-            outB[o + 3] = (byte)((rgbaIn[a + 3] + rgbaIn[b + 3] + rgbaIn[c + 3] + rgbaIn[d + 3] + 2) >> 2);
+            // ALFA-WAZONE usrednianie (czarne trojkaty przy szwie orto): przezroczyste piksele NIE zaciemniaja
+            // koloru — kolor tylko z pokrytych, alfa usredniana osobno (inaczej gleboke mipy maja czarna
+            // obwodke, ktora przy binarnym progu DXT1a wychodzi KRYJACA).
+            int aa = rgbaIn[a + 3], ab = rgbaIn[b + 3], ac = rgbaIn[c + 3], ad = rgbaIn[d + 3];
+            int sumA = aa + ab + ac + ad;
+            if (sumA == 0)
+            {
+                outB[o] = 0; outB[o + 1] = 0; outB[o + 2] = 0; outB[o + 3] = 0;
+            }
+            else
+            {
+                outB[o] = (byte)(((rgbaIn[a] * aa) + (rgbaIn[b] * ab) + (rgbaIn[c] * ac) + (rgbaIn[d] * ad) + (sumA >> 1)) / sumA);
+                outB[o + 1] = (byte)(((rgbaIn[a + 1] * aa) + (rgbaIn[b + 1] * ab) + (rgbaIn[c + 1] * ac) + (rgbaIn[d + 1] * ad) + (sumA >> 1)) / sumA);
+                outB[o + 2] = (byte)(((rgbaIn[a + 2] * aa) + (rgbaIn[b + 2] * ab) + (rgbaIn[c + 2] * ac) + (rgbaIn[d + 2] * ad) + (sumA >> 1)) / sumA);
+                outB[o + 3] = (byte)((sumA + 2) >> 2);
+            }
         }
     }
 
