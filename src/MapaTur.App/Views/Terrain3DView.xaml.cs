@@ -6989,6 +6989,12 @@ public partial class Terrain3DView : ContentView
                     r.OrthoDetailColorMode = r.OrthoDetailColorMode == 0 ? 1 : 0;
                     Serilog.Log.Information("[OrthoDetailSlice] colour = {Mode}", r.OrthoDetailColorMode == 1 ? "TONE-FROM-BASE (detail = fine frequencies only)" : "RAW");
                     e.Handled = true; return;
+                // '7' — A/B tier det1m (krok 3): przełącza WYŁĄCZNIE uniform użycia — dane zostają rezydentne
+                // na GPU, więc porównanie panoramy nie jest skażone streamingiem (warunek testu).
+                case Windows.System.VirtualKey.Number7:
+                    r.Det1mEnabled = !r.Det1mEnabled;
+                    Serilog.Log.Information("[Det1m] A/B: {State}", r.Det1mEnabled ? "ON" : "OFF");
+                    e.Handled = true; return;
                 // '8' toggles the cell-boundary outline (diagnostics).
                 case Windows.System.VirtualKey.Number8:
                     r.OrthoDetailDebugBounds = !r.OrthoDetailDebugBounds;
@@ -8541,6 +8547,9 @@ public partial class Terrain3DView : ContentView
             // ~30 cells so the coarse ring never re-decodes on a pan (same stutter cause as det05, smaller scale).
             maxBytes: OperatingSystem.IsWindows() ? 2048L << 20 : 384L << 20);
         var composer = new MapaTur.Application.Terrain.OrthoDetailCellComposer(grid, cache.Get, baseFill: null);
+        // det1m (krok 3): rezydentny tier 1 m z prebake'u — ładowany raz na starcie, A/B klawiszem '7'.
+        renderer.Det1mPackDir = System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(dir) ?? dir, "opk", "det1m");
         // TIER REBALANCE (2026-07-23): desktop ring 1500 → 5000 m so the 28-cell det25 midground actually has
         // candidates to fill (a 1500 m ring holds ~7 cells — the raised cap was starved at the source).
         var policy = new MapaTur.Application.Terrain.OrthoDetailResidencyPolicy(

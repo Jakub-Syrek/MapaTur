@@ -178,6 +178,28 @@ Parallel.ForEach(groups, new ParallelOptions { MaxDegreeOfParallelism = parallel
                 Interlocked.Add(ref pageCountTotal, existing.PageCount);
                 indexCells.Add(new OrthoPackIndex.CellEntry(gi, gj, GroupPx, (ushort)existing.PageCount, new FileInfo(packPath).Length));
                 foreach ((int ti, int tj) in members) { coveredTiles.Add((ti, tj)); }
+
+                // Fragment det1m jest pochodną ŹRÓDŁA (WebP), nie pakietu — przy skipie i tak go budujemy
+                // (dekod + kompozyt + downsample, bez re-enkodu stron det25). Bez tego przyrostowy bieg
+                // z --det1m-out dawał 0 pakietów det1m (luka wykryta 2026-07-23).
+                if (det1mOut is not null)
+                {
+                    byte[] gRgba = new byte[GroupPx * GroupPx * 4];
+                    foreach ((int ti, int tj) in members)
+                    {
+                        byte[]? t = DecodeWebp(tiles[(ti, tj)].Path);
+                        if (t is null) { continue; }
+                        int lx = ti - (gi * GroupTiles), ly = tj - (gj * GroupTiles);
+                        for (int row = 0; row < TilePx; row++)
+                        {
+                            System.Buffer.BlockCopy(t, row * TilePx * 4, gRgba,
+                                ((((ly * TilePx) + row) * GroupPx) + (lx * TilePx)) * 4, TilePx * 4);
+                        }
+                    }
+
+                    det1mFragments[(gi, gj)] = Half(Half(gRgba, GroupPx), GroupPx / 2);
+                }
+
                 return;
             }
         }
@@ -282,13 +304,23 @@ if (det1mOut is not null)
             }
         }
 
-        // det1m: strony 512 px (8×8) z pełnego rgba + tail — identyczna struktura jak det25.
+        // det1m: strony 512 px (8×8) z pełnego rgba + tail. Strona powstaje TYLKO nad realnym pokryciem
+        // (fragment det25 istniał) — czarna strona spoza pokrycia w pakiecie = „puste pola" na ekranie
+        // (bramka P0); brak strony w TOC = shaderowy fallback do bazy przez maskę pokrycia.
+        bool PageCovered(int lx, int ly)
+        {
+            // Strona 512 px @1 m = 512 m = ćwiartka fragmentu (fragment 1024 px = grupa det25).
+            int fi = (pi * Det1mPackFragments) + (lx / 2), fj = (pj * Det1mPackFragments) + (ly / 2);
+            return det1mFragments.ContainsKey((fi, fj));
+        }
+
         var pages = new List<OrthoPagePack.PageData>();
         byte[] pageBuf = new byte[TilePx * TilePx * 4];
         for (int lx = 0; lx < 8; lx++)
         {
             for (int ly = 0; ly < 8; ly++)
             {
+                if (!PageCovered(lx, ly)) { continue; }
                 for (int row = 0; row < TilePx; row++)
                 {
                     System.Buffer.BlockCopy(rgba, ((((ly * TilePx) + row) * PackPx) + (lx * TilePx)) * 4,

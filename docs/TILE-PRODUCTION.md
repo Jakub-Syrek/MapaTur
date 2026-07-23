@@ -674,3 +674,7 @@ tail = kompozyt grupy 8×8 → 2048↓) + 54 pakiety det1m (downsample 4× grup)
 - det1m: 54 pakiety, **3 510/3 510 stron CRC OK**, wszystkie kontrole czyste — 0,1 min
 
 Zakres: to pełny prebake WARSTW det25 + det1m; det05 pozostaje późniejszym etapem (krok 6 migracji).
+
+**Korekta det1m (2026-07-23, po poprawce pokrycia):** strony tylko nad realnym źródłem — 54 pakiety,
+**2 790/2 790 stron CRC OK** (720 czarnych stron spoza pokrycia odrzuconych względem pierwszego bake'u),
+0,56 GB; przyrostowy bieg z `--det1m-out` buduje fragmenty także dla pominiętych grup (dekod bez re-enkodu).

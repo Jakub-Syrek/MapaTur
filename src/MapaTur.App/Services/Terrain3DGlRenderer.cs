@@ -123,6 +123,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // data-side-corrected (V2) tiles that must render RAW (a second shader de-blue = double correction),
         // while det25/base/mosaic still need the mode-1 de-blue. 1 = det05 ARRAY skips the mode-1 transform.
         "uniform int uOrthoDet05ArrRaw;\n" +
+        // det1m (krok 3): rezydentna warstwa 1 m/px między det25 a bazą — array 4096² BC1 (unit 14) +
+        // maska pokrycia R8 (unit 15, filtrowana liniowo = miękki brzeg 512 m). Dobór slice'a O(1) z
+        // regularnej siatki (bez pętli po AABB). uUseDet1m = wyłącznie A/B — dane zostają rezydentne.
+        "uniform highp sampler2DArray uOrthoDet1m;\n" + // GLES: sampler2DArray nie ma domyślnej precyzji
+        "uniform highp sampler2D uOrthoDet1mCov;\n" +
+        "uniform int uUseDet1m;\n" +
+        "uniform vec2 uDet1mMinXmaxY;\n" +   // (minX świata, maxY świata) — v rośnie na południe jak wiersze tekstury
+        "uniform vec2 uDet1mInvSize;\n" +
+        "uniform ivec2 uDet1mGridDim;\n" +
+        "uniform int uDet1mSliceIdx[160];\n" +
         "uniform int uOrthoDetailDebugBounds;\n" + // 1 = outline detail cell AABB edges (diagnostics)
         "uniform vec2 uDet25EyeXY;\n" +      // world-XY of the streaming focus (ring centre) for the det25 range fade
         "uniform float uDet25FadeInner;\n" + // det25 at full strength within this metric radius of the focus
@@ -353,6 +363,24 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // stable world XY falls inside [mn,mx], fading back over uDetailBlendMeters at the AABB edge (no hard
         // seam / UV-clamp stripe). `use` is a uniform so the early-out is uniform control flow — the implicit-LOD
         // fetch below stays derivative-valid; bicubic kicks in when magnified (close camera).
+        // det1m: tier między bazą a det25. Fallback konstrukcyjny: poza siatką / cov≈0 / slice==-1 → baseC
+        // (nigdy czerń). Kolor: mode-1 de-blue jak det25 (ta sama radiometria — det1m to downsample det25);
+        // harmonizacja tonalna zbędna (warstwa NAD nim, det25, i tak wygrywa tam gdzie rezydentna).
+        "vec3 applyOrthoDet1m(vec2 wxy, vec3 baseC){\n" +
+        "  if (uUseDet1m == 0) { return baseC; }\n" +
+        "  vec2 uv = vec2((wxy.x - uDet1mMinXmaxY.x) * uDet1mInvSize.x, (uDet1mMinXmaxY.y - wxy.y) * uDet1mInvSize.y);\n" +
+        "  if (uv.x <= 0.0 || uv.x >= 1.0 || uv.y <= 0.0 || uv.y >= 1.0) { return baseC; }\n" +
+        "  float cov = texture(uOrthoDet1mCov, uv).r;\n" +
+        "  if (cov <= 0.01) { return baseC; }\n" +
+        "  ivec2 g = ivec2(clamp(int(uv.x * float(uDet1mGridDim.x)), 0, uDet1mGridDim.x - 1),\n" +
+        "                  clamp(int(uv.y * float(uDet1mGridDim.y)), 0, uDet1mGridDim.y - 1));\n" +
+        "  int slice = uDet1mSliceIdx[(g.y * uDet1mGridDim.x) + g.x];\n" +
+        "  if (slice < 0) { return baseC; }\n" +
+        "  vec2 cellUv = fract(uv * vec2(uDet1mGridDim));\n" +
+        "  vec3 dc = texture(uOrthoDet1m, vec3(cellUv, float(slice))).rgb;\n" +
+        "  if (uOrthoDetailColorMode == 1) { dc = deblueShadow(dc); }\n" +
+        "  return mix(baseC, dc, cov);\n" +
+        "}\n" +
         "vec3 applyOrthoDetail(sampler2D tex, int use, vec2 mn, vec2 mx, float blendM, vec2 wxy, vec3 baseC, float rangeFade){\n" +
         "  if (use != 1) return baseC;\n" +
         "  vec2 uv = vec2((wxy.x - mn.x) / (mx.x - mn.x), (mx.y - wxy.y) / (mx.y - mn.y));\n" + // v=0 at north, matches base ortho UV
@@ -703,6 +731,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // AABB walk + bicubic) doubled the mirror's fragment cost (refl 13.8 → 26.9 ms once 16 cells were
         // resident). The mirror shows base ortho; the REAL view keeps every detail layer.
         "    if (uReflectionPass < 0.5) {\n" +
+        "      c = applyOrthoDet1m(vStableWorldPos.xy, c);\n" + // najgrubszy tier pierwszy — det25/det05 wygrywają nad nim
         "      float det25Fade = 1.0 - smoothstep(uDet25FadeInner, uDet25FadeOuter, length(vStableWorldPos.xy - uDet25EyeXY));\n" +
         "      c = applyOrthoDetail(uOrthoDet25, uUseDet25, uDet25MinXY, uDet25MaxXY, uDetailBlendMeters, vStableWorldPos.xy, c, det25Fade);\n" +
         "      c = applyOrthoDetail(uOrthoDet05, uUseDet05, uDet05MinXY, uDet05MaxXY, uDetailBlendMeters, vStableWorldPos.xy, c, 1.0);\n" + // static 5 cm mosaic fallback (non-streaming installs)
@@ -3239,6 +3268,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform1(detailBlendLocation, OrthoDetailBlendMeters);
         gl.Uniform1(detailColorModeLocation, OrthoDetailColorMode);
         gl.Uniform1(det05ArrRawLocation, Det05ArrayRawColor ? 1 : 0);
+        gl.Uniform1(useDet1mLoc, det1mReady && Det1mEnabled ? 1 : 0); // A/B = wyłącznie ten uniform; dane rezydentne
         gl.Uniform1(detailDebugBoundsLocation, OrthoDetailDebugBounds ? 1 : 0);
         gl.ActiveTexture(TextureUnit.Texture0);
     }
@@ -3803,6 +3833,258 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             });
     }
 
+    // ── det1m RESIDENT TIER (krok 3, ARCHITEKTURA-STREAMING §3 + ANEKS A) ────────────────────────────
+    // Warstwa 1 m/px domykająca lukę 2-8 km panoramy: ~54 pakiety .opk (4096² BC1, pełne mipy) ładowane
+    // RAZ na starcie z prebake'u i REZYDENTNE NA STAŁE — żaden ruch/obrót nie może ich wybić. A/B (klawisz)
+    // przełącza WYŁĄCZNIE uniform uUseDet1m — dane zostają na GPU, porównanie nieskażone streamingiem.
+    // Brak strony/pakietu ⇒ maska pokrycia gate'uje do bazy (nigdy czerń, nigdy stop renderera).
+    public bool Det1mEnabled { get; set; } = true;
+
+    /// <summary>Katalog pakietów det1m (`opk/det1m`). Null = warstwa wyłączona.</summary>
+    public string? Det1mPackDir { get; set; }
+
+    private sealed record Det1mLoad(
+        int PiMin, int PjMin, int GridW, int GridH,
+        List<(int Pi, int Pj, byte[] Chain, ulong CovBits)> Slices,
+        MapaTur.Domain.Geography.MapBounds GridGeo);
+
+    private uint det1mArrayTexture;
+    private uint det1mCovTexture;
+    private bool det1mKicked;
+    private bool det1mReady;
+    private Task<Det1mLoad?>? det1mLoadTask;
+    private Det1mLoad? det1mLoaded;
+    private int det1mUploadCursor;
+    private readonly int[] det1mSliceIdx = new int[160];
+    private int det1mSamplerLoc = -1, det1mCovLoc = -1, useDet1mLoc = -1,
+        det1mMinXyLoc = -1, det1mInvSizeLoc = -1, det1mGridDimLoc = -1, det1mSliceIdxLoc = -1;
+
+    private const double Det25TileDlon = 512 * 0.25 / (111320.0 * 0.65935); // cos(49.25°) = 0.65935 — anchor 19.5/49.4 jak dane
+    private const double Det25TileDlat = 512 * 0.25 / 111320.0;
+
+    private static Det1mLoad? LoadDet1mPacks(string dir)
+    {
+        OrthoPackIndex? idx = OrthoPackIndex.Load(System.IO.Path.Combine(dir, "index.bin"));
+        if (idx is null || idx.Cells.Count == 0)
+        {
+            Log.Warning("[Det1m] brak/uszkodzony index.bin w {Dir} — warstwa wyłączona (fallback: baza)", dir);
+            return null;
+        }
+
+        int piMin = idx.Cells.Min(c => c.Ci), piMax = idx.Cells.Max(c => c.Ci);
+        int pjMin = idx.Cells.Min(c => c.Cj), pjMax = idx.Cells.Max(c => c.Cj);
+        int gridW = piMax - piMin + 1, gridH = pjMax - pjMin + 1;
+        if (gridW * gridH > 160)
+        {
+            Log.Warning("[Det1m] siatka {W}×{H} przekracza slot uniformów (160) — warstwa wyłączona", gridW, gridH);
+            return null;
+        }
+
+        var slices = new List<(int, int, byte[], ulong)>(idx.Cells.Count);
+        int chainSize = MapaTur.Application.Terrain.GpuCellCache.ChainSize(4096);
+        int level0 = MapaTur.Application.Terrain.Bc1Encoder.EncodedSize(4096, 4096);
+        foreach (OrthoPackIndex.CellEntry c in idx.Cells)
+        {
+            using OrthoPagePack? pack = OrthoPagePack.Open(System.IO.Path.Combine(dir, $"{c.Ci}_{c.Cj}.opk"), 4096);
+            if (pack is null)
+            {
+                Log.Warning("[Det1m] pakiet ({Pi},{Pj}) nie otwiera się — pomijam (baza pokryje)", c.Ci, c.Cj);
+                continue;
+            }
+
+            byte[] chain = new byte[chainSize];
+            ulong cov = 0;
+            bool tailOk = pack.TryReadPage(OrthoPagePack.TailPageId, out byte[] tail)
+                && tail.Length == chainSize - level0;
+            if (tailOk)
+            {
+                System.Buffer.BlockCopy(tail, 0, chain, level0, tail.Length);
+            }
+
+            foreach (OrthoPagePack.Entry e in pack.Entries)
+            {
+                if (e.PageId == OrthoPagePack.TailPageId || !pack.TryReadPage(e.PageId, out byte[] page))
+                {
+                    continue; // strona zła/nieobecna → bit pokrycia zostaje 0 → shader pokazuje bazę
+                }
+
+                int lx = e.PageId / 8, ly = e.PageId % 8;
+                // Wklej mip0 strony (512² BC1 = 128×128 bloków) w level0 celi (1024×1024 bloków).
+                const int PageBlocks = 128, CellBlocks = 1024, RowBytes = PageBlocks * 8;
+                for (int row = 0; row < PageBlocks; row++)
+                {
+                    System.Buffer.BlockCopy(page, row * RowBytes, chain,
+                        (((((ly * PageBlocks) + row) * CellBlocks) + (lx * PageBlocks)) * 8), RowBytes);
+                }
+
+                cov |= 1UL << ((ly * 8) + lx);
+            }
+
+            if (cov != 0 && tailOk)
+            {
+                slices.Add((c.Ci, c.Cj, chain, cov));
+            }
+        }
+
+        if (slices.Count == 0)
+        {
+            return null;
+        }
+
+        // Geo AABB siatki z mapowania kafli det25 (anchor 19.5/49.4 — spójny z pipeline'em danych):
+        // pakiet = 32×32 kafli det25.
+        double lon0 = 19.5 + (piMin * 32 * Det25TileDlon);
+        double lon1 = 19.5 + ((piMax + 1) * 32 * Det25TileDlon);
+        double lat1 = 49.4 - (pjMin * 32 * Det25TileDlat);
+        double lat0 = 49.4 - ((pjMax + 1) * 32 * Det25TileDlat);
+        var geo = new MapaTur.Domain.Geography.MapBounds(
+            new MapaTur.Domain.Geography.GeoPoint(lat0, lon0),
+            new MapaTur.Domain.Geography.GeoPoint(lat1, lon1));
+        Log.Information("[Det1m] wczytano {N} pakietów, siatka {W}×{H}", slices.Count, gridW, gridH);
+        return new Det1mLoad(piMin, pjMin, gridW, gridH, slices, geo);
+    }
+
+    // Per frame: kick → harvest (alokacja po sprawdzeniu limitów GPU + log realnego VRAM) → budżetowany
+    // upload przez ring PBO (jeden slice na klatkę trzyma się budżetu 6 ms). Wołane ze StreamOrthoDetail.
+    private unsafe void PumpDet1m(GL gl)
+    {
+        if (Det1mPackDir is null)
+        {
+            return;
+        }
+
+        if (!det1mKicked)
+        {
+            det1mKicked = true;
+            string dir = Det1mPackDir;
+            det1mLoadTask = Task.Run(() => LoadDet1mPacks(dir));
+        }
+
+        if (det1mLoaded is null && det1mLoadTask is { IsCompleted: true } t)
+        {
+            det1mLoadTask = null;
+            det1mLoaded = t.IsCompletedSuccessfully ? t.Result : null;
+            if (det1mLoaded is null)
+            {
+                Det1mPackDir = null; // twardy fallback: warstwy nie ma, baza pokrywa — nie ponawiamy co klatkę
+                return;
+            }
+        }
+
+        // Alokacja GPU (także po utracie kontekstu — tekstury giną, det1mLoaded w RAM zostaje).
+        if (det1mLoaded is not null && det1mArrayTexture == 0)
+        {
+            // WARUNEK TESTU 2: limity GPU/ANGLE PRZED alokacją + raport realnego VRAM (array + mipy).
+            Span<int> maxTex = stackalloc int[1];
+            Span<int> maxLayers = stackalloc int[1];
+            gl.GetInteger(GLEnum.MaxTextureSize, maxTex);
+            gl.GetInteger((GLEnum)0x88FF, maxLayers); // GL_MAX_ARRAY_TEXTURE_LAYERS
+            int layers = det1mLoaded.Slices.Count;
+            long vram = (long)layers * MapaTur.Application.Terrain.GpuCellCache.ChainSize(4096);
+            if (maxTex[0] < 4096 || maxLayers[0] < layers)
+            {
+                Log.Warning("[Det1m] limit GPU (maxTex={T}, maxLayers={L}) < wymagane (4096, {N}) — warstwa wyłączona",
+                    maxTex[0], maxLayers[0], layers);
+                det1mLoaded = null; Det1mPackDir = null;
+                return;
+            }
+
+            while (gl.GetError() != GLEnum.NoError) { }
+            det1mArrayTexture = gl.GenTexture();
+            gl.BindTexture(TextureTarget.Texture2DArray, det1mArrayTexture);
+            gl.TexStorage3D(TextureTarget.Texture2DArray, 13,
+                (SizedInternalFormat)GlCompressedRgbS3tcDxt1, 4096, 4096, (uint)layers);
+            GLEnum err = gl.GetError();
+            if (err != GLEnum.NoError)
+            {
+                Log.Warning("[Det1m] TexStorage3D odmówił (GL 0x{E:X}) — warstwa wyłączona, baza pokrywa", (int)err);
+                gl.DeleteTexture(det1mArrayTexture); det1mArrayTexture = 0;
+                det1mLoaded = null; Det1mPackDir = null;
+                return;
+            }
+
+            gl.TexParameter(TextureTarget.Texture2DArray, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
+            gl.TexParameter(TextureTarget.Texture2DArray, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+            gl.TexParameter(TextureTarget.Texture2DArray, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+            gl.TexParameter(TextureTarget.Texture2DArray, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+
+            // Maska pokrycia (R8, strona=512 m, filtrowana liniowo = miękki brzeg) + indeks slice'ów siatki.
+            Array.Fill(det1mSliceIdx, -1);
+            int covW = det1mLoaded.GridW * 8, covH = det1mLoaded.GridH * 8;
+            byte[] covPix = new byte[covW * covH];
+            for (int s = 0; s < det1mLoaded.Slices.Count; s++)
+            {
+                (int pi, int pj, _, ulong bits) = det1mLoaded.Slices[s];
+                int gx = pi - det1mLoaded.PiMin, gy = pj - det1mLoaded.PjMin;
+                det1mSliceIdx[(gy * det1mLoaded.GridW) + gx] = s;
+                for (int b = 0; b < 64; b++)
+                {
+                    if ((bits & (1UL << b)) != 0)
+                    {
+                        int lx = b % 8, ly = b / 8;
+                        covPix[(((gy * 8) + ly) * covW) + ((gx * 8) + lx)] = 255;
+                    }
+                }
+            }
+
+            det1mCovTexture = gl.GenTexture();
+            gl.BindTexture(TextureTarget.Texture2D, det1mCovTexture);
+            fixed (byte* cp = covPix)
+            {
+                gl.TexImage2D(TextureTarget.Texture2D, 0, (int)InternalFormat.R8, (uint)covW, (uint)covH, 0,
+                    PixelFormat.Red, PixelType.UnsignedByte, cp);
+            }
+
+            gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+            gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+            gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+            gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+            gl.BindTexture(TextureTarget.Texture2D, 0);
+            det1mUploadCursor = 0;
+            det1mReady = false;
+            Log.Information(
+                "[Det1m] array {Layers}×4096² BC1+mipy = {MB} MB VRAM (maxTex={T}, maxLayers={L}) + maska {Cw}×{Ch}",
+                layers, vram / (1024 * 1024), maxTex[0], maxLayers[0], covW, covH);
+        }
+
+        // Budżetowany upload: jeden slice na klatkę (chain ~10,7 MB: level0 jednym chunkiem PBO, mipy drugim).
+        if (det1mLoaded is not null && det1mArrayTexture != 0 && det1mUploadCursor < det1mLoaded.Slices.Count)
+        {
+            EnsureUploadPbos(gl, (nuint)OrthoUploadBytesPerChunk);
+            (int _, int _, byte[] chain, _) = det1mLoaded.Slices[det1mUploadCursor];
+            gl.BindTexture(TextureTarget.Texture2DArray, det1mArrayTexture);
+            int off = 0;
+            for (int lv = 0, px = 4096; px >= 1; lv++, px >>= 1)
+            {
+                int bytes = MapaTur.Application.Terrain.Bc1Encoder.EncodedSize(px, px);
+                if (StageChunkInPbo(gl, chain, off, bytes))
+                {
+                    gl.CompressedTexSubImage3D(TextureTarget.Texture2DArray, lv, 0, 0, det1mUploadCursor,
+                        (uint)px, (uint)px, 1, (InternalFormat)GlCompressedRgbS3tcDxt1, (uint)bytes, (void*)0);
+                    gl.BindBuffer(BufferTargetARB.PixelUnpackBuffer, 0);
+                }
+                else
+                {
+                    fixed (byte* p = &chain[off])
+                    {
+                        gl.CompressedTexSubImage3D(TextureTarget.Texture2DArray, lv, 0, 0, det1mUploadCursor,
+                            (uint)px, (uint)px, 1, (InternalFormat)GlCompressedRgbS3tcDxt1, (uint)bytes, p);
+                    }
+                }
+
+                off += bytes;
+            }
+
+            gl.BindTexture(TextureTarget.Texture2DArray, 0);
+            det1mUploadCursor++;
+            if (det1mUploadCursor == det1mLoaded.Slices.Count)
+            {
+                det1mReady = true;
+                Log.Information("[Det1m] REZYDENTNE: {N}/{N} slice'ów wgranych — warstwa żywa", det1mUploadCursor);
+            }
+        }
+    }
+
     // H1 (2026-07-23): PIXEL_UNPACK PBO ring for the det05 strip uploads. TexSubImage3D from CLIENT memory
     // makes ANGLE copy the chunk synchronously on the GL thread and sync the real transfer at swap (the
     // "bites at swap" 150–300 ms gaps). From a PBO the call is a GPU-side transfer the driver overlaps with
@@ -4177,14 +4459,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         det25FrameTick++;
         ProbeS3tc(gl); // BC1 capability must be known BEFORE any compose kick (kick picks the payload format)
+        PumpDet1m(gl); // rezydentny tier 1 m: kick ładowania, alokacja po limitach GPU, budżetowany upload
 
-        // Near-field clamp: pull the focus back along the view ray so a background peak never claims the
-        // ring; the clamped point's XY lands over the foreground terrain the screen is actually full of.
-        Vector3 toTarget = cameraTarget - cameraPosition;
-        float targetDist = toTarget.Length();
-        Vector3 focusRaw = targetDist > DetailFocusMaxMeters && targetDist > 1e-3f
-            ? cameraPosition + (toTarget * (DetailFocusMaxMeters / targetDist))
-            : cameraTarget;
+        // ROTATION-INVARIANT residency (2026-07-23, ZASADA 9 — user: "drgnięcie myszką wyładowuje kafle",
+        // reported three times): the ring used to chase the LOOK point (camera + view ray ≤800 m), so an orbit
+        // swept the ring centre in a circle and churned the resident set on every twitch. The ring is now
+        // centred on the CAMERA POSITION — a pure rotation changes NOTHING in the desired set, by construction.
+        // Affordable only since BC1: the full 360° det25 disc (~80 × 11 MB) + det05 disc (16 × 45 MB) ≈ 1.6 GB.
+        Vector3 focusRaw = cameraPosition;
 
         // Time smoothing: the ring and the fade circle must not follow mouse jitter. Exponential glide
         // with a snap for genuine relocations (teleport, preset, route jump).
@@ -4691,8 +4973,42 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // and set its world-space AABB, or gate det25 OFF for this tile. CellForPoint's CellContains invariant means
     // the picked cell fully covers a z17-sized tile, so the tile never straddles a boundary; overlap texels are
     // bit-identical between neighbours (assembler 1:1 placement) so tiles picking different cells still align.
+    // Raz na klatkę: bind + uniformy siatki det1m (świat liczony z anchor — jak AABB det05). Gate tick jak
+    // w BindDet05ForTile. useDet1m idzie w głównym bloku uniformów (A/B działa też zanim ta ścieżka wykona).
+    private long det1mUniformsTick = -1;
+
+    private unsafe void BindDet1mOncePerFrame(GL gl, TerrainMesh3D anchorMesh)
+    {
+        if (!det1mReady || det1mLoaded is null || det1mUniformsTick == det25FrameTick)
+        {
+            return;
+        }
+
+        det1mUniformsTick = det25FrameTick;
+        MapaTur.Domain.Geography.MapBounds b = det1mLoaded.GridGeo;
+        Vector3 sw = anchorMesh.GeoToWorld(b.SouthWest, 0f);
+        Vector3 ne = anchorMesh.GeoToWorld(b.NorthEast, 0f);
+        float minX = MathF.Min(sw.X, ne.X), maxX = MathF.Max(sw.X, ne.X);
+        float minY = MathF.Min(sw.Y, ne.Y), maxY = MathF.Max(sw.Y, ne.Y);
+        gl.ActiveTexture(TextureUnit.Texture14);
+        gl.BindTexture(TextureTarget.Texture2DArray, det1mArrayTexture);
+        gl.ActiveTexture(TextureUnit.Texture15);
+        gl.BindTexture(TextureTarget.Texture2D, det1mCovTexture);
+        gl.ActiveTexture(TextureUnit.Texture0);
+        gl.Uniform1(det1mSamplerLoc, 14);
+        gl.Uniform1(det1mCovLoc, 15);
+        gl.Uniform2(det1mMinXyLoc, minX, maxY);
+        gl.Uniform2(det1mInvSizeLoc, 1f / MathF.Max(1f, maxX - minX), 1f / MathF.Max(1f, maxY - minY));
+        gl.Uniform2(det1mGridDimLoc, det1mLoaded.GridW, det1mLoaded.GridH);
+        fixed (int* p = det1mSliceIdx)
+        {
+            gl.Uniform1(det1mSliceIdxLoc, 160, p);
+        }
+    }
+
     private void BindDet25ForTile(GL gl, TerrainMesh3D mesh, TerrainMesh3D anchorMesh)
     {
+        BindDet1mOncePerFrame(gl, anchorMesh); // tier det1m współdzieli miejsce bindów detali (gate per klatkę)
         if (det25Grid is null)
         {
             gl.Uniform1(useDet25Location, 0);
@@ -4870,6 +5186,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             detailBlendLocation = -1;
             detailColorModeLocation = -1;
             det05ArrRawLocation = -1;
+            det1mSamplerLoc = -1; det1mCovLoc = -1; useDet1mLoc = -1;
+            det1mMinXyLoc = -1; det1mInvSizeLoc = -1; det1mGridDimLoc = -1; det1mSliceIdxLoc = -1;
+            det1mArrayTexture = 0; det1mCovTexture = 0; det1mReady = false; det1mUploadCursor = 0; // kontekst padł — realokacja w PumpDet1m
             detailDebugBoundsLocation = -1;
             det25EyeXyLocation = -1;
             det25FadeInnerLocation = -1;
@@ -8448,6 +8767,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         detailBlendLocation = g.GetUniformLocation(program, "uDetailBlendMeters");
         detailColorModeLocation = g.GetUniformLocation(program, "uOrthoDetailColorMode");
         det05ArrRawLocation = g.GetUniformLocation(program, "uOrthoDet05ArrRaw");
+        det1mSamplerLoc = g.GetUniformLocation(program, "uOrthoDet1m");
+        det1mCovLoc = g.GetUniformLocation(program, "uOrthoDet1mCov");
+        useDet1mLoc = g.GetUniformLocation(program, "uUseDet1m");
+        det1mMinXyLoc = g.GetUniformLocation(program, "uDet1mMinXmaxY");
+        det1mInvSizeLoc = g.GetUniformLocation(program, "uDet1mInvSize");
+        det1mGridDimLoc = g.GetUniformLocation(program, "uDet1mGridDim");
+        det1mSliceIdxLoc = g.GetUniformLocation(program, "uDet1mSliceIdx[0]");
         detailDebugBoundsLocation = g.GetUniformLocation(program, "uOrthoDetailDebugBounds");
         det25EyeXyLocation = g.GetUniformLocation(program, "uDet25EyeXY");
         det25FadeInnerLocation = g.GetUniformLocation(program, "uDet25FadeInner");
