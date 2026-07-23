@@ -954,6 +954,50 @@ public partial class Terrain3DView : ContentView
         cameraSaveTimer.Interval = TimeSpan.FromMilliseconds(1200);
         cameraSaveTimer.Tick += OnCameraSaveTick;
         cameraSaveTimer.Start();
+
+        // BENCH harness (2026-07-23, perf/pano-streaming): MAPATUR_BENCH_F9=<runs> auto-runs the deterministic
+        // F9 Orla Perć flight <runs> times back-to-back (run 1 = cold in-process caches, run 2+ = warm) and
+        // quits, emitting [Bench] log markers so a script can slice the log per run and diff metrics between
+        // builds on an identical camera path. MP4 capture is suppressed for clean numbers.
+        if (int.TryParse(Environment.GetEnvironmentVariable("MAPATUR_BENCH_F9"), out int benchRuns) && benchRuns > 0)
+        {
+            benchRunsRemaining = benchRuns;
+            benchTotalRuns = benchRuns;
+            benchTimer = Dispatcher.CreateTimer();
+            benchTimer.Interval = TimeSpan.FromSeconds(2);
+            benchTimer.Tick += OnBenchTick;
+            benchTimer.Start();
+            Serilog.Log.Information("[Bench] armed: {Runs} F9 runs, waiting for scene", benchRuns);
+        }
+    }
+
+    // BENCH harness state — see the constructor arm. Runs the flight only once the world exists and a minimum
+    // settle time has passed (the same streaming warm-up a user gets before pressing F9 by hand).
+    private readonly IDispatcherTimer? benchTimer;
+    private int benchRunsRemaining;
+    private readonly int benchTotalRuns;
+    private int benchTicks;
+
+    private void OnBenchTick(object? sender, EventArgs e)
+    {
+        benchTicks++;
+        if (flightActive || benchRunsRemaining <= 0)
+        {
+            return;
+        }
+
+        // Scene-ready gate: world frame + raster present, and ≥20 s settle so base streaming matches a human run.
+        if (WorldFrame is null || Raster is null || benchTicks < 10)
+        {
+            return;
+        }
+
+        int runIndex = benchTotalRuns - benchRunsRemaining + 1;
+        benchRunsRemaining--;
+        Serilog.Log.Information(
+            "[Bench] run {Run}/{Total} start ({Kind})", runIndex, benchTotalRuns, runIndex == 1 ? "cold" : "warm");
+        StartOrlaPercFlight();
+        recordingRequested = false; // no MP4 capture during bench — NVENC would skew the numbers
     }
 
     private readonly IDispatcherTimer cameraSaveTimer;
@@ -1878,6 +1922,20 @@ public partial class Terrain3DView : ContentView
         if (finished)
         {
             StopFlight();
+
+            // BENCH harness: mark the run boundary; OnBenchTick starts the next run (warm) on its next tick.
+            // After the last run, quit so the log ends exactly at the benchmark's edge.
+            if (benchTimer is not null)
+            {
+                int doneRun = benchTotalRuns - benchRunsRemaining;
+                Serilog.Log.Information("[Bench] run {Run}/{Total} complete", doneRun, benchTotalRuns);
+                if (benchRunsRemaining <= 0)
+                {
+                    Serilog.Log.Information("[Bench] all runs complete — quitting");
+                    benchTimer.Stop();
+                    Microsoft.Maui.Controls.Application.Current?.Quit();
+                }
+            }
         }
     }
 
@@ -8543,13 +8601,16 @@ public partial class Terrain3DView : ContentView
             : null;
         if (dsDir is not null)
         {
-            // These tiles are de-shadowed ON DISK, so force the correct viewing config so the preview shows the
-            // baked correction as-is (no double-correction): shader de-blue OFF (colour mode 0 = RAW) and the
-            // runtime baked-shadow compensation OFF. User can still toggle to compare (keys 9/1/F2/F1).
-            renderer.OrthoDetailColorMode = 0;
+            // These tiles are de-shadowed ON DISK. H3 (2026-07-23): the old global RAW (colour mode 0) also
+            // stripped the shader de-blue from det25/base — the whole DISTANCE rendered with the raw blue cast
+            // ("pół Morskiego Oka na niebiesko"). Now the split is per-layer: the streamed det05 array renders
+            // RAW (no double-correction on the V2-baked cells) while det25/base/mosaic keep the mode-1 de-blue.
+            // User can still toggle to compare (keys 9/1/F2/F1).
+            renderer.OrthoDetailColorMode = 1;
+            renderer.Det05ArrayRawColor = true;
             renderer.BakedShadowComp = 0f;
             Serilog.Log.Information(
-                "[OrthoDetail05] DESHADOW PREVIEW ON — overlay {DsDir} over fallback {Dir}; forced OrthoDetailColorMode=0 + BakedShadowComp=0",
+                "[OrthoDetail05] DESHADOW PREVIEW ON — overlay {DsDir} over fallback {Dir}; per-layer colour: det05 array RAW, det25/base de-blue (mode 1)",
                 dsDir, dir);
         }
         int dsHits = 0, dsFallback = 0;

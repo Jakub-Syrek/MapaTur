@@ -119,6 +119,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform int uUseDet05Arr;\n" +
         "uniform float uDetailBlendMeters;\n" + // soft edge fade of the detail AABB back to the base ortho
         "uniform int uOrthoDetailColorMode;\n" + // 0 = raw detail, 1 = base de-blue transform (R3 slice A/B)
+        // H3 (2026-07-23): per-layer colour split for the deshadow preview. The STREAMED det05 cells can carry
+        // data-side-corrected (V2) tiles that must render RAW (a second shader de-blue = double correction),
+        // while det25/base/mosaic still need the mode-1 de-blue. 1 = det05 ARRAY skips the mode-1 transform.
+        "uniform int uOrthoDet05ArrRaw;\n" +
         "uniform int uOrthoDetailDebugBounds;\n" + // 1 = outline detail cell AABB edges (diagnostics)
         "uniform vec2 uDet25EyeXY;\n" +      // world-XY of the streaming focus (ring centre) for the det25 range fade
         "uniform float uDet25FadeInner;\n" + // det25 at full strength within this metric radius of the focus
@@ -328,7 +332,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  vec3 dc = dcs.rgb;\n" +
         "  vec2 fp = fwidth(uv) * ts;\n" +
         "  if (max(fp.x, fp.y) < 1.0) { dc = inA ? texBicubicArr(uOrthoDet05Arr, uv, lz, ts) : texBicubicArr(uOrthoDet05ArrB, uv, lz, ts); }\n" +
-        "  if (uOrthoDetailColorMode == 1) {\n" +
+        "  if (uOrthoDetailColorMode == 1 && uOrthoDet05ArrRaw == 0) {\n" + // H3: V2-baked cells render RAW while det25/base keep de-blue
         "    dc = deblueShadow(dc);\n" +                                   // (1) HARD RULE: absolute blue-cast removal
         "    float toneLod = max(0.0, log2(max(ts.x / (mx.x - mn.x), ts.y / (mx.y - mn.y))));\n" +
         "    vec3 dRaw = inA ? textureLod(uOrthoDet05Arr, vec3(uv, lz), toneLod).rgb : textureLod(uOrthoDet05ArrB, vec3(uv, lz), toneLod).rgb;\n" +
@@ -1962,6 +1966,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // Planar water reflection: uniform locations + a half-resolution colour target (texture + depth RB) the
     // pre-pass renders the mirrored terrain into, which the lake mesh then samples. Behind ReflectionEnabled.
     private int reflectionPassLocation = -1;
+
+    // H5 (2026-07-23): mirror-content cull radius. Reflections at half-res + ripple wobble resolve only the
+    // near walls; beyond this the reflected terrain is sub-pixel at the water horizon. 8 km is generous for
+    // every Tatra tarn (Morskie Oko's far wall is < 2 km) while cutting the whole-massif tile ring ~10×.
+    private const float ReflectionMaxDistanceMeters = 8000f;
     private int waterClipZLocation = -1;
     private int reflectionTexLocation = -1;
     private int reflectionEnabledLocation = -1;
@@ -2059,6 +2068,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int useDet05ArrLocation = -1;
     private int detailBlendLocation = -1;
     private int detailColorModeLocation = -1;
+    private int det05ArrRawLocation = -1;       // H3: per-layer colour split (det05 array RAW vs det25/base de-blue)
     private int detailDebugBoundsLocation = -1;
     private int det25EyeXyLocation = -1;
     private int det25FadeInnerLocation = -1;
@@ -2084,6 +2094,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// exists to prevent.
     /// </summary>
     public int OrthoDetailColorMode { get; set; } = 1;
+
+    /// <summary>H3 (2026-07-23): when true, the STREAMED det05 array cells skip the mode-1 shader de-blue —
+    /// for the deshadow preview whose cells are data-side corrected (V2) and must not be corrected twice —
+    /// while det25/base/mosaic keep the full mode-1 transform. False = original single-mode behaviour.</summary>
+    public bool Det05ArrayRawColor { get; set; }
 
     /// <summary>Diagnostics: outline the detail cell AABB edges (magenta) so cell boundaries are visible.</summary>
     public bool OrthoDetailDebugBounds { get; set; }
@@ -2144,12 +2159,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // (nothing checked glGetError) and the sticky error poisoned terrain-tile allocations (white holes,
     // looping "doczytywanie", 2026-07-20). The card was never full — a 16 GB GPU died on one oversized
     // resource. Each slice stays ≤8 layers ≈2.86 GB; EnsureDet05Array verifies every allocation.
-    private static readonly int Det05HardCapCells = OperatingSystem.IsWindows() ? 12 : 3;
+    // H2 (2026-07-23): 12 → 16 on desktop — the shader's slot list (uDet05Aabb[16]) and the A+B slices
+    // (8+8 layers) were built for 16 all along; the hardware-derived ledger (~9.5 GB on a 16 GB card) funds
+    // 16 × 357 MB with the det25 backing reserve intact. Phone untouched.
+    private static readonly int Det05HardCapCells = OperatingSystem.IsWindows() ? 16 : 3;
 
     /// <summary>Layers per det05 array texture — keeps every single GPU resource ≈2.86 GB, safely under
     /// the 32-bit (~4.29 GB) per-resource ceiling. Must match the shader's slice constant (best &lt; 8).</summary>
     private const int Det05ArraySliceLayers = 8;
-    private static readonly double Det05RingRadiusMeters = OperatingSystem.IsWindows() ? 600.0 : 350.0;
+    // H2 (2026-07-23): 600 → 800 m with the 16-cell cap — 16 cells of ~410 m span tile an 800 m ring, so the
+    // 5 cm reflector reaches the far side of a cirque like Morskie Oko instead of stopping mid-lake.
+    private static readonly double Det05RingRadiusMeters = OperatingSystem.IsWindows() ? 800.0 : 350.0;
     private static readonly int Det05CoarseBackingCells = OperatingSystem.IsWindows() ? 6 : 4; // det25 cells reserved to back the det05 ring (no-hole)
 
     // det05 cell TEXTURE ARRAYS (units 12 + 13): allocated lazily on first upload (TexStorage3D, error-
@@ -2176,8 +2196,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         public bool LayerReady;              // det05 ARRAY path: layer fully uploaded — safe to reference in the AABB list
         public double PromoteMs;             // det05 ARRAY path: frame-clock ms of the promote (drives the fade-in)
         public int UploadedRows;
+        public int UploadLevel;              // det05 ARRAY path: mip level currently strip-uploading (0 = base)
         public byte[]? Pending;              // composed buffer awaiting strip-upload
+        public byte[]? PendingMips;          // det05 ARRAY path: worker-built mip chain (levels 1..N, packed)
         public byte[]? Rented;               // pooled cell buffer lent to the in-flight compose (owner: this cell until returned)
+        public byte[]? RentedMips;           // pooled mip-chain buffer (owner: this cell until returned)
         public Task<byte[]?>? Compose;       // off-thread composition in flight
         public long DesiredTick;             // last frame the cell was desired (LRU eviction key)
         public bool Empty;                   // compose returned null (outside the fetched footprint) — no texture
@@ -2196,11 +2219,19 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private static void ReleaseCellBuffer(DetailCellGpu cell)
     {
         byte[]? owned = cell.Rented;
+        byte[]? ownedMips = cell.RentedMips;
         cell.Rented = null;
         cell.Pending = null;
+        cell.RentedMips = null;
+        cell.PendingMips = null;
         if (owned is not null && cell.Compose is null)
         {
             MapaTur.Application.Terrain.MeshBufferPool.Shared.Return(owned);
+        }
+
+        if (ownedMips is not null && cell.Compose is null)
+        {
+            MapaTur.Application.Terrain.MeshBufferPool.Shared.Return(ownedMips);
         }
     }
     private System.Numerics.Vector2 orthoCoverageMin;
@@ -2435,8 +2466,41 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // Desktop 9 GB (2026-07-20): the raised caps (12 × 357 MB det05 + 12 × 89 MB det25 ≈ 5.4 GB) plus the
     // ~2 GB base set fit a 16 GB card comfortably. The 07-20 white-holes incident was NOT this ledger —
     // it was a single >4.29 GB resource (see Det05ArraySliceLayers); the ledger allocates nothing itself.
-    private static readonly long OrthoVramBudgetBytes =
-        OperatingSystem.IsWindows() ? 9L * 1024 * 1024 * 1024 : 3L * 1024 * 1024 * 1024;
+    // H2 (2026-07-23, KONTRAKT-ORTO "budżety z hardware'u raz na starcie"): the desktop budget now DERIVES
+    // from the card's dedicated VRAM (60 %, clamped 4–12 GB) instead of a flat const — a 16 GB card gets
+    // ~9.5 GB, an 8 GB card degrades to 4.8 GB instead of overcommitting. Phone path unchanged.
+    private static readonly long OrthoVramBudgetBytes = OperatingSystem.IsWindows()
+        ? Math.Clamp((long)(QueryDedicatedVramBytes() * 0.60), 4L << 30, 12L << 30)
+        : 3L * 1024 * 1024 * 1024;
+
+    // Dedicated VRAM from the display-class registry (HardwareInformation.qwMemorySize — the only reliable
+    // source on Windows; Win32_VideoController.AdapterRAM is a uint32 capped at 4 GB). 0 → the clamp floor.
+    private static long QueryDedicatedVramBytes()
+    {
+        try
+        {
+            using var cls = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                @"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}");
+            long best = 0;
+            foreach (string sub in cls?.GetSubKeyNames() ?? Array.Empty<string>())
+            {
+                using var k = cls!.OpenSubKey(sub);
+                if (k?.GetValue("HardwareInformation.qwMemorySize") is long qw && qw > best)
+                {
+                    best = qw;
+                }
+            }
+
+            Log.Information("[VRAM] dedicated {GB:F1} GB → ortho budget {BGB:F1} GB",
+                best / (1024.0 * 1024 * 1024), Math.Clamp((long)(best * 0.60), 4L << 30, 12L << 30) / (1024.0 * 1024 * 1024));
+            return best;
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "[VRAM] registry query failed — budget falls to the 4 GB clamp floor");
+            return 0;
+        }
+    }
     private OrthoResidencyPlanner? orthoPlanner;
     // Per-cell world-space AABB (keyed by OrthoTileIndex), unioned from the mesh tiles that sample it.
     private readonly Dictionary<int, (Vector3 Min, Vector3 Max)> orthoCellBounds = new();
@@ -3079,6 +3143,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform1(useDet05Location, use05);
         gl.Uniform1(detailBlendLocation, OrthoDetailBlendMeters);
         gl.Uniform1(detailColorModeLocation, OrthoDetailColorMode);
+        gl.Uniform1(det05ArrRawLocation, Det05ArrayRawColor ? 1 : 0);
         gl.Uniform1(detailDebugBoundsLocation, OrthoDetailDebugBounds ? 1 : 0);
         gl.ActiveTexture(TextureUnit.Texture0);
     }
@@ -3211,13 +3276,26 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 det05ComposeInFlight++;
                 // Pooled compose destination (the 256 MiB det05 cell buffer per compose was the single
                 // largest LOH churn of a covered-strip walk). Ownership: the cell, until ReleaseCellBuffer.
+                int cellPx = det05Grid.CellPx;
                 byte[] rented = MapaTur.Application.Terrain.MeshBufferPool.Shared.RentBytes(
-                    det05Grid.CellPx * det05Grid.CellPx * 4);
+                    cellPx * cellPx * 4);
+                // Worker-built mip chain (2026-07-23, H1): GenerateMipmap on a 12-layer 8192² array is a
+                // whole-resource GenerateMips under ANGLE/D3D11 — a multi-GB GPU chew on every promote that
+                // landed at swap as the 150–300 ms frame gaps. The compose worker now box-filters the chain
+                // off-thread and the drain strip-uploads each level; the GL thread never mip-generates det05.
+                byte[] rentedMips = MapaTur.Application.Terrain.MeshBufferPool.Shared.RentBytes(
+                    (cellPx * cellPx * 4 / 3) + 64);
                 cell.Rented = rented;
+                cell.RentedMips = rentedMips;
                 cell.Compose = Task.Run(() =>
                 {
                     var swc = System.Diagnostics.Stopwatch.StartNew();
                     byte[]? buf = composer.Compose(ci, cj, rented);
+                    if (buf is not null)
+                    {
+                        BuildMipChain(buf, cellPx, rentedMips);
+                    }
+
                     capture.ComposeMs = swc.Elapsed.TotalMilliseconds;
                     return buf;
                 });
@@ -3245,6 +3323,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
                     cell.Pending = buf;
                     cell.Rented = buf; // ownership continues through the strip-upload to promote/dispose
+                    cell.PendingMips = cell.RentedMips; // worker-built chain rides along to the strip-upload
                     if (!det05UploadQueue.Contains(cell.Key))
                     {
                         det05UploadQueue.Add(cell.Key);
@@ -3309,7 +3388,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         cell.LayerReady = false;
         if (composeAlive)
         {
-            cell.Rented = null; cell.Pending = null; // deliberate drop — the orphaned task owns the buffer now
+            // deliberate drop — the orphaned task owns both buffers now (it may still be writing the chain)
+            cell.Rented = null; cell.Pending = null;
+            cell.RentedMips = null; cell.PendingMips = null;
         }
         else
         {
@@ -3317,6 +3398,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         cell.UploadedRows = 0;
+        cell.UploadLevel = 0;
         det05UploadQueue.Remove(cell.Key);
     }
 
@@ -3402,6 +3484,117 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         return tex;
     }
 
+    // Worker-side mip chain for a det05 cell (H1, 2026-07-23): packed levels 1..N (down to 1×1), each a 2×2
+    // box average of the previous, written into ONE pooled buffer (level 1 at offset 0, level k right after
+    // k−1). Replaces GL GenerateMipmap for the det05 arrays: under ANGLE/D3D11 that call regenerates mips for
+    // the WHOLE 12-layer array (a multi-GB GPU chew) on every single-cell promote and lands at swap as the
+    // measured 150–300 ms frame gaps. Level 1 (the 64 MB one) is row-parallel; the tail is trivial.
+    private static unsafe void BuildMipChain(byte[] level0, int px, byte[] dest)
+    {
+        fixed (byte* src0 = level0)
+        fixed (byte* dst0 = dest)
+        {
+            byte* src = src0;
+            byte* dst = dst0;
+            int sPx = px;
+            while (sPx > 1)
+            {
+                int dPx = sPx >> 1;
+                byte* s = src, d = dst;
+                int srcPx = sPx;
+                void DownRow(int y)
+                {
+                    byte* r0 = s + ((long)(2 * y) * srcPx * 4);
+                    byte* r1 = r0 + ((long)srcPx * 4);
+                    byte* dRow = d + ((long)y * dPx * 4);
+                    for (int x = 0; x < dPx; x++)
+                    {
+                        int o = x * 8, oD = x * 4;
+                        dRow[oD + 0] = (byte)((r0[o + 0] + r0[o + 4] + r1[o + 0] + r1[o + 4] + 2) >> 2);
+                        dRow[oD + 1] = (byte)((r0[o + 1] + r0[o + 5] + r1[o + 1] + r1[o + 5] + 2) >> 2);
+                        dRow[oD + 2] = (byte)((r0[o + 2] + r0[o + 6] + r1[o + 2] + r1[o + 6] + 2) >> 2);
+                        dRow[oD + 3] = (byte)((r0[o + 3] + r0[o + 7] + r1[o + 3] + r1[o + 7] + 2) >> 2);
+                    }
+                }
+
+                if (dPx >= 2048)
+                {
+                    System.Threading.Tasks.Parallel.For(0, dPx, DownRow);
+                }
+                else
+                {
+                    for (int y = 0; y < dPx; y++) { DownRow(y); }
+                }
+
+                src = dst;
+                dst += (long)dPx * dPx * 4;
+                sPx = dPx;
+            }
+        }
+    }
+
+    // H1 (2026-07-23): PIXEL_UNPACK PBO ring for the det05 strip uploads. TexSubImage3D from CLIENT memory
+    // makes ANGLE copy the chunk synchronously on the GL thread and sync the real transfer at swap (the
+    // "bites at swap" 150–300 ms gaps). From a PBO the call is a GPU-side transfer the driver overlaps with
+    // rendering. Ring of 3 so consecutive chunks never stall on each other's in-flight DMA.
+    private readonly uint[] uploadPbo = new uint[3];
+    private int uploadPboIndex;
+    private nuint uploadPboSize;
+    private bool uploadPboBroken; // MapBufferRange refused once → stay on the direct path (no per-frame retries)
+
+    private unsafe void EnsureUploadPbos(GL gl, nuint size)
+    {
+        if (uploadPbo[0] != 0 && uploadPboSize >= size)
+        {
+            return;
+        }
+
+        for (int i = 0; i < uploadPbo.Length; i++)
+        {
+            if (uploadPbo[i] != 0) { gl.DeleteBuffer(uploadPbo[i]); }
+            uploadPbo[i] = gl.GenBuffer();
+            gl.BindBuffer(BufferTargetARB.PixelUnpackBuffer, uploadPbo[i]);
+            gl.BufferData(BufferTargetARB.PixelUnpackBuffer, size, null, BufferUsageARB.StreamDraw);
+        }
+
+        gl.BindBuffer(BufferTargetARB.PixelUnpackBuffer, 0);
+        uploadPboSize = size;
+        Log.Information("[Upload] PBO ring ready: {N} × {MB} MB", uploadPbo.Length, size / (1024 * 1024));
+    }
+
+    // Copies one chunk into the next ring PBO and leaves it BOUND as PIXEL_UNPACK, so the caller's
+    // TexSubImage sources from PBO offset 0 (pass pixels = null) and MUST unbind afterwards. False = map
+    // refused → caller uses the direct client-memory path (and we latch off to avoid per-frame map churn).
+    private unsafe bool StageChunkInPbo(GL gl, byte[] src, long srcOffset, int bytes)
+    {
+        if (uploadPboBroken)
+        {
+            return false;
+        }
+
+        uploadPboIndex = (uploadPboIndex + 1) % uploadPbo.Length;
+        gl.BindBuffer(BufferTargetARB.PixelUnpackBuffer, uploadPbo[uploadPboIndex]);
+        gl.BufferData(BufferTargetARB.PixelUnpackBuffer, uploadPboSize, null, BufferUsageARB.StreamDraw); // orphan
+        void* ptr = gl.MapBufferRange(
+            BufferTargetARB.PixelUnpackBuffer, 0, (nuint)bytes,
+            (uint)(MapBufferAccessMask.WriteBit | MapBufferAccessMask.InvalidateBufferBit));
+        if (ptr == null)
+        {
+            gl.BindBuffer(BufferTargetARB.PixelUnpackBuffer, 0);
+            uploadPboBroken = true;
+            Log.Warning("[Upload] MapBufferRange refused — PBO path latched OFF, direct uploads");
+            return false;
+        }
+
+        fixed (byte* s = &src[srcOffset])
+        {
+            System.Buffer.MemoryCopy(s, ptr, bytes, bytes);
+        }
+
+        gl.UnmapBuffer(BufferTargetARB.PixelUnpackBuffer);
+        return true;
+    }
+
     private unsafe void DrainDet05Uploads(GL gl)
     {
         if (det05UploadQueue.Count == 0)
@@ -3437,6 +3630,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
                 cell.Layer = layer;
                 cell.UploadedRows = 0;
+                cell.UploadLevel = 0;
             }
 
             // Global layer → slice + local z (slice A carries layers 0..slice-1, B the rest).
@@ -3457,47 +3651,84 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 bound = target;
             }
 
-            // Strip-upload straight into the assigned layer: a partial layer is never sampled, because the
-            // fragment shader only sees cells present in the AABB slot list (LayerReady gates that).
-            int rowBytes = w * 4;
-            int rowsPerChunk = Math.Max(1, OrthoUploadBytesPerChunk / Math.Max(1, rowBytes));
-            while (cell.UploadedRows < h)
+            // Strip-upload the assigned layer LEVEL BY LEVEL (H1): level 0 streams from the composed buffer,
+            // levels 1..N from the worker-built chain — the GL thread never calls GenerateMipmap for det05
+            // (under ANGLE that regenerated the WHOLE multi-GB array per promote → the 150–300 ms gaps).
+            // Chunks go through the PBO ring so each TexSubImage is an async GPU-side copy, not a client-
+            // memory sync. A partial layer is never sampled (LayerReady gates the AABB slot list).
+            EnsureUploadPbos(gl, (nuint)OrthoUploadBytesPerChunk);
+            byte[]? mips = cell.PendingMips;
+            int totalLevels = mips is not null ? Math.ILogB(w) + 1 : 1;
+            while (cell.UploadLevel < totalLevels)
             {
-                int rows = Math.Min(rowsPerChunk, h - cell.UploadedRows);
-                fixed (byte* p = &rgba[(long)cell.UploadedRows * rowBytes])
+                int lv = cell.UploadLevel;
+                int lPx = Math.Max(1, w >> lv);
+                byte[] srcBuf = lv == 0 ? rgba : mips!;
+                long lvOffset = 0;
+                for (int j = 1; j < lv; j++)
                 {
-                    gl.TexSubImage3D(TextureTarget.Texture2DArray, 0, 0, cell.UploadedRows, z,
-                        (uint)w, (uint)rows, 1, PixelFormat.Rgba, PixelType.UnsignedByte, p);
+                    long p = w >> j;
+                    lvOffset += p * p * 4;
+                }
+
+                int rowBytes = lPx * 4;
+                int rowsPerChunk = Math.Max(1, OrthoUploadBytesPerChunk / Math.Max(1, rowBytes));
+                int rows = Math.Min(rowsPerChunk, lPx - cell.UploadedRows);
+                long srcOff = lvOffset + ((long)cell.UploadedRows * rowBytes);
+                int bytes = rows * rowBytes;
+                if (StageChunkInPbo(gl, srcBuf, srcOff, bytes))
+                {
+                    gl.TexSubImage3D(TextureTarget.Texture2DArray, lv, 0, cell.UploadedRows, z,
+                        (uint)lPx, (uint)rows, 1, PixelFormat.Rgba, PixelType.UnsignedByte, (void*)0);
+                    gl.BindBuffer(BufferTargetARB.PixelUnpackBuffer, 0);
+                }
+                else
+                {
+                    fixed (byte* p = &srcBuf[srcOff])
+                    {
+                        gl.TexSubImage3D(TextureTarget.Texture2DArray, lv, 0, cell.UploadedRows, z,
+                            (uint)lPx, (uint)rows, 1, PixelFormat.Rgba, PixelType.UnsignedByte, p);
+                    }
                 }
 
                 cell.UploadedRows += rows;
-                if (frameClock.ElapsedMilliseconds - start >= Det25UploadBudgetMsPerFrame)
+                if (cell.UploadedRows >= lPx)
+                {
+                    cell.UploadLevel++;
+                    cell.UploadedRows = 0;
+                }
+
+                if (frameClock.ElapsedMilliseconds - start >= OrthoUploadBudgetMsPerFrame)
                 {
                     break;
                 }
             }
 
-            if (cell.UploadedRows >= h)
+            if (cell.UploadLevel >= totalLevels)
             {
                 cell.LayerReady = true;
                 cell.PromoteMs = frameClock.ElapsedMilliseconds;
-                if (inA) { promotedA = true; } else { promotedB = true; }
-                ReleaseCellBuffer(cell); // the final TexSubImage3D has copied — recycle the pooled buffer
+                if (mips is null)
+                {
+                    if (inA) { promotedA = true; } else { promotedB = true; } // no chain → slice-wide fallback below
+                }
+
+                ReleaseCellBuffer(cell); // the final TexSubImage3D has copied — recycle the pooled buffers
                 det05ResidentBytes += OrthoVramBudget.CellResidentBytes(w, h);
                 det05UploadQueue.RemoveAt(0);
                 Log.Information(
-                    "[Det05] cell ({Ci},{Cj}) compose {C:F0}ms | layer {Layer} ({Slice}) resident",
-                    cell.Ci, cell.Cj, cell.ComposeMs, cell.Layer, inA ? "A" : "B");
+                    "[Det05] cell ({Ci},{Cj}) compose {C:F0}ms | layer {Layer} ({Slice}) resident ({Levels} levels)",
+                    cell.Ci, cell.Cj, cell.ComposeMs, cell.Layer, inA ? "A" : "B", totalLevels);
             }
 
-            if (frameClock.ElapsedMilliseconds - start >= Det25UploadBudgetMsPerFrame)
+            if (frameClock.ElapsedMilliseconds - start >= OrthoUploadBudgetMsPerFrame)
             {
                 break;
             }
         }
 
-        // Regenerate mips only for the slice(s) that finished a layer this frame. Layers mid-upload get
-        // garbage mips — harmless, they are not in the slot list yet and get a fresh chain on completion.
+        // FALLBACK ONLY (cells promoted without a worker-built chain — should not happen in practice): the old
+        // slice-wide GenerateMipmap, kept so such a layer never samples garbage mips. Logged loudly.
         if (promotedA || promotedB)
         {
             double t0 = frameClock.ElapsedMilliseconds;
@@ -3514,14 +3745,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             }
 
             GLEnum mipError = gl.GetError();
-            if (mipError != GLEnum.NoError)
-            {
-                Log.Warning("[Det05] array mip regen GL error 0x{Err:X}", (int)mipError);
-            }
-            else
-            {
-                Log.Information("[Det05] array mip regen {Ms:F0} ms", frameClock.ElapsedMilliseconds - t0);
-            }
+            Log.Warning(
+                "[Det05] FALLBACK slice-wide mip regen (no worker chain) {Ms:F0} ms, GL 0x{Err:X}",
+                frameClock.ElapsedMilliseconds - t0, (int)mipError);
         }
 
         gl.BindTexture(TextureTarget.Texture2DArray, 0);
@@ -4078,9 +4304,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         if (dbgLastFrameMs > 0 && frameGap > 150)
         {
             Log.Information(
-                "[GL3D] frame gap {Gap}ms (gen2 +{Gen2Delta}, totalGen2={Gen2}, heap={HeapMB}MB, pendingUploads={Pending})",
-                frameGap, gen2Now - dbgLastGen2, gen2Now, GC.GetTotalMemory(false) / (1024 * 1024), pendingTileUploads.Count);
+                "[GL3D] frame gap {Gap}ms (gen2 +{Gen2Delta}, totalGen2={Gen2}, heap={HeapMB}MB, pendingUploads={Pending}, tileUp={TileMs:F0}ms/{TileN})",
+                frameGap, gen2Now - dbgLastGen2, gen2Now, GC.GetTotalMemory(false) / (1024 * 1024), pendingTileUploads.Count,
+                uploadTileDataMs, uploadTileDataCount);
         }
+
+        uploadTileDataMs = 0; uploadTileDataCount = 0; // per-frame attribution window
 
         dbgLastFrameMs = nowFrameMs;
         dbgLastGen2 = gen2Now;
@@ -4170,6 +4399,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             useDet05ArrLocation = -1;
             detailBlendLocation = -1;
             detailColorModeLocation = -1;
+            det05ArrRawLocation = -1;
             detailDebugBoundsLocation = -1;
             det25EyeXyLocation = -1;
             det25FadeInnerLocation = -1;
@@ -5041,6 +5271,19 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             uint reflBound = 0;
             foreach (KeyValuePair<TerrainMesh3D, TileBuffers> entry in tileBuffers)
             {
+                // H5 (2026-07-23): the mirror used to draw EVERY resident tile — the whole-Tatra base ring,
+                // ~1000 draws ≈ 32 ms GPU warm — with no culling at all. A lake reflection at half-res with
+                // the 2 % ripple wobble resolves only the nearby walls; terrain beyond this radius lands in
+                // a couple of pixels at the water horizon. Cheap XY distance-to-AABB cull from the camera
+                // (WorldMin/Max are precomputed at mesh build). Verified before/after on the F9 bench.
+                Vector3 wmin = entry.Key.WorldMin, wmax = entry.Key.WorldMax;
+                float rdx = Math.Max(0f, Math.Max(wmin.X - cameraWorldPos.X, cameraWorldPos.X - wmax.X));
+                float rdy = Math.Max(0f, Math.Max(wmin.Y - cameraWorldPos.Y, cameraWorldPos.Y - wmax.Y));
+                if ((rdx * rdx) + (rdy * rdy) > ReflectionMaxDistanceMeters * ReflectionMaxDistanceMeters)
+                {
+                    continue;
+                }
+
                 OrthoTile? ot = null;
                 if (reflAnyOrtho)
                 {
@@ -7719,6 +7962,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         useDet05ArrLocation = g.GetUniformLocation(program, "uUseDet05Arr");
         detailBlendLocation = g.GetUniformLocation(program, "uDetailBlendMeters");
         detailColorModeLocation = g.GetUniformLocation(program, "uOrthoDetailColorMode");
+        det05ArrRawLocation = g.GetUniformLocation(program, "uOrthoDet05ArrRaw");
         detailDebugBoundsLocation = g.GetUniformLocation(program, "uOrthoDetailDebugBounds");
         det25EyeXyLocation = g.GetUniformLocation(program, "uDet25EyeXY");
         det25FadeInnerLocation = g.GetUniformLocation(program, "uDet25FadeInner");
@@ -9940,36 +10184,26 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     {
         int vertexCount = tile.Vertices.Length;
 
-        // Positions: tightly packed x,y,z floats.
-        var positions = new float[vertexCount * 3];
-        for (int i = 0; i < vertexCount; i++)
-        {
-            Vector3 v = tile.Vertices[i];
-            positions[(i * 3) + 0] = v.X;
-            positions[(i * 3) + 1] = v.Y;
-            positions[(i * 3) + 2] = v.Z;
-        }
+        // H6 (2026-07-23): positions/normals upload ZERO-COPY straight from the mesh's Vector3[] — the layout
+        // IS tightly packed x,y,z floats (System.Numerics.Vector3 = 3 sequential floats), so the old per-tile
+        // repack was two fresh LOH arrays and two full copies per tile for nothing. Colours still need the
+        // ARGB→RGBA swizzle but into a POOLED buffer. The per-tile BufferData wall time is measured below —
+        // uploadTileDataMs feeds the bench so the "gap frames all have pendingUploads>0" hypothesis stays
+        // attributed to numbers, not vibes.
+        double tUp0 = frameClock.ElapsedMilliseconds;
+        System.ReadOnlySpan<float> positions = System.Runtime.InteropServices.MemoryMarshal.Cast<Vector3, float>(
+            tile.Vertices.AsSpan());
+        System.ReadOnlySpan<float> normalsSpan = System.Runtime.InteropServices.MemoryMarshal.Cast<Vector3, float>(
+            tile.Normals.AsSpan());
 
-        // Colours: the UNSHADED base tint as explicit R,G,B,A bytes (the mesh stores 0xAARRGGBB; avoid
-        // endianness surprises). The fragment shader applies Lambert shading per pixel from the normal.
-        var colors = new byte[vertexCount * 4];
+        byte[] colorsRented = MapaTur.Application.Terrain.MeshBufferPool.Shared.RentBytes(vertexCount * 4);
         for (int i = 0; i < vertexCount; i++)
         {
             uint argb = tile.BaseColors[i];
-            colors[(i * 4) + 0] = (byte)((argb >> 16) & 0xFF);
-            colors[(i * 4) + 1] = (byte)((argb >> 8) & 0xFF);
-            colors[(i * 4) + 2] = (byte)(argb & 0xFF);
-            colors[(i * 4) + 3] = (byte)((argb >> 24) & 0xFF);
-        }
-
-        // Normals: tightly packed x,y,z floats in the mesh's world frame (X east, Y north, Z up).
-        var normals = new float[vertexCount * 3];
-        for (int i = 0; i < vertexCount; i++)
-        {
-            Vector3 n = tile.Normals[i];
-            normals[(i * 3) + 0] = n.X;
-            normals[(i * 3) + 1] = n.Y;
-            normals[(i * 3) + 2] = n.Z;
+            colorsRented[(i * 4) + 0] = (byte)((argb >> 16) & 0xFF);
+            colorsRented[(i * 4) + 1] = (byte)((argb >> 8) & 0xFF);
+            colorsRented[(i * 4) + 2] = (byte)(argb & 0xFF);
+            colorsRented[(i * 4) + 3] = (byte)((argb >> 24) & 0xFF);
         }
 
         uint[] indices = tile.Indices;
@@ -9986,13 +10220,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         buffers.ColorVbo = g.GenBuffer();
         g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.ColorVbo);
-        g.BufferData<byte>(BufferTargetARB.ArrayBuffer, (nuint)colors.Length, colors, BufferUsageARB.StaticDraw);
+        g.BufferData<byte>(BufferTargetARB.ArrayBuffer, (nuint)(vertexCount * 4), colorsRented.AsSpan(0, vertexCount * 4), BufferUsageARB.StaticDraw);
         g.EnableVertexAttribArray(1);
         g.VertexAttribPointer(1, 4, VertexAttribPointerType.UnsignedByte, true, 4, (void*)0);
+        MapaTur.Application.Terrain.MeshBufferPool.Shared.Return(colorsRented); // BufferData copied — pool it back
 
         buffers.NormalVbo = g.GenBuffer();
         g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.NormalVbo);
-        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(normals.Length * sizeof(float)), normals, BufferUsageARB.StaticDraw);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(normalsSpan.Length * sizeof(float)), normalsSpan, BufferUsageARB.StaticDraw);
         g.EnableVertexAttribArray(2);
         g.VertexAttribPointer(2, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
 
@@ -10018,11 +10253,19 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         g.BindVertexArray(0);
         tileBuffers[tile] = buffers;
+        uploadTileDataMs += frameClock.ElapsedMilliseconds - tUp0;
+        uploadTileDataCount++;
 
         // The CPU vertex buffers are now in GPU VBOs and nothing reads them again (this is their only reader),
         // so return the big arrays to the pool — the next tile rebuild rents them instead of churning the LOH.
         tile.ReturnBuffersToPool();
     }
+
+    // H6 diagnostics: cumulative client-side wall time of UploadTile BufferData batches + count, logged with
+    // the frame-gap line so gap frames attribute to either the client call (Map-path fix) or the swap flush
+    // (throttle fix). Reset after each log.
+    private double uploadTileDataMs;
+    private int uploadTileDataCount;
 
     private void ReleaseTiles(GL g)
     {
