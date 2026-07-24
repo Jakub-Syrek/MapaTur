@@ -3571,8 +3571,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
             if (det05Cells.TryGetValue(key, out DetailCellGpu? cell)
                 && cell.Compose is null && !cell.Empty
-                && !cell.LayerReady && cell.Pending is null)
+                && !cell.LayerReady && cell.Pending is null && cell.PendingBc1 is null)
             {
+                // PendingBc1 w guardzie (2026-07-24): bez niego cela BC1 w trakcie strip-uploadu była
+                // RE-KICKOWANA (drugi odczyt .opk ~45 MB, drugi promote, ledger [Mem] liczony 2×).
                 int ci = cell.Ci, cj = cell.Cj;
                 MapaTur.Application.Terrain.IOrthoDetailComposer composer = det05Composer;
                 DetailCellGpu capture = cell;
@@ -3836,9 +3838,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         Log.Information(
-            "[Det05] cell ARRAYS allocated: {Px}px, slice A {A} + slice B {B} layers ({GB:F1} GB with mips), glGetError clean — per-fragment cell pick",
+            "[Det05] cell ARRAYS allocated: {Px}px, slice A {A} + slice B {B} layers ({GB:F1} GB with mips, {Fmt}), glGetError clean — per-fragment cell pick",
             px, layersA, det05ArrayTextureB != 0 ? layersB : 0,
-            allocated * OrthoVramBudget.CellResidentBytes(px, px) / (1024.0 * 1024.0 * 1024.0));
+            allocated * (det05Bc1On
+                ? (double)MapaTur.Application.Terrain.GpuCellCache.ChainSize(px)
+                : OrthoVramBudget.CellResidentBytes(px, px)) / (1024.0 * 1024.0 * 1024.0),
+            det05Bc1On ? "BC1" : "RGBA");
     }
 
     // One ≤2.9 GB slice, error-checked: returns 0 (and deletes the name) if the driver refused the
