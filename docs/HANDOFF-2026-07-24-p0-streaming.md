@@ -48,6 +48,22 @@
   kropkowana ścieżka OSM przy stawie z pierwszego zrzutu; po fixie samplingowym zweryfikować, czy coś
   jeszcze przecina taflę (Overpass leżał — 504; lokalny extract w scratchpad/zabie.osm).
 
+## AKTUALIZACJA ~20:45 (czwarta runda)
+
+- **Kreski: WERDYKT USERA „zniknęły, wygląda dobrze"** (fix textureGrad 9dc010e). Lekcja procesowa
+  zapisana w memory: zgłoszony bug ISTNIEJE — negatywny pomiar = zła metoda, próbkować DO SKUTKU.
+- **BUG ZNALEZIONY przy diagnozie [Mem] 2×: kick det05 bez `PendingBc1` w guardzie** — cela BC1 w
+  trakcie strip-uploadu była RE-KICKOWANA: KAŻDA cela det05 czytana z .opk DWUKROTNIE (2×45 MB I/O),
+  podwójny promote, ledger [Mem] 2× (2731 zamiast ~1431 MB przy 32 celach). Fix w kodzie (guard jak w
+  det25) + poprawiony przelicznik logu alokacji („10.7 GB" liczone po RGBA mimo BC1) — **CZEKA NA BUILD**
+  (apka usera trzyma exe). Po buildzie: weryfikacja pojedynczego opk-read per cela w logu + F9.
+- **Pkt 4 (spike relokacji) — pierwsze pomiary z logów zimnego startu na pozie MO (bez nowych runów):**
+  start→„DEM within renderer budget" **13 s** (load+parse tatry.dem); →„streaming wired" **+16 s BEZ
+  LOGÓW** (budowa meshy — luka telemetryczna, dodać [OrthoLat]-style log); dekod 4×PNG bazy 8192×5462 +
+  upload **~10 s**; tile-swap hitch **701 ms** (lines=383 ms! + other=293 — przebudowa linii na wątku
+  GL przy swapie = główny wkład w hitch). Następny krok: run z teleportem (nie zimny start) + log
+  per-podsystem tej luki 16 s.
+
 ## PEŁNA LISTA POZOSTAŁEJ ROBOTY (odtworzona 12:40 — taski NIE przenoszą się między sesjami,
 ## poprzednia lista ≥11 tasków przepadła; TA lista jest teraz jedynym nośnikiem — aktualizować TUTAJ)
 
