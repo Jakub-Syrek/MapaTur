@@ -5705,6 +5705,7 @@ public partial class Terrain3DView : ContentView
             }
 
             // Recording capture for this path happens inside TryRenderTerrainGl (GL FBO readback), not here.
+            ServiceTestHarness(e, frame); // harness działa też na ścieżce GL (metoda kończy się tym returnem)
             return;
         }
 #endif
