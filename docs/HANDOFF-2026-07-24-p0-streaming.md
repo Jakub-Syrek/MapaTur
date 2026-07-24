@@ -1,5 +1,53 @@
 # HANDOFF 2026-07-24 — P0 architektura streamingu: stan, WSZYSTKIE napotkane problemy, kontynuacja
 
+## ══ START 2026-07-25 — ZACZNIJ OD TEGO ══
+
+### PRIORYTET 1: „łączenia są masakryczne gdzieniegdzie" (zrzut usera na koniec dnia)
+
+Kadr dowodowy: grań Szpiglasowy Wierch / Dolina Temnosmreczyńska, **JASNA PIŁOKSZTAŁTNA linia** (zygzak
+kwantowany do kafli) biegnąca WZDŁUŻ zbocza przez cały kadr, druga niżej. To granica POKRYCIA warstwy
+detalu (po nodata-fix v4 czerń→przezroczystość: baza prześwituje, ale krawędź pokrycia jest OSTRA —
+ząbki kafli 512px/128 m + kontrast tonalny detal↔baza; możliwa też jasna obwódka filtrowania BC1 na
+brzegu punch-through).
+
+**Poza kamery do odtworzenia kadru 1:1** (MAPATUR_START_POSE):
+`5674.639;-6026.549;1944.8878;1449.4592;4.0875397;0.39500022`
+
+Plan (pomiar → fix, NIE zgadywać):
+1. Odtworzyć kadr harnessem; klasyfikacja per-piksel którą granicę widać — rozszerzyć wzorzec
+   `MAPATUR_DET1M_DEBUG` na det25Arr/det05 (kolor per warstwa+stan alfy) albo killami warstw.
+2. Fix na WSZYSTKICH ścieżkach naraz (TERRAIN-GRAPHICS-CHECKLIST!): preferowany DATA-side feather
+   brzegu pokrycia w bake (gradient alfy na N tekselach zamiast binarnego punch-through) — formaty v5 +
+   rebake (det25+det1m 37 min, det05 37 min — zmierzone dziś, maszyna zdrowa); alternatywnie shaderowy
+   fade po odległości od krawędzi pokrycia. Ząbki kwantu kafli leczy TYLKO feather w danych.
+3. Sweep wizualny ≥3 lokacje wzdłuż granicy PL/SK + werdykt usera.
+
+### Stan na koniec 2026-07-24 (wszystko zacommitowane, gałąź perf/pano-streaming)
+
+Dzień zamknął: czarne trójkąty PL/SK (nodata GUGiK→alfa0, v4, rebake), miny samplerów (pin przy linku),
+kreski przełączeń cel (textureGrad), krok 6 det25+det05 (strony .opk, opk-read 0.2-1.4 s/celę, zero
+compose), zstd (det05 67→45 GB, TDD), zasięg 5cm 12→48 cel/~600 m (96 cofnięte pomiarem: pętla slotów
+18.7 ms — czeka na O(1)), frame-gapy GC (pooling stron — TryReadPageInto), kontrast (toneLod +3, próg
+mism w górę — luma std wracała 39.5→24.7→fix), demo F9 (start z pozy usera, słońce zatrzymane 17:45 na
+~20 s, bramka „scena dobudowana" przed startem; WERDYKT USERA: „jest wow"). FB-opis napisany.
+
+**Rozmiary instalki (zmierzone dziś):** opk det05 45 GB + det25 7.9 GB + det1m 0.57 GB = 53.5 GB;
++ baza PNG ~2 GB + DEM/baked/z16 ~2-4 GB + mbtiles ~1-2 GB ⇒ **~59-62 GB**. Źródłowe WebP (15+1.6 GB)
+NIE muszą wchodzić do instalki (strony .opk są źródłem prawdy; compose=fallback). .opk już zstd —
+instalator nie ściśnie; cięcie = paczki regionalne (mechanizm Railway już jest): baza+det25+det1m
+~15 GB w instalce, det05 45 GB jako opcjonalny pakiet „Tatry HD".
+
+### Kolejka po łączeniach (bez zmian priorytetów)
+1. O(1) wybór celi det05/det25 (krata→slot jak det1m sliceIdx) — odblokuje 96+ cel bez kosztu pętli
+   per piksel (96/64 zmierzone: terrain 18.7 ms → cofnięte do 48/32 przy 12-13 ms).
+2. Bench F9 cold+warm na nowej bramce „scena dobudowana" (stary baseline z małym ringiem bez wartości).
+3. Spike relokacji: zmierzone składowe zimnego startu — load tatry.dem 13 s, budowa meshy 16 s BEZ
+   LOGÓW (dodać telemetrię), dekod bazy PNG ~10 s, hitch tile-swap 701 ms (lines=383 ms!).
+4. Werdykt usera: zasięg 48 cel wystarczy? kontrast po fixie OK? przycinanie po poolingu zniknęło?
+5. Krok 7 (tail-first/burst), krok 8 (sprzątanie compose/mtgc/martwych klas), pełna bramka e2e.
+6. Drobne: magenta w MAPATUR_DET1M_DEBUG (cov>0 bez slice'a na brzegu), audyt samplerów pozostałych
+   programów, exposed-route way 1421182377 (trail_visibility=horrible przy Żabich B. — OSM, osobne).
+
 ## AKTUALIZACJA 12:15 (druga runda 07-24) — pkt 6, 7 i 10 ROZWIĄZANE
 
 - **Pkt 7 (miny samplerów) ✔**: wszystkie samplery programu terenu pinowane przy linku (`EnsureProgram`,
