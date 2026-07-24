@@ -331,6 +331,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Same colour law as applyOrthoDetail mode 1 (conditional tone harmonisation) — KONTRAKT-ORTO §1.
         "vec3 applyOrthoDet05Array(vec2 wxy, vec3 baseC, float blendM){\n" +
         "  if (uUseDet05Arr != 1) return baseC;\n" +
+        "  vec2 wdx = dFdx(wxy), wdy = dFdy(wxy);\n" + // gradienty świata PRZED wyborem celi — patrz applyOrthoDet25Arr
         "  int best = -1; float bestEdge = 0.0;\n" +
         "  for (int i = 0; i < 32; i++) {\n" +
         "    vec2 mn = uDet05Aabb[i].xy; vec2 mx = uDet05Aabb[i].zw;\n" +
@@ -341,13 +342,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  }\n" +
         "  if (best < 0) return baseC;\n" +
         "  vec2 mn = uDet05Aabb[best].xy; vec2 mx = uDet05Aabb[best].zw;\n" +
-        "  vec2 uv = vec2((wxy.x - mn.x) / (mx.x - mn.x), (mx.y - wxy.y) / (mx.y - mn.y));\n" +
+        "  vec2 sp = mx - mn;\n" +
+        "  vec2 uv = vec2((wxy.x - mn.x) / sp.x, (mx.y - wxy.y) / sp.y);\n" +
         "  vec2 ts = vec2(textureSize(uOrthoDet05Arr, 0).xy);\n" +
         "  bool inA = best < uDet05ArrA;\n" + // slot index → slice (A: 0..uDet05ArrA-1, B: reszta)
         "  float lz = inA ? float(best) : float(best - uDet05ArrA);\n" +
-        "  vec4 dcs = inA ? texture(uOrthoDet05Arr, vec3(uv, lz)) : texture(uOrthoDet05ArrB, vec3(uv, lz));\n" +
+        "  vec2 gx = vec2(wdx.x / sp.x, -wdx.y / sp.y);\n" +
+        "  vec2 gy = vec2(wdy.x / sp.x, -wdy.y / sp.y);\n" +
+        "  vec4 dcs = inA ? textureGrad(uOrthoDet05Arr, vec3(uv, lz), gx, gy) : textureGrad(uOrthoDet05ArrB, vec3(uv, lz), gx, gy);\n" +
         "  vec3 dc = dcs.rgb;\n" +
-        "  vec2 fp = fwidth(uv) * ts;\n" +
+        "  vec2 fp = (abs(gx) + abs(gy)) * ts;\n" + // fwidth z gradów świata (fwidth(uv) na linii przełączenia cel = śmieci)
+
         "  if (max(fp.x, fp.y) < 1.0) { dc = inA ? texBicubicArr(uOrthoDet05Arr, uv, lz, ts) : texBicubicArr(uOrthoDet05ArrB, uv, lz, ts); }\n" +
         "  if (uOrthoDetailColorMode == 1 && uOrthoDet05ArrRaw == 0) {\n" + // H3: V2-baked cells render RAW while det25/base keep de-blue
         "    dc = deblueShadow(dc);\n" +                                   // (1) HARD RULE: absolute blue-cast removal
@@ -378,6 +383,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Kolor: ten sam dwustopniowy law. Alpha = fade-in promocji (anty-pop).
         "vec3 applyOrthoDet25Arr(vec2 wxy, vec3 baseC){\n" +
         "  if (uUseDet25Arr == 0) { return baseC; }\n" +
+        // KROPKOWANE LINIE PRZEŁĄCZEŃ CEL (2026-07-24, zrzuty usera: jasne przerywane proste przez całą
+        // mapę, prostopadłe, najjaśniejsze na wodzie): per-fragment wybór celi ⇒ na Voronoi-granicy
+        // best-cell uv SKACZE między fragmentami quadu, implicit-LOD dostaje śmieciowe pochodne i sampluje
+        // najgłębsze mipy (uśredniony JASNY kolor celi). Fix: gradienty ze ŚWIATA (wxy — ciągłe przez
+        // granice; liczone tu, w uniform flow) i textureGrad zamiast texture. Dane były czyste — pomiary
+        // (dekod chainów, edge-step, porównanie nakładek) wykluczyły bake/assembler.
+        "  vec2 wdx = dFdx(wxy), wdy = dFdy(wxy);\n" +
         "  int best = -1; float bestD = 1e30;\n" +
         "  for (int i = 0; i < 32; i++) {\n" +
         "    vec4 bb = uDet25Aabb[i];\n" +
@@ -387,8 +399,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  }\n" +
         "  if (best < 0) { return baseC; }\n" +
         "  vec4 bb = uDet25Aabb[best];\n" +
-        "  vec2 uv = vec2((wxy.x - bb.x) / (bb.z - bb.x), (bb.w - wxy.y) / (bb.w - bb.y));\n" +
-        "  vec4 dcs = texture(uOrthoDet25Arr, vec3(uv, float(best)));\n" + // DXT1a: a=0 = brak pokrycia
+        "  vec2 sp = bb.zw - bb.xy;\n" +
+        "  vec2 uv = vec2((wxy.x - bb.x) / sp.x, (bb.w - wxy.y) / sp.y);\n" +
+        "  vec2 gx = vec2(wdx.x / sp.x, -wdx.y / sp.y);\n" +
+        "  vec2 gy = vec2(wdy.x / sp.x, -wdy.y / sp.y);\n" +
+        "  vec4 dcs = textureGrad(uOrthoDet25Arr, vec3(uv, float(best)), gx, gy);\n" + // DXT1a: a=0 = brak pokrycia
         "  vec3 dc = dcs.rgb;\n" +
         "  if (uOrthoDetailColorMode == 1) {\n" + // dwustopniowy law (wzorzec applyOrthoDet05Array, KONTRAKT-ORTO §1)
         "    dc = deblueShadow(dc);\n" +                                   // (1) HARD RULE: absolute blue-cast removal
@@ -405,6 +420,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "}\n" +
         "vec3 applyOrthoDet1m(vec2 wxy, vec3 baseC){\n" +
         "  if (uUseDet1m == 0) { return baseC; }\n" +
+        "  vec2 wdx = dFdx(wxy), wdy = dFdy(wxy);\n" + // gradienty świata — fract(cellUv) skacze na granicach komórek
         "  vec2 uv = vec2((wxy.x - uDet1mMinXmaxY.x) * uDet1mInvSize.x, (uDet1mMinXmaxY.y - wxy.y) * uDet1mInvSize.y);\n" +
         "  if (uv.x <= 0.0 || uv.x >= 1.0 || uv.y <= 0.0 || uv.y >= 1.0) { return baseC; }\n" +
         "  float cov = texture(uOrthoDet1mCov, uv).r;\n" +
@@ -414,7 +430,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  int slice = uDet1mSliceIdx[(g.y * uDet1mGridDim.x) + g.x];\n" +
         "  if (slice < 0) { if (uDet1mDebug == 1) { return vec3(1.0, 0.0, 1.0); } return baseC; }\n" + // debug: magenta = brak slice'a mimo cov
         "  vec2 cellUv = fract(uv * vec2(uDet1mGridDim));\n" +
-        "  vec4 dcs = texture(uOrthoDet1m, vec3(cellUv, float(slice)));\n" + // DXT1a: a=0 = brak pokrycia
+        "  vec2 gsc = uDet1mInvSize * vec2(uDet1mGridDim);\n" +
+        "  vec2 gx = vec2(wdx.x * gsc.x, -wdx.y * gsc.y);\n" +
+        "  vec2 gy = vec2(wdy.x * gsc.x, -wdy.y * gsc.y);\n" +
+        "  vec4 dcs = textureGrad(uOrthoDet1m, vec3(cellUv, float(slice)), gx, gy);\n" + // DXT1a: a=0 = brak pokrycia
         "  if (uDet1mDebug == 1) {\n" + // klasyfikacja danych: skad czern? (opaque-black przechodzi bramke alfa)
         "    if (dcs.a < 0.05) { return vec3(1.0, 1.0, 0.0); }\n" +          // zolty: punch-through (a=0)
         "    if (dot(dcs.rgb, dcs.rgb) < 0.0004) { return vec3(1.0, 0.0, 0.0); }\n" + // czerwony: OPAQUE BLACK w danych
