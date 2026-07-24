@@ -21,6 +21,25 @@
   coverage-gate przy tworzeniu celi (koniec 1088 prób dekodu poza pokryciem), kick-path `.opk` przed
   mtgc/compose (compose = fallback z logiem). Log: `opk-read` vs `compose` — bramka „0 compose" grepowalna.
   ZMIERZONE: cela 186-465 ms opk-read (compose było 1,3-5 s), 10 cel ≈ 0,9 s.
+## AKTUALIZACJA ~14:00 (trzecia runda — „zasięg 5 cm śmiesznie mały; rozwiń kompresję")
+
+- **zstd stron `.opk` ŻYWE (e3c5089)**: Write kompresuje per strona (adaptacyjnie, CRC z RAW — odczyt
+  waliduje też dekompresję; TDD 13/13), bake default level 9 (`--no-zstd` wyłącza). ZstdSharp.Port w CPM.
+- **det05 na stronach `.opk` (e3c5089)**: `Det05OpkDir` + kick-path jak det25; assembler przeszedł TDD
+  geometrii det05 (coverage 16 / grupa 16).
+- **REBAKE det05 v4+zstd UKOŃCZONY**: 1412 pakietów / 344 489 stron / 0 błędów / **44,99 GB** (z 67 GB,
+  −33%), czas **36,6 min** (nie 675 — tamten bieg był na dławionej maszynie). `--verify-full` w toku.
+- **Zasięg 5 cm — przyczyna liczbowo**: near-cap liczony z RGBA 357 MB/celę + cap 12 + 16 slotów shadera
+  (kalibracja sprzed BC1). Fix (e3c5089): bajty z `GpuCellCache.ChainSize` (BC1 ≈ 44,7 MB), cap 12→32,
+  sloty 16→32 (`uDet05ArrA` zamiast literalu 8; BC1 slice 16 warstw ≈ 715 MB/array, RGBA-fallback 8),
+  promień pełnego 5 cm ~300 → ~490 m. Dalsze skalowanie po pomiarze F9 (pętla slotów kosztuje per piksel).
+- det05-stream jest DEFAULT ON (`MAPATUR_DET05_STREAM=0` wymusza statyczny showcase) — stary komentarz
+  „Default OFF" poprawiony.
+- **BLOKADA**: finalny build App czeka na zamknięcie apki testowej usera (pid 53272, locki DLL).
+- NOWE otwarte: kropkowana linia exposed-route przecina Nižné Žabie pleso Bielovodské (zrzut usera) —
+  parser nie skleja ways, simplify 20 m nie wyprostuje obejścia stawu ⇒ najpewniej geometria w OSM;
+  weryfikacja Overpass w toku (endpointy 504). Decyzja produktowa po werdykcie z danych.
+
 ## PEŁNA LISTA POZOSTAŁEJ ROBOTY (odtworzona 12:40 — taski NIE przenoszą się między sesjami,
 ## poprzednia lista ≥11 tasków przepadła; TA lista jest teraz jedynym nośnikiem — aktualizować TUTAJ)
 
