@@ -1483,11 +1483,13 @@ public partial class Terrain3DView : ContentView
     {
         (0.00f, 5.0f),   // dawn — start in the pre-sunrise red
         (0.26f, 8.5f),   // … a VERY long morning lingered in sunrise / red light (~26 % of the flight)
-        (0.46f, 14.0f),  // … full day (~20 %; golden hour outranks it since 07-24 — user's call)
-        (0.53f, 17.17f), // … approach into the warm band
-        (0.82f, 17.83f), // … golden-hour PLATEAU 17:10→17:50 for ~29 % of the flight, sun 3–14° ABOVE horizon
-        (0.92f, 18.5f),  // … sunset into dusk
-        (1.00f, 20.5f),  // … night for the sky reveal — stars, Big Dipper, Moon (elev −25°)
+        (0.46f, 14.0f),  // … full day (~20 %)
+        (0.53f, 17.17f), // … approach into the warm band (as before)
+        (0.62f, 17.75f), // … reach 17:45 — sun ~4.7° up, strong orange on the slopes
+        (0.85f, 17.75f), // … SUN HELD STILL at 17:45 for 23 % of the flight (≈20 s) — user 07-24:
+                         //    „zatrzymaj słońce w tym miejscu, reszta idzie jak wcześniej"
+        (0.92f, 18.5f),  // … sunset into dusk (as before)
+        (1.00f, 20.5f),  // … night for the sky reveal — stars, Big Dipper, Moon
     };
 
     // Piecewise-linear interpolation of FlightTimeKeys at flight progress p∈[0,1].
