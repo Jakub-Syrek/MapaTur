@@ -1,0 +1,224 @@
+using FluentAssertions;
+
+using MapaTur.Application.Terrain;
+
+namespace MapaTur.Application.Tests.Terrain;
+
+/// <summary>
+/// Krok 6 (ARCHITEKTURA-STREAMING §9 + ANEKS A): runtime'owa cela det25 (nakładkowa, pitch 6 / coverage 8)
+/// montuje się ze STRON ≤4 dysjunktywnych pakietów `.opk` (grupa 8×8 kafli) — bez dekodu WebP, bez enkodu
+/// BC1, bez generowania mipów. Kontrakt pod testem: strony mip0/mip1 lądują blokowo we właściwych oknach
+/// poziomów 0-1, poziomy 2-8 wycinane blokowo z tail-i grup, poziomy 9+ (≤8 px, nigdy nie samplowane w
+/// zasięgu fade det25) z tail-a grupy dominującej; KAFEL BEZ STRONY zostaje PRZEZROCZYSTY (DXT1a
+/// transparent-black, indeks 3), NIGDY zerowy blok (= kryjąca czerń — mechanizm czarnych trójkątów);
+/// okno całkiem poza pokryciem → false (coverage-gate, baza kryje).
+/// </summary>
+public sealed class OrthoPageWindowAssemblerTests : IDisposable
+{
+    private const int TilePx = 512;
+    private const int GroupTiles = 8;
+    private const int CoverageTiles = 8;
+    private const int PitchTiles = 6;
+    private const int CellPx = CoverageTiles * TilePx; // 4096
+    private static readonly int Mip0Bytes = Bc1Encoder.EncodedSize(TilePx, TilePx);
+    private static readonly int Mip1Bytes = Bc1Encoder.EncodedSize(TilePx / 2, TilePx / 2);
+
+    private readonly string dir = Path.Combine(Path.GetTempPath(), "opk-window-tests-" + Guid.NewGuid().ToString("N"));
+
+    public OrthoPageWindowAssemblerTests() => Directory.CreateDirectory(dir);
+
+    public void Dispose()
+    {
+        try { Directory.Delete(dir, recursive: true); } catch (IOException) { }
+    }
+
+    private static int TailBytes()
+    {
+        int total = 0;
+        for (int px = CellPx / 2; px >= 1; px /= 2)
+        {
+            total += Bc1Encoder.EncodedSize(px, px);
+        }
+
+        return total;
+    }
+
+    /// <summary>Zapisuje syntetyczny pakiet grupy (gi,gj): wskazane strony wypełnione bajtem
+    /// <c>10*(lx+1)+ly</c> (mip0) / temu samemu +100 (mip1), tail wypełniony <paramref name="tailFill"/>.</summary>
+    private void BuildPack(int gi, int gj, (int Lx, int Ly)[] present, byte tailFill)
+    {
+        var pages = new List<OrthoPagePack.PageData>();
+        byte[] tail = new byte[TailBytes()];
+        Array.Fill(tail, tailFill);
+        pages.Add(new OrthoPagePack.PageData(OrthoPagePack.TailPageId, 1, tail, 0));
+        foreach ((int lx, int ly) in present)
+        {
+            byte[] payload = new byte[Mip0Bytes + Mip1Bytes];
+            Array.Fill(payload, (byte)((10 * (lx + 1)) + ly), 0, Mip0Bytes);
+            Array.Fill(payload, (byte)((10 * (lx + 1)) + ly + 100), Mip0Bytes, Mip1Bytes);
+            pages.Add(new OrthoPagePack.PageData((ushort)((lx * GroupTiles) + ly), 0, payload, 1UL));
+        }
+
+        OrthoPagePack.Write(Path.Combine(dir, $"{gi}_{gj}.opk"), CellPx, pages);
+    }
+
+    private static (int Level0, int Level1, int Level2) ChainOffsets()
+    {
+        int l0 = Bc1Encoder.EncodedSize(CellPx, CellPx);
+        int l1 = Bc1Encoder.EncodedSize(CellPx / 2, CellPx / 2);
+        return (0, l0, l0 + l1);
+    }
+
+    // Bajt bloku BC1 poziomu 0 celi pod kaflem OKNA (tx,ty), texel-blok (bx,by) wewnątrz kafla.
+    private static int Level0BlockOffset(int tx, int ty, int bx, int by)
+    {
+        const int CellBlocks = CellPx / 4;   // 1024
+        const int TileBlocks = TilePx / 4;   // 128
+        int row = (ty * TileBlocks) + by;
+        int col = (tx * TileBlocks) + bx;
+        return ((row * CellBlocks) + col) * 8;
+    }
+
+    private static readonly byte[] TransparentBlock = { 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF };
+
+    [Fact]
+    public void should_place_page_mip0_blocks_in_aligned_window()
+    {
+        // Cela (0,0): okno kafli [0..8) == grupa (0,0) — wszystkie 64 strony z jednego pakietu.
+        BuildPack(0, 0, [(0, 0), (3, 2)], tailFill: 0x77);
+        byte[] chain = new byte[GpuCellCache.ChainSize(CellPx)];
+
+        bool ok = OrthoPageWindowAssembler.TryAssembleDet25Window(
+            dir, 0, 0, PitchTiles, CoverageTiles, GroupTiles, chain, out int pagesRead);
+
+        ok.Should().BeTrue();
+        pagesRead.Should().Be(2);
+        chain[Level0BlockOffset(0, 0, 0, 0)].Should().Be(10);       // strona (0,0) → kafel okna (0,0)
+        chain[Level0BlockOffset(3, 2, 5, 7)].Should().Be(42);       // strona (3,2) → kafel okna (3,2)
+    }
+
+    [Fact]
+    public void should_fill_missing_pages_with_transparent_blocks_never_zero()
+    {
+        BuildPack(0, 0, [(0, 0)], tailFill: 0x77);
+        byte[] chain = new byte[GpuCellCache.ChainSize(CellPx)];
+
+        OrthoPageWindowAssembler.TryAssembleDet25Window(
+            dir, 0, 0, PitchTiles, CoverageTiles, GroupTiles, chain, out _);
+
+        int missing = Level0BlockOffset(7, 7, 0, 0); // kafel bez strony
+        chain.AsSpan(missing, 8).ToArray().Should().Equal(TransparentBlock);
+    }
+
+    [Fact]
+    public void should_assemble_window_from_four_packs()
+    {
+        // Cela (1,1): okno kafli [6..14)² → grupy (0,0),(0,1),(1,0),(1,1). Kafel globalny (6,7) leży w
+        // grupie (0,0) jako (lx=6,ly=7) i w oknie jako (0,1); kafel (8,8) w grupie (1,1) jako (0,0), okno (2,2).
+        BuildPack(0, 0, [(6, 7)], tailFill: 0x11);
+        BuildPack(0, 1, [(7, 0)], tailFill: 0x22); // kafel globalny (7,8) → okno (1,2)
+        BuildPack(1, 0, [(0, 6)], tailFill: 0x33); // kafel globalny (8,6) → okno (2,0)
+        BuildPack(1, 1, [(0, 0)], tailFill: 0x44); // kafel globalny (8,8) → okno (2,2)
+        byte[] chain = new byte[GpuCellCache.ChainSize(CellPx)];
+
+        bool ok = OrthoPageWindowAssembler.TryAssembleDet25Window(
+            dir, 1, 1, PitchTiles, CoverageTiles, GroupTiles, chain, out int pagesRead);
+
+        ok.Should().BeTrue();
+        pagesRead.Should().Be(4);
+        chain[Level0BlockOffset(0, 1, 0, 0)].Should().Be(77);  // (lx6,ly7): 10*7+7
+        chain[Level0BlockOffset(1, 2, 0, 0)].Should().Be(80);  // (lx7,ly0): 10*8+0
+        chain[Level0BlockOffset(2, 0, 0, 0)].Should().Be(16);  // (lx0,ly6): 10*1+6
+        chain[Level0BlockOffset(2, 2, 0, 0)].Should().Be(10);  // (lx0,ly0): 10*1+0
+    }
+
+    [Fact]
+    public void should_place_page_mip1_blocks_in_level1()
+    {
+        BuildPack(0, 0, [(2, 5)], tailFill: 0x77);
+        byte[] chain = new byte[GpuCellCache.ChainSize(CellPx)];
+
+        OrthoPageWindowAssembler.TryAssembleDet25Window(
+            dir, 0, 0, PitchTiles, CoverageTiles, GroupTiles, chain, out _);
+
+        (_, int l1, _) = ChainOffsets();
+        const int CellL1Blocks = CellPx / 2 / 4; // 512
+        const int TileL1Blocks = TilePx / 2 / 4; // 64
+        int off = l1 + (((((5 * TileL1Blocks) + 0) * CellL1Blocks) + (2 * TileL1Blocks) + 0) * 8);
+        chain[off].Should().Be(10 * 3 + 5 + 100);
+    }
+
+    [Fact]
+    public void should_window_tail_levels_from_group_tails()
+    {
+        // Cela (1,1), okno [6..14): na poziomie 2 celi (1024 px, kafel = 128 px = 32 bloki) lewy-górny róg
+        // okna pochodzi z grupy (0,0) — tail 0x11; prawy-dolny z grupy (1,1) — tail 0x44.
+        BuildPack(0, 0, [(6, 6)], tailFill: 0x11);
+        BuildPack(0, 1, [(6, 0)], tailFill: 0x22);
+        BuildPack(1, 0, [(0, 6)], tailFill: 0x33);
+        BuildPack(1, 1, [(0, 0)], tailFill: 0x44);
+        byte[] chain = new byte[GpuCellCache.ChainSize(CellPx)];
+
+        OrthoPageWindowAssembler.TryAssembleDet25Window(
+            dir, 1, 1, PitchTiles, CoverageTiles, GroupTiles, chain, out _);
+
+        (_, _, int l2) = ChainOffsets();
+        const int CellL2Blocks = CellPx / 4 / 4;  // 256 bloków w wierszu poziomu 2
+        chain[l2].Should().Be(0x11);                                        // róg NW okna ← tail grupy (0,0)
+        int lastBlock = l2 + ((((CellL2Blocks - 1) * CellL2Blocks) + (CellL2Blocks - 1)) * 8);
+        chain[lastBlock].Should().Be(0x44);                                 // róg SE okna ← tail grupy (1,1)
+    }
+
+    /// <summary>Zapisuje pakiet, którego tail ma KAŻDY part (poziom) wypełniony innym bajtem: part p → 0xA0+p.
+    /// Łapie pomyłkę o jeden poziom (part 0 = 2048 px = poziom 1 CELI, wypełniany ze stron mip1 — poziom 2
+    /// celi musi czytać part 1, nie part 0).</summary>
+    private void BuildPackWithLevelledTail(int gi, int gj)
+    {
+        byte[] tail = new byte[TailBytes()];
+        int off = 0, p = 0;
+        for (int px = CellPx / 2; px >= 1; px /= 2, p++)
+        {
+            int bytes = Bc1Encoder.EncodedSize(px, px);
+            Array.Fill(tail, (byte)(0xA0 + p), off, bytes);
+            off += bytes;
+        }
+
+        byte[] payload = new byte[Mip0Bytes + Mip1Bytes];
+        OrthoPagePack.Write(Path.Combine(dir, $"{gi}_{gj}.opk"), CellPx,
+        [
+            new OrthoPagePack.PageData(OrthoPagePack.TailPageId, 1, tail, 0),
+            new OrthoPagePack.PageData(0, 0, payload, 1UL),
+        ]);
+    }
+
+    [Fact]
+    public void should_read_tail_part_matching_cell_level_not_off_by_one()
+    {
+        BuildPackWithLevelledTail(0, 0);
+        byte[] chain = new byte[GpuCellCache.ChainSize(CellPx)];
+
+        OrthoPageWindowAssembler.TryAssembleDet25Window(
+            dir, 0, 0, PitchTiles, CoverageTiles, GroupTiles, chain, out _);
+
+        (_, _, int l2) = ChainOffsets();
+        chain[l2].Should().Be(0xA1);                     // poziom 2 celi (1024 px) = part 1 tail-a, NIE part 0
+        int l3 = l2 + Bc1Encoder.EncodedSize(CellPx / 4, CellPx / 4);
+        chain[l3].Should().Be(0xA2);                     // poziom 3 (512 px) = part 2
+        int deepest = GpuCellCache.ChainSize(CellPx) - 8;
+        chain[deepest].Should().Be(0xAB);                // poziom 12 (1 px) = part 11 (0xA0+11)
+    }
+
+    [Fact]
+    public void should_return_false_when_window_has_no_pages()
+    {
+        // Pakiet istnieje, ale okno celi (10,10) → kafle [60..68) → grupy 7-8 — brak plików.
+        BuildPack(0, 0, [(0, 0)], tailFill: 0x77);
+        byte[] chain = new byte[GpuCellCache.ChainSize(CellPx)];
+
+        bool ok = OrthoPageWindowAssembler.TryAssembleDet25Window(
+            dir, 10, 10, PitchTiles, CoverageTiles, GroupTiles, chain, out int pagesRead);
+
+        ok.Should().BeFalse();
+        pagesRead.Should().Be(0);
+    }
+}

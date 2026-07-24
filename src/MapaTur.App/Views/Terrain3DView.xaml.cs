@@ -8657,6 +8657,9 @@ public partial class Terrain3DView : ContentView
         // det1m (krok 3): rezydentny tier 1 m z prebake'u — ładowany raz na starcie, A/B klawiszem '7'.
         renderer.Det1mPackDir = System.IO.Path.Combine(
             System.IO.Path.GetDirectoryName(dir) ?? dir, "opk", "det1m");
+        // det25 (krok 6): strony .opk zamiast compose — pierwsza wizyta czyta prebake, nie dekoduje WebP.
+        renderer.Det25OpkDir = System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(dir) ?? dir, "opk", "det25");
         // TIER REBALANCE (2026-07-23): desktop ring 1500 → 5000 m so the 28-cell det25 midground actually has
         // candidates to fill (a 1500 m ring holds ~7 cells — the raised cap was starved at the source).
         var policy = new MapaTur.Application.Terrain.OrthoDetailResidencyPolicy(

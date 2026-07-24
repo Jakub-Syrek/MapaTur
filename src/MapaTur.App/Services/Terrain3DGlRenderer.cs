@@ -2276,6 +2276,57 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// <summary>Directory of the det25 GPU-cell cache (BC1 chains) — same contract as det05's.</summary>
     public string? Det25GpuCacheDir { get; set; }
 
+    /// <summary>Katalog pakietów `.opk` det25 (krok 6 architektury: strony GPU-ready zamiast compose).
+    /// Null / brak `index.bin` = dotychczasowa ścieżka compose (fallback; log przy probie).</summary>
+    public string? Det25OpkDir { get; set; }
+
+    private MapaTur.Application.Terrain.OrthoPackIndex? det25OpkIndex;
+    private bool det25OpkProbed;
+
+    // Krok 6: strony .opk są jedyną produkcyjną ścieżką det25, gdy indeks jest czytelny i GPU ma s3tc
+    // (BC1 chain idzie przez CompressedTexSubImage; brak s3tc → RGBA compose jak dotąd).
+    private bool Det25OpkReady()
+    {
+        if (!det25OpkProbed)
+        {
+            det25OpkProbed = true;
+            if (!string.IsNullOrEmpty(Det25OpkDir))
+            {
+                det25OpkIndex = MapaTur.Application.Terrain.OrthoPackIndex.Load(
+                    System.IO.Path.Combine(Det25OpkDir, "index.bin"));
+                Log.Information("[Det25] .opk page streaming {State} ({Dir}: {Cells} grup)",
+                    det25OpkIndex is null ? "OFF — index.bin nieczytelny/brak, zostaje compose" : "ON",
+                    Det25OpkDir, det25OpkIndex?.Cells.Count ?? 0);
+            }
+        }
+
+        return det25OpkIndex is not null && det05Bc1On;
+    }
+
+    // Coverage-gate z index.bin (handoff pkt 8): cela, której okno nie zawiera ŻADNEGO kafla pokrycia,
+    // jest pusta z definicji — zero I/O, zero prób dekodu (przedtem: 1088 misses nad SK).
+    private bool Det25WindowCovered(int ci, int cj)
+    {
+        if (det25OpkIndex is null || det25Grid is null)
+        {
+            return true;
+        }
+
+        int ti0 = ci * det25Grid.PitchTiles, tj0 = cj * det25Grid.PitchTiles;
+        for (int ti = ti0; ti < ti0 + det25Grid.CoverageTiles; ti++)
+        {
+            for (int tj = tj0; tj < tj0 + det25Grid.CoverageTiles; tj++)
+            {
+                if (det25OpkIndex.IsTileCovered(ti, tj))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     private string? Det25CachePath(int ci, int cj)
         => string.IsNullOrEmpty(Det25GpuCacheDir) ? null : System.IO.Path.Combine(Det25GpuCacheDir, $"{ci}_{cj}.mtgc");
 
@@ -2338,6 +2389,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         public byte[]? RentedMips;           // pooled mip-chain buffer (owner: this cell until returned)
         public byte[]? RentedBc1;            // pooled BC1-chain buffer (owner: this cell until returned)
         public bool FromCache;               // BC1 path: chain came from the disk cache (skip the re-write)
+        public bool FromOpk;                 // krok 6: chain zmontowany ze stron .opk (log/telemetria bramki "0 compose")
         public long ResidentBytesLedger;     // what this cell added to det05ResidentBytes at promote (path-dependent)
         public Task<byte[]?>? Compose;       // off-thread composition in flight
         public long DesiredTick;             // last frame the cell was desired (LRU eviction key)
@@ -4761,7 +4813,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             else
             {
                 (int ci, int cj) = det25Grid.CellFromKey(key);
-                det25Cells[key] = new DetailCellGpu
+                var created = new DetailCellGpu
                 {
                     Key = key,
                     Ci = ci,
@@ -4770,6 +4822,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     Px = det25Grid.CellPx,
                     DesiredTick = det25FrameTick,
                 };
+                if (Det25OpkReady() && !Det25WindowCovered(ci, cj))
+                {
+                    created.Empty = true; // coverage-gate z index.bin — poza pokryciem baza kryje, zero I/O
+                }
+
+                det25Cells[key] = created;
             }
         }
 
@@ -4802,7 +4860,26 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     byte[] rentedBc1 = MapaTur.Application.Terrain.MeshBufferPool.Shared.RentBytes(
                         MapaTur.Application.Terrain.GpuCellCache.ChainSize(cellPx25));
                     cell.RentedBc1 = rentedBc1;
-                    if (cachePath is not null && System.IO.File.Exists(cachePath))
+                    if (Det25OpkReady())
+                    {
+                        // Krok 6 (PumpPageReads): cela montowana WYŁĄCZNIE ze stron .opk — zero dekodu WebP,
+                        // zero enkodu BC1, zero mipów na runtime; czyste I/O + memcpy na wątku puli.
+                        // .opk JEST cache'm GPU-ready, więc mtgc nie jest ani czytany, ani pisany.
+                        string opkDir = Det25OpkDir!;
+                        int pitch = det25Grid.PitchTiles, coverage = det25Grid.CoverageTiles;
+                        int groupTiles = det25OpkIndex!.TilesPerCell;
+                        cell.Compose = Task.Run(() =>
+                        {
+                            var swc = System.Diagnostics.Stopwatch.StartNew();
+                            bool ok = MapaTur.Application.Terrain.OrthoPageWindowAssembler.TryAssembleDet25Window(
+                                opkDir, ci, cj, pitch, coverage, groupTiles, rentedBc1, out _);
+                            capture.ComposeMs = swc.Elapsed.TotalMilliseconds;
+                            capture.FromCache = ok; // pomija zapis mtgc (strony są źródłem prawdy)
+                            capture.FromOpk = ok;
+                            return ok ? rentedBc1 : null;
+                        });
+                    }
+                    else if (cachePath is not null && System.IO.File.Exists(cachePath))
                     {
                         cell.Compose = Task.Run(() =>
                         {
@@ -5170,8 +5247,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 det25ResidentBytes += rb;
                 ReleaseCellBuffer(cell);
                 det25UploadQueue.RemoveAt(0);
-                Log.Information("[Det25] cell ({Ci},{Cj}) compose {C:F0}ms{Cache} | ARR layer {Layer} resident (BC1)",
-                    cell.Ci, cell.Cj, cell.ComposeMs, cell.FromCache ? " [CACHE-HIT]" : string.Empty, cell.Layer);
+                Log.Information("[Det25] cell ({Ci},{Cj}) {Src} {C:F0}ms | ARR layer {Layer} resident (BC1)",
+                    cell.Ci, cell.Cj, cell.FromOpk ? "opk-read" : cell.FromCache ? "compose [CACHE-HIT]" : "compose",
+                    cell.ComposeMs, cell.Layer);
             }
             else if (complete)
             {
