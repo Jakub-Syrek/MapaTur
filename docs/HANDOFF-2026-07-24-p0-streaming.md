@@ -15,7 +15,15 @@
   **UWAGA: det05 `.opk` (67 GB) nadal v3 — przebake'ować PRZED wpięciem PumpPageReads (krok 6).**
 - **Pkt 10 (harmonizacja tonu) ✔ kodowo**: dwustopniowy law (wzorzec applyOrthoDet05Array) dopisany do
   `applyOrthoDet1m` i `applyOrthoDet25Arr` (commit 99554f9). Werdykt wizualny należy do usera (DELL).
-- Pozostają: krok 6 runtime (PumpPageReads + coverage-gate), pkt 11 (spike relokacji), bramka e2e.
+- **Krok 6 det25 UKOŃCZONY (b95c485)**: `OrthoPageWindowAssembler` (TDD 7/7 — w tym test off-by-one
+  poziomów tail-a) montuje łańcuch BC1 celi ze stron ≤4 pakietów `.opk`; kafel bez strony = DXT1a
+  transparent-black (nigdy zerowy blok = czerń). Renderer: `Det25OpkDir` + probe `index.bin` (log ON/OFF),
+  coverage-gate przy tworzeniu celi (koniec 1088 prób dekodu poza pokryciem), kick-path `.opk` przed
+  mtgc/compose (compose = fallback z logiem). Log: `opk-read` vs `compose` — bramka „0 compose" grepowalna.
+  ZMIERZONE: cela 186-465 ms opk-read (compose było 1,3-5 s), 10 cel ≈ 0,9 s.
+- Pozostają: **det05 na strony .opk** (najpierw rebake det05 v4 — 67 GB, ~11 h nocą, decyzja usera;
+  assembler jest już sparametryzowany coverage/pitch/grupa), pkt 11 (spike relokacji), bramka e2e
+  AGENTS.md na EXE+AppData+DELL, krok 8 (kasacja compose-path + mtgc po werdyktach).
 
 Gałąź: `perf/pano-streaming` (feat/walk-mode nietknięty na f07c2da). Obowiązują: `AGENTS.md` (P0!),
 `docs/ZASADY-MAPATUR.md` (18 zasad), `docs/ARCHITEKTURA-STREAMING.md` (+ANEKS A). Zasada komunikacji:
