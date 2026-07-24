@@ -214,24 +214,56 @@ public sealed class OrthoPagePack : IDisposable
         }
 
         Entry e = entries[idx];
-        byte[] buf;
+        byte[] buf = new byte[e.RawBytes];
+        if (!TryReadPageInto(pageId, buf, diskScratch: null, out int len) || len != e.RawBytes)
+        {
+            return false;
+        }
+
+        payload = buf;
+        return true;
+    }
+
+    /// <summary>Jak <see cref="TryReadPage"/>, ale W CALLER-OWNED bufory (pooling — 2026-07-24: świeże
+    /// alokacje per strona przemielały LOH gigabajtami i pauzy gen2-GC dawały frame gapy 150–320 ms w
+    /// locie). <paramref name="payloadDest"/> musi pomieścić RawBytes strony; <paramref name="diskScratch"/>
+    /// (opcjonalny, na frame zstd) musi pomieścić ZstdBytes — za mały/null przy kompresji ⇒ alokacja awaryjna.
+    /// Zwraca w <paramref name="payloadLength"/> długość RAW payloadu.</summary>
+    public bool TryReadPageInto(ushort pageId, byte[] payloadDest, byte[]? diskScratch, out int payloadLength)
+    {
+        ArgumentNullException.ThrowIfNull(payloadDest);
+        payloadLength = 0;
+        if (!byPageId.TryGetValue(pageId, out int idx))
+        {
+            return false;
+        }
+
+        Entry e = entries[idx];
+        if (payloadDest.Length < e.RawBytes)
+        {
+            return false;
+        }
+
         try
         {
-            byte[] disk = new byte[e.ZstdBytes > 0 ? e.ZstdBytes : e.RawBytes];
-            stream.Seek(e.Offset, SeekOrigin.Begin);
-            stream.ReadExactly(disk);
             if (e.ZstdBytes > 0)
             {
+                byte[] disk = diskScratch is not null && diskScratch.Length >= e.ZstdBytes
+                    ? diskScratch
+                    : new byte[e.ZstdBytes];
+                stream.Seek(e.Offset, SeekOrigin.Begin);
+                stream.ReadExactly(disk, 0, e.ZstdBytes);
                 decompressor ??= new ZstdSharp.Decompressor();
-                buf = new byte[e.RawBytes];
-                if (!decompressor.TryUnwrap(disk, buf, out int written) || written != e.RawBytes)
+                if (!decompressor.TryUnwrap(disk.AsSpan(0, e.ZstdBytes), payloadDest, out int written)
+                    || written != e.RawBytes)
                 {
                     return false;
                 }
             }
             else
             {
-                buf = disk;
+                stream.Seek(e.Offset, SeekOrigin.Begin);
+                stream.ReadExactly(payloadDest, 0, e.RawBytes);
             }
         }
         catch (Exception ex) when (ex is IOException or ZstdSharp.ZstdException)
@@ -239,12 +271,12 @@ public sealed class OrthoPagePack : IDisposable
             return false; // I/O albo śmieciowy frame zstd — strona traktowana jak nieobecna
         }
 
-        if (Crc32(buf) != e.Crc32)
+        if (Crc32(payloadDest.AsSpan(0, e.RawBytes)) != e.Crc32)
         {
             return false;
         }
 
-        payload = buf;
+        payloadLength = e.RawBytes;
         return true;
     }
 

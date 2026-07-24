@@ -54,6 +54,19 @@ public static class OrthoPageWindowAssembler
             TransparentBlock.CopyTo(chainDest, o);
         }
 
+        // Pooling (2026-07-24, frame gapy 150-320 ms z pauz gen2-GC): JEDEN bufor stron i JEDEN scratch
+        // zstd wynajete na cale wywolanie zamiast new byte[] per strona (256 stron + tail ~15 MB na cele
+        // przemielalo LOH gigabajtami przy wymianie cel w locie).
+        int tailBytesMax = 0;
+        for (int px = (groupTiles * TilePx) / 2; px >= 1; px /= 2)
+        {
+            tailBytesMax += Bc1Encoder.EncodedSize(px, px);
+        }
+
+        byte[] pageBuf = MeshBufferPool.Shared.RentBytes(tailBytesMax);      // tail jest najwiekszy; strony <= tail
+        byte[] zstdScratch = MeshBufferPool.Shared.RentBytes(tailBytesMax);  // compressed <= raw
+        try
+        {
         int ti0 = ci * pitchTiles, tj0 = cj * pitchTiles;         // okno kafli [ti0, ti0+coverage)
         int giA = FloorDiv(ti0, groupTiles), giB = FloorDiv(ti0 + coverageTiles - 1, groupTiles);
         int gjA = FloorDiv(tj0, groupTiles), gjB = FloorDiv(tj0 + coverageTiles - 1, groupTiles);
@@ -94,15 +107,15 @@ public static class OrthoPageWindowAssembler
                     for (int tj = tjFrom; tj < tjTo; tj++)
                     {
                         int lx = ti - (gi * groupTiles), ly = tj - (gj * groupTiles);
-                        if (!pack.TryReadPage((ushort)((lx * groupTiles) + ly), out byte[] payload)
-                            || payload.Length < mip0Bytes + mip1Bytes)
+                        if (!pack.TryReadPageInto((ushort)((lx * groupTiles) + ly), pageBuf, zstdScratch, out int payloadLen)
+                            || payloadLen < mip0Bytes + mip1Bytes)
                         {
                             continue; // kafel bez pokrycia → zostaje transparent
                         }
 
                         int wx = ti - ti0, wy = tj - tj0; // pozycja kafla w OKNIE celi
-                        BlitTile(payload, 0, TilePx, chainDest, 0, cellPx, wx, wy);
-                        BlitTile(payload, mip0Bytes, TilePx / 2, chainDest, level1Off, cellPx / 2, wx, wy);
+                        BlitTile(pageBuf, 0, TilePx, chainDest, 0, cellPx, wx, wy);
+                        BlitTile(pageBuf, mip0Bytes, TilePx / 2, chainDest, level1Off, cellPx / 2, wx, wy);
                         pagesRead++;
                     }
                 }
@@ -110,10 +123,12 @@ public static class OrthoPageWindowAssembler
                 // Tail grupy: poziomy 2..8 celi wycinane oknem; 9+ tylko z grupy dominującej (bez okna).
                 // Party tail-a: p=0 → 2048 px = POZIOM 1 CELI (wypełniany ze stron mip1, pomijamy),
                 // p=level-1 → px identyczny z poziomem celi (grupa i cela mają ten sam metraż 4096 px).
-                if (!pack.TryReadPage(OrthoPagePack.TailPageId, out byte[] tail))
+                if (!pack.TryReadPageInto(OrthoPagePack.TailPageId, pageBuf, zstdScratch, out int tailLen))
                 {
                     continue;
                 }
+
+                byte[] tail = pageBuf; // alias — tail zajmuje pageBuf az do konca tej grupy
 
                 int tailOff = Bc1Encoder.EncodedSize(groupPx / 2, groupPx / 2); // skip part 0 (poziom 1)
                 int destOff = level0Bytes + Bc1Encoder.EncodedSize(cellPx / 2, cellPx / 2);
@@ -121,7 +136,7 @@ public static class OrthoPageWindowAssembler
                 {
                     int px = cellPx >> level;                      // rozmiar poziomu celi == rozmiar parta
                     int tailPartBytes = Bc1Encoder.EncodedSize(px, px);
-                    if (tailOff + tailPartBytes > tail.Length)
+                    if (tailOff + tailPartBytes > tailLen)
                     {
                         break; // tail krótszy niż oczekiwany — nie czytamy poza nim
                     }
@@ -149,6 +164,12 @@ public static class OrthoPageWindowAssembler
         }
 
         return pagesRead > 0;
+        }
+        finally
+        {
+            MeshBufferPool.Shared.Return(pageBuf);
+            MeshBufferPool.Shared.Return(zstdScratch);
+        }
     }
 
     private static int FloorDiv(int a, int b) => (int)Math.Floor((double)a / b);

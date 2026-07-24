@@ -356,10 +356,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  if (max(fp.x, fp.y) < 1.0) { dc = inA ? texBicubicArr(uOrthoDet05Arr, uv, lz, ts) : texBicubicArr(uOrthoDet05ArrB, uv, lz, ts); }\n" +
         "  if (uOrthoDetailColorMode == 1 && uOrthoDet05ArrRaw == 0) {\n" + // H3: V2-baked cells render RAW while det25/base keep de-blue
         "    dc = deblueShadow(dc);\n" +                                   // (1) HARD RULE: absolute blue-cast removal
-        "    float toneLod = max(0.0, log2(max(ts.x / (mx.x - mn.x), ts.y / (mx.y - mn.y))));\n" +
+        "    float toneLod = max(0.0, log2(max(ts.x / (mx.x - mn.x), ts.y / (mx.y - mn.y)))) + 3.0;\n" + // ~8 m/texel: mikrocienie skał to nie szew ekspozycji (kontrast! 07-24)
         "    vec3 dRaw = inA ? textureLod(uOrthoDet05Arr, vec3(uv, lz), toneLod).rgb : textureLod(uOrthoDet05ArrB, vec3(uv, lz), toneLod).rgb;\n" +
         "    vec3 delta = deblueShadow(dRaw) - deblueShadow(baseC);\n" +   // (2) both de-blued → delta = pure exposure seam (never re-adds blue)
-        "    float mism = smoothstep(0.10, 0.28, max(abs(delta.r), max(abs(delta.g), abs(delta.b))));\n" +
+        "    float mism = smoothstep(0.16, 0.35, max(abs(delta.r), max(abs(delta.g), abs(delta.b))));\n" + // próg w górę: kontrast był wypłukiwany (luma std 39.5→24.7, zmierzone 07-24)
         "    dc = clamp(dc - (delta * mism), 0.0, 1.0);\n" +               //     harmonise only the survey exposure seam
         "  }\n" +
         "  vec2 cd = min(wxy - mn, mx - wxy);\n" +
@@ -408,10 +408,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  if (uOrthoDetailColorMode == 1) {\n" + // dwustopniowy law (wzorzec applyOrthoDet05Array, KONTRAKT-ORTO §1)
         "    dc = deblueShadow(dc);\n" +                                   // (1) HARD RULE: absolute blue-cast removal
         "    vec2 ts = vec2(textureSize(uOrthoDet25Arr, 0).xy);\n" +
-        "    float toneLod = max(0.0, log2(max(ts.x / (bb.z - bb.x), ts.y / (bb.w - bb.y))));\n" +
+        "    float toneLod = max(0.0, log2(max(ts.x / (bb.z - bb.x), ts.y / (bb.w - bb.y)))) + 3.0;\n" + // ~8 m/texel — patrz det05Array
         "    vec3 dRaw = textureLod(uOrthoDet25Arr, vec3(uv, float(best)), toneLod).rgb;\n" +
         "    vec3 delta = deblueShadow(dRaw) - deblueShadow(baseC);\n" +   // (2) both de-blued → delta = pure exposure seam
-        "    float mism = smoothstep(0.10, 0.28, max(abs(delta.r), max(abs(delta.g), abs(delta.b))));\n" +
+        "    float mism = smoothstep(0.16, 0.35, max(abs(delta.r), max(abs(delta.g), abs(delta.b))));\n" + // próg w górę: kontrast był wypłukiwany (luma std 39.5→24.7, zmierzone 07-24)
         "    dc = clamp(dc - (delta * mism), 0.0, 1.0);\n" +               //     harmonise only the survey exposure seam
         "  }\n" +
         "  vec2 cd = min(wxy - bb.xy, bb.zw - wxy);\n" +
@@ -444,10 +444,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    dc = deblueShadow(dc);\n" +                                   // (1) HARD RULE: absolute blue-cast removal
         "    vec2 ts = vec2(textureSize(uOrthoDet1m, 0).xy);\n" +
         "    vec2 cellM = vec2(1.0 / uDet1mInvSize.x, 1.0 / uDet1mInvSize.y) / vec2(uDet1mGridDim);\n" + // komorka w metrach
-        "    float toneLod = max(0.0, log2(max(ts.x / cellM.x, ts.y / cellM.y)));\n" + // mip o skali ~1 texel/metr, jak det05/det25
+        "    float toneLod = max(0.0, log2(max(ts.x / cellM.x, ts.y / cellM.y))) + 3.0;\n" + // ~8 m/texel — patrz det05Array
         "    vec3 dRaw = textureLod(uOrthoDet1m, vec3(cellUv, float(slice)), toneLod).rgb;\n" +
         "    vec3 delta = deblueShadow(dRaw) - deblueShadow(baseC);\n" +   // (2) both de-blued → delta = pure exposure seam
-        "    float mism = smoothstep(0.10, 0.28, max(abs(delta.r), max(abs(delta.g), abs(delta.b))));\n" +
+        "    float mism = smoothstep(0.16, 0.35, max(abs(delta.r), max(abs(delta.g), abs(delta.b))));\n" + // próg w górę: kontrast był wypłukiwany (luma std 39.5→24.7, zmierzone 07-24)
         "    dc = clamp(dc - (delta * mism), 0.0, 1.0);\n" +               //     harmonise only the survey exposure seam
         "  }\n" +
         "  return mix(baseC, dc, cov * dcs.a);\n" +
@@ -475,9 +475,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // it is an exact identity, so the MO showcase renders verbatim and stays sharp at every distance;
         // the earlier "tone-from-base" law that reduced distant views to bare base is NOT reinstated.
         "    dc = deblueShadow(dc);\n" +                                   // (1) HARD RULE: absolute blue-cast removal
-        "    float toneLod = max(0.0, log2(max(ts.x / (mx.x - mn.x), ts.y / (mx.y - mn.y))));\n" +
+        "    float toneLod = max(0.0, log2(max(ts.x / (mx.x - mn.x), ts.y / (mx.y - mn.y)))) + 3.0;\n" + // ~8 m/texel: mikrocienie skał to nie szew ekspozycji (kontrast! 07-24)
         "    vec3 delta = deblueShadow(textureLod(tex, uv, toneLod).rgb) - deblueShadow(baseC);\n" + // (2) both de-blued → delta = pure exposure seam
-        "    float mism = smoothstep(0.10, 0.28, max(abs(delta.r), max(abs(delta.g), abs(delta.b))));\n" +
+        "    float mism = smoothstep(0.16, 0.35, max(abs(delta.r), max(abs(delta.g), abs(delta.b))));\n" + // próg w górę: kontrast był wypłukiwany (luma std 39.5→24.7, zmierzone 07-24)
         "    dc = clamp(dc - (delta * mism), 0.0, 1.0);\n" +               //     harmonise only the survey exposure seam
         "  }\n" +
         "  vec2 cd = min(wxy - mn, mx - wxy);\n" +                    // >0 inside the AABB on both axes
