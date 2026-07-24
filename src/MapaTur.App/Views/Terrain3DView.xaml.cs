@@ -1573,7 +1573,17 @@ public partial class Terrain3DView : ContentView
             return;
         }
 
-        var pts = new Vector3[OrlaPercWaypoints.Length];
+        // 2026-07-24 (user): demo startuje DOKŁADNIE z bieżącej pozycji i kierunku kamery — path dostaje
+        // prefix na promieniu patrzenia użytkownika (start = jego kadr, ruch rusza w jego kierunku),
+        // po czym spline wchodzi w dotychczasową trasę; sam ruch/waypointy bez zmian.
+        Vector3 userPos = Camera.Position;
+        Vector3 userLook = Camera.Target;
+        Vector3 lookDir = userLook - userPos;
+        lookDir = lookDir.LengthSquared() > 1e-3f ? Vector3.Normalize(lookDir) : new Vector3(1f, 0f, 0f);
+
+        var pts = new Vector3[OrlaPercWaypoints.Length + 2];
+        pts[0] = userLook;
+        pts[1] = userLook + (lookDir * 1500f);
         for (int i = 0; i < OrlaPercWaypoints.Length; i++)
         {
             (double lat, double lon) = OrlaPercWaypoints[i];
@@ -1582,7 +1592,7 @@ public partial class Terrain3DView : ContentView
             {
                 elev = 2000; // fall back if the waypoint lands on a no-data cell
             }
-            pts[i] = frame.GeoToWorld(new GeoPoint(lat, lon), (float)elev);
+            pts[i + 2] = frame.GeoToWorld(new GeoPoint(lat, lon), (float)elev);
         }
 
         flightProgressKeys = null; // built-in demo: plain linear progress, no stop holds
@@ -1590,6 +1600,11 @@ public partial class Terrain3DView : ContentView
         flightBuildGated = false; // demo keeps its fixed FlightStartPauseSeconds eye-hold
         flightGateOpen = true;
         BeginFlight(pts);
+        // Pierwsza klatka lotu = kadr użytkownika (zamiast snapu do reguł lotu); low-pass follow=0.10
+        // płynnie przejmuje stąd do wysokości/odsunięcia lotu — start bez cięcia, ruch jak dotąd.
+        flightSmoothPos = userPos;
+        flightSmoothLook = userLook;
+        flightSmoothInit = true;
     }
 
     /// <summary>Starts a cinematic fly-through ALONG the planned tourist route — and records it to MP4 — so the
