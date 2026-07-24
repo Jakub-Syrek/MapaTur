@@ -31,11 +31,14 @@ compose), zstd (det05 67→45 GB, TDD), zasięg 5cm 12→48 cel/~600 m (96 cofni
 mism w górę — luma std wracała 39.5→24.7→fix), demo F9 (start z pozy usera, słońce zatrzymane 17:45 na
 ~20 s, bramka „scena dobudowana" przed startem; WERDYKT USERA: „jest wow"). FB-opis napisany.
 
-**Rozmiary instalki (zmierzone dziś):** opk det05 45 GB + det25 7.9 GB + det1m 0.57 GB = 53.5 GB;
-+ baza PNG ~2 GB + DEM/baked/z16 ~2-4 GB + mbtiles ~1-2 GB ⇒ **~59-62 GB**. Źródłowe WebP (15+1.6 GB)
-NIE muszą wchodzić do instalki (strony .opk są źródłem prawdy; compose=fallback). .opk już zstd —
-instalator nie ściśnie; cięcie = paczki regionalne (mechanizm Railway już jest): baza+det25+det1m
-~15 GB w instalce, det05 45 GB jako opcjonalny pakiet „Tatry HD".
+**Rozmiary instalki (ZMIERZONE du, pełne — korekta z ~60 GB):** opk det05 45 + det25 7.9 + det1m 0.57
+= 53.5 GB; baza dem+PNG 2.8; dem-cache/baked **9.1**; dem-cache/gugik z16 **17** (runtime buduje z nich
+1 m detail na żywo!); maps 0.68 ⇒ **~83 GB niezbędnych danych**. POZA instalką: źródłowe WebP det05 17 +
+det25 1.9 GB (strony .opk są źródłem prawdy) oraz gpu-cache **6.8 GB przestarzałych mtgc v3** — do
+skasowania (krok 8; .opk je zastąpiło — szybkie −6.8 GB u usera). .opk/WebP już skompresowane —
+instalator nie ściśnie; realne cięcie = paczki regionalne (Railway): baza+det25+det1m+DEM ~30 GB w
+instalce, det05 45 GB jako opcjonalny pakiet „Tatry HD"; ewentualnie zbadać czy gugik z16 (17 GB) da
+się spakować do własnego formatu stronicowego jak orto (dziś: surowe kafle).
 
 ### Kolejka po łączeniach (bez zmian priorytetów)
 1. O(1) wybór celi det05/det25 (krata→slot jak det1m sliceIdx) — odblokuje 96+ cel bez kosztu pętli
