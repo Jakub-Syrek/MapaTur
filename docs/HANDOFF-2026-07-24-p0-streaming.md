@@ -21,9 +21,35 @@
   coverage-gate przy tworzeniu celi (koniec 1088 prób dekodu poza pokryciem), kick-path `.opk` przed
   mtgc/compose (compose = fallback z logiem). Log: `opk-read` vs `compose` — bramka „0 compose" grepowalna.
   ZMIERZONE: cela 186-465 ms opk-read (compose było 1,3-5 s), 10 cel ≈ 0,9 s.
-- Pozostają: **det05 na strony .opk** (najpierw rebake det05 v4 — 67 GB, ~11 h nocą, decyzja usera;
-  assembler jest już sparametryzowany coverage/pitch/grupa), pkt 11 (spike relokacji), bramka e2e
-  AGENTS.md na EXE+AppData+DELL, krok 8 (kasacja compose-path + mtgc po werdyktach).
+## PEŁNA LISTA POZOSTAŁEJ ROBOTY (odtworzona 12:40 — taski NIE przenoszą się między sesjami,
+## poprzednia lista ≥11 tasków przepadła; TA lista jest teraz jedynym nośnikiem — aktualizować TUTAJ)
+
+1. **Werdykty wizualne usera (DELL, skompilowany exe)** — NIC z dzisiejszego nie jest odebrane:
+   (a) czarne trójkąty PL/SK zniknęły? (b) TON det1m/det25Arr — harmonizacja zmienia wygląd całej
+   panoramy (patchwork stylów miał zniknąć, ale mogła zmienić charakter warstw!); (c) ostrość/jakość
+   bliskiego planu nieregresowana; (d) pierwsza wizyta i płynność.
+2. **Bench F9 przed/po (ZASADY: cold+warm, identyczne warunki)** — dzisiejsze zmiany (pin samplerów,
+   +1 textureLod fetch w tonie det1m/det25, opk-read) NIE są zmierzone F9; baseline z poprzedniej
+   sesji: warm 0 gapów / 17 ms GPU. `MAPATUR_BENCH_F9=2` + parser `scratchpad/bench_parse.py`.
+3. **det05 na strony .opk** (dokończenie kroku 6): rebake det05 v4 — 67 GB, ostatnio 675 min (nocny
+   bieg, decyzja usera) → wpięcie analogiczne do det25 (assembler sparametryzowany; det05 ma
+   coverage 16 / grupy 16 / dwie tekstury array A/B). Do tego det05-stream jest ZA FLAGĄ
+   `MAPATUR_DET05_STREAM=1` — decyzja o defaultowym włączeniu po rebake + werdykcie.
+4. **Pkt 11 handoffu: spike ~10 s przy dużej relokacji kamery** (przebudowa DEM/mesh/POI) — poza
+   zakresem orto, NIETKNIĘTY, psuje pomiar bramki 1 (raportować osobno per [OrthoLat]).
+5. **Krok 7 architektury**: mip-tail-first (dwustopniowa gotowość `uDet05MinLod`) + burst 24 MB
+   (po benchu z kroku 0). Cel: 20 cm w < 0,5 s.
+6. **Krok 8 architektury (sprzątanie po werdyktach)**: kasacja produkcyjnego compose-path i czytnika
+   mtgc det25, martwych `OrthoDetailAssembler`/`OrthoDetailStreamingManager` (produkcja ich NIE używa
+   — potwierdzone grepem 07-24), starej mozaiki det25 (unit 9, BindAndSetOrthoDetail use25); 4 kotwice
+   samoweryfikacji KONTRAKT-ORTO; sweep TERRAIN-GRAPHICS-CHECKLIST na ≥3 lokacjach.
+7. **Pełna bramka e2e AGENTS.md** (wszystkie kryteria §10 architektury NARAZ, na EXE+AppData+DELL):
+   0 compose w logu (grep `opk-read` vs `compose`), det25 < 1 s / det05 20 cm < 1,5 s / 5 cm < 4 s,
+   panorama MO ostra, obrót 360° = 0 ewikcji, frame-gap 0, budżety z hardware, cold i warm.
+8. **Drobne otwarte**: magenta w `MAPATUR_DET1M_DEBUG` na prawym brzegu (cov>0 bez slice'a — maska
+   pokrycia det1m szersza niż siatka slice'ów? wyjaśnić); miny samplerów audytowane TYLKO w programie
+   terenu (linie/billboardy/ghost/particles mają własne programy — przejrzeć ich samplery tym samym
+   wzorcem); mozaika det25 legacy nadal ładowana gdy plik istnieje (usunąć w kroku 8).
 
 Gałąź: `perf/pano-streaming` (feat/walk-mode nietknięty na f07c2da). Obowiązują: `AGENTS.md` (P0!),
 `docs/ZASADY-MAPATUR.md` (18 zasad), `docs/ARCHITEKTURA-STREAMING.md` (+ANEKS A). Zasada komunikacji:
