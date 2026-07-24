@@ -1,5 +1,22 @@
 # HANDOFF 2026-07-24 — P0 architektura streamingu: stan, WSZYSTKIE napotkane problemy, kontynuacja
 
+## AKTUALIZACJA 12:15 (druga runda 07-24) — pkt 6, 7 i 10 ROZWIĄZANE
+
+- **Pkt 7 (miny samplerów) ✔**: wszystkie samplery programu terenu pinowane przy linku (`EnsureProgram`,
+  mapa unitów w komentarzu); legacy mozaika det25 → unit 9 (10 = wyłącznie det25Arr). Zweryfikowane:
+  kill det1m/det25arr/det05arr renderuje pełny teren (przedtem szare tło). Commit 99554f9.
+- **Pkt 6 (czarne trójkąty PL/SK) ✔ — przyczyna: NODATA GUGiK, nie mesh.** Bisekcja po fixie min:
+  none=SĄ, det1m=BRAK → warstwa det1m. Klasyfikacja shaderowa (`MAPATUR_DET1M_DEBUG=1`): czerwony
+  opaque black (RGB=0, a=1) dokładnie w miejscu trójkątów. Audyt źródła: 38 kafli granicznych det25 to
+  WebP BEZ alfy z kryjącą czernią (0,0,0) do 96,7% (nodata WMS poza granicą PL). Fix:
+  `OrthoNodata.ZeroAlphaOnBlack` (TDD 4/4) w bake `DecodeWebp` + runtime compose det25/det05; formaty
+  `.opk`/`.mtgc` **v4** (pełna inwalidacja); rebake det25+det1m 3,6 min CRC OK. Weryfikacja wizualna:
+  poza bisekcji + MO + Rysy + dolinka — zero czerni. Commit 54d5f6b; recepta TILE-PRODUCTION §9.1.
+  **UWAGA: det05 `.opk` (67 GB) nadal v3 — przebake'ować PRZED wpięciem PumpPageReads (krok 6).**
+- **Pkt 10 (harmonizacja tonu) ✔ kodowo**: dwustopniowy law (wzorzec applyOrthoDet05Array) dopisany do
+  `applyOrthoDet1m` i `applyOrthoDet25Arr` (commit 99554f9). Werdykt wizualny należy do usera (DELL).
+- Pozostają: krok 6 runtime (PumpPageReads + coverage-gate), pkt 11 (spike relokacji), bramka e2e.
+
 Gałąź: `perf/pano-streaming` (feat/walk-mode nietknięty na f07c2da). Obowiązują: `AGENTS.md` (P0!),
 `docs/ZASADY-MAPATUR.md` (18 zasad), `docs/ARCHITEKTURA-STREAMING.md` (+ANEKS A). Zasada komunikacji:
 bez obietnic/przeprosin; raport = ukończony element / wynik e2e / niespełnione kryteria / rollback.
