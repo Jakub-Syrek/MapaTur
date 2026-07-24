@@ -36,9 +36,17 @@
 - det05-stream jest DEFAULT ON (`MAPATUR_DET05_STREAM=0` wymusza statyczny showcase) — stary komentarz
   „Default OFF" poprawiony.
 - **BLOKADA**: finalny build App czeka na zamknięcie apki testowej usera (pid 53272, locki DLL).
-- NOWE otwarte: kropkowana linia exposed-route przecina Nižné Žabie pleso Bielovodské (zrzut usera) —
-  parser nie skleja ways, simplify 20 m nie wyprostuje obejścia stawu ⇒ najpewniej geometria w OSM;
-  weryfikacja Overpass w toku (endpointy 504). Decyzja produktowa po werdykcie z danych.
+- **Kropkowane jasne linie przez całą mapę (user 4×; „prostopadłe jak kafle") ROZWIĄZANE (9dc010e)**:
+  to NIE dane (dekod chainów, edge-step granic kafli/grup, nakładki cel bit-identyczne — czyste) tylko
+  SAMPLING: śmieciowe pochodne implicit-LOD na Voronoi-granicach per-fragment wyboru celi
+  det25Arr/det05Array (+ fract det1m) → najgłębsze mipy (jasny uśredniony kolor) na linii przełączenia.
+  Fix: `textureGrad` z gradientami ze świata (dFdx/dFdy(wxy), uniform flow) w 3 funkcjach + decyzja
+  bicubic z gradów. Zweryfikowane harnessem na pozie usera (pomiar skupień jasnych px na tafli MO: zero
+  wąskich linii). LEKCJA METODYCZNA: artefakty 1-px NIE są widoczne na downscale'owanych podglądach —
+  false negative; oceniać pomiarem na pełnej rozdzielczości.
+- Otwarte poboczne: exposed-route way 1421182377 (trail_visibility=horrible) przy Żabich B. — prawdziwa
+  kropkowana ścieżka OSM przy stawie z pierwszego zrzutu; po fixie samplingowym zweryfikować, czy coś
+  jeszcze przecina taflę (Overpass leżał — 504; lokalny extract w scratchpad/zabie.osm).
 
 ## PEŁNA LISTA POZOSTAŁEJ ROBOTY (odtworzona 12:40 — taski NIE przenoszą się między sesjami,
 ## poprzednia lista ≥11 tasków przepadła; TA lista jest teraz jedynym nośnikiem — aktualizować TUTAJ)
