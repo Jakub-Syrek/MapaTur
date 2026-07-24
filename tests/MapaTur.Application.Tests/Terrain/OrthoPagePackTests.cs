@@ -131,6 +131,72 @@ public sealed class OrthoPagePackTests : IDisposable
         Directory.GetFiles(dir).Should().ContainSingle(f => f.EndsWith(".opk", StringComparison.Ordinal));
     }
 
+    // ── zstd (2026-07-24, „rozwiń tę kompresję"): pole zstdBytes jest w formacie od v1; teraz Write
+    // umie kompresować per strona (adaptacyjnie — strona nieściśliwa zostaje raw), a TryReadPage
+    // dekompresuje i waliduje crc RAW payloadu, więc przekłamanie compressed też jest odrzucane. ──
+
+    [Fact]
+    public void should_compress_page_and_roundtrip_byte_exact()
+    {
+        var pages = new[] { Page(OrthoPagePack.TailPageId, 2, 65536, 0x11), Page(4, 0, 65536, 0x22) };
+
+        OrthoPagePack.Write(PackPath, cellPx: 8192, pages, zstdLevel: 9);
+        using OrthoPagePack pack = OrthoPagePack.Open(PackPath, 8192)!;
+
+        OrthoPagePack.Entry e = pack.Entries.Single(x => x.PageId == 4);
+        e.ZstdBytes.Should().BeGreaterThan(0).And.BeLessThan(e.RawBytes, "stała wypełniona strona jest silnie ściśliwa");
+        pack.TryReadPage(4, out byte[] got).Should().BeTrue();
+        got.Length.Should().Be(65536);
+        got.Should().AllBeEquivalentTo((byte)0x22);
+    }
+
+    [Fact]
+    public void should_store_incompressible_page_raw()
+    {
+        byte[] noise = new byte[4096];
+        new Random(1234).NextBytes(noise); // pseudolosowy payload — zstd nie zejdzie poniżej raw
+        var page = new OrthoPagePack.PageData(7, 0, noise, 0xAB);
+
+        OrthoPagePack.Write(PackPath, cellPx: 8192, new[] { page }, zstdLevel: 9);
+        using OrthoPagePack pack = OrthoPagePack.Open(PackPath, 8192)!;
+
+        pack.Entries.Single(x => x.PageId == 7).ZstdBytes.Should().Be(0, "strona nieściśliwa zostaje raw");
+        pack.TryReadPage(7, out byte[] got).Should().BeTrue();
+        got.Should().Equal(noise);
+    }
+
+    [Fact]
+    public void should_reject_corrupted_compressed_page()
+    {
+        OrthoPagePack.Write(PackPath, cellPx: 8192, new[] { Page(3, 0, 65536, 0x77) }, zstdLevel: 9);
+        using (FileStream fs = new(PackPath, FileMode.Open, FileAccess.ReadWrite))
+        {
+            fs.Seek(32 + 32, SeekOrigin.Begin); // pierwszy bajt compressed payloadu (magic frame zstd)
+            int b = fs.ReadByte();
+            fs.Seek(-1, SeekOrigin.Current);
+            fs.WriteByte((byte)(b ^ 0xFF));
+        }
+
+        using OrthoPagePack pack = OrthoPagePack.Open(PackPath, 8192)!;
+        pack.TryReadPage(3, out _).Should().BeFalse("przekłamana strona compressed nie może trafić do GPU");
+    }
+
+    [Fact]
+    public void should_mix_raw_and_compressed_pages_in_one_pack()
+    {
+        byte[] noise = new byte[2048];
+        new Random(99).NextBytes(noise);
+        var pages = new[] { Page(OrthoPagePack.TailPageId, 2, 65536, 0x55), new OrthoPagePack.PageData(9, 0, noise, 0x1UL) };
+
+        OrthoPagePack.Write(PackPath, cellPx: 8192, pages, zstdLevel: 9);
+        using OrthoPagePack pack = OrthoPagePack.Open(PackPath, 8192)!;
+
+        pack.TryReadPage(OrthoPagePack.TailPageId, out byte[] tail).Should().BeTrue();
+        tail.Should().AllBeEquivalentTo((byte)0x55);
+        pack.TryReadPage(9, out byte[] raw).Should().BeTrue();
+        raw.Should().Equal(noise);
+    }
+
     [Fact]
     public void SrcHashes_SurviveRoundTrip_ForIncrementalBake()
     {

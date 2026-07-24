@@ -26,6 +26,9 @@ string? srcArg = GetArg("--src"); // wymagane tylko dla bake'u (walidowane za ga
 string outDir = GetArg("--out") ?? throw new ArgumentException("--out wymagane");
 string? det1mOut = GetArg("--det1m-out");
 int parallelism = int.TryParse(GetArg("--parallel"), out int p) ? p : Math.Max(2, Environment.ProcessorCount - 2);
+// zstd stron (ARCHITEKTURA: .opk → zstd → chain-buffer): default ON poziom 9 (offline; dekompresja
+// runtime ~GB/s niezależnie od poziomu). --no-zstd = strony raw (zstdBytes=0), format ten sam.
+int zstdLevel = args.Contains("--no-zstd") ? 0 : 9;
 
 // ── Tryb --verify-full: PEŁNA walidacja warstwy (bez bake'u) ─────────────────────────────────────────
 // CRC KAŻDEJ strony, offsety/długości (rozłączne, w granicach pliku, payload za TOC), unikalność pageId
@@ -112,7 +115,7 @@ foreach (string colDir in Directory.EnumerateDirectories(src))
 var groups = tiles.Keys
     .GroupBy(t => (Gi: Math.DivRem(t.Ti, GroupTiles, out _) is var _ ? t.Ti / GroupTiles : 0, Gj: t.Tj / GroupTiles))
     .ToDictionary(g => g.Key, g => g.ToList());
-Console.WriteLine($"[bake] kafli: {tiles.Count}, grup (pakietów det25): {groups.Count}, parallel={parallelism}");
+Console.WriteLine($"[bake] kafli: {tiles.Count}, grup (pakietów {layer}): {groups.Count}, parallel={parallelism}, zstd={zstdLevel}");
 
 // ── 2. Bake per grupa (równolegle, bounded) ──────────────────────────────────────────────────────────
 Directory.CreateDirectory(outDir);
@@ -277,7 +280,7 @@ Parallel.ForEach(groups, new ParallelOptions { MaxDegreeOfParallelism = parallel
     foreach (byte[] t in tailParts) { System.Buffer.BlockCopy(t, 0, tail, off, t.Length); off += t.Length; }
     pages.Insert(0, new OrthoPagePack.PageData(OrthoPagePack.TailPageId, 1, tail, 0));
 
-    OrthoPagePack.Write(packPath, GroupPx, pages);
+    OrthoPagePack.Write(packPath, GroupPx, pages, zstdLevel);
     Interlocked.Add(ref pageCountTotal, pages.Count);
     indexCells.Add(new OrthoPackIndex.CellEntry(gi, gj, GroupPx, (ushort)pages.Count, new FileInfo(packPath).Length));
 
@@ -373,7 +376,7 @@ if (det1mOut is not null)
         pages.Insert(0, new OrthoPagePack.PageData(OrthoPagePack.TailPageId, 1, tail, 0));
 
         string packPath = Path.Combine(det1mOut, $"{pi}_{pj}.opk");
-        OrthoPagePack.Write(packPath, PackPx, pages);
+        OrthoPagePack.Write(packPath, PackPx, pages, zstdLevel);
         idx1m.Add(new OrthoPackIndex.CellEntry(pi, pj, PackPx, (ushort)pages.Count, new FileInfo(packPath).Length));
         det1mCount++;
     }

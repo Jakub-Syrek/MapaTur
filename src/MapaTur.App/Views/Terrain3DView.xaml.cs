@@ -8788,6 +8788,9 @@ public partial class Terrain3DView : ContentView
         renderer.Det05GpuCacheDir = System.IO.Path.Combine(
             System.IO.Path.GetDirectoryName(dir) ?? dir, "gpu-cache",
             dsDir is not null ? System.IO.Path.GetFileName(dsDir) + "-over-det05" : System.IO.Path.GetFileName(dir));
+        // det05 (krok 6): strony .opk zamiast compose — jak det25.
+        renderer.Det05OpkDir = System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(dir) ?? dir, "opk", "det05");
         renderer.SetOrthoDetail05Streaming(grid, composer, cache, Coverage);
         Serilog.Log.Information("[OrthoDetail05] det05 streaming wired from {Dir} ({N} covered cells)", dir, coveredKeys.Count);
         return true;

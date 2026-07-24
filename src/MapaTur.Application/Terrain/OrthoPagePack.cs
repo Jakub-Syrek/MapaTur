@@ -55,8 +55,11 @@ public sealed class OrthoPagePack : IDisposable
         }
     }
 
-    /// <summary>Atomowy zapis pakietu: tail wymuszony na początek payloadu niezależnie od kolejności wejścia.</summary>
-    public static void Write(string path, int cellPx, IEnumerable<PageData> pages)
+    /// <summary>Atomowy zapis pakietu: tail wymuszony na początek payloadu niezależnie od kolejności
+    /// wejścia. <paramref name="zstdLevel"/> &gt; 0 kompresuje KAŻDĄ stronę zstd (adaptacyjnie — strona,
+    /// której kompresja nie zmniejsza, zostaje raw z zstdBytes=0; format wspiera mieszankę per strona).
+    /// CRC w TOC liczone ZAWSZE z RAW payloadu, więc odczyt waliduje również poprawność dekompresji.</summary>
+    public static void Write(string path, int cellPx, IEnumerable<PageData> pages, int zstdLevel = 0)
     {
         List<PageData> ordered = pages.OrderBy(p => p.PageId == TailPageId ? 0 : 1).ToList();
         ArgumentOutOfRangeException.ThrowIfGreaterThan(ordered.Count, ushort.MaxValue - 1);
@@ -64,6 +67,26 @@ public sealed class OrthoPagePack : IDisposable
         if (!string.IsNullOrEmpty(parent))
         {
             Directory.CreateDirectory(parent);
+        }
+
+        // Payload na dysk: compressed albo raw per strona (null = raw). Liczone PRZED TOC, bo offsety
+        // stron zależą od faktycznych długości zapisu.
+        var stored = new byte[ordered.Count][];
+        if (zstdLevel > 0)
+        {
+            using var compressor = new ZstdSharp.Compressor(zstdLevel);
+            for (int i = 0; i < ordered.Count; i++)
+            {
+                byte[] z = compressor.Wrap(ordered[i].Payload).ToArray();
+                stored[i] = z.Length < ordered[i].Payload.Length ? z : ordered[i].Payload;
+            }
+        }
+        else
+        {
+            for (int i = 0; i < ordered.Count; i++)
+            {
+                stored[i] = ordered[i].Payload;
+            }
         }
 
         long payloadStart = HeaderBytes + ((long)ordered.Count * TocEntryBytes);
@@ -84,23 +107,25 @@ public sealed class OrthoPagePack : IDisposable
 
             Span<byte> toc = stackalloc byte[TocEntryBytes];
             long offset = payloadStart;
-            foreach (PageData p in ordered)
+            for (int i = 0; i < ordered.Count; i++)
             {
+                PageData p = ordered[i];
+                bool compressed = !ReferenceEquals(stored[i], p.Payload);
                 BinaryPrimitives.WriteUInt16LittleEndian(toc, p.PageId);
                 toc[2] = p.Level;
                 toc[3] = 0;
                 BinaryPrimitives.WriteInt64LittleEndian(toc[4..], offset);
                 BinaryPrimitives.WriteInt32LittleEndian(toc[12..], p.Payload.Length);
-                BinaryPrimitives.WriteInt32LittleEndian(toc[16..], 0); // zstdBytes = 0 → bez kompresji
+                BinaryPrimitives.WriteInt32LittleEndian(toc[16..], compressed ? stored[i].Length : 0);
                 BinaryPrimitives.WriteUInt32LittleEndian(toc[20..], Crc32(p.Payload));
                 BinaryPrimitives.WriteUInt64LittleEndian(toc[24..], p.SrcHash);
                 fs.Write(toc);
-                offset += p.Payload.Length;
+                offset += stored[i].Length;
             }
 
-            foreach (PageData p in ordered)
+            foreach (byte[] s in stored)
             {
-                fs.Write(p.Payload);
+                fs.Write(s);
             }
         }
 
@@ -177,8 +202,9 @@ public sealed class OrthoPagePack : IDisposable
         }
     }
 
-    /// <summary>Czyta i waliduje (crc32) jedną stronę. False = strona nieobecna w TOC albo przekłamana —
-    /// wywołujący traktuje jak brak pokrycia; przekłamana strona NIGDY nie trafia do GPU.</summary>
+    /// <summary>Czyta i waliduje (crc32 RAW payloadu) jedną stronę; zstdBytes &gt; 0 w TOC → dekompresja.
+    /// False = strona nieobecna w TOC, przekłamana albo niedekompresowalna — wywołujący traktuje jak brak
+    /// pokrycia; taka strona NIGDY nie trafia do GPU.</summary>
     public bool TryReadPage(ushort pageId, out byte[] payload)
     {
         payload = Array.Empty<byte>();
@@ -188,15 +214,29 @@ public sealed class OrthoPagePack : IDisposable
         }
 
         Entry e = entries[idx];
-        byte[] buf = new byte[e.RawBytes];
+        byte[] buf;
         try
         {
+            byte[] disk = new byte[e.ZstdBytes > 0 ? e.ZstdBytes : e.RawBytes];
             stream.Seek(e.Offset, SeekOrigin.Begin);
-            stream.ReadExactly(buf);
+            stream.ReadExactly(disk);
+            if (e.ZstdBytes > 0)
+            {
+                decompressor ??= new ZstdSharp.Decompressor();
+                buf = new byte[e.RawBytes];
+                if (!decompressor.TryUnwrap(disk, buf, out int written) || written != e.RawBytes)
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                buf = disk;
+            }
         }
-        catch (IOException)
+        catch (Exception ex) when (ex is IOException or ZstdSharp.ZstdException)
         {
-            return false;
+            return false; // I/O albo śmieciowy frame zstd — strona traktowana jak nieobecna
         }
 
         if (Crc32(buf) != e.Crc32)
@@ -208,7 +248,14 @@ public sealed class OrthoPagePack : IDisposable
         return true;
     }
 
-    public void Dispose() => stream.Dispose();
+    // Kontekst dekompresji per instancję (jak stream — TryReadPage nie jest wielowątkowe per pack).
+    private ZstdSharp.Decompressor? decompressor;
+
+    public void Dispose()
+    {
+        decompressor?.Dispose();
+        stream.Dispose();
+    }
 
     // CRC-32 (IEEE 802.3, odbity wielomian 0xEDB88320) — tablicowy, bez zależności NuGet.
     private static readonly uint[] CrcTable = BuildCrcTable();

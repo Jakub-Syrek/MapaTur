@@ -114,8 +114,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // slice B the rest; the fragment picks the slice from its slot index (best < 8).
         "uniform mediump sampler2DArray uOrthoDet05Arr;\n" +
         "uniform mediump sampler2DArray uOrthoDet05ArrB;\n" +
-        "uniform vec4 uDet05Aabb[16];\n" + // slots ≥ Det05HardCapCells (12 desktop) — headroom without GLSL edits
-        "uniform float uDet05Alpha[16];\n" + // per-slot fade-in after promote (0→1 over ~300 ms) — no popping
+        "uniform vec4 uDet05Aabb[32];\n" + // slots ≥ Det05HardCapCells (32 desktop BC1) — headroom without GLSL edits
+        "uniform float uDet05Alpha[32];\n" + // per-slot fade-in after promote (0→1 over ~300 ms) — no popping
+        "uniform int uDet05ArrA;\n" +      // liczba warstw slice'a A (BC1: 16, RGBA-fallback: 8) — mapping slot→(array, warstwa)
         "uniform int uUseDet05Arr;\n" +
         "uniform float uDetailBlendMeters;\n" + // soft edge fade of the detail AABB back to the base ortho
         "uniform int uOrthoDetailColorMode;\n" + // 0 = raw detail, 1 = base de-blue transform (R3 slice A/B)
@@ -331,7 +332,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "vec3 applyOrthoDet05Array(vec2 wxy, vec3 baseC, float blendM){\n" +
         "  if (uUseDet05Arr != 1) return baseC;\n" +
         "  int best = -1; float bestEdge = 0.0;\n" +
-        "  for (int i = 0; i < 16; i++) {\n" +
+        "  for (int i = 0; i < 32; i++) {\n" +
         "    vec2 mn = uDet05Aabb[i].xy; vec2 mx = uDet05Aabb[i].zw;\n" +
         "    if (mx.x <= mn.x) continue;\n" +
         "    vec2 cd = min(wxy - mn, mx - wxy);\n" +
@@ -342,8 +343,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  vec2 mn = uDet05Aabb[best].xy; vec2 mx = uDet05Aabb[best].zw;\n" +
         "  vec2 uv = vec2((wxy.x - mn.x) / (mx.x - mn.x), (mx.y - wxy.y) / (mx.y - mn.y));\n" +
         "  vec2 ts = vec2(textureSize(uOrthoDet05Arr, 0).xy);\n" +
-        "  bool inA = best < 8;\n" + // slot index → slice (A: 0..7, B: 8..15); must match Det05ArraySliceLayers
-        "  float lz = inA ? float(best) : float(best - 8);\n" +
+        "  bool inA = best < uDet05ArrA;\n" + // slot index → slice (A: 0..uDet05ArrA-1, B: reszta)
+        "  float lz = inA ? float(best) : float(best - uDet05ArrA);\n" +
         "  vec4 dcs = inA ? texture(uOrthoDet05Arr, vec3(uv, lz)) : texture(uOrthoDet05ArrB, vec3(uv, lz));\n" +
         "  vec3 dc = dcs.rgb;\n" +
         "  vec2 fp = fwidth(uv) * ts;\n" +
@@ -2149,7 +2150,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int det05MinXyLocation = -1;
     private int det05MaxXyLocation = -1;
     private int det05ArrSamplerLocation = -1;   // sampler2DArray slice A on unit 12 (layers 0..7)
-    private int det05ArrBSamplerLocation = -1;  // sampler2DArray slice B on unit 13 (layers 8..15)
+    private int det05ArrBSamplerLocation = -1;  // sampler2DArray slice B on unit 13 (layers det05LayersA..)
+    private int det05ArrALoc = -1;              // uDet05ArrA — liczba warstw slice'a A (mapping slot→array w shaderze)
     private int det05ArrAabbLocation = -1;      // vec4[16] per-LAYER world AABBs
     private int det05ArrAlphaLocation = -1;     // float[16] per-slot promote fade-in
     private int useDet05ArrLocation = -1;
@@ -2257,7 +2259,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // H2 (2026-07-23) raised this 12 → 16; the TIER REBALANCE same day pulls it back to 12 — the freed
     // ~1.4 GB funds the det25 midground (see Det25HardCapCells), which is what a panorama actually shows.
     // The slot list/slices still support 16 if a future budget wants it. Phone untouched.
-    private static readonly int Det05HardCapCells = OperatingSystem.IsWindows() ? 12 : 3;
+    // 2026-07-24 („zasięg 5 cm śmiesznie mały"): 12 → 32. Kalibrowane, gdy cela kosztowała 357 MB RGBA;
+    // z BC1 (ChainSize ≈ 44,7 MB) 32 cele = ~1,43 GB — wciąż drobiazg w ledgerze ~9,6 GB. Faktyczny
+    // promień pełnego 5 cm rośnie ~300 → ~490 m (pitch 153,6 m, nearest-cap); dalej kryje det25.
+    private static readonly int Det05HardCapCells = OperatingSystem.IsWindows() ? 32 : 3;
 
     // BC1 GPU-cell pipeline (2026-07-23, ZASADY 11/13): cells are encoded to BC1+mips OFF-THREAD (once — the
     // disk cache serves every revisit in ~15 ms) and uploaded compressed. 1/8 the bytes end-to-end: a det05
@@ -2280,8 +2285,31 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// Null / brak `index.bin` = dotychczasowa ścieżka compose (fallback; log przy probie).</summary>
     public string? Det25OpkDir { get; set; }
 
+    /// <summary>Katalog pakietów `.opk` det05 — ten sam kontrakt co <see cref="Det25OpkDir"/>.</summary>
+    public string? Det05OpkDir { get; set; }
+
     private MapaTur.Application.Terrain.OrthoPackIndex? det25OpkIndex;
     private bool det25OpkProbed;
+    private MapaTur.Application.Terrain.OrthoPackIndex? det05OpkIndex;
+    private bool det05OpkProbed;
+
+    private bool Det05OpkReady()
+    {
+        if (!det05OpkProbed)
+        {
+            det05OpkProbed = true;
+            if (!string.IsNullOrEmpty(Det05OpkDir))
+            {
+                det05OpkIndex = MapaTur.Application.Terrain.OrthoPackIndex.Load(
+                    System.IO.Path.Combine(Det05OpkDir, "index.bin"));
+                Log.Information("[Det05] .opk page streaming {State} ({Dir}: {Cells} grup)",
+                    det05OpkIndex is null ? "OFF — index.bin nieczytelny/brak, zostaje compose" : "ON",
+                    Det05OpkDir, det05OpkIndex?.Cells.Count ?? 0);
+            }
+        }
+
+        return det05OpkIndex is not null && det05Bc1On;
+    }
 
     // Krok 6: strony .opk są jedyną produkcyjną ścieżką det25, gdy indeks jest czytelny i GPU ma s3tc
     // (BC1 chain idzie przez CompressedTexSubImage; brak s3tc → RGBA compose jak dotąd).
@@ -2351,7 +2379,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
     /// <summary>Layers per det05 array texture — keeps every single GPU resource ≈2.86 GB, safely under
     /// the 32-bit (~4.29 GB) per-resource ceiling. Must match the shader's slice constant (best &lt; 8).</summary>
-    private const int Det05ArraySliceLayers = 8;
+    // BC1: 16 warstw 8192² z mipami ≈ 715 MB/array — daleko od sufitu ~4,29 GB/resource. RGBA-fallback
+    // (bez s3tc) zostaje przy 8 (16×357 MB przebiłoby sufit) — patrz EnsureDet05Array.
+    private const int Det05ArraySliceLayers = 16;
+    private int det05LayersA; // faktyczne warstwy slice'a A po alokacji (mapping slot→(array, warstwa) + uniform uDet05ArrA)
     // H2 (2026-07-23): 600 → 800 m with the 16-cell cap — 16 cells of ~410 m span tile an 800 m ring, so the
     // 5 cm reflector reaches the far side of a cirque like Morskie Oko instead of stopping mid-lake.
     private static readonly double Det05RingRadiusMeters = OperatingSystem.IsWindows() ? 800.0 : 350.0;
@@ -3461,8 +3492,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         det05Composer = composer;
         det05TileCache = tileCache;
 
-        long det05CellBytes = OrthoVramBudget.CellResidentBytes(grid.CellPx, grid.CellPx);
-        long det25CellBytes = OrthoVramBudget.CellResidentBytes(det25Grid.CellPx, det25Grid.CellPx);
+        // BC1 chain (jedyna produkcyjna ścieżka det05-stream — desktop ANGLE zawsze ma s3tc): cela 8192²
+        // to ~45 MB, nie 357 MB RGBA. Stara arytmetyka dusiła near-cap i CAŁY zasięg 5 cm do „kałuży".
+        // (RGBA-fallback miałby zaniżony ledger — akceptowane: nie występuje na wspieranym desktopie.)
+        long det05CellBytes = MapaTur.Application.Terrain.GpuCellCache.ChainSize(grid.CellPx);
+        long det25CellBytes = MapaTur.Application.Terrain.GpuCellCache.ChainSize(det25Grid.CellPx);
         var fine = new MapaTur.Application.Terrain.DetailLevelSpec(
             grid,
             new MapaTur.Application.Terrain.OrthoDetailResidencyPolicy(grid, Det05RingRadiusMeters, Det25FastMotionSpeedMps, prefetchLeadMeters: 120),
@@ -3534,7 +3568,24 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     byte[] rentedBc1 = MapaTur.Application.Terrain.MeshBufferPool.Shared.RentBytes(
                         MapaTur.Application.Terrain.GpuCellCache.ChainSize(cellPx));
                     cell.RentedBc1 = rentedBc1;
-                    if (cachePath is not null && System.IO.File.Exists(cachePath))
+                    if (Det05OpkReady())
+                    {
+                        // Krok 6 dla det05: cela ze stron .opk (zero WebP/BC1/mipów na runtime), jak det25.
+                        string opkDir = Det05OpkDir!;
+                        int pitch = det05Grid.PitchTiles, coverage = det05Grid.CoverageTiles;
+                        int groupTiles = det05OpkIndex!.TilesPerCell;
+                        cell.Compose = Task.Run(() =>
+                        {
+                            var swc = System.Diagnostics.Stopwatch.StartNew();
+                            bool ok = MapaTur.Application.Terrain.OrthoPageWindowAssembler.TryAssembleDet25Window(
+                                opkDir, ci, cj, pitch, coverage, groupTiles, rentedBc1, out _);
+                            capture.ComposeMs = swc.Elapsed.TotalMilliseconds;
+                            capture.FromCache = ok;
+                            capture.FromOpk = ok;
+                            return ok ? rentedBc1 : null;
+                        });
+                    }
+                    else if (cachePath is not null && System.IO.File.Exists(cachePath))
                     {
                         cell.Compose = Task.Run(() =>
                         {
@@ -3736,8 +3787,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         ProbeS3tc(gl); // decide BC1 vs RGBA once, BEFORE the storage is allocated (format is immutable)
         int px = det05Grid.CellPx;
         int wanted = Math.Max(1, Det05HardCapCells);
-        int layersA = Math.Min(wanted, Det05ArraySliceLayers);
-        int layersB = Math.Max(0, wanted - layersA);
+        int perArray = det05Bc1On ? Det05ArraySliceLayers : 8; // RGBA: 8×357 MB ≈ 2,86 GB — tuż pod sufitem/resource
+        int layersA = Math.Min(wanted, perArray);
+        int layersB = Math.Min(Math.Max(0, wanted - layersA), perArray);
 
         while (gl.GetError() != GLEnum.NoError) { } // drain stale errors so the checks below test OUR calls
 
@@ -3757,6 +3809,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             }
         }
 
+        det05LayersA = layersA; // mapping slot→(array, warstwa) i uniform uDet05ArrA (bind raz na klatkę)
         det05FreeLayers.Clear();
         for (int i = allocated - 1; i >= 0; i--)
         {
@@ -4427,10 +4480,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 cell.UploadLevel = 0;
             }
 
-            // Global layer → slice + local z (slice A carries layers 0..slice-1, B the rest).
-            bool inA = cell.Layer < Det05ArraySliceLayers;
+            // Global layer → slice + local z (slice A carries layers 0..det05LayersA-1, B the rest).
+            bool inA = cell.Layer < det05LayersA;
             uint target = inA ? det05ArrayTexture : det05ArrayTextureB;
-            int z = inA ? cell.Layer : cell.Layer - Det05ArraySliceLayers;
+            int z = inA ? cell.Layer : cell.Layer - det05LayersA;
             if (target == 0)
             {
                 det05UploadQueue.RemoveAt(0); // slice B refused by the driver — cell waits for an A slot
@@ -4559,9 +4612,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 ReleaseCellBuffer(cell); // the final upload has copied — recycle the pooled buffers
                 det05UploadQueue.RemoveAt(0);
                 Log.Information(
-                    "[Det05] cell ({Ci},{Cj}) compose {C:F0}ms{Cache} | layer {Layer} ({Slice}) resident ({Levels} levels, {Fmt})",
-                    cell.Ci, cell.Cj, cell.ComposeMs, cell.FromCache ? " [CACHE-HIT]" : string.Empty,
-                    cell.Layer, inA ? "A" : "B", totalLevels, bc1 is not null ? "BC1" : "RGBA");
+                    "[Det05] cell ({Ci},{Cj}) {Src} {C:F0}ms | layer {Layer} ({Slice}) resident ({Levels} levels, {Fmt})",
+                    cell.Ci, cell.Cj, cell.FromOpk ? "opk-read" : cell.FromCache ? "compose [CACHE-HIT]" : "compose",
+                    cell.ComposeMs, cell.Layer, inA ? "A" : "B", totalLevels, bc1 is not null ? "BC1" : "RGBA");
             }
 
             if (frameClock.ElapsedMilliseconds - start >= OrthoUploadBudgetMsPerFrame)
@@ -4616,8 +4669,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         det05ArrayUniformsTick = det25FrameTick;
-        Span<float> aabb = stackalloc float[16 * 4];
-        Span<float> alpha = stackalloc float[16];
+        Span<float> aabb = stackalloc float[32 * 4];
+        Span<float> alpha = stackalloc float[32];
         alpha.Clear(); // stackalloc zero-init is not contractual — empty slots must read alpha 0
         for (int i = 0; i < aabb.Length; i += 4)
         {
@@ -4628,7 +4681,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         double nowMs = frameClock.ElapsedMilliseconds;
         foreach (DetailCellGpu cell in det05Cells.Values)
         {
-            if (!cell.LayerReady || cell.Layer < 0 || cell.Layer >= 16)
+            if (!cell.LayerReady || cell.Layer < 0 || cell.Layer >= 32)
             {
                 continue;
             }
@@ -4655,14 +4708,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.ActiveTexture(TextureUnit.Texture0);
             gl.Uniform1(det05ArrSamplerLocation, 12);
             gl.Uniform1(det05ArrBSamplerLocation, 13);
+            gl.Uniform1(det05ArrALoc, det05LayersA);
             fixed (float* p = aabb)
             {
-                gl.Uniform4(det05ArrAabbLocation, 16, p);
+                gl.Uniform4(det05ArrAabbLocation, 32, p);
             }
 
             fixed (float* p = alpha)
             {
-                gl.Uniform1(det05ArrAlphaLocation, 16, p);
+                gl.Uniform1(det05ArrAlphaLocation, 32, p);
             }
 
             gl.Uniform1(useDet05ArrLocation, 1);
@@ -4766,7 +4820,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             baseBytes += det05MosaicResidentBytes;
         }
 
-        long cellBytes = OrthoVramBudget.CellResidentBytes(det25Grid.CellPx, det25Grid.CellPx);
+        // BC1 (jedyna produkcyjna ścieżka desktop) kosztuje ChainSize ≈ 1/8 RGBA — near-cap liczony ze
+        // STAREJ arytmetyki RGBA dusił zasięg detalu przy pustym VRAM („zasięg 5 cm śmiesznie mały").
+        long cellBytes = det05Bc1On
+            ? MapaTur.Application.Terrain.GpuCellCache.ChainSize(det25Grid.CellPx)
+            : OrthoVramBudget.CellResidentBytes(det25Grid.CellPx, det25Grid.CellPx);
         IReadOnlyList<int> desired;
         IReadOnlyList<int> fineDesired = Array.Empty<int>();
         int nearCap;
@@ -5513,6 +5571,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             det05MaxXyLocation = -1;
             det05ArrSamplerLocation = -1;
             det05ArrBSamplerLocation = -1;
+            det05ArrALoc = -1;
             det05ArrAabbLocation = -1;
             det05ArrAlphaLocation = -1;
             useDet05ArrLocation = -1;
@@ -9103,6 +9162,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         det05MaxXyLocation = g.GetUniformLocation(program, "uDet05MaxXY");
         det05ArrSamplerLocation = g.GetUniformLocation(program, "uOrthoDet05Arr");
         det05ArrBSamplerLocation = g.GetUniformLocation(program, "uOrthoDet05ArrB");
+        det05ArrALoc = g.GetUniformLocation(program, "uDet05ArrA");
         det05ArrAabbLocation = g.GetUniformLocation(program, "uDet05Aabb[0]");
         det05ArrAlphaLocation = g.GetUniformLocation(program, "uDet05Alpha[0]");
         useDet05ArrLocation = g.GetUniformLocation(program, "uUseDet05Arr");

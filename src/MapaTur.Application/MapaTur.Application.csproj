@@ -10,6 +10,8 @@
     <!-- glTF import + runtime skinning for the ridden dragon. -->
     <PackageReference Include="SharpGLTF.Core" />
     <PackageReference Include="SharpGLTF.Runtime" />
+    <!-- Kompresja stron .opk (zstd; pole zstdBytes w TOC od v1). -->
+    <PackageReference Include="ZstdSharp.Port" />
   </ItemGroup>
 
   <PropertyGroup>

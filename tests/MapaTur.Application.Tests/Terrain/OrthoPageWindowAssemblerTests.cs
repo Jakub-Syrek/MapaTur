@@ -221,4 +221,39 @@ public sealed class OrthoPageWindowAssemblerTests : IDisposable
         ok.Should().BeFalse();
         pagesRead.Should().Be(0);
     }
+
+    [Fact]
+    public void should_assemble_det05_geometry_window_from_two_packs()
+    {
+        // det05: coverage 16 / pitch 6 / grupa 16 (cela 8192 px). Cela (1,0): okno kafli X [6..22) →
+        // grupy gi=0 i gi=1. Strona (lx=6,ly=0) grupy 0 → kafel okna (0,0); strona (lx=0,ly=0) grupy 1 →
+        // kafel okna (10,0). Assembler jest w pełni sparametryzowany — ten test przybija geometrię det05.
+        const int Cov05 = 16, Grp05 = 16, Cell05Px = Cov05 * TilePx; // 8192
+        int tailBytes = 0;
+        for (int px = Cell05Px / 2; px >= 1; px /= 2) { tailBytes += Bc1Encoder.EncodedSize(px, px); }
+        void Pack05(int gi, int gj, int lx, int ly, byte fill)
+        {
+            byte[] tail = new byte[tailBytes];
+            byte[] payload = new byte[Mip0Bytes + Mip1Bytes];
+            Array.Fill(payload, fill, 0, Mip0Bytes);
+            OrthoPagePack.Write(Path.Combine(dir, $"{gi}_{gj}.opk"), Cell05Px,
+            [
+                new OrthoPagePack.PageData(OrthoPagePack.TailPageId, 1, tail, 0),
+                new OrthoPagePack.PageData((ushort)((lx * Grp05) + ly), 0, payload, 1UL),
+            ]);
+        }
+
+        Pack05(0, 0, 6, 0, 0xAA);
+        Pack05(1, 0, 0, 0, 0xBB);
+        byte[] chain = new byte[GpuCellCache.ChainSize(Cell05Px)];
+
+        bool ok = OrthoPageWindowAssembler.TryAssembleDet25Window(
+            dir, 1, 0, PitchTiles, Cov05, Grp05, chain, out int pagesRead);
+
+        ok.Should().BeTrue();
+        pagesRead.Should().Be(2);
+        const int TileBlocks = TilePx / 4;
+        chain[0].Should().Be(0xAA);                                    // kafel okna (0,0), blok (0,0)
+        chain[(10 * TileBlocks) * 8].Should().Be(0xBB);               // kafel okna (10,0) w wierszu blokowym 0
+    }
 }
