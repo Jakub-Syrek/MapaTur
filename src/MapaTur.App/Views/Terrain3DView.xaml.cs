@@ -1019,6 +1019,10 @@ public partial class Terrain3DView : ContentView
             lastSavedCameraSerialized = serialized;
             CameraState = serialized; // flows to the view-model → settings store
 
+            // TEST HARNESS: sync pozy dla agenta (czyta %TEMP%\mapatur-pose.txt podczas testu manualnego).
+            try { System.IO.File.WriteAllText(HarnessPosePath, serialized); }
+            catch (System.IO.IOException) { }
+
             // LOD Krok 4: report a snapshot of the camera pose so the host can raycast the look-at point and
             // stream the detail patch to the gaze. Snapshot (not the live camera) so the async reload reads a
             // stable pose. The timer debounces; the host gates the actual reload on look-at drift.
@@ -5314,7 +5318,7 @@ public partial class Terrain3DView : ContentView
 
         // A debug pinned camera (roughness-LOD tuning) wins over everything so redeploys reproduce one view;
         // otherwise restore the camera saved for this DEM; if none (or a different region), auto-frame.
-        if (!TryApplyPinnedCamera() && !TryRestoreCamera(frame))
+        if (!TryApplyPinnedCamera() && !TryApplyEnvPose() && !TryRestoreCamera(frame))
         {
             Camera.Target = Vector3.Zero;
             Camera.Distance = Math.Max(frame.HorizontalExtent * 2.5f, 5_000f);
@@ -5730,6 +5734,99 @@ public partial class Terrain3DView : ContentView
         DrawWalkViewmodel(canvas, e.Info.Width, e.Info.Height);
         DrawDragon(canvas, e.Info.Width, e.Info.Height);
         ServiceRecording(e);
+        ServiceTestHarness(e, frame);
+    }
+
+    // ── TEST HARNESS (2026-07-24, na prośbę usera): deterministyczne testy bez rąk na klawiaturze ──
+    // MAPATUR_START_POSE="tx;ty;tz;dist;az;pitch" — start w dokładnej pozie (format pinned-camera);
+    // MAPATUR_CHROME=0 — panele schowane od startu; MAPATUR_SHOT_DIR=<dir> — F10 lub
+    // MAPATUR_AUTOSHOT_SEC=n zapisuje PNG bieżącej klatki Z POZIOMU APKI (działa mimo blokady ekranu);
+    // sync pozy: co ~1,2 s bieżąca poza + geo celu ląduje w %TEMP%\mapatur-pose.txt — agent czyta,
+    // gdzie user patrzy podczas testu manualnego, i może wystartować drugą instancję w TEJ pozie.
+    private static readonly string? HarnessStartPose = Environment.GetEnvironmentVariable("MAPATUR_START_POSE");
+    private static readonly bool HarnessChromeOff = Environment.GetEnvironmentVariable("MAPATUR_CHROME") == "0";
+    private static readonly string? HarnessShotDir = Environment.GetEnvironmentVariable("MAPATUR_SHOT_DIR");
+    private static readonly int HarnessAutoshotSec =
+        int.TryParse(Environment.GetEnvironmentVariable("MAPATUR_AUTOSHOT_SEC"), out int s) ? s : 0;
+    internal static readonly string HarnessPosePath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "mapatur-pose.txt");
+    private bool harnessChromeApplied;
+    private bool harnessPoseApplied;
+    private double harnessLastShotMs;
+    private double harnessLastPoseMs;
+    private volatile bool harnessShotRequested;
+
+    private bool TryApplyEnvPose()
+    {
+        if (harnessPoseApplied || string.IsNullOrEmpty(HarnessStartPose))
+        {
+            return false;
+        }
+
+        string[] parts = HarnessStartPose.Split(';');
+        var ci = System.Globalization.CultureInfo.InvariantCulture;
+        if (parts.Length == 6
+            && float.TryParse(parts[0], System.Globalization.NumberStyles.Float, ci, out float tx)
+            && float.TryParse(parts[1], System.Globalization.NumberStyles.Float, ci, out float ty)
+            && float.TryParse(parts[2], System.Globalization.NumberStyles.Float, ci, out float tz)
+            && float.TryParse(parts[3], System.Globalization.NumberStyles.Float, ci, out float dist)
+            && float.TryParse(parts[4], System.Globalization.NumberStyles.Float, ci, out float az)
+            && float.TryParse(parts[5], System.Globalization.NumberStyles.Float, ci, out float pitch))
+        {
+            Camera.Target = new Vector3(tx, ty, tz);
+            Camera.Distance = dist;
+            Camera.AzimuthRadians = az;
+            Camera.PitchRadians = pitch;
+            harnessPoseApplied = true;
+            Serilog.Log.Information("[Harness] start-poza z env: {Pose}", HarnessStartPose);
+            return true;
+        }
+
+        return false;
+    }
+
+    private void ServiceTestHarness(SKPaintGLSurfaceEventArgs e, TerrainMesh3D frame)
+    {
+        if (HarnessChromeOff && !harnessChromeApplied)
+        {
+            harnessChromeApplied = true;
+            SetChromeVisible(false);
+        }
+
+        double nowMs = Environment.TickCount64; // recordClock tyka tylko przy nagrywaniu — tu potrzebny zawsze
+        if (nowMs - harnessLastPoseMs >= 2000)
+        {
+            harnessLastPoseMs = nowMs;
+            try { System.IO.File.WriteAllText(HarnessPosePath, SerializeCamera(frame)); }
+            catch (System.IO.IOException) { }
+        }
+
+        if (harnessLastShotMs == 0)
+        {
+            harnessLastShotMs = nowMs; // pierwsza fotka dopiero po pełnym interwale (nie ekran ładowania)
+        }
+
+        bool due = HarnessAutoshotSec > 0 && nowMs - harnessLastShotMs >= HarnessAutoshotSec * 1000.0;
+        if (HarnessShotDir is null || (!harnessShotRequested && !due))
+        {
+            return;
+        }
+
+        harnessShotRequested = false;
+        harnessLastShotMs = nowMs;
+        try
+        {
+            using SkiaSharp.SKImage snap = e.Surface.Snapshot();
+            using SkiaSharp.SKData png = snap.Encode(SkiaSharp.SKEncodedImageFormat.Png, 90);
+            System.IO.Directory.CreateDirectory(HarnessShotDir);
+            string name = $"shot-{DateTime.Now:yyyyMMdd-HHmmss-fff}.png";
+            using System.IO.FileStream fs = System.IO.File.Create(System.IO.Path.Combine(HarnessShotDir, name));
+            png.SaveTo(fs);
+            Serilog.Log.Information("[Harness] zrzut {Name} | poza {Pose}", name, SerializeCamera(frame));
+        }
+        catch (Exception ex) when (ex is System.IO.IOException or UnauthorizedAccessException)
+        {
+            Serilog.Log.Warning(ex, "[Harness] zapis zrzutu nieudany");
+        }
     }
 
     // Per-frame recording service: lazily starts the recording once the surface size is known, then
@@ -6988,6 +7085,9 @@ public partial class Terrain3DView : ContentView
                 case Windows.System.VirtualKey.Number9:
                     r.OrthoDetailColorMode = r.OrthoDetailColorMode == 0 ? 1 : 0;
                     Serilog.Log.Information("[OrthoDetailSlice] colour = {Mode}", r.OrthoDetailColorMode == 1 ? "TONE-FROM-BASE (detail = fine frequencies only)" : "RAW");
+                    e.Handled = true; return;
+                case Windows.System.VirtualKey.F10:
+                    harnessShotRequested = true; // TEST HARNESS: zrzut biezacej klatki z poziomu apki
                     e.Handled = true; return;
                 // '7' — A/B tier det1m (krok 3): przełącza WYŁĄCZNIE uniform użycia — dane zostają rezydentne
                 // na GPU, więc porównanie panoramy nie jest skażone streamingiem (warunek testu).

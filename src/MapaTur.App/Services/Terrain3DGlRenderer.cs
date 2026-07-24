@@ -2342,6 +2342,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // drawów głównego passu (rozstrzyga kandydata „cull wycina kafle za sylwetką" w jeden relaunch).
     private static readonly bool frustumCullOff =
         Environment.GetEnvironmentVariable("MAPATUR_NO_FRUSTUM_CULL") == "1";
+
+    // BISEKCJA WARSTW (2026-07-24): MAPATUR_KILL=det1m,det25arr,det05arr,mosaic,baseskin — wyłącza wskazane
+    // ścieżki na starcie; kamera wznawia ten sam kadr, więc seria relanchy ze zrzutami wskazuje warstwę
+    // malującą czarne trójkąty MECHANICZNIE (pięć hipotez obalonych pomiarami — koniec teorii).
+    private static readonly HashSet<string> killLayers = new(
+        (Environment.GetEnvironmentVariable("MAPATUR_KILL") ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+        StringComparer.OrdinalIgnoreCase);
     private TerrainMesh3D? detailAnchorMesh;
 
     private bool CellVisibleLastFrame(MapaTur.Domain.Geography.MapBounds b)
@@ -3278,7 +3286,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     {
         bool en = OrthoDetailEnabled && tiles.Count > 0;
         int use25 = (en && orthoDet25Texture != 0 && det25GeoSet) ? 1 : 0;
-        int use05 = (en && orthoDet05Texture != 0 && det05GeoSet) ? 1 : 0;
+        int use05 = (en && orthoDet05Texture != 0 && det05GeoSet && !killLayers.Contains("mosaic")) ? 1 : 0;
         if (use25 == 1)
         {
             Vector3 sw = tiles[0].GeoToWorld(det25GeoSw, 0f);
@@ -3947,7 +3955,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
     private unsafe void EnsureDet25Array(GL gl)
     {
-        if (det25ArrayTexture != 0 || !det05Bc1On)
+        if (det25ArrayTexture != 0 || !det05Bc1On || killLayers.Contains("det25arr"))
         {
             return;
         }
@@ -4096,7 +4104,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // upload przez ring PBO (jeden slice na klatkę trzyma się budżetu 6 ms). Wołane ze StreamOrthoDetail.
     private unsafe void PumpDet1m(GL gl)
     {
-        if (Det1mPackDir is null)
+        if (Det1mPackDir is null || killLayers.Contains("det1m"))
         {
             return;
         }
@@ -4514,7 +4522,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // makes every call after the first a no-op.
     private unsafe void BindDet05ForTile(GL gl, TerrainMesh3D mesh, TerrainMesh3D anchorMesh)
     {
-        if (det05Grid is null || det05ArrayTexture == 0)
+        if (det05Grid is null || det05ArrayTexture == 0 || killLayers.Contains("det05arr"))
         {
             gl.Uniform1(useDet05ArrLocation, 0);
             return;
@@ -6485,6 +6493,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
             TileBuffers tile = entry.Value;
             float isBaseSkin = entry.Key.IsBaseSkin ? 1f : 0f;
+            if (isBaseSkin > 0.5f && killLayers.Contains("baseskin"))
+            {
+                continue; // bisekcja: baza-skóra wyłączona
+            }
+
             if (isBaseSkin != lastIsBaseSkin)
             {
                 gl.Uniform1(isBaseSkinLocation, isBaseSkin);

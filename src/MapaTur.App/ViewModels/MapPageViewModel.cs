@@ -127,8 +127,10 @@ public sealed partial class MapPageViewModel : ObservableObject
     private string lodBadgeText = QuietLodBadgeText;
 
     // The always-on find-me / teleport (search + location) bar can be collapsed to free screen space.
+    // Default COLLAPSED (user 2026-07-24: „panel szukania domyślnie zamknięty") — the scene starts clean;
+    // one tap on the bar header expands it.
     [ObservableProperty]
-    private bool isLocateBarExpanded = true;
+    private bool isLocateBarExpanded;
 
     [RelayCommand]
     private void ToggleLocateBar() => IsLocateBarExpanded = !IsLocateBarExpanded;
