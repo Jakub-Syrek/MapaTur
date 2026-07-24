@@ -2234,11 +2234,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private const double Det25PrefetchLeadMeters = 400.0;
     private const double Det25UploadBudgetMsPerFrame = 4.0; // its own strip-upload budget, on top of base ortho's 6 ms
 
-    // ── Hi-res ortho detail STREAMING — det05 (5 cm) SECOND LEVEL (R5, behind MAPATUR_DET05_STREAM=1) ─────────
+    // ── Hi-res ortho detail STREAMING — det05 (5 cm) SECOND LEVEL (unit 11) ──────────────────────────────────
     // Parallel to the det25 machinery above but on unit 11, coverage-gated (5 cm exists only on a partial strip),
     // and coordinated with det25 against the ONE shared budget by TwoLevelDetailResidencyPolicy (det05>det25>base,
-    // no-hole reserve). Default OFF ⇒ the accepted det25 + static 5 cm MO showcase path above is byte-for-byte
-    // unchanged. When ON, the static mosaic is not loaded and streamed det05 owns unit 11 (finest-wins over det25).
+    // no-hole reserve). Default ON (MAPATUR_DET05_STREAM=0 forces the static MO showcase fallback). When ON,
+    // the static mosaic is not loaded and streamed det05 owns unit 11 (finest-wins over det25).
     private bool det05StreamOn;
     private MapaTur.Application.Terrain.OrthoDetailGrid? det05Grid;
     private MapaTur.Application.Terrain.IOrthoDetailComposer? det05Composer;
