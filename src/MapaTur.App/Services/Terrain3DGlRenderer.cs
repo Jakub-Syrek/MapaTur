@@ -138,6 +138,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform vec2 uDet1mInvSize;\n" +
         "uniform ivec2 uDet1mGridDim;\n" +
         "uniform int uDet1mSliceIdx[160];\n" +
+        "uniform int uDet1mDebug;\n" + // 1 = klasyfikacja danych det1m (env MAPATUR_DET1M_DEBUG): czerwony=opaque black, zolty=a0, magenta=brak slice'a
         "uniform int uOrthoDetailDebugBounds;\n" + // 1 = outline detail cell AABB edges (diagnostics)
         "uniform vec2 uDet25EyeXY;\n" +      // world-XY of the streaming focus (ring centre) for the det25 range fade
         "uniform float uDet25FadeInner;\n" + // det25 at full strength within this metric radius of the focus
@@ -369,11 +370,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // seam / UV-clamp stripe). `use` is a uniform so the early-out is uniform control flow — the implicit-LOD
         // fetch below stays derivative-valid; bicubic kicks in when magnified (close camera).
         // det1m: tier między bazą a det25. Fallback konstrukcyjny: poza siatką / cov≈0 / slice==-1 → baseC
-        // (nigdy czerń). Kolor: mode-1 de-blue jak det25 (ta sama radiometria — det1m to downsample det25);
-        // harmonizacja tonalna zbędna (warstwa NAD nim, det25, i tak wygrywa tam gdzie rezydentna).
+        // (nigdy czerń). Kolor: PEŁNY dwustopniowy law jak zatwierdzone ścieżki (KONTRAKT-ORTO §1) — bez
+        // niego panorama to patchwork STYLÓW warstw (werdykt usera 2026-07-24).
         // det25 array: najbliższa ZAWIERAJĄCA cela wygrywa (nakładkowa siatka pitch-6 — wiele cel może
         // zawierać punkt; bierzemy tę o środku najbliżej, jak per-tile CellForPoint, ale per FRAGMENT).
-        // Kolor: mode-1 de-blue jak stara ścieżka det25. Alpha = fade-in promocji (anty-pop).
+        // Kolor: ten sam dwustopniowy law. Alpha = fade-in promocji (anty-pop).
         "vec3 applyOrthoDet25Arr(vec2 wxy, vec3 baseC){\n" +
         "  if (uUseDet25Arr == 0) { return baseC; }\n" +
         "  int best = -1; float bestD = 1e30;\n" +
@@ -388,7 +389,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  vec2 uv = vec2((wxy.x - bb.x) / (bb.z - bb.x), (bb.w - wxy.y) / (bb.w - bb.y));\n" +
         "  vec4 dcs = texture(uOrthoDet25Arr, vec3(uv, float(best)));\n" + // DXT1a: a=0 = brak pokrycia
         "  vec3 dc = dcs.rgb;\n" +
-        "  if (uOrthoDetailColorMode == 1) { dc = deblueShadow(dc); }\n" +
+        "  if (uOrthoDetailColorMode == 1) {\n" + // dwustopniowy law (wzorzec applyOrthoDet05Array, KONTRAKT-ORTO §1)
+        "    dc = deblueShadow(dc);\n" +                                   // (1) HARD RULE: absolute blue-cast removal
+        "    vec2 ts = vec2(textureSize(uOrthoDet25Arr, 0).xy);\n" +
+        "    float toneLod = max(0.0, log2(max(ts.x / (bb.z - bb.x), ts.y / (bb.w - bb.y))));\n" +
+        "    vec3 dRaw = textureLod(uOrthoDet25Arr, vec3(uv, float(best)), toneLod).rgb;\n" +
+        "    vec3 delta = deblueShadow(dRaw) - deblueShadow(baseC);\n" +   // (2) both de-blued → delta = pure exposure seam
+        "    float mism = smoothstep(0.10, 0.28, max(abs(delta.r), max(abs(delta.g), abs(delta.b))));\n" +
+        "    dc = clamp(dc - (delta * mism), 0.0, 1.0);\n" +               //     harmonise only the survey exposure seam
+        "  }\n" +
         "  vec2 cd = min(wxy - bb.xy, bb.zw - wxy);\n" +
         "  float wgt = clamp(min(cd.x, cd.y) / max(uDetailBlendMeters, 0.001), 0.0, 1.0) * dcs.a * uDet25AlphaArr[best];\n" +
         "  return mix(baseC, dc, wgt);\n" +
@@ -402,11 +411,25 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  ivec2 g = ivec2(clamp(int(uv.x * float(uDet1mGridDim.x)), 0, uDet1mGridDim.x - 1),\n" +
         "                  clamp(int(uv.y * float(uDet1mGridDim.y)), 0, uDet1mGridDim.y - 1));\n" +
         "  int slice = uDet1mSliceIdx[(g.y * uDet1mGridDim.x) + g.x];\n" +
-        "  if (slice < 0) { return baseC; }\n" +
+        "  if (slice < 0) { if (uDet1mDebug == 1) { return vec3(1.0, 0.0, 1.0); } return baseC; }\n" + // debug: magenta = brak slice'a mimo cov
         "  vec2 cellUv = fract(uv * vec2(uDet1mGridDim));\n" +
         "  vec4 dcs = texture(uOrthoDet1m, vec3(cellUv, float(slice)));\n" + // DXT1a: a=0 = brak pokrycia
+        "  if (uDet1mDebug == 1) {\n" + // klasyfikacja danych: skad czern? (opaque-black przechodzi bramke alfa)
+        "    if (dcs.a < 0.05) { return vec3(1.0, 1.0, 0.0); }\n" +          // zolty: punch-through (a=0)
+        "    if (dot(dcs.rgb, dcs.rgb) < 0.0004) { return vec3(1.0, 0.0, 0.0); }\n" + // czerwony: OPAQUE BLACK w danych
+        "    return vec3(0.0, 0.6, 0.0);\n" +                                // zielony: zdrowe krycie
+        "  }\n" +
         "  vec3 dc = dcs.rgb;\n" +
-        "  if (uOrthoDetailColorMode == 1) { dc = deblueShadow(dc); }\n" +
+        "  if (uOrthoDetailColorMode == 1) {\n" + // dwustopniowy law (wzorzec applyOrthoDet05Array, KONTRAKT-ORTO §1)
+        "    dc = deblueShadow(dc);\n" +                                   // (1) HARD RULE: absolute blue-cast removal
+        "    vec2 ts = vec2(textureSize(uOrthoDet1m, 0).xy);\n" +
+        "    vec2 cellM = vec2(1.0 / uDet1mInvSize.x, 1.0 / uDet1mInvSize.y) / vec2(uDet1mGridDim);\n" + // komorka w metrach
+        "    float toneLod = max(0.0, log2(max(ts.x / cellM.x, ts.y / cellM.y)));\n" + // mip o skali ~1 texel/metr, jak det05/det25
+        "    vec3 dRaw = textureLod(uOrthoDet1m, vec3(cellUv, float(slice)), toneLod).rgb;\n" +
+        "    vec3 delta = deblueShadow(dRaw) - deblueShadow(baseC);\n" +   // (2) both de-blued → delta = pure exposure seam
+        "    float mism = smoothstep(0.10, 0.28, max(abs(delta.r), max(abs(delta.g), abs(delta.b))));\n" +
+        "    dc = clamp(dc - (delta * mism), 0.0, 1.0);\n" +               //     harmonise only the survey exposure seam
+        "  }\n" +
         "  return mix(baseC, dc, cov * dcs.a);\n" +
         "}\n" +
         "vec3 applyOrthoDetail(sampler2D tex, int use, vec2 mn, vec2 mx, float blendM, vec2 wxy, vec3 baseC, float rangeFade){\n" +
@@ -2350,6 +2373,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         (Environment.GetEnvironmentVariable("MAPATUR_KILL") ?? string.Empty)
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
         StringComparer.OrdinalIgnoreCase);
+
+    // MAPATUR_DET1M_DEBUG=1 — klasyfikacja danych det1m w shaderze (czerwony=opaque black przechodzący
+    // bramkę alfa, żółty=punch-through a=0, magenta=cov>0 bez slice'a, zielony=zdrowe krycie).
+    private static readonly bool det1mDebug =
+        Environment.GetEnvironmentVariable("MAPATUR_DET1M_DEBUG") == "1";
     private TerrainMesh3D? detailAnchorMesh;
 
     private bool CellVisibleLastFrame(MapaTur.Domain.Geography.MapBounds b)
@@ -3278,7 +3306,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             orthoDet25Texture, pendingDet25W, pendingDet25H, orthoDet05Texture, pendingDet05W, pendingDet05H, aniso);
     }
 
-    // Binds the detail mosaics (units 10/11) and sets their world-space AABB + gate uniforms ONCE per frame,
+    // Binds the detail mosaics (units 9/11) and sets their world-space AABB + gate uniforms ONCE per frame,
     // before both the reflection and terrain passes (which share this program). Geo AABB → world via the same
     // per-tile anchor the base ortho coverage uses (LocalTangentProjection). A disabled/absent layer → uUse*=0
     // = strict no-op. Restores the active unit to 0 so the per-tile ortho binding below is unaffected.
@@ -3291,9 +3319,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             Vector3 sw = tiles[0].GeoToWorld(det25GeoSw, 0f);
             Vector3 ne = tiles[0].GeoToWorld(det25GeoNe, 0f);
-            gl.ActiveTexture(TextureUnit.Texture10);
+            gl.ActiveTexture(TextureUnit.Texture9); // 10 belongs to uOrthoDet25Arr (array type) — never share
             gl.BindTexture(TextureTarget.Texture2D, orthoDet25Texture);
-            gl.Uniform1(det25SamplerLocation, 10);
+            gl.Uniform1(det25SamplerLocation, 9);
             gl.Uniform2(det25MinXyLocation, Math.Min(sw.X, ne.X), Math.Min(sw.Y, ne.Y));
             gl.Uniform2(det25MaxXyLocation, Math.Max(sw.X, ne.X), Math.Max(sw.Y, ne.Y));
         }
@@ -3313,6 +3341,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform1(detailColorModeLocation, OrthoDetailColorMode);
         gl.Uniform1(det05ArrRawLocation, Det05ArrayRawColor ? 1 : 0);
         gl.Uniform1(useDet1mLoc, det1mReady && Det1mEnabled ? 1 : 0); // A/B = wyłącznie ten uniform; dane rezydentne
+        gl.Uniform1(det1mDebugLoc, det1mDebug ? 1 : 0);
         gl.Uniform1(detailDebugBoundsLocation, OrthoDetailDebugBounds ? 1 : 0);
         gl.ActiveTexture(TextureUnit.Texture0);
     }
@@ -4013,7 +4042,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int det1mUploadCursor;
     private readonly int[] det1mSliceIdx = new int[160];
     private int det1mSamplerLoc = -1, det1mCovLoc = -1, useDet1mLoc = -1,
-        det1mMinXyLoc = -1, det1mInvSizeLoc = -1, det1mGridDimLoc = -1, det1mSliceIdxLoc = -1;
+        det1mMinXyLoc = -1, det1mInvSizeLoc = -1, det1mGridDimLoc = -1, det1mSliceIdxLoc = -1,
+        det1mDebugLoc = -1;
 
     private const double Det25TileDlon = 512 * 0.25 / (111320.0 * 0.65935); // cos(49.25°) = 0.65935 — anchor 19.5/49.4 jak dane
     private const double Det25TileDlat = 512 * 0.25 / 111320.0;
@@ -5184,7 +5214,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.BindTexture(TextureTarget.Texture2D, 0);
     }
 
-    // Per terrain draw: bind the nearest resident det25 cell (containing the tile's geographic centre) to unit 10
+    // Per terrain draw: bind the nearest resident det25 cell (containing the tile's geographic centre) to unit 9
     // and set its world-space AABB, or gate det25 OFF for this tile. CellForPoint's CellContains invariant means
     // the picked cell fully covers a z17-sized tile, so the tile never straddles a boundary; overlap texels are
     // bit-identical between neighbours (assembler 1:1 placement) so tiles picking different cells still align.
@@ -5227,10 +5257,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         BindDet25ArrOncePerFrame(gl, anchorMesh); // krok 4: sloty arraya det25
         if (det25ArrayTexture != 0)
         {
-            // Array aktywny: stary per-tile bind wyłączony; jego sampler2D wskazuje unit 15 (ten sam TYP co
-            // maska det1m — nigdy nie samplowany przy useDet25==0, a walidator GL nie widzi konfliktu typów
-            // na unit 10, który zajmuje teraz sampler2DArray).
-            gl.Uniform1(det25SamplerLocation, 15);
+            // Array aktywny: stary per-tile bind wyłączony. uOrthoDet25 siedzi NA STAŁE na unit 9 (pin przy
+            // linku) — unit 10 należy wyłącznie do sampler2DArray, więc żaden stan warstw nie tworzy
+            // konfliktu typów na unicie.
             gl.Uniform1(useDet25Location, 0);
             return;
         }
@@ -5252,7 +5281,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             if (cell.Texture != det25BoundTexture)
             {
-                gl.ActiveTexture(TextureUnit.Texture10);
+                gl.ActiveTexture(TextureUnit.Texture9); // 10 belongs to uOrthoDet25Arr (array type) — never share
                 gl.BindTexture(TextureTarget.Texture2D, cell.Texture);
                 gl.ActiveTexture(TextureUnit.Texture0);
                 det25BoundTexture = cell.Texture;
@@ -5260,7 +5289,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
             Vector3 sw = anchorMesh.GeoToWorld(cell.Bounds.SouthWest, 0f);
             Vector3 ne = anchorMesh.GeoToWorld(cell.Bounds.NorthEast, 0f);
-            gl.Uniform1(det25SamplerLocation, 10);
+            gl.Uniform1(det25SamplerLocation, 9);
             gl.Uniform2(det25MinXyLocation, Math.Min(sw.X, ne.X), Math.Min(sw.Y, ne.Y));
             gl.Uniform2(det25MaxXyLocation, Math.Max(sw.X, ne.X), Math.Max(sw.Y, ne.Y));
             gl.Uniform1(useDet25Location, 1);
@@ -5416,6 +5445,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             det25ArrayTexture = 0; det25ArrFreeLayers.Clear(); // kontekst padł — cele wrócą przez desired/kick
             det1mSamplerLoc = -1; det1mCovLoc = -1; useDet1mLoc = -1;
             det1mMinXyLoc = -1; det1mInvSizeLoc = -1; det1mGridDimLoc = -1; det1mSliceIdxLoc = -1;
+            det1mDebugLoc = -1;
             det1mArrayTexture = 0; det1mCovTexture = 0; det1mReady = false; det1mUploadCursor = 0; // kontekst padł — realokacja w PumpDet1m
             detailDebugBoundsLocation = -1;
             det25EyeXyLocation = -1;
@@ -9012,6 +9042,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         det1mInvSizeLoc = g.GetUniformLocation(program, "uDet1mInvSize");
         det1mGridDimLoc = g.GetUniformLocation(program, "uDet1mGridDim");
         det1mSliceIdxLoc = g.GetUniformLocation(program, "uDet1mSliceIdx[0]");
+        det1mDebugLoc = g.GetUniformLocation(program, "uDet1mDebug");
         detailDebugBoundsLocation = g.GetUniformLocation(program, "uOrthoDetailDebugBounds");
         det25EyeXyLocation = g.GetUniformLocation(program, "uDet25EyeXY");
         det25FadeInnerLocation = g.GetUniformLocation(program, "uDet25FadeInner");
@@ -9077,6 +9108,34 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         shadowTexelLoc = g.GetUniformLocation(program, "uShadowTexel");
         aoStrengthLoc = g.GetUniformLocation(program, "uAoStrength");
         bakedShadowCompLoc = g.GetUniformLocation(program, "uBakedShadowComp");
+
+        // ALWAYS pin every sampler of the terrain program to its home unit AT LINK TIME, before the first
+        // draw. A sampler uniform left at its default (unit 0) collides with uOrtho (sampler2D) whenever
+        // its TYPE differs (sampler2DArray/sampler2DShadow): two sampler types on one texture image unit
+        // make the program invalid to USE, and ANGLE/Adreno reject EVERY draw (GL_INVALID_OPERATION) — the
+        // whole terrain vanishes the moment a layer is off/not-yet-ready and its per-frame bind path is
+        // skipped (same lesson as the CSM pin in Render). Per-frame paths may re-assert these values but
+        // must never move a sampler onto a unit owned by a different sampler type.
+        // Unit map (terrain program): 0=uOrtho 1=uReflectionTex 2/3/4=uShadowMap0..2 5=uTrailMask
+        // 6=uWaterMask 8=uBaseCover 9=uOrthoDet25 (legacy mosaic) 10=uOrthoDet25Arr 11=uOrthoDet05
+        // 12=uOrthoDet05Arr 13=uOrthoDet05ArrB 14=uOrthoDet1m 15=uOrthoDet1mCov.
+        g.UseProgram(program);
+        g.Uniform1(orthoSamplerLocation, 0);
+        g.Uniform1(reflectionTexLocation, 1);
+        g.Uniform1(shadowMap0Loc, 2);
+        g.Uniform1(shadowMap1Loc, 3);
+        g.Uniform1(shadowMap2Loc, 4);
+        g.Uniform1(trailMaskSamplerLocation, 5);
+        g.Uniform1(waterMaskSamplerLocation, 6);
+        g.Uniform1(baseCoverSamplerLocation, 8);
+        g.Uniform1(det25SamplerLocation, 9);
+        g.Uniform1(det25ArrSamplerLoc, 10);
+        g.Uniform1(det05SamplerLocation, 11);
+        g.Uniform1(det05ArrSamplerLocation, 12);
+        g.Uniform1(det05ArrBSamplerLocation, 13);
+        g.Uniform1(det1mSamplerLoc, 14);
+        g.Uniform1(det1mCovLoc, 15);
+        g.UseProgram(0);
 
         // Sky program — single triangle covering the screen, fragment-shader-only atmospheric model.
         uint sks = CompileShader(g, ShaderType.VertexShader, SkyVertexShaderSource);
