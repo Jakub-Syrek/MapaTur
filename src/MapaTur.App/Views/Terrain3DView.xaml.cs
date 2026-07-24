@@ -8642,7 +8642,13 @@ public partial class Terrain3DView : ContentView
             {
                 string p = System.IO.Path.Combine(
                     dir, i.ToString(System.Globalization.CultureInfo.InvariantCulture), $"{j}.webp");
-                return DecodeOrtho(p) is { Width: 512, Height: 512 } t ? t.Rgba : null;
+                if (DecodeOrtho(p) is not { Width: 512, Height: 512 } t)
+                {
+                    return null;
+                }
+
+                MapaTur.Application.Terrain.OrthoNodata.ZeroAlphaOnBlack(t.Rgba); // nodata GUGiK → punch-through
+                return t.Rgba;
             },
             // 2 GB desktop / 384 MB phone (2026-07-20): det25 cell = 64 decoded 512² tiles ≈ 64 MB; 2 GB holds
             // ~30 cells so the coarse ring never re-decodes on a pan (same stutter cause as det05, smaller scale).
@@ -8750,13 +8756,20 @@ public partial class Terrain3DView : ContentView
                                 "[OrthoDetail05] deshadow-preview served: {Hits} from det05-deshadow, {Fallback} fallback det05",
                                 served, dsFallback);
                         }
+                        MapaTur.Application.Terrain.OrthoNodata.ZeroAlphaOnBlack(td.Rgba); // nodata GUGiK → punch-through
                         return td.Rgba;
                     }
                 }
                 string p = System.IO.Path.Combine(
                     dir, i.ToString(System.Globalization.CultureInfo.InvariantCulture), $"{j}.webp");
                 if (dsDir is not null) { System.Threading.Interlocked.Increment(ref dsFallback); }
-                return DecodeOrtho(p) is { Width: 512, Height: 512 } t ? t.Rgba : null;
+                if (DecodeOrtho(p) is not { Width: 512, Height: 512 } t)
+                {
+                    return null;
+                }
+
+                MapaTur.Application.Terrain.OrthoNodata.ZeroAlphaOnBlack(t.Rgba); // nodata GUGiK → punch-through
+                return t.Rgba;
             },
             // 16 GB desktop (2026-07-20, "mając 64 GB RAM"): a det05 cell = 256 decoded 512² tiles ≈ 268 MB;
             // 16 GB holds ~60 cells = the WHOLE Morskie-Oko cirque decoded. Root cause of the pan stutter was

@@ -129,6 +129,7 @@ byte[]? DecodeWebp(string path)
         : bmp.Copy(SKColorType.Rgba8888)!;
     byte[] dst = new byte[TilePx * TilePx * 4];
     System.Runtime.InteropServices.Marshal.Copy(rgba.GetPixels(), dst, 0, dst.Length);
+    OrthoNodata.ZeroAlphaOnBlack(dst); // nodata GUGiK (kryjąca czerń na granicy PL) → punch-through
     return dst;
 }
 

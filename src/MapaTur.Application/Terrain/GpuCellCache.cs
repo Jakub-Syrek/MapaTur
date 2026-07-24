@@ -14,7 +14,7 @@ namespace MapaTur.Application.Terrain;
 public static class GpuCellCache
 {
     private const uint Magic = 0x4347544D; // "MTGC" little-endian
-    private const ushort Version = 3; // v3 = mipy alfa-wazone (v2 mialo czarna obwodke przy szwie orto) // v2 = DXT1a z alfą (v1-RGB malowało czerń na brzegach pokrycia)
+    private const ushort Version = 4; // v4 = nodata (0,0,0)→alfa 0 (v3 malowalo czarne trojkaty przy granicy PL/SK) // v3 = mipy alfa-wazone (v2 mialo czarna obwodke przy szwie orto) // v2 = DXT1a z alfą (v1-RGB malowało czerń na brzegach pokrycia)
     private const ushort FormatBc1 = 1;
     private const int HeaderBytes = 16;
 

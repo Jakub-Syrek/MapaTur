@@ -675,6 +675,27 @@ tail = kompozyt grupy 8×8 → 2048↓) + 54 pakiety det1m (downsample 4× grup)
 
 Zakres: to pełny prebake WARSTW det25 + det1m; det05 pozostaje późniejszym etapem (krok 6 migracji).
 
+### §9.1 Nodata GUGiK → alfa 0 (format v4, 2026-07-24 — czarne trójkąty przy granicy PL/SK)
+
+**Przyczyna (zmierzona, nie teoria):** GUGiK WMS przycina orto na granicy PL; wypełnienie poza granicą to
+KRYJĄCA czerń — WebP **bez kanału alfa**, RGB dokładnie (0,0,0). Audyt kafli granicznych det25 w rejonie
+Temnosmrečinskej doliny (i∈[283,300], j∈[156,182]): **38 kafli z czernią, do 96,7% kafla**
+(`testdata/maps/audit-black-nodata.py`). Dekod nadawał im a=255 → alfa-ważone mipy (v3) uczciwie uśredniały
+czerń jak kolor → BC1 kodował opaque black → shaderowa bramka `dcs.a` bezradna → czarne trójkąty
+skwantowane do kafli (hipotenusa = skos granicy). Dowód per-piksel: tryb `MAPATUR_DET1M_DEBUG=1`
+(czerwony = opaque black w danych).
+
+**Fix (jedna implementacja, WSZYSTKIE ścieżki dekodu detalu):** `OrthoNodata.ZeroAlphaOnBlack` —
+piksel o dokładnym RGB=(0,0,0) dostaje alfa=0 (kanały koloru nietknięte; korekta POKRYCIA, nie koloru).
+Wpięte w: bake CLI (`DecodeWebp`), runtime compose det25 i det05 (lambdy `OrthoTileDecodeCache`).
+Bazy NIE dotyczy (pokrycie bazy = AABB, nie alfa; baza jest już klipowana maską GUGiK data-side).
+Realny cień po stratnym WebP nigdy nie jest dokładnym zerem (ma wartości ~2–15).
+
+**Inwalidacja:** `OrthoPagePack.Version` i `GpuCellCache.Version` 3→4 — stare `.opk` są odrzucane przy
+otwarciu (det1m degraduje się do bazy, zero czerni), stare `.mtgc` są kasowane i rekomponowane w locie.
+Rebake det25+det1m jak w §9 (bump wersji sam wymusza pełny bieg — skip po srcHash nie widzi pakietów v3).
+det05 `.opk` (67 GB, krok 6): przebake'ować PRZED wpięciem PumpPageReads.
+
 **Korekta det1m (2026-07-23, po poprawce pokrycia):** strony tylko nad realnym źródłem — 54 pakiety,
 **2 790/2 790 stron CRC OK** (720 czarnych stron spoza pokrycia odrzuconych względem pierwszego bake'u),
 0,56 GB; przyrostowy bieg z `--det1m-out` buduje fragmenty także dla pominiętych grup (dekod bez re-enkodu).
