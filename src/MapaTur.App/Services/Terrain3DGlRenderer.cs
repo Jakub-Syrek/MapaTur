@@ -2374,6 +2374,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         return false;
     }
 
+    /// <summary>True, gdy streaming detalu orto nie ma nic w locie (kolejki uploadu i compose puste) —
+    /// bramka „scena dobudowana" dla startu demo F9/benchu (start w trakcie dociągania ścierwi film
+    /// i zakłamuje pomiar zarywania).</summary>
+    public bool DetailStreamingIdle =>
+        det25ComposeInFlight == 0 && det05ComposeInFlight == 0
+        && det25UploadQueue.Count == 0 && det05UploadQueue.Count == 0;
+
     private string? Det25CachePath(int ci, int cj)
         => string.IsNullOrEmpty(Det25GpuCacheDir) ? null : System.IO.Path.Combine(Det25GpuCacheDir, $"{ci}_{cj}.mtgc");
 

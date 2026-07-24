@@ -981,6 +981,66 @@ public partial class Terrain3DView : ContentView
     private int benchRunsRemaining;
     private readonly int benchTotalRuns;
     private int benchTicks;
+    private int benchIdleTicks; // kolejne ticki z pustymi kolejkami streamingu (bramka „scena dobudowana")
+
+    // Ręczny F9 z bramką gotowości sceny: start odroczony aż kolejki streamingu opustoszeją (≥2 ticki po
+    // 1 s), z awaryjnym capem 60 s. Drugi F9 w oczekiwaniu = natychmiastowy start (świadome nadpisanie).
+    private IDispatcherTimer? flightPendingTimer;
+    private int flightPendingTicks;
+    private int flightPendingIdleTicks;
+
+    private void RequestFlightStartWhenSceneReady()
+    {
+        if (flightActive)
+        {
+            StartOrlaPercFlight(); // istniejące zachowanie F9 w locie (restart) — bez zmian
+            return;
+        }
+
+        if (flightPendingTimer is not null)
+        {
+            StopFlightPendingTimer();
+            Serilog.Log.Information("[Flight] drugi F9 w oczekiwaniu — start natychmiast");
+            StartOrlaPercFlight();
+            return;
+        }
+
+        if (glRenderer?.DetailStreamingIdle ?? true)
+        {
+            StartOrlaPercFlight();
+            return;
+        }
+
+        flightPendingTicks = 0;
+        flightPendingIdleTicks = 0;
+        flightPendingTimer = Dispatcher.CreateTimer();
+        flightPendingTimer.Interval = TimeSpan.FromSeconds(1);
+        flightPendingTimer.Tick += OnFlightPendingTick;
+        flightPendingTimer.Start();
+        Serilog.Log.Information("[Flight] F9 odroczony — czekam aż teren się dobuduje (streaming w locie)");
+    }
+
+    private void OnFlightPendingTick(object? sender, EventArgs e)
+    {
+        flightPendingTicks++;
+        flightPendingIdleTicks = (glRenderer?.DetailStreamingIdle ?? true) ? flightPendingIdleTicks + 1 : 0;
+        if (flightPendingIdleTicks >= 2 || flightPendingTicks >= 60)
+        {
+            Serilog.Log.Information("[Flight] scena gotowa po {T}s (idle={I}) — start", flightPendingTicks, flightPendingIdleTicks >= 2);
+            StopFlightPendingTimer();
+            StartOrlaPercFlight();
+        }
+    }
+
+    private void StopFlightPendingTimer()
+    {
+        if (flightPendingTimer is { } t)
+        {
+            t.Stop();
+            t.Tick -= OnFlightPendingTick;
+            flightPendingTimer = null;
+        }
+    }
 
     private void OnBenchTick(object? sender, EventArgs e)
     {
@@ -990,9 +1050,20 @@ public partial class Terrain3DView : ContentView
             return;
         }
 
-        // Scene-ready gate: world frame + raster present, and ≥20 s settle so base streaming matches a human run.
-        if (WorldFrame is null || Raster is null || benchTicks < 10)
+        // Scene-ready gate (2026-07-24, user: „nie startuj dema zanim się nie skończy buildować teren, bo
+        // ścierwi okrutnie"): world frame + raster + STREAMING DETALU BEZ PRACY W LOCIE (kolejki puste)
+        // przez ≥2 kolejne ticki, min 20 s settle; awaryjny cap 120 s, żeby bench nigdy nie wisiał.
+        bool streamingIdle = glRenderer?.DetailStreamingIdle ?? true;
+        benchIdleTicks = streamingIdle ? benchIdleTicks + 1 : 0;
+        if (WorldFrame is null || Raster is null || benchTicks < 10
+            || (benchIdleTicks < 2 && benchTicks < 60))
         {
+            if (benchTicks % 5 == 0)
+            {
+                Serilog.Log.Information("[Bench] waiting: frame={F} raster={R} streamingIdle={I} t={T}s",
+                    WorldFrame is not null, Raster is not null, streamingIdle, benchTicks * 2);
+            }
+
             return;
         }
 
@@ -1397,15 +1468,26 @@ public partial class Terrain3DView : ContentView
     private const double FlightCancelDragPx = 30.0;    // cumulative drag (px) before a touch cancels the fly-through
 
     // Time-of-day arc (flight progress → hour): a VERY long red morning, the largest stretch in full day, a
-    // sizable golden evening, then only a BRIEF night at the very end — just enough to whip the camera up to
+    // LONG golden evening, then only a BRIEF night at the very end — just enough to whip the camera up to
     // the Big Dipper + Moon for the finale.
+    // 2026-07-24 (user: „mignięcie golden hour, żeby było dłuższe — pomarańcz"): ZMIERZONE serią
+    // autoshotów (R−B nieba per klatka): silnik daje neutralny dzień aż do ~19:55, a barwowy pomarańcz
+    // dopiero ~20:10–21:00 tuż przed nocą — stary przebieg (19:00→21:48 w 10 % lotu) przelatywał przez to
+    // okno w kilka sekund. Teraz 19:40→21:00 trwa ~23 % lotu (0.70→0.93); dzień dalej największy.
+    // POLICZONE z Atmosphere (nie symulowane): silnik ma STAŁY łuk słońca SunriseHour=6/SunsetHour=18,
+    // elev = 1.118·sin(π(h−6)/12), a pomarańcz = warmth = 1−|elev|/0.55 ⇒ warmth>0.5 dla h∈(17:03, 18:00).
+    // Wcześniejsze plateau 20:00–20:40 leżało PO zachodzie silnika (elev −13°…−17° ⇒ SunColor=0 ⇒ ciemno).
+    // Plateau 17:10→17:50 (elev 14°→3°, warmth 0.56→0.91) położone na p 0.53–0.82 — odcinku trasy, który
+    // wg pomiaru autoshotów faktycznie patrzy pod niskie zachodnie słońce.
     private static readonly (float P, float Hour)[] FlightTimeKeys =
     {
         (0.00f, 5.0f),   // dawn — start in the pre-sunrise red
-        (0.28f, 8.5f),   // … a VERY long morning lingered in sunrise / red light (~28 % of the flight)
-        (0.68f, 16.0f),  // … the largest stretch in full day (~40 %)
-        (0.90f, 19.0f),  // … a sizable golden evening (~22 %)
-        (1.00f, 21.8f),  // … a brief night (~10 %) for the sky reveal — stars, Big Dipper, Moon
+        (0.26f, 8.5f),   // … a VERY long morning lingered in sunrise / red light (~26 % of the flight)
+        (0.46f, 14.0f),  // … full day (~20 %; golden hour outranks it since 07-24 — user's call)
+        (0.53f, 17.17f), // … approach into the warm band
+        (0.82f, 17.83f), // … golden-hour PLATEAU 17:10→17:50 for ~29 % of the flight, sun 3–14° ABOVE horizon
+        (0.92f, 18.5f),  // … sunset into dusk
+        (1.00f, 20.5f),  // … night for the sky reveal — stars, Big Dipper, Moon (elev −25°)
     };
 
     // Piecewise-linear interpolation of FlightTimeKeys at flight progress p∈[0,1].
@@ -5822,7 +5904,14 @@ public partial class Terrain3DView : ContentView
             string name = $"shot-{DateTime.Now:yyyyMMdd-HHmmss-fff}.png";
             using System.IO.FileStream fs = System.IO.File.Create(System.IO.Path.Combine(HarnessShotDir, name));
             png.SaveTo(fs);
-            Serilog.Log.Information("[Harness] zrzut {Name} | poza {Pose}", name, SerializeCamera(frame));
+            double shotMoving = flightBuildGated
+                ? (flightGateOpen ? flightMovingClock.Elapsed.TotalSeconds : 0.0)
+                : flightClock.Elapsed.TotalSeconds - FlightStartPauseSeconds; // ta sama formuła co OnFlightTick
+            float shotP = flightActive && flightTotalMovingSeconds > 0
+                ? Math.Clamp((float)(shotMoving / flightTotalMovingSeconds), 0f, 1f)
+                : -1f;
+            Serilog.Log.Information("[Harness] zrzut {Name} | p={P:F3} hour={Hour:F2} | poza {Pose}",
+                name, shotP, shotP >= 0 ? FlightTimeOfDay(shotP) : -1f, SerializeCamera(frame));
         }
         catch (Exception ex) when (ex is System.IO.IOException or UnauthorizedAccessException)
         {
@@ -7226,8 +7315,11 @@ public partial class Terrain3DView : ContentView
 
             // F9 starts the cinematic grand-tour fly-through (Orla Perć ridge → Western Tatras → Gerlach
             // finale, time-swept midday→night) — same entry point as the Widok panel's 🎬 button, for demos.
+            // Gate 2026-07-24: nie startuj, póki streaming detalu ma pracę w locie — film startujący w
+            // trakcie dociągania „ścierwi okrutnie" (rozmyte cele, zarywanie z uploadów). Odraczamy start
+            // do gotowości (OnFlightPendingTick), zamiast odpalać w breję.
             case Windows.System.VirtualKey.F9:
-                StartOrlaPercFlight();
+                RequestFlightStartWhenSceneReady();
                 break;
 
             // View pitch — tilt the gaze in place (same ApplyLookAround as the ⊺/ꓕ pad buttons, so the
