@@ -1014,22 +1014,92 @@ public partial class Terrain3DView : ContentView
         flightPendingTicks = 0;
         flightPendingIdleTicks = 0;
         flightPendingTimer = Dispatcher.CreateTimer();
-        flightPendingTimer.Interval = TimeSpan.FromSeconds(1);
+        // 1 s → 250 ms (2026-07-25, user: „tryb demo włącza się nie od razu"). Bramka wymaga 2 kolejnych
+        // tyknięć bezczynności streamingu, więc przy tyknięciu sekundowym minimalna zwłoka wynosiła 2 s,
+        // a w praktyce 6 s (kwantyzacja do pełnych sekund + dłuższa budowa po podniesieniu zasięgu).
+        // Przy 250 ms próg to 0,5 s bezczynności — ta sama ochrona przed startem na wpół zbudowanej scenie,
+        // bez odczucia „nie reaguje". Limit awaryjny nadal 60 s (240 tyknięć).
+        flightPendingTimer.Interval = TimeSpan.FromMilliseconds(250);
         flightPendingTimer.Tick += OnFlightPendingTick;
         flightPendingTimer.Start();
+        // Naprawa wyszarzonego Game Bara RÓWNOLEGLE z cachowaniem sceny (decyzja usera 2026-07-25: naprawiać
+        // PRZED kręceniem, nigdy w trakcie). Kończy się na długo przed otwarciem bramki, więc nic nie kosztuje.
+#if WINDOWS
+        if (Environment.GetEnvironmentVariable("MAPATUR_F9_RECORD") != "0")
+        {
+            Platforms.Windows.GameBarCapture.EnsureRecordingReadyAsync();
+        }
+#endif
         Serilog.Log.Information("[Flight] F9 odroczony — czekam aż teren się dobuduje (streaming w locie)");
     }
 
     private void OnFlightPendingTick(object? sender, EventArgs e)
     {
         flightPendingTicks++;
-        flightPendingIdleTicks = (glRenderer?.DetailStreamingIdle ?? true) ? flightPendingIdleTicks + 1 : 0;
-        if (flightPendingIdleTicks >= 2 || flightPendingTicks >= 60)
+
+        // GOTOWOŚĆ = REZYDENCJA, nie „brak zadań w locie". DetailStreamingIdle bywa prawdziwe w środku
+        // napełniania (między partiami), więc lot startował na wpół zacachowanej scenie i przez pierwsze
+        // sekundy lagował. Teraz czekamy, aż obie warstwy mają komplet ŻĄDANYCH cel — plus krótka cisza.
+        (int r05, int d05, int r25, int d25) = glRenderer?.DetailStreamingProgress ?? (0, 0, 0, 0);
+        bool cached = d05 > 0 && r05 >= d05 && (d25 == 0 || r25 >= d25);
+        flightPendingIdleTicks = cached && (glRenderer?.DetailStreamingIdle ?? true) ? flightPendingIdleTicks + 1 : 0;
+
+        int done = r05 + r25, want = Math.Max(1, d05 + d25);
+        if (FlightPrepPanel is not null)
         {
-            Serilog.Log.Information("[Flight] scena gotowa po {T}s (idle={I}) — start", flightPendingTicks, flightPendingIdleTicks >= 2);
+            FlightPrepPanel.IsVisible = true;
+            FlightPrepLabel.Text = $"Przygotowuję scenę do lotu…  {Math.Min(100, done * 100 / want)}%"
+                + $"\n5 cm: {r05}/{d05}   ·   25 cm: {r25}/{d25}";
+        }
+
+        if (flightPendingIdleTicks >= 2 || flightPendingTicks >= 240)
+        {
+            Serilog.Log.Information(
+                "[Flight] scena gotowa po {T}ms (cache {R05}/{D05} det05, {R25}/{D25} det25, limit={L}) — start",
+                flightPendingTicks * 250, r05, d05, r25, d25, flightPendingTicks >= 240);
+            if (FlightPrepPanel is not null)
+            {
+                FlightPrepPanel.IsVisible = false;
+            }
+
             StopFlightPendingTimer();
+            StartGameBarCaptureForFlight();
             StartOrlaPercFlight();
         }
+    }
+
+    // Nagranie demo F9 przez Game Bar (2026-07-25, prośba usera: „a demo nie może samo włączać nagrywania
+    // Win+Shift+R?"). Skrót jest PRZEŁĄCZNIKIEM, więc ten sam wywołujemy na starcie i na końcu lotu.
+    // Wysyłany PO otwarciu bramki, a PRZED ruszeniem kropki — Game Bar potrzebuje chwili na rozkręcenie,
+    // a nagranie ma objąć lot od pierwszej klatki, nie od trzeciej sekundy.
+    // Wyłącznik: MAPATUR_F9_RECORD=0 (np. gdy nagrywasz czymś innym i nie chcesz podwójnego przełączenia).
+    private bool gameBarCaptureStarted;
+
+    private void StartGameBarCaptureForFlight()
+    {
+        if (Environment.GetEnvironmentVariable("MAPATUR_F9_RECORD") == "0")
+        {
+            return;
+        }
+
+#if WINDOWS
+        gameBarCaptureStarted = Platforms.Windows.GameBarCapture.ToggleRecording();
+        Serilog.Log.Information("[Flight] Game Bar: wyslano Win+Shift+R (start nagrania) = {Ok}", gameBarCaptureStarted);
+#endif
+    }
+
+    private void StopGameBarCaptureForFlight()
+    {
+        if (!gameBarCaptureStarted)
+        {
+            return;
+        }
+
+        gameBarCaptureStarted = false;
+#if WINDOWS
+        Serilog.Log.Information("[Flight] Game Bar: wyslano Win+Shift+R (stop nagrania) = {Ok}",
+            Platforms.Windows.GameBarCapture.ToggleRecording());
+#endif
     }
 
     private void StopFlightPendingTimer()
@@ -1825,6 +1895,7 @@ public partial class Terrain3DView : ContentView
         flightActive = false;
         flightMarkerWorld = null;
         flightTimer?.Stop();
+        StopGameBarCaptureForFlight(); // ten sam skrót Win+Shift+R kończy nagranie demo
 
         // Finalize the MP4 (if one was being captured) and surface its path to the host page.
         recordingRequested = false;
@@ -8771,6 +8842,13 @@ public partial class Terrain3DView : ContentView
             System.IO.Path.GetDirectoryName(dir) ?? dir, "opk", "det25");
         // TIER REBALANCE (2026-07-23): desktop ring 1500 → 5000 m so the 28-cell det25 midground actually has
         // candidates to fill (a 1500 m ring holds ~7 cells — the raised cap was starved at the source).
+        // fastMotionSpeedMps: PRÓBA 25 → 300 COFNIĘTA POMIAREM (2026-07-25, ten sam dzień). Zamysł był dobry:
+        // powyżej progu polityka zwraca PUSTY zbiór żądanych cel, więc lot F9 (~230 m/s) leciał nad bazą.
+        // Ale zdjęcie progu sprawiło, że 128 cel × 11 MB dociąga się przy KAŻDYM ruchu kamery i — w parze
+        // z ograniczoną retencją puli buforów — daje burzę alokacji: sterta wróciła z 3,1 GB do 8-10 GB,
+        // gapy z 8 do 98 (mediana 234 ms), user: „rwie okrutnie".
+        // Detal w locie trzeba zrobić INACZEJ niż zdjęciem progu — kandydat: prefetch WZDŁUŻ ZNANEJ TRASY
+        // lotu (F9 zna waypointy z góry), czyli dociąganie z wyprzedzeniem zamiast gonienia kamery.
         var policy = new MapaTur.Application.Terrain.OrthoDetailResidencyPolicy(
             grid, ringRadiusMeters: OperatingSystem.IsWindows() ? 5000.0 : 1500.0,
             fastMotionSpeedMps: 25.0, prefetchLeadMeters: 400.0);

@@ -104,6 +104,15 @@
              (1-finger drag = orbit, pinch = zoom), translation is on the bottom-right pad. Altitude
              is the one camera dimension that's awkward to reach via a 2D screen gesture, so it
              keeps its own tappable column. -->
+        <!-- Komunikat przygotowania lotu F9 (2026-07-25). Bez niego apka wyglądała na ZAMROŻONĄ: bramka
+             czekała na dobudowanie sceny w ciszy, a user nie wiedział, czy klawisz w ogóle zadziałał.
+             Widoczny tylko w trakcie oczekiwania; pokazuje realny postęp cachowania obu warstw. -->
+        <Border x:Name="FlightPrepPanel" IsVisible="False" InputTransparent="True"
+                HorizontalOptions="Center" VerticalOptions="Center"
+                BackgroundColor="#CC101418" StrokeThickness="0" Padding="18,12">
+            <Label x:Name="FlightPrepLabel" TextColor="#F2F5F7" FontSize="15" HorizontalTextAlignment="Center" />
+        </Border>
+
         <VerticalStackLayout x:Name="AltitudePad" HorizontalOptions="Start" VerticalOptions="End"
                              Margin="12" Spacing="4" InputTransparent="False">
             <Button Text="&#x25B2;" Pressed="OnRaiseClicked" Released="OnPadReleased" Style="{StaticResource Cam3DButton}" />
