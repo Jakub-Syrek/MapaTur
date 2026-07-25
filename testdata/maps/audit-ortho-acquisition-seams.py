@@ -11,8 +11,14 @@ Dla każdej pary sąsiadów (poziomo i pionowo) liczy różnicę median na pasac
   dStd — lokalny kontrast (charakter nalotu, mgiełka)
 Pomija pary, gdzie któryś pas jest nodata/near-black (granica PL) albo prawie jednolity (woda/śnieg).
 
-Rozkład |dL| po wszystkich parach = SKALA problemu i bramka odbioru procesu wyrównywania:
-szwy akwizycji siedzą w ogonie rozkładu (p95/p99), a nie w medianie.
+★ KONTROLA PAROWANA JEST OBOWIĄZKOWA (lekcja 2026-07-25). Sama wartość na realnej krawędzi NIE jest
+dowodem szwu: ta sama metryka policzona na SZTUCZNEJ krawędzi WEWNĄTRZ kafla — gdzie zmiana nalotu jest
+fizycznie niemożliwa — daje praktycznie identyczny rozkład (zmierzone na det25, 800 par: |dL|>6/255
+w 8,0% par realnych vs 8,1% par kontrolnych; p95 8.11 vs 7.76). Metryka mierzy więc przede wszystkim
+SZORSTKOŚĆ RZEŹBY. Wnioskować wolno TYLKO z NADWYŻKI realna−kontrola, a ta jest zerowa do p95 i pojawia
+się dopiero w p99 (+4.2/255) i w maksimum (+32.5/255) — czyli szwy akwizycji są RZADKIE i DUŻE,
+a nie powszechne i małe. Pierwsza wersja tego skryptu (bez kontroli) kazała mi ogłosić „9,8% granic
+to szwy" — nieprawda.
 
 Użycie:
   python audit-ortho-acquisition-seams.py <katalog-warstwy> [--pairs 400] [--strip 8]
@@ -58,6 +64,45 @@ def diffs(a, b):
     )
 
 
+def control_pairs(tiles, keys, step, want_pairs, strip):
+    """KONTROLA PAROWANA: ta sama metryka na SZTUCZNEJ krawędzi WEWNĄTRZ kafla (środkowa kolumna/wiersz),
+    gdzie zmiana nalotu jest z definicji NIEMOŻLIWA. Różnica realna − kontrola to jedyna część sygnału,
+    którą wolno przypisać szwowi; sama wartość na realnej krawędzi mierzy głównie szorstkość rzeźby."""
+    out = []
+    for k in keys[::step]:
+        a = load(tiles[k])
+        if a is None:
+            continue
+        h, w, _ = a.shape
+        for axis in (0, 1):
+            if axis:
+                mid = w // 2
+                sa, sb = a[:, mid - strip:mid, :], a[:, mid:mid + strip, :]
+            else:
+                mid = h // 2
+                sa, sb = a[mid - strip:mid, :, :], a[mid:mid + strip, :, :]
+            if usable(sa) and usable(sb):
+                out.append(diffs(sa, sb))
+        if len(out) >= want_pairs:
+            break
+    return out
+
+
+def report(name, arr, label_width=22):
+    a = np.array(arr)
+    print(f"\n== {name}: par {len(arr)}")
+    print(f"{'':{label_width}}{'mediana|x|':>11}{'p90':>9}{'p95':>9}{'p99':>9}{'max':>9}")
+    stats_out = {}
+    for idx, nm in enumerate(["dL  (ekspozycja)", "dRG (chroma R-G)", "dGB (chroma G-B)", "dStd(kontrast)"]):
+        v = np.abs(a[:, idx])
+        q = (np.median(v), np.percentile(v, 90), np.percentile(v, 95), np.percentile(v, 99), v.max())
+        stats_out[nm] = q
+        print(f"{nm:{label_width}}{q[0]:11.2f}{q[1]:9.2f}{q[2]:9.2f}{q[3]:9.2f}{q[4]:9.2f}")
+    strong = np.abs(a[:, 0]) > 6
+    print(f"{'par |dL|>6/255':{label_width}}{strong.mean() * 100:10.1f}%")
+    return stats_out
+
+
 def main(root, want_pairs, strip):
     tiles = {}
     for d in os.scandir(root):
@@ -98,16 +143,16 @@ def main(root, want_pairs, strip):
     if not out:
         print("brak uzywalnych par")
         return
-    a = np.array(out)
-    print(f"par sąsiadów zmierzonych: {len(out)}  (pas {strip} px po każdej stronie)")
-    print(f"{'':22}{'mediana|x|':>11}{'p90':>9}{'p95':>9}{'p99':>9}{'max':>9}")
-    for idx, name in enumerate(["dL  (ekspozycja)", "dRG (chroma R-G)", "dGB (chroma G-B)", "dStd(kontrast)"]):
-        v = np.abs(a[:, idx])
-        print(f"{name:22}{np.median(v):11.2f}{np.percentile(v, 90):9.2f}"
-              f"{np.percentile(v, 95):9.2f}{np.percentile(v, 99):9.2f}{v.max():9.2f}")
-    strong = np.abs(a[:, 0]) > 6
-    print(f"\npary ze skokiem luminancji > 6/255: {strong.sum()} = {strong.mean() * 100:.1f}% "
-          f"— to kandydaci na szwy akwizycji")
+    real = report(f"KRAWĘDŹ REALNA kafel|kafel (pas {strip} px)", out)
+    ctrl = report(f"KONTROLA: sztuczna krawędź WEWNĄTRZ kafla (pas {strip} px)",
+                  control_pairs(tiles, keys, step, want_pairs, strip))
+
+    print("\n== NADWYŻKA (realna − kontrola) — TYLKO to wolno przypisać szwowi akwizycji")
+    for nm in real:
+        r, c = real[nm], ctrl[nm]
+        print(f"{nm:22}" + "".join(f"{r[i] - c[i]:+9.2f}" for i in range(5)))
+    print("\nUWAGA: sama wartość na krawędzi realnej mierzy przede wszystkim SZORSTKOŚĆ RZEŹBY —")
+    print("bez kontroli parowanej ta metryka wskaże 'szwy' tam, gdzie ich nie ma.")
 
 
 if __name__ == "__main__":
