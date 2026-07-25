@@ -3775,7 +3775,24 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             }
         }
 
-        int over = det05Cells.Count - Math.Max(0, Det05HardCapCells);
+        // ★ GŁODZENIE ŻĄDANYCH CEL (2026-07-25, user: „jak się przesunę, to nie odświeża się przede mną
+        // niska rozdzielczość"). Eksmisja była wyzwalana WYŁĄCZNIE przekroczeniem limitu liczby cel, więc
+        // gdy pula zapełniła się dokładnie do capa (over = 0), NIC nigdy nie było eksmitowane: cele z
+        // poprzedniej pozycji trzymały wszystkie warstwy tablicy, a nowo ŻĄDANE nie miały gdzie wejść i
+        // czekały w nieskończoność (objaw w logu: resident 182 / desired 140 / queue 0, wolny 1 slot).
+        // Teraz eksmisja rusza także wtedy, gdy żądana cela nie ma warstwy, a pula wolnych warstw jest pusta.
+        int starved = 0;
+        foreach (int key in desired)
+        {
+            if (det05Cells.TryGetValue(key, out DetailCellGpu? need) && need.Layer < 0)
+            {
+                starved++;
+            }
+        }
+
+        int over = Math.Max(
+            det05Cells.Count - Math.Max(0, Det05HardCapCells),
+            starved - det05FreeLayers.Count);
         while (over > 0)
         {
             // ANTI-CHURN (ZASADA 9): prefer an OFF-SCREEN victim; a cell the camera still sees is evicted only

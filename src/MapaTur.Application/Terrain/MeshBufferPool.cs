@@ -90,12 +90,30 @@ public sealed class MeshBufferPool
             {
                 if (u8.TryGetValue(length, out Stack<byte[]>? s) && s.Count > 0)
                 {
-                    return s.Pop();
+                    byte[] taken = s.Pop();
+                    pooledByteBytes -= taken.Length;
+                    return taken;
                 }
             }
         }
 
         return new byte[length];
+    }
+
+    /// <summary>Górny pułap BAJTÓW trzymanych w puli <c>byte[]</c> (2026-07-25). Pula miała limit LICZBY
+    /// buforów (4096/koszyk), ale nie ich rozmiaru — a łańcuch BC1 celi det05 to ~43 MB. Po podniesieniu
+    /// zasięgu do 192 cel oznaczało to ~8,2 GB kopii CPU trzymanych na stałe (zmierzone: sterta zarządzana
+    /// 11-15 GB w locie i rosnący licznik gen2). Kopia po stronie CPU jest potrzebna WYŁĄCZNIE na czas
+    /// uploadu — po nim dane żyją w teksturze. Pooling zostaje dla buforów, które faktycznie krążą
+    /// (strony, scratch zstd, siatki); nadmiar oddajemy GC zamiast trzymać w nieskończoność.</summary>
+    private const long MaxPooledByteBytes = 512L << 20;
+
+    private long pooledByteBytes;
+
+    /// <summary>Bajty aktualnie trzymane w puli <c>byte[]</c> — do logu pamięci.</summary>
+    public long PooledByteBytes
+    {
+        get { lock (this.gate) { return this.pooledByteBytes; } }
     }
 
     /// <summary>Returns a buffer for reuse. See <see cref="Return(Vector3[])"/>.</summary>
@@ -108,6 +126,12 @@ public sealed class MeshBufferPool
 
         lock (gate)
         {
+            if (pooledByteBytes + buffer.Length > MaxPooledByteBytes)
+            {
+                return; // ponad budżet — oddajemy GC zamiast trzymać (patrz MaxPooledByteBytes)
+            }
+
+            pooledByteBytes += buffer.Length;
             Push(u8, buffer.Length, buffer);
         }
     }
