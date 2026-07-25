@@ -114,8 +114,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // slice B the rest; the fragment picks the slice from its slot index (best < 8).
         "uniform mediump sampler2DArray uOrthoDet05Arr;\n" +
         "uniform mediump sampler2DArray uOrthoDet05ArrB;\n" +
-        "uniform vec4 uDet05Aabb[48];\n" + // slots ≥ Det05HardCapCells (96 desktop BC1) — headroom without GLSL edits
-        "uniform float uDet05Alpha[48];\n" + // per-slot fade-in after promote (0→1 over ~300 ms) — no popping
+        "uniform vec4 uDet05Aabb[96];\n" + // slots = Det05HardCapCells (96 desktop BC1)
+        "uniform float uDet05Alpha[96];\n" + // per-slot fade-in after promote (0→1 over ~300 ms) — no popping
         "uniform int uDet05ArrA;\n" +      // liczba warstw slice'a A (BC1: 16, RGBA-fallback: 8) — mapping slot→(array, warstwa)
         "uniform int uUseDet05Arr;\n" +
         "uniform float uDetailBlendMeters;\n" + // soft edge fade of the detail AABB back to the base ortho
@@ -346,7 +346,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  if (uUseDet05Arr != 1) return baseC;\n" +
         "  vec2 wdx = dFdx(wxy), wdy = dFdy(wxy);\n" + // gradienty świata PRZED wyborem celi — patrz applyOrthoDet25Arr
         "  int best = -1; float bestEdge = 0.0;\n" +
-        "  for (int i = 0; i < 48; i++) {\n" +
+        "  for (int i = 0; i < 96; i++) {\n" +
         "    vec2 mn = uDet05Aabb[i].xy; vec2 mx = uDet05Aabb[i].zw;\n" +
         "    if (mx.x <= mn.x) continue;\n" +
         "    vec2 cd = min(wxy - mn, mx - wxy);\n" +
@@ -2309,7 +2309,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // 2026-07-24 („zasięg 5 cm śmiesznie mały", potem „proszę o to już 3 dzień"): 12 → 32 → 48.
     // Kalibrowane, gdy cela kosztowała 357 MB RGBA; z BC1 (ChainSize ≈ 44,7 MB) 48 cel = ~2,1 GB w
     // ledgerze ~9,6 GB. Promień pełnego 5 cm ~600 m (pitch 153,6 m, nearest-cap); dalej kryje det25.
-    private static readonly int Det05HardCapCells = OperatingSystem.IsWindows() ? 48 : 3;
+    // 2026-07-25: PRZYWRÓCONE 96 na WYRAŹNE ŻĄDANIE USERA. Wczoraj 21:06 (2317682) agent SAM cofnął próbę
+    // 96 do 48, bo zmierzył terrain 18,7 ms / 31 ms sumGpu (~32 FPS) — mimo że user właśnie oglądał stan 96
+    // i był dla niego dobry. To był konflikt „obraz vs płynność", którego zasada 3 NIE pozwala rozstrzygać
+    // agentowi. NIE OBNIŻAĆ bez werdyktu usera. Docelowo koszt znika po O(1) wyborze celi (krata→slot).
+    private static readonly int Det05HardCapCells = OperatingSystem.IsWindows() ? 96 : 3;
 
     // BC1 GPU-cell pipeline (2026-07-23, ZASADY 11/13): cells are encoded to BC1+mips OFF-THREAD (once — the
     // disk cache serves every revisit in ~15 ms) and uploaded compressed. 1/8 the bytes end-to-end: a det05
@@ -2435,11 +2439,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// the 32-bit (~4.29 GB) per-resource ceiling. Must match the shader's slice constant (best &lt; 8).</summary>
     // BC1: 24 warstwy 8192² z mipami ≈ 1,07 GB/array — daleko od sufitu ~4,29 GB/resource. RGBA-fallback
     // (bez s3tc) zostaje przy 8 (24×357 MB przebiłoby sufit) — patrz EnsureDet05Array.
-    private const int Det05ArraySliceLayers = 24;
+    private const int Det05ArraySliceLayers = 48; // 48 warstw 8192² BC1+mipy ≈ 2,14 GB/array — pod sufitem ~4,29 GB/resource
     private int det05LayersA; // faktyczne warstwy slice'a A po alokacji (mapping slot→(array, warstwa) + uniform uDet05ArrA)
     // H2 (2026-07-23): 600 → 800 m with the 16-cell cap — 16 cells of ~410 m span tile an 800 m ring, so the
     // 5 cm reflector reaches the far side of a cirque like Morskie Oko instead of stopping mid-lake.
-    private static readonly double Det05RingRadiusMeters = OperatingSystem.IsWindows() ? 1400.0 : 350.0;
+    private static readonly double Det05RingRadiusMeters = OperatingSystem.IsWindows() ? 2000.0 : 350.0;
     private static readonly int Det05CoarseBackingCells = OperatingSystem.IsWindows() ? 6 : 4; // det25 cells reserved to back the det05 ring (no-hole)
 
     // det05 cell TEXTURE ARRAYS (units 12 + 13): allocated lazily on first upload (TexStorage3D, error-
