@@ -84,12 +84,17 @@ Stare pakiety leżą jako `opk/det25-prerim` i `opk/det1m-prerim` — **rollback
 
 1. **WERDYKT USERA** na pozie z nagłówka: czy „łączenia" zniknęły; czy ton/ostrość bliskiego planu bez
    regresji; czy MO (showcase 5 cm) niezmienione.
-2. **BLADY TRÓJKĄTNY PLACEK na tafli MO i na stoku pod Rysami** — zauważony w sweepie, ma PROSTE krawędzie
-   i wierzchołek (kształt trójkąta siatki, nie prostokąt celi orto), półprzezroczysty, jasnoszaro-niebieski.
-   Kandydaci: geometria/woda (mesh nad lustrem), mgła/cloud-shadow na wielkim trójkącie niskiego LOD.
-   **Nie zdążyłem rozstrzygnąć.** Test rozstrzygający (tani): run presetu `mo` z
-   `MAPATUR_KILL=det1m,det25arr,det05arr,mosaic` — jeśli placek zostaje, nie ma nic wspólnego z orto
-   ani z dzisiejszymi zmianami (te dotykają wyłącznie samplowania detalu).
+2. **BLADY TRÓJKĄTNY PLACEK na tafli MO** (i podobny na stoku pod Rysami) — ZASTANY, NIE z dzisiejszych
+   zmian. Dwa testy 1:1 na tej samej pozie `8836.09;-5599.396;1394.5;900;4.0875397;0.39500022`:
+   - `MAPATUR_KILL=det1m,det25arr,det05arr,mosaic` ⇒ **placka NIE MA** (tafla jednolita) ⇒ maluje go
+     warstwa detalu, nie geometria ani woda;
+   - build ze **wczorajszym shaderem** (`git checkout 5e37b20 -- Terrain3DGlRenderer.cs`) ⇒ **placek JEST**,
+     identyczny kształt i pozycja ⇒ un-premultiply go nie stworzył ani nie uwidocznił.
+   Zostaje do wyjaśnienia: to ortofoto detalu malowane NA lustrze wody (jasna, mglista tafla ze zdjęcia
+   lotniczego kontra ciemna woda z renderera), a granica placka to krawędź celi/pokrycia w perspektywie.
+   Kierunek: bramkować detal maską wody (`flatW × darkW` — NIGDY nie usuwać, §C.5) albo tłumić detal
+   na taflach jezior. **Uwaga metodyczna:** exe po tym A/B trzeba PRZEBUDOWAĆ — inaczej na dysku zostaje
+   build ze starym shaderem (zrobione: DLL 08:32:45, 11 wystąpień `unpremulPunch` w źródle).
 3. Pojedyncze ciemne piksele zostają miejscami na granicy (np. kolumna x=565 w kadrze dowodowym: luma 3).
    Metryka nie widzi ich jako linii (0 komponentów), ale jeśli user je zauważy — sprawdzić, czy to kafle,
    w których nodata NIE jest dokładnym zerem (brak ziarna do zalewu) albo realny cień.
