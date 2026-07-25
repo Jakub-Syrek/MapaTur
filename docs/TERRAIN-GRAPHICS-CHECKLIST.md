@@ -153,6 +153,29 @@ chain, called by every path, so coverage can't drift. **TODO: this consolidation
    gradient kink at z17 from the per-tile-clamped supersample kernel (`DemTileSupersampler.LowPassDownsample`) —
    sub-visual next to the AO step, bake-side, NOT fixed by the halo (see TILE-PRODUCTION §2.5).
 
+11. **★★ PUNCH-THROUGH SAMPLES MUST BE UN-PREMULTIPLIED — every detail path, every helper** (2026-07-25,
+   the "bright saw + black dotted line along the PL/SK coverage edge" root cause). A transparent DXT1a texel
+   decodes to **RGBA(0,0,0,0)** (`Bc1Encoder`: palette index 3 = *transparent BLACK*), and the alpha-weighted
+   mip builders write **RGB=0** where the whole quad is empty (`BuildMipChain`/`Half`: `if (sumA == 0)`).
+   So **any** filtering near a coverage edge — bilinear, mip, bicubic — dilutes the colour with BLACK in
+   proportion to (1−α). Two artefacts, one cause: (a) the displayed sample darkens → a black thread;
+   (b) that same contaminated sample fed to the **tone law** makes `delta < 0`, and `dc − delta·mism`
+   *raises* luminance → a bright, tile-quantised **saw** along the edge (measured on the user's pose:
+   line RGB 165,167,162 vs terrain 95,99,94 — an 89% metric drop after the fix, 1097 → 120 px).
+   **Recovery is exact, not a heuristic:** filtered `rgb_f = Σ wᵢcᵢ` (transparent contribute 0) and
+   `α_f = Σ_covered wᵢ`, so `rgb_f / α_f` **is** the average over covered texels — that is `unpremulPunch()`.
+   Inside coverage (α=1) it is the identity, so the approved look cannot drift. Rules that must stay true:
+   - every `dc = <sample>` on a detail path goes through `unpremulPunch` (det1m, det25Arr, det05Array,
+     `applyOrthoDetail`) — **never** `dcs.rgb` raw;
+   - the tone reference (`textureLod(..., toneLod)`) is fetched as **vec4**, un-premultiplied, and the
+     correction is gated by that footprint's alpha (`smoothstep(0.02, 0.12, toneA)`) — a footprint with no
+     coverage carries no tone information and must not drive `delta`;
+   - both bicubic helpers return **vec4** (alpha must survive the same weights); the opaque BASE ortho
+     takes `.rgb` and is NOT un-premultiplied.
+   Guarded by `tests/MapaTur.Application.Tests/Terrain/TerrainShaderPunchThroughTests.cs` (asserts the
+   invariant on ALL FOUR paths — the historical failure was a silent shader replace that landed on one
+   path only). **If you add a new detail-sampling path, extend that test.**
+
 ---
 
 ## D. KNOWN DATA GAPS (GUGiK 1 m flat-0 — confirmed: re-fetch returns `0..0`)

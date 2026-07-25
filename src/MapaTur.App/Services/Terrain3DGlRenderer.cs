@@ -120,6 +120,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform int uUseDet05Arr;\n" +
         "uniform float uDetailBlendMeters;\n" + // soft edge fade of the detail AABB back to the base ortho
         "uniform int uOrthoDetailColorMode;\n" + // 0 = raw detail, 1 = base de-blue transform (R3 slice A/B)
+        "uniform int uToneHarm;\n" +  // 1 = harmonizacja tonu (krok 2 prawa) czynna; 0 = SAMO de-blue (diagnostyka MAPATUR_ORTHO_TONE=0)
+        "uniform int uToneDebug;\n" + // 1 = zamiast koloru rysuj MAPĘ korekty tonu (MAPATUR_ORTHO_TONE_DEBUG=1)
         // H3 (2026-07-23): per-layer colour split for the deshadow preview. The STREAMED det05 cells can carry
         // data-side-corrected (V2) tiles that must render RAW (a second shader de-blue = double correction),
         // while det25/base/mosaic still need the mode-1 de-blue. 1 = det05 ARRAY skips the mode-1 transform.
@@ -271,7 +273,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  float w = 6.0 - x - y - z;\n" +
         "  return vec4(x, y, z, w) * (1.0 / 6.0);\n" +
         "}\n" +
-        "vec3 texBicubic(sampler2D t, vec2 uv, vec2 ts){\n" +
+        // ★ UN-PREMULTIPLY PUNCH-THROUGH (2026-07-25 — jasna piła + ciemna nitka na granicy pokrycia).
+        // Texel przezroczysty DXT1a dekoduje się jako RGBA(0,0,0,0) (Bc1Encoder: indeks 3 = przezroczysta CZERŃ),
+        // a mipy alfa-ważone zapisują RGB=0 gdy cała czwórka jest pusta (BuildMipChain/Half: `if (sumA == 0)`).
+        // KAŻDE filtrowanie przy granicy pokrycia (bilinear, mip, bicubic) rozcieńcza więc kolor CZERNIĄ
+        // proporcjonalnie do (1−a) — stąd (a) ciemna nitka w wyświetlanym samplu, (b) po podaniu takiego
+        // sampla do prawa tonu delta<0 ⇒ `dc − delta` PODBIJA jasność ⇒ jasne pasmo (zmierzone: kolor linii
+        // 165,167,162 przy terenie 95,99,94). Odzyskanie średniej PO POKRYTYCH texelach jest DOKŁADNE:
+        // rgb_f = Σ wᵢ·cᵢ (przezroczyste wnoszą 0), a_f = Σ wᵢ·aᵢ = Σ_pokryte wᵢ ⇒ rgb_f / a_f = ta średnia.
+        // Poza granicą pokrycia (a→0) wynik i tak jest mnożony przez dcs.a, więc dzielenie nie ma wpływu.
+        "vec3 unpremulPunch(vec4 s){ return clamp(s.rgb / max(s.a, 0.00393), 0.0, 1.0); }\n" + // 1/255
+        "vec4 texBicubic(sampler2D t, vec2 uv, vec2 ts){\n" +
         "  vec2 coord = uv * ts - 0.5;\n" +
         "  vec2 fxy = fract(coord);\n" +
         "  coord -= fxy;\n" +
@@ -281,16 +293,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  vec4 s = vec4(xc.xz + xc.yw, yc.xz + yc.yw);\n" +
         "  vec4 off = cx + vec4(xc.yw, yc.yw) / s;\n" +
         "  off *= vec4(1.0 / ts.x, 1.0 / ts.x, 1.0 / ts.y, 1.0 / ts.y);\n" +
-        "  vec3 s00 = textureLod(t, vec2(off.x, off.z), 0.0).rgb;\n" +
-        "  vec3 s10 = textureLod(t, vec2(off.y, off.z), 0.0).rgb;\n" +
-        "  vec3 s01 = textureLod(t, vec2(off.x, off.w), 0.0).rgb;\n" +
-        "  vec3 s11 = textureLod(t, vec2(off.y, off.w), 0.0).rgb;\n" +
+        // RGBA (nie RGB): alfa musi przejść przez te same wagi, żeby caller mógł zrobić un-premultiply.
+        "  vec4 s00 = textureLod(t, vec2(off.x, off.z), 0.0);\n" +
+        "  vec4 s10 = textureLod(t, vec2(off.y, off.z), 0.0);\n" +
+        "  vec4 s01 = textureLod(t, vec2(off.x, off.w), 0.0);\n" +
+        "  vec4 s11 = textureLod(t, vec2(off.y, off.w), 0.0);\n" +
         "  float sx = s.x / (s.x + s.y);\n" +
         "  float sy = s.z / (s.z + s.w);\n" +
         "  return mix(mix(s11, s01, sx), mix(s10, s00, sx), sy);\n" +
         "}\n" +
         // Array-layer twin of texBicubic (same weights, fetches one layer of the det05 array).
-        "vec3 texBicubicArr(mediump sampler2DArray t, vec2 uv, float layer, vec2 ts){\n" +
+        "vec4 texBicubicArr(mediump sampler2DArray t, vec2 uv, float layer, vec2 ts){\n" +
         "  vec2 coord = uv * ts - 0.5;\n" +
         "  vec2 fxy = fract(coord);\n" +
         "  coord -= fxy;\n" +
@@ -300,10 +313,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  vec4 s = vec4(xc.xz + xc.yw, yc.xz + yc.yw);\n" +
         "  vec4 off = cx + vec4(xc.yw, yc.yw) / s;\n" +
         "  off *= vec4(1.0 / ts.x, 1.0 / ts.x, 1.0 / ts.y, 1.0 / ts.y);\n" +
-        "  vec3 s00 = textureLod(t, vec3(off.x, off.z, layer), 0.0).rgb;\n" +
-        "  vec3 s10 = textureLod(t, vec3(off.y, off.z, layer), 0.0).rgb;\n" +
-        "  vec3 s01 = textureLod(t, vec3(off.x, off.w, layer), 0.0).rgb;\n" +
-        "  vec3 s11 = textureLod(t, vec3(off.y, off.w, layer), 0.0).rgb;\n" +
+        "  vec4 s00 = textureLod(t, vec3(off.x, off.z, layer), 0.0);\n" +
+        "  vec4 s10 = textureLod(t, vec3(off.y, off.z, layer), 0.0);\n" +
+        "  vec4 s01 = textureLod(t, vec3(off.x, off.w, layer), 0.0);\n" +
+        "  vec4 s11 = textureLod(t, vec3(off.y, off.w, layer), 0.0);\n" +
         "  float sx = s.x / (s.x + s.y);\n" +
         "  float sy = s.z / (s.z + s.w);\n" +
         "  return mix(mix(s11, s01, sx), mix(s10, s00, sx), sy);\n" +
@@ -350,17 +363,20 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  vec2 gx = vec2(wdx.x / sp.x, -wdx.y / sp.y);\n" +
         "  vec2 gy = vec2(wdy.x / sp.x, -wdy.y / sp.y);\n" +
         "  vec4 dcs = inA ? textureGrad(uOrthoDet05Arr, vec3(uv, lz), gx, gy) : textureGrad(uOrthoDet05ArrB, vec3(uv, lz), gx, gy);\n" +
-        "  vec3 dc = dcs.rgb;\n" +
+        "  vec3 dc = unpremulPunch(dcs);\n" + // czerń przezroczystych texeli NIE może rozcieńczać koloru przy granicy pokrycia
         "  vec2 fp = (abs(gx) + abs(gy)) * ts;\n" + // fwidth z gradów świata (fwidth(uv) na linii przełączenia cel = śmieci)
 
-        "  if (max(fp.x, fp.y) < 1.0) { dc = inA ? texBicubicArr(uOrthoDet05Arr, uv, lz, ts) : texBicubicArr(uOrthoDet05ArrB, uv, lz, ts); }\n" +
+        "  if (max(fp.x, fp.y) < 1.0) { dc = unpremulPunch(inA ? texBicubicArr(uOrthoDet05Arr, uv, lz, ts) : texBicubicArr(uOrthoDet05ArrB, uv, lz, ts)); }\n" +
         "  if (uOrthoDetailColorMode == 1 && uOrthoDet05ArrRaw == 0) {\n" + // H3: V2-baked cells render RAW while det25/base keep de-blue
         "    dc = deblueShadow(dc);\n" +                                   // (1) HARD RULE: absolute blue-cast removal
         "    float toneLod = max(0.0, log2(max(ts.x / (mx.x - mn.x), ts.y / (mx.y - mn.y)))) + 3.0;\n" + // ~8 m/texel: mikrocienie skał to nie szew ekspozycji (kontrast! 07-24)
-        "    vec3 dRaw = inA ? textureLod(uOrthoDet05Arr, vec3(uv, lz), toneLod).rgb : textureLod(uOrthoDet05ArrB, vec3(uv, lz), toneLod).rgb;\n" +
+        "    vec4 tRaw = inA ? textureLod(uOrthoDet05Arr, vec3(uv, lz), toneLod) : textureLod(uOrthoDet05ArrB, vec3(uv, lz), toneLod);\n" +
+        "    float toneA = tRaw.a; vec3 dRaw = unpremulPunch(tRaw);\n" + // ton z POKRYTYCH texeli, nie z czerni brzegu
         "    vec3 delta = deblueShadow(dRaw) - deblueShadow(baseC);\n" +   // (2) both de-blued → delta = pure exposure seam (never re-adds blue)
-        "    float mism = smoothstep(0.16, 0.35, max(abs(delta.r), max(abs(delta.g), abs(delta.b))));\n" + // próg w górę: kontrast był wypłukiwany (luma std 39.5→24.7, zmierzone 07-24)
+        "    float mism = smoothstep(0.16, 0.35, max(abs(delta.r), max(abs(delta.g), abs(delta.b)))) * float(uToneHarm) * smoothstep(0.02, 0.12, toneA);\n" + // próg w górę: kontrast był wypłukiwany (luma std 39.5→24.7, zmierzone 07-24); uToneHarm=0 → diagnostyczne wyłączenie SAMEJ harmonizacji (de-blue zostaje)
         "    dc = clamp(dc - (delta * mism), 0.0, 1.0);\n" +               //     harmonise only the survey exposure seam
+        "    if (uToneDebug == 1) { float corr = -(delta.r + delta.g + delta.b) * mism / 3.0;\n" + // mapa korekty: czerwony = ROZJAŚNIENIE, niebieski = przyciemnienie
+        "      dc = vec3(clamp(corr * 3.0, 0.0, 1.0), 0.12, clamp(-corr * 3.0, 0.0, 1.0)); }\n" +
         "  }\n" +
         "  vec2 cd = min(wxy - mn, mx - wxy);\n" +
         "  float w = clamp(min(cd.x, cd.y) / max(blendM, 0.001), 0.0, 1.0) * dcs.a * uDet05Alpha[best];\n" +
@@ -404,15 +420,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  vec2 gx = vec2(wdx.x / sp.x, -wdx.y / sp.y);\n" +
         "  vec2 gy = vec2(wdy.x / sp.x, -wdy.y / sp.y);\n" +
         "  vec4 dcs = textureGrad(uOrthoDet25Arr, vec3(uv, float(best)), gx, gy);\n" + // DXT1a: a=0 = brak pokrycia
-        "  vec3 dc = dcs.rgb;\n" +
+        "  vec3 dc = unpremulPunch(dcs);\n" + // czerń przezroczystych texeli NIE może rozcieńczać koloru przy granicy pokrycia
         "  if (uOrthoDetailColorMode == 1) {\n" + // dwustopniowy law (wzorzec applyOrthoDet05Array, KONTRAKT-ORTO §1)
         "    dc = deblueShadow(dc);\n" +                                   // (1) HARD RULE: absolute blue-cast removal
         "    vec2 ts = vec2(textureSize(uOrthoDet25Arr, 0).xy);\n" +
         "    float toneLod = max(0.0, log2(max(ts.x / (bb.z - bb.x), ts.y / (bb.w - bb.y)))) + 3.0;\n" + // ~8 m/texel — patrz det05Array
-        "    vec3 dRaw = textureLod(uOrthoDet25Arr, vec3(uv, float(best)), toneLod).rgb;\n" +
+        "    vec4 tRaw = textureLod(uOrthoDet25Arr, vec3(uv, float(best)), toneLod);\n" +
+        "    float toneA = tRaw.a; vec3 dRaw = unpremulPunch(tRaw);\n" + // ton z POKRYTYCH texeli, nie z czerni brzegu
         "    vec3 delta = deblueShadow(dRaw) - deblueShadow(baseC);\n" +   // (2) both de-blued → delta = pure exposure seam
-        "    float mism = smoothstep(0.16, 0.35, max(abs(delta.r), max(abs(delta.g), abs(delta.b))));\n" + // próg w górę: kontrast był wypłukiwany (luma std 39.5→24.7, zmierzone 07-24)
+        "    float mism = smoothstep(0.16, 0.35, max(abs(delta.r), max(abs(delta.g), abs(delta.b)))) * float(uToneHarm) * smoothstep(0.02, 0.12, toneA);\n" + // próg w górę: kontrast był wypłukiwany (luma std 39.5→24.7, zmierzone 07-24); uToneHarm=0 → diagnostyczne wyłączenie SAMEJ harmonizacji (de-blue zostaje)
         "    dc = clamp(dc - (delta * mism), 0.0, 1.0);\n" +               //     harmonise only the survey exposure seam
+        "    if (uToneDebug == 1) { float corr = -(delta.r + delta.g + delta.b) * mism / 3.0;\n" + // mapa korekty: czerwony = ROZJAŚNIENIE, niebieski = przyciemnienie
+        "      dc = vec3(clamp(corr * 3.0, 0.0, 1.0), 0.12, clamp(-corr * 3.0, 0.0, 1.0)); }\n" +
         "  }\n" +
         "  vec2 cd = min(wxy - bb.xy, bb.zw - wxy);\n" +
         "  float wgt = clamp(min(cd.x, cd.y) / max(uDetailBlendMeters, 0.001), 0.0, 1.0) * dcs.a * uDet25AlphaArr[best];\n" +
@@ -439,16 +458,19 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    if (dot(dcs.rgb, dcs.rgb) < 0.0004) { return vec3(1.0, 0.0, 0.0); }\n" + // czerwony: OPAQUE BLACK w danych
         "    return vec3(0.0, 0.6, 0.0);\n" +                                // zielony: zdrowe krycie
         "  }\n" +
-        "  vec3 dc = dcs.rgb;\n" +
+        "  vec3 dc = unpremulPunch(dcs);\n" + // czerń przezroczystych texeli NIE może rozcieńczać koloru przy granicy pokrycia
         "  if (uOrthoDetailColorMode == 1) {\n" + // dwustopniowy law (wzorzec applyOrthoDet05Array, KONTRAKT-ORTO §1)
         "    dc = deblueShadow(dc);\n" +                                   // (1) HARD RULE: absolute blue-cast removal
         "    vec2 ts = vec2(textureSize(uOrthoDet1m, 0).xy);\n" +
         "    vec2 cellM = vec2(1.0 / uDet1mInvSize.x, 1.0 / uDet1mInvSize.y) / vec2(uDet1mGridDim);\n" + // komorka w metrach
         "    float toneLod = max(0.0, log2(max(ts.x / cellM.x, ts.y / cellM.y))) + 3.0;\n" + // ~8 m/texel — patrz det05Array
-        "    vec3 dRaw = textureLod(uOrthoDet1m, vec3(cellUv, float(slice)), toneLod).rgb;\n" +
+        "    vec4 tRaw = textureLod(uOrthoDet1m, vec3(cellUv, float(slice)), toneLod);\n" +
+        "    float toneA = tRaw.a; vec3 dRaw = unpremulPunch(tRaw);\n" + // ton z POKRYTYCH texeli, nie z czerni brzegu
         "    vec3 delta = deblueShadow(dRaw) - deblueShadow(baseC);\n" +   // (2) both de-blued → delta = pure exposure seam
-        "    float mism = smoothstep(0.16, 0.35, max(abs(delta.r), max(abs(delta.g), abs(delta.b))));\n" + // próg w górę: kontrast był wypłukiwany (luma std 39.5→24.7, zmierzone 07-24)
+        "    float mism = smoothstep(0.16, 0.35, max(abs(delta.r), max(abs(delta.g), abs(delta.b)))) * float(uToneHarm) * smoothstep(0.02, 0.12, toneA);\n" + // próg w górę: kontrast był wypłukiwany (luma std 39.5→24.7, zmierzone 07-24); uToneHarm=0 → diagnostyczne wyłączenie SAMEJ harmonizacji (de-blue zostaje)
         "    dc = clamp(dc - (delta * mism), 0.0, 1.0);\n" +               //     harmonise only the survey exposure seam
+        "    if (uToneDebug == 1) { float corr = -(delta.r + delta.g + delta.b) * mism / 3.0;\n" + // mapa korekty: czerwony = ROZJAŚNIENIE, niebieski = przyciemnienie
+        "      dc = vec3(clamp(corr * 3.0, 0.0, 1.0), 0.12, clamp(-corr * 3.0, 0.0, 1.0)); }\n" +
         "  }\n" +
         "  return mix(baseC, dc, cov * dcs.a);\n" +
         "}\n" +
@@ -457,9 +479,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  vec2 uv = vec2((wxy.x - mn.x) / (mx.x - mn.x), (mx.y - wxy.y) / (mx.y - mn.y));\n" + // v=0 at north, matches base ortho UV
         "  vec2 ts = vec2(textureSize(tex, 0));\n" +
         "  vec4 dcs = texture(tex, uv);\n" +
-        "  vec3 dc = dcs.rgb;\n" +
+        "  vec3 dc = unpremulPunch(dcs);\n" + // czerń przezroczystych texeli NIE może rozcieńczać koloru przy granicy pokrycia
         "  vec2 fp = fwidth(uv) * ts;\n" +
-        "  if (max(fp.x, fp.y) < 1.0) { dc = texBicubic(tex, uv, ts); }\n" +
+        "  if (max(fp.x, fp.y) < 1.0) { dc = unpremulPunch(texBicubic(tex, uv, ts)); }\n" +
         // Colour variant, mode 1 (DEFAULT — the no-burnt-shadows hard rule): neutralise the sky cast of
         // burnt-in flight shadows by DESATURATING toward the RGB mean, gated by the blue excess. This is the
         // documented PROPER method from the §3.11 r1-c3 rollback (TILE-PRODUCTION): the old §3.13 shift
@@ -476,9 +498,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // the earlier "tone-from-base" law that reduced distant views to bare base is NOT reinstated.
         "    dc = deblueShadow(dc);\n" +                                   // (1) HARD RULE: absolute blue-cast removal
         "    float toneLod = max(0.0, log2(max(ts.x / (mx.x - mn.x), ts.y / (mx.y - mn.y)))) + 3.0;\n" + // ~8 m/texel: mikrocienie skał to nie szew ekspozycji (kontrast! 07-24)
-        "    vec3 delta = deblueShadow(textureLod(tex, uv, toneLod).rgb) - deblueShadow(baseC);\n" + // (2) both de-blued → delta = pure exposure seam
-        "    float mism = smoothstep(0.16, 0.35, max(abs(delta.r), max(abs(delta.g), abs(delta.b))));\n" + // próg w górę: kontrast był wypłukiwany (luma std 39.5→24.7, zmierzone 07-24)
+        "    vec4 tRaw = textureLod(tex, uv, toneLod);\n" +
+        "    float toneA = tRaw.a; vec3 dRaw = unpremulPunch(tRaw);\n" + // ton z POKRYTYCH texeli, nie z czerni brzegu
+        "    vec3 delta = deblueShadow(dRaw) - deblueShadow(baseC);\n" + // (2) both de-blued → delta = pure exposure seam
+        "    float mism = smoothstep(0.16, 0.35, max(abs(delta.r), max(abs(delta.g), abs(delta.b)))) * float(uToneHarm) * smoothstep(0.02, 0.12, toneA);\n" + // próg w górę: kontrast był wypłukiwany (luma std 39.5→24.7, zmierzone 07-24); uToneHarm=0 → diagnostyczne wyłączenie SAMEJ harmonizacji (de-blue zostaje)
         "    dc = clamp(dc - (delta * mism), 0.0, 1.0);\n" +               //     harmonise only the survey exposure seam
+        "    if (uToneDebug == 1) { float corr = -(delta.r + delta.g + delta.b) * mism / 3.0;\n" + // mapa korekty: czerwony = ROZJAŚNIENIE, niebieski = przyciemnienie
+        "      dc = vec3(clamp(corr * 3.0, 0.0, 1.0), 0.12, clamp(-corr * 3.0, 0.0, 1.0)); }\n" +
         "  }\n" +
         "  vec2 cd = min(wxy - mn, mx - wxy);\n" +                    // >0 inside the AABB on both axes
         "  float w = clamp(min(cd.x, cd.y) / max(blendM, 0.001), 0.0, 1.0) * rangeFade * dcs.a;\n" + // ×alpha: holes (a=0) keep base/coarser tier
@@ -780,7 +806,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // would shimmer there. The unconditional fetch above keeps implicit derivatives defined.
         "    vec2 otsF = vec2(textureSize(uOrtho, 0));\n" +
         "    vec2 ofp = fwidth(vTex) * otsF;\n" +
-        "    if (max(ofp.x, ofp.y) < 1.0) { c = texBicubic(uOrtho, vTex, otsF); }\n" +
+        "    if (max(ofp.x, ofp.y) < 1.0) { c = texBicubic(uOrtho, vTex, otsF).rgb; }\n" + // baza jest kryjąca — bez un-premultiply
         "    if (uSharpen > 0.0) {\n" +
         // 4-tap unsharp mask: crisp up edges that mip/aniso minification softens. Clamped to [0,1].
         // Texel size comes from THIS cell's textureSize (otsF), NOT a global uniform: with per-cell
@@ -2176,6 +2202,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int useDet05ArrLocation = -1;
     private int detailBlendLocation = -1;
     private int detailColorModeLocation = -1;
+    private int toneHarmLoc = -1;               // diagnostyka: 0 = wyłącz SAMĄ harmonizację tonu (de-blue zostaje)
+    private int toneDebugLoc = -1;              // diagnostyka: mapa korekty tonu zamiast koloru
     private int det05ArrRawLocation = -1;       // H3: per-layer colour split (det05 array RAW vs det25/base de-blue)
     private int detailDebugBoundsLocation = -1;
     private int det25EyeXyLocation = -1;
@@ -2487,6 +2515,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // bramkę alfa, żółty=punch-through a=0, magenta=cov>0 bez slice'a, zielony=zdrowe krycie).
     private static readonly bool det1mDebug =
         Environment.GetEnvironmentVariable("MAPATUR_DET1M_DEBUG") == "1";
+
+    // Diagnostyka jasnej linii na granicy pokrycia (2026-07-25): MAPATUR_ORTHO_TONE=0 wyłącza SAM krok (2)
+    // prawa koloru (warunkową harmonizację tonu), zostawiając de-blue — izoluje hipotezę „głęboki mip tonu
+    // zanieczyszczony czernią texeli bez pokrycia ⇒ delta ujemna ⇒ ROZJAŚNIENIE brzegu". MAPATUR_ORTHO_TONE_DEBUG=1
+    // rysuje mapę tej korekty (czerwony = rozjaśnienie, niebieski = przyciemnienie).
+    private static readonly bool toneHarmOff =
+        Environment.GetEnvironmentVariable("MAPATUR_ORTHO_TONE") == "0";
+
+    private static readonly bool toneDebug =
+        Environment.GetEnvironmentVariable("MAPATUR_ORTHO_TONE_DEBUG") == "1";
     private TerrainMesh3D? detailAnchorMesh;
 
     private bool CellVisibleLastFrame(MapaTur.Domain.Geography.MapBounds b)
@@ -3448,6 +3486,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform1(useDet05Location, use05);
         gl.Uniform1(detailBlendLocation, OrthoDetailBlendMeters);
         gl.Uniform1(detailColorModeLocation, OrthoDetailColorMode);
+        gl.Uniform1(toneHarmLoc, toneHarmOff ? 0 : 1);
+        gl.Uniform1(toneDebugLoc, toneDebug ? 1 : 0);
         gl.Uniform1(det05ArrRawLocation, Det05ArrayRawColor ? 1 : 0);
         gl.Uniform1(useDet1mLoc, det1mReady && Det1mEnabled ? 1 : 0); // A/B = wyłącznie ten uniform; dane rezydentne
         gl.Uniform1(det1mDebugLoc, det1mDebug ? 1 : 0);
@@ -9199,6 +9239,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         useDet05ArrLocation = g.GetUniformLocation(program, "uUseDet05Arr");
         detailBlendLocation = g.GetUniformLocation(program, "uDetailBlendMeters");
         detailColorModeLocation = g.GetUniformLocation(program, "uOrthoDetailColorMode");
+        toneHarmLoc = g.GetUniformLocation(program, "uToneHarm");
+        toneDebugLoc = g.GetUniformLocation(program, "uToneDebug");
         det05ArrRawLocation = g.GetUniformLocation(program, "uOrthoDet05ArrRaw");
         det25ArrSamplerLoc = g.GetUniformLocation(program, "uOrthoDet25Arr");
         det25ArrAabbLoc = g.GetUniformLocation(program, "uDet25Aabb[0]");
