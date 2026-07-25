@@ -700,6 +700,52 @@ det05 `.opk` (67 GB, krok 6): przebake'ować PRZED wpięciem PumpPageReads.
 **2 790/2 790 stron CRC OK** (720 czarnych stron spoza pokrycia odrzuconych względem pierwszego bake'u),
 0,56 GB; przyrostowy bieg z `--det1m-out` buduje fragmenty także dla pominiętych grup (dekod bez re-enkodu).
 
+### §9.2 RĄBEK nodata → alfa 0 (2026-07-25 — czarna kropkowana linia wzdłuż granicy PL)
+
+**Przyczyna (zmierzona).** §9.1 gasi alfę tylko na DOKŁADNYM (0,0,0). Stratny WebP zostawia jednak wokół
+kryjącej czerni pierścień pikseli near-black, które dokładnym zerem NIE są — więc przechodzą jako
+KRYJĄCY, czarny „teren" i malują czarną kropkowaną linię wzdłuż całej granicy pokrycia (profil poprzeczny
+na pozie Szpiglasowego: luma spada 120 → **8-9** na JEDNYM wierszu pikseli). Profil rąbka w źródłowych
+kaflach det25 (10 kafli granicznych, pierścienie wokół dokładnej czerni;
+`testdata/maps/audit-ortho-nodata-rim.py width <katalog-warstwy>`):
+
+| odległość od czerni | 1 px | 2 px | 3 px | 4 px | 5 px | 7 px+ |
+|---|---|---|---|---|---|---|
+| mediana luma | 1.0 | 1.3 | 8.0 | 90.8 | 102.3 | ~106 |
+| udział luma<16 | 95,3% | 76,4% | 51,1% | 30,7% | 12,5% | <3% |
+
+Kontrola (teren daleko od nodata, n=982 659 px): mediana **97.7**, udział luma<16 = **0,0%**.
+Uwaga historyczna: nota z §9.1 „realny cień nigdy nie jest dokładnym zerem (~2–15)" jest prawdziwa, ale
+to właśnie ten zakres zajmuje rąbek — dlatego sam próg jasności NIE wystarcza jako kryterium.
+
+**Fix:** `OrthoNodata.ZeroAlphaOnNodataRim(rgba, w, h, maxRimLuma: 16)` — zalew 8-spójny **od dokładnej
+czerni** przez piksele o lumie ≤ 16. Kryterium to SPÓJNOŚĆ, nie próg: głęboki cień w środku zdjęcia nie
+dotyka nodata, więc zostaje. Kanały koloru nietknięte. Wpięte we WSZYSTKIE 4 ścieżki dekodu (bake
+`DecodeWebp` + 3 lambdy runtime compose det25/det05/deshadow-preview). TDD:
+`tests/MapaTur.Application.Tests/Terrain/OrthoNodataRimTests.cs` (7 testów: rąbek gaszony, cień
+nieprzylegający zachowany, jasny teren zatrzymuje propagację, przekątna, kolor nietknięty, no-op bez nodata).
+
+**Audyt bezpieczeństwa reguły** (`audit-ortho-nodata-rim.py safety`, próbka 600 kafli det25): 579 kafli nie ma ANI
+JEDNEGO czarnego piksela ⇒ reguła jest **no-op na 96,5% zbioru**; 21 kafli granicznych; tylko 1 kafel ma
+śladową czerń (<0,5%). Rąbek dogaszony: średnio **+1,19 pkt proc.** pokrycia kafla (max 4,70%), luma rąbka:
+mediana 1.0, maksimum 16.0.
+
+**Zakres rebake'u — WYŁĄCZNIE det25 + det1m.** det05 (5 cm) NIE zawiera nodata: audyt 400 kafli z 343 077
+(`audit-ortho-nodata-rim.py scan`) dał **0 kafli z czernią** (warstwa pokrywa wnętrze masywu, nie sięga granicy PL). det1m powstaje z tego
+samego źródła co det25 (4× downsample grup), więc jeden bieg naprawia obie warstwy:
+
+```
+dotnet run --project src/MapaTur.OrthoBake -c Release -- --layer det25 \
+  --src "<AppData>/…/tatry/det25" --out "<AppData>/…/tatry/opk/det25-rim" \
+  --det1m-out "<AppData>/…/tatry/opk/det1m-rim"
+dotnet run --project src/MapaTur.OrthoBake -c Release -- --out "…/opk/det25-rim" --verify-full
+```
+`--verify-full` to tryb OSOBNY (weryfikuje istniejące wyjście) — nie flaga bake'u.
+
+**BEZ bumpu wersji formatu.** `OrthoPagePack.Version` zostaje 4: bump unieważniłby także 45 GB pakietów
+det05, które nie mają czego naprawiać. Zamiast tego bake idzie do NOWYCH katalogów, po `--verify-full`
+następuje podmiana, a stare zostają jako `*-prerim` (rollback).
+
 ## §10. Pełny prebake v2 (DXT1a z alfą) — WSZYSTKIE warstwy (2026-07-23 wieczór, ZMIERZONE)
 
 Po regresji „czarnych dziur" (BC1-RGB gubił alfę bramkującą pokrycie) format v2 = DXT1a punch-through

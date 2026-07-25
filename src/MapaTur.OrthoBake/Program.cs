@@ -132,7 +132,10 @@ byte[]? DecodeWebp(string path)
         : bmp.Copy(SKColorType.Rgba8888)!;
     byte[] dst = new byte[TilePx * TilePx * 4];
     System.Runtime.InteropServices.Marshal.Copy(rgba.GetPixels(), dst, 0, dst.Length);
-    OrthoNodata.ZeroAlphaOnBlack(dst); // nodata GUGiK (kryjąca czerń na granicy PL) → punch-through
+    // Nodata GUGiK (kryjąca czerń poza granicą PL) → punch-through, RAZEM z rąbkiem near-black, który
+    // zostawia po sobie stratny WebP (~3 px, luma 1-8; bez tego kryjąca czerń rąbka malowała czarną
+    // kropkowaną linię wzdłuż całej granicy — zmierzone 2026-07-25).
+    OrthoNodata.ZeroAlphaOnNodataRim(dst, TilePx, TilePx);
     return dst;
 }
 

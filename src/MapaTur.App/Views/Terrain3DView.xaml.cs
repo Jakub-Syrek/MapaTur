@@ -8756,7 +8756,7 @@ public partial class Terrain3DView : ContentView
                     return null;
                 }
 
-                MapaTur.Application.Terrain.OrthoNodata.ZeroAlphaOnBlack(t.Rgba); // nodata GUGiK → punch-through
+                MapaTur.Application.Terrain.OrthoNodata.ZeroAlphaOnNodataRim(t.Rgba, 512, 512); // nodata GUGiK + rąbek near-black WebP → punch-through
                 return t.Rgba;
             },
             // 2 GB desktop / 384 MB phone (2026-07-20): det25 cell = 64 decoded 512² tiles ≈ 64 MB; 2 GB holds
@@ -8868,7 +8868,7 @@ public partial class Terrain3DView : ContentView
                                 "[OrthoDetail05] deshadow-preview served: {Hits} from det05-deshadow, {Fallback} fallback det05",
                                 served, dsFallback);
                         }
-                        MapaTur.Application.Terrain.OrthoNodata.ZeroAlphaOnBlack(td.Rgba); // nodata GUGiK → punch-through
+                        MapaTur.Application.Terrain.OrthoNodata.ZeroAlphaOnNodataRim(td.Rgba, 512, 512); // nodata GUGiK + rąbek near-black WebP → punch-through
                         return td.Rgba;
                     }
                 }
@@ -8880,7 +8880,7 @@ public partial class Terrain3DView : ContentView
                     return null;
                 }
 
-                MapaTur.Application.Terrain.OrthoNodata.ZeroAlphaOnBlack(t.Rgba); // nodata GUGiK → punch-through
+                MapaTur.Application.Terrain.OrthoNodata.ZeroAlphaOnNodataRim(t.Rgba, 512, 512); // nodata GUGiK + rąbek near-black WebP → punch-through
                 return t.Rgba;
             },
             // 16 GB desktop (2026-07-20, "mając 64 GB RAM"): a det05 cell = 256 decoded 512² tiles ≈ 268 MB;
@@ -9036,6 +9036,9 @@ public partial class Terrain3DView : ContentView
                     if (DecodeOrtho(p) is { } t)
                     {
                         System.Threading.Interlocked.Increment(ref decoded);
+                        // Ta ścieżka (PoC slice) jest poza produkcją i do skasowania w kroku 8, ale nodata
+                        // gasimy i tu — inwariant „WSZYSTKIE ścieżki dekodu detalu" nie może mieć wyjątków.
+                        MapaTur.Application.Terrain.OrthoNodata.ZeroAlphaOnNodataRim(t.Rgba, t.Width, t.Height);
                         return t.Rgba;
                     }
 
