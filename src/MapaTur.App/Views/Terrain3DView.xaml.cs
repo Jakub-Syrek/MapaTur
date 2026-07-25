@@ -8783,6 +8783,14 @@ public partial class Terrain3DView : ContentView
     // Wire the det05 (5 cm) SECOND streamed level on unit 11, coverage-gated: a tile decode cache over the det05
     // pyramid, the composer, and the covered-cell set (_coverage.txt = cells with ≥95% source, so 5 cm only
     // streams where the tiles exist — the 07-14 map showed 5 cm is a partial strip). Behind MAPATUR_DET05_STREAM=1.
+    /// <summary>Skok kraty cel det05 w kaflach. 16 = CELE ROZŁĄCZNE (pitch = coverage): cela wnosi 409,6² m²
+    /// zamiast 153,6², czyli 7,1× więcej terenu z TEJ SAMEJ pamięci (192 cele = 32 km², promień ~3,2 km
+    /// zamiast ~1,2 km). Nakładka 2,7× była wymogiem wyboru celi PER DRAW (CellContains — kafel terenu nie
+    /// mógł przechodzić przez granicę celi); wybór jest PER FRAGMENT od 2026-07-20, więc wymóg jest martwy.
+    /// KAŻDA zmiana tej wartości WYMAGA wygenerowania listy pokrycia dla nowej kraty
+    /// (testdata/maps/build-det05-coverage.py --pitch N), inaczej warstwa 5 cm znika w całości.</summary>
+    private const int Det05PitchTiles = 16;
+
     private bool SetupDet05Streaming(Services.Terrain3DGlRenderer renderer, IReadOnlyList<string>? basePaths)
     {
         string? demDir = basePaths is { Count: > 0 } ? System.IO.Path.GetDirectoryName(basePaths[0]) : null;
@@ -8805,7 +8813,16 @@ public partial class Terrain3DView : ContentView
 
         string dir = tilesDir;
         var coveredKeys = new HashSet<int>();
-        string covFile = System.IO.Path.Combine(dir, "_coverage.txt");
+        // ★ KLUCZE POKRYCIA ZALEŻĄ OD SKOKU KRATY (klucz = ci*100000+cj). Zmiana pitchTiles unieważnia CAŁY
+        // plik — każda cela wypada jako „bez pokrycia", planer żąda ZERA cel i warstwa 5 cm ZNIKA (dwa
+        // nieudane podejścia 2026-07-25, objaw: `[Mem] det05 0 cells | desired 0`). Dlatego plik jest wybierany
+        // po skoku: `_coverage_p{pitch}.txt`, a `_coverage.txt` (krata pitch 6) zostaje jako zgodność wstecz.
+        // Generator: testdata/maps/build-det05-coverage.py <katalog-det05> --pitch N.
+        string covFile = System.IO.Path.Combine(dir, $"_coverage_p{Det05PitchTiles}.txt");
+        if (!System.IO.File.Exists(covFile))
+        {
+            covFile = System.IO.Path.Combine(dir, "_coverage.txt");
+        }
         if (System.IO.File.Exists(covFile))
         {
             foreach (string line in System.IO.File.ReadLines(covFile))
@@ -8824,7 +8841,8 @@ public partial class Terrain3DView : ContentView
             return false;
         }
 
-        var grid = new MapaTur.Application.Terrain.OrthoDetailGrid(resMeters: 0.05, coverageTiles: 16, pitchTiles: 6);
+        var grid = new MapaTur.Application.Terrain.OrthoDetailGrid(
+            resMeters: 0.05, coverageTiles: 16, pitchTiles: Det05PitchTiles);
         // DESHADOW PREVIEW (env-gated, 2026-07-21): with MAPATUR_DET05_DESHADOW_PREVIEW=1, serve the corrected
         // tile from a sibling deshadow dir when it exists, else fall back to the original det05 tile.
         //   MAPATUR_DET05_DESHADOW_DIR selects the override dir (default "det05-deshadow" = Rysy PoC rollback;

@@ -114,9 +114,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // slice B the rest; the fragment picks the slice from its slot index (best < 8).
         "uniform mediump sampler2DArray uOrthoDet05Arr;\n" +
         "uniform mediump sampler2DArray uOrthoDet05ArrB;\n" +
-        "uniform vec4 uDet05Aabb[96];\n" + // slots = Det05HardCapCells (96 desktop BC1)
-        "uniform float uDet05Alpha[96];\n" + // per-slot fade-in after promote (0→1 over ~300 ms) — no popping
-        "uniform int uDet05ArrA;\n" +      // liczba warstw slice'a A (BC1: 16, RGBA-fallback: 8) — mapping slot→(array, warstwa)
+        "uniform vec4 uDet05Aabb[192];\n" + // slots = Det05HardCapCells (192 desktop BC1 = 3 tablice × 64)
+        "uniform float uDet05Alpha[192];\n" + // per-slot fade-in after promote (0→1 over ~300 ms) — no popping
+        "uniform mediump sampler2DArray uOrthoDet05ArrC;\n" + // trzecia tablica (unit 7) — 3×64 = 192 cele
+        "uniform int uDet05ArrLayers;\n" + // warstw NA TABLICĘ; slot→(tablica, warstwa) = (slot/L, slot%L)
         "uniform int uUseDet05Arr;\n" +
         "uniform float uDetailBlendMeters;\n" + // soft edge fade of the detail AABB back to the base ortho
         "uniform int uOrthoDetailColorMode;\n" + // 0 = raw detail, 1 = base de-blue transform (R3 slice A/B)
@@ -133,8 +134,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform highp sampler2D uOrthoDet1mCov;\n" +
         // det25 ARRAY (krok 4): per-fragment wybór celi jak det05 — koniec patchworku per-tile bind.
         "uniform highp sampler2DArray uOrthoDet25Arr;\n" +
-        "uniform vec4 uDet25Aabb[32];\n" +
-        "uniform float uDet25AlphaArr[32];\n" +
+        "uniform vec4 uDet25Aabb[128];\n" +
+        "uniform float uDet25AlphaArr[128];\n" +
         "uniform int uUseDet25Arr;\n" +
         "uniform int uUseDet1m;\n" +
         "uniform vec2 uDet1mMinXmaxY;\n" +   // (minX świata, maxY świata) — v rośnie na południe jak wiersze tekstury
@@ -346,7 +347,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  if (uUseDet05Arr != 1) return baseC;\n" +
         "  vec2 wdx = dFdx(wxy), wdy = dFdy(wxy);\n" + // gradienty świata PRZED wyborem celi — patrz applyOrthoDet25Arr
         "  int best = -1; float bestEdge = 0.0;\n" +
-        "  for (int i = 0; i < 96; i++) {\n" +
+        "  for (int i = 0; i < 192; i++) {\n" +
         "    vec2 mn = uDet05Aabb[i].xy; vec2 mx = uDet05Aabb[i].zw;\n" +
         "    if (mx.x <= mn.x) continue;\n" +
         "    vec2 cd = min(wxy - mn, mx - wxy);\n" +
@@ -358,19 +359,28 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  vec2 sp = mx - mn;\n" +
         "  vec2 uv = vec2((wxy.x - mn.x) / sp.x, (mx.y - wxy.y) / sp.y);\n" +
         "  vec2 ts = vec2(textureSize(uOrthoDet05Arr, 0).xy);\n" +
-        "  bool inA = best < uDet05ArrA;\n" + // slot index → slice (A: 0..uDet05ArrA-1, B: reszta)
-        "  float lz = inA ? float(best) : float(best - uDet05ArrA);\n" +
+        // slot → (tablica, warstwa): trzy równe tablice po uDet05ArrLayers warstw (3×64 = 192 cele).
+        // Trzecia istnieje, bo JEDNA tekstura nie może przekroczyć 4 GiB (32-bitowe pole rozmiaru —
+        // to był sufit „białych dziur" z 07-20), a 192 cele to 8 GiB; unit 7 był jedynym wolnym.
+        "  int ai = best / uDet05ArrLayers;\n" +
+        "  float lz = float(best - (ai * uDet05ArrLayers));\n" +
         "  vec2 gx = vec2(wdx.x / sp.x, -wdx.y / sp.y);\n" +
         "  vec2 gy = vec2(wdy.x / sp.x, -wdy.y / sp.y);\n" +
-        "  vec4 dcs = inA ? textureGrad(uOrthoDet05Arr, vec3(uv, lz), gx, gy) : textureGrad(uOrthoDet05ArrB, vec3(uv, lz), gx, gy);\n" +
+        "  vec4 dcs = ai == 0 ? textureGrad(uOrthoDet05Arr, vec3(uv, lz), gx, gy)\n" +
+        "           : (ai == 1 ? textureGrad(uOrthoDet05ArrB, vec3(uv, lz), gx, gy)\n" +
+        "                      : textureGrad(uOrthoDet05ArrC, vec3(uv, lz), gx, gy));\n" +
         "  vec3 dc = unpremulPunch(dcs);\n" + // czerń przezroczystych texeli NIE może rozcieńczać koloru przy granicy pokrycia
         "  vec2 fp = (abs(gx) + abs(gy)) * ts;\n" + // fwidth z gradów świata (fwidth(uv) na linii przełączenia cel = śmieci)
 
-        "  if (max(fp.x, fp.y) < 1.0) { dc = unpremulPunch(inA ? texBicubicArr(uOrthoDet05Arr, uv, lz, ts) : texBicubicArr(uOrthoDet05ArrB, uv, lz, ts)); }\n" +
+        "  if (max(fp.x, fp.y) < 1.0) { dc = unpremulPunch(ai == 0 ? texBicubicArr(uOrthoDet05Arr, uv, lz, ts)\n" +
+        "                                        : (ai == 1 ? texBicubicArr(uOrthoDet05ArrB, uv, lz, ts)\n" +
+        "                                                   : texBicubicArr(uOrthoDet05ArrC, uv, lz, ts))); }\n" +
         "  if (uOrthoDetailColorMode == 1 && uOrthoDet05ArrRaw == 0) {\n" + // H3: V2-baked cells render RAW while det25/base keep de-blue
         "    dc = deblueShadow(dc);\n" +                                   // (1) HARD RULE: absolute blue-cast removal
         "    float toneLod = max(0.0, log2(max(ts.x / (mx.x - mn.x), ts.y / (mx.y - mn.y)))) + 3.0;\n" + // ~8 m/texel: mikrocienie skał to nie szew ekspozycji (kontrast! 07-24)
-        "    vec4 tRaw = inA ? textureLod(uOrthoDet05Arr, vec3(uv, lz), toneLod) : textureLod(uOrthoDet05ArrB, vec3(uv, lz), toneLod);\n" +
+        "    vec4 tRaw = ai == 0 ? textureLod(uOrthoDet05Arr, vec3(uv, lz), toneLod)\n" +
+        "              : (ai == 1 ? textureLod(uOrthoDet05ArrB, vec3(uv, lz), toneLod)\n" +
+        "                         : textureLod(uOrthoDet05ArrC, vec3(uv, lz), toneLod));\n" +
         "    float toneA = tRaw.a; vec3 dRaw = unpremulPunch(tRaw);\n" + // ton z POKRYTYCH texeli, nie z czerni brzegu
         "    vec3 delta = deblueShadow(dRaw) - deblueShadow(baseC);\n" +   // (2) both de-blued → delta = pure exposure seam (never re-adds blue)
         "    float mism = smoothstep(0.16, 0.35, max(abs(delta.r), max(abs(delta.g), abs(delta.b)))) * float(uToneHarm) * smoothstep(0.02, 0.12, toneA);\n" + // próg w górę: kontrast był wypłukiwany (luma std 39.5→24.7, zmierzone 07-24); uToneHarm=0 → diagnostyczne wyłączenie SAMEJ harmonizacji (de-blue zostaje)
@@ -379,7 +389,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "      dc = vec3(clamp(corr * 3.0, 0.0, 1.0), 0.12, clamp(-corr * 3.0, 0.0, 1.0)); }\n" +
         "  }\n" +
         "  vec2 cd = min(wxy - mn, mx - wxy);\n" +
-        "  float w = clamp(min(cd.x, cd.y) / max(blendM, 0.001), 0.0, 1.0) * dcs.a * uDet05Alpha[best];\n" +
+        // Cele det05 są ROZŁĄCZNE — fade po odległości od AABB robiłby SIATKĘ szwów (na wspólnej krawędzi
+        // min(cd)=0 ⇒ w=0 ⇒ baza przebija wzdłuż każdej granicy celi). Krycie daje alfa danych + fade promocji.
+        "  float w = dcs.a * uDet05Alpha[best];\n" +
         "  vec3 outc = mix(baseC, dc, w);\n" +
         "  if (uOrthoDetailDebugBounds == 1) {\n" +
         "    float edge = min(cd.x, cd.y);\n" +
@@ -407,7 +419,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // (dekod chainów, edge-step, porównanie nakładek) wykluczyły bake/assembler.
         "  vec2 wdx = dFdx(wxy), wdy = dFdy(wxy);\n" +
         "  int best = -1; float bestD = 1e30;\n" +
-        "  for (int i = 0; i < 32; i++) {\n" +
+        "  for (int i = 0; i < 128; i++) {\n" +
         "    vec4 bb = uDet25Aabb[i];\n" +
         "    if (wxy.x < bb.x || wxy.y < bb.y || wxy.x > bb.z || wxy.y > bb.w) { continue; }\n" +
         "    vec2 cen = 0.5 * (bb.xy + bb.zw); float d = dot(wxy - cen, wxy - cen);\n" +
@@ -2195,8 +2207,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int det05MinXyLocation = -1;
     private int det05MaxXyLocation = -1;
     private int det05ArrSamplerLocation = -1;   // sampler2DArray slice A on unit 12 (layers 0..7)
-    private int det05ArrBSamplerLocation = -1;  // sampler2DArray slice B on unit 13 (layers det05LayersA..)
-    private int det05ArrALoc = -1;              // uDet05ArrA — liczba warstw slice'a A (mapping slot→array w shaderze)
+    private int det05ArrBSamplerLocation = -1;  // sampler2DArray slice B on unit 13
+    private int det05ArrCSamplerLocation = -1;  // sampler2DArray slice C on unit 7 (trzecia tablica — 192 cele)
+    private int det05ArrALoc = -1;              // uDet05ArrLayers — warstw NA TABLICĘ (mapping slot→(tablica, warstwa))
     private int det05ArrAabbLocation = -1;      // vec4[16] per-LAYER world AABBs
     private int det05ArrAlphaLocation = -1;     // float[16] per-slot promote fade-in
     private int useDet05ArrLocation = -1;
@@ -2275,7 +2288,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // panorama (1–5 km) fell to the ~2–4 m/px base. 25 cm at 2 km already out-resolves the screen, so the whole
     // frame reads "sharp" when det25 covers it: det25 12 → 28 cells / 1.5 → 5 km (2.5 GB), det05 back to 12
     // (4.3 GB) — together with the ~2.8 GB base inside the 9.6 GB hardware-derived ledger.
-    private static readonly int Det25HardCapCells = OperatingSystem.IsWindows() ? 32 : 8; // sloty arraya = 32; 64 wymaga O(1) wyboru celi (petla 64+96 AABB = terrain 18.7 ms)
+    private static readonly int Det25HardCapCells = OperatingSystem.IsWindows() ? 128 : 8; // = Det25ArrLayers; 128 cel × 768 m ⇒ ~4,9 km średniego dystansu
     private static readonly double Det25RingRadiusMeters = OperatingSystem.IsWindows() ? 5000.0 : 1500.0;
     private const double Det25FastMotionSpeedMps = 25.0; // above this the ring is suppressed (dragon flight)
     private const double Det25PrefetchLeadMeters = 400.0;
@@ -2313,7 +2326,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // 96 do 48, bo zmierzył terrain 18,7 ms / 31 ms sumGpu (~32 FPS) — mimo że user właśnie oglądał stan 96
     // i był dla niego dobry. To był konflikt „obraz vs płynność", którego zasada 3 NIE pozwala rozstrzygać
     // agentowi. NIE OBNIŻAĆ bez werdyktu usera. Docelowo koszt znika po O(1) wyborze celi (krata→slot).
-    private static readonly int Det05HardCapCells = OperatingSystem.IsWindows() ? 96 : 3;
+    private static readonly int Det05HardCapCells = OperatingSystem.IsWindows() ? 192 : 3;
 
     // BC1 GPU-cell pipeline (2026-07-23, ZASADY 11/13): cells are encoded to BC1+mips OFF-THREAD (once — the
     // disk cache serves every revisit in ~15 ms) and uploaded compressed. 1/8 the bytes end-to-end: a det05
@@ -2439,11 +2452,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// the 32-bit (~4.29 GB) per-resource ceiling. Must match the shader's slice constant (best &lt; 8).</summary>
     // BC1: 24 warstwy 8192² z mipami ≈ 1,07 GB/array — daleko od sufitu ~4,29 GB/resource. RGBA-fallback
     // (bez s3tc) zostaje przy 8 (24×357 MB przebiłoby sufit) — patrz EnsureDet05Array.
-    private const int Det05ArraySliceLayers = 48; // 48 warstw 8192² BC1+mipy ≈ 2,14 GB/array — pod sufitem ~4,29 GB/resource
+    // 64 warstwy 8192² BC1+mipy = 2,73 GiB na tablicę — bezpiecznie pod TWARDYM sufitem 4 GiB na JEDNĄ
+    // teksturę (32-bitowe pole rozmiaru; 96 warstw = dokładnie 4 GiB = przepełnienie → „białe dziury" 07-20).
+    // TRZY takie tablice = 192 cele = 8,0 GiB. Liczba ustalona z userem 2026-07-25 — nie zmieniać bez pytania.
+    private const int Det05ArraySliceLayers = 64;
     private int det05LayersA; // faktyczne warstwy slice'a A po alokacji (mapping slot→(array, warstwa) + uniform uDet05ArrA)
     // H2 (2026-07-23): 600 → 800 m with the 16-cell cap — 16 cells of ~410 m span tile an 800 m ring, so the
     // 5 cm reflector reaches the far side of a cirque like Morskie Oko instead of stopping mid-lake.
-    private static readonly double Det05RingRadiusMeters = OperatingSystem.IsWindows() ? 2000.0 : 350.0;
+    // 2000 → 3200 m: przy CELACH ROZŁĄCZNYCH promień 2 km wysycał się już na 84 celach (3,6 GB), więc to
+    // pierścień, a nie pamięć, był ogranicznikiem. 3,2 km ⇒ ~192 cele = pełny budżet 8 GB.
+    private static readonly double Det05RingRadiusMeters = OperatingSystem.IsWindows() ? 3200.0 : 350.0;
     private static readonly int Det05CoarseBackingCells = OperatingSystem.IsWindows() ? 6 : 4; // det25 cells reserved to back the det05 ring (no-hole)
 
     // det05 cell TEXTURE ARRAYS (units 12 + 13): allocated lazily on first upload (TexStorage3D, error-
@@ -2451,7 +2469,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // layer index L maps to slice A (L < Det05ArraySliceLayers) or slice B (L − slice). Shader slot list
     // is fixed at 16; smaller caps simply leave the rest as sentinels.
     private uint det05ArrayTexture;             // slice A (layers 0..7)
-    private uint det05ArrayTextureB;            // slice B (layers 8..15); 0 when the cap fits slice A
+    private uint det05ArrayTextureB;            // slice B; 0 when the cap fits slice A
+    private uint det05ArrayTextureC;            // slice C (unit 7); 0 gdy cap mieści się w A+B
     private readonly Stack<int> det05FreeLayers = new();
     private long det05ArrayUniformsTick = -1;   // per-frame guard for the AABB uniform upload
 
@@ -2808,8 +2827,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // H2 (2026-07-23, KONTRAKT-ORTO "budżety z hardware'u raz na starcie"): the desktop budget now DERIVES
     // from the card's dedicated VRAM (60 %, clamped 4–12 GB) instead of a flat const — a 16 GB card gets
     // ~9.5 GB, an 8 GB card degrades to 4.8 GB instead of overcommitting. Phone path unchanged.
+    // ★★ BUDŻET PODNIESIONY NA POLECENIE USERA (2026-07-25) — NIE ZMIENIAĆ BEZ PYTANIA (zasada 19).
+    // 0,60 → 0,78 i sufit 12 → 14 GiB. Powód: 192 cele det05 to 8,0 GiB, plus baza ~2,8 + det25 ~0,35
+    // + det1m 0,58 = ~11,7 GiB. Stary clamp dawał 9,6 GiB i CICHO dusił cap — user miał 16 GB VRAM stojące
+    // odłogiem i pół jeziora w 5 cm. Ta stała ma historię cichych zmian (07-20 flat 9 GB → 07-23 60% VRAM
+    // → dziś); każda kolejna wymaga pytania.
     private static readonly long OrthoVramBudgetBytes = OperatingSystem.IsWindows()
-        ? Math.Clamp((long)(QueryDedicatedVramBytes() * 0.60), 4L << 30, 12L << 30)
+        ? Math.Clamp((long)(QueryDedicatedVramBytes() * 0.78), 4L << 30, 14L << 30)
         : 3L * 1024 * 1024 * 1024;
 
     // Dedicated VRAM from the display-class registry (HardwareInformation.qwMemorySize — the only reliable
@@ -3862,6 +3886,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         int perArray = det05Bc1On ? Det05ArraySliceLayers : 8; // RGBA: 8×357 MB ≈ 2,86 GB — tuż pod sufitem/resource
         int layersA = Math.Min(wanted, perArray);
         int layersB = Math.Min(Math.Max(0, wanted - layersA), perArray);
+        int layersC = Math.Min(Math.Max(0, wanted - layersA - layersB), perArray);
 
         while (gl.GetError() != GLEnum.NoError) { } // drain stale errors so the checks below test OUR calls
 
@@ -3871,17 +3896,28 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             return; // loud log inside; next frame retries — det25/base carry the view meanwhile
         }
 
+        // WARSTWY MUSZĄ BYĆ RÓWNE we wszystkich tablicach: shader mapuje slot→(tablica, warstwa) jako
+        // (slot/L, slot%L). Jeśli któraś tablica się nie zaalokuje, ucinamy pulę do wielokrotności L,
+        // zamiast dopuścić rozjazd mapowania (cichy sampling nie tej celi).
         int allocated = layersA;
         if (layersB > 0)
         {
             det05ArrayTextureB = AllocateDet05Slice(gl, px, layersB, "B");
-            if (det05ArrayTextureB != 0)
+            if (det05ArrayTextureB != 0 && layersB == layersA)
             {
                 allocated += layersB;
+                if (layersC > 0)
+                {
+                    det05ArrayTextureC = AllocateDet05Slice(gl, px, layersC, "C");
+                    if (det05ArrayTextureC != 0 && layersC == layersA)
+                    {
+                        allocated += layersC;
+                    }
+                }
             }
         }
 
-        det05LayersA = layersA; // mapping slot→(array, warstwa) i uniform uDet05ArrA (bind raz na klatkę)
+        det05LayersA = layersA; // warstw NA TABLICĘ → uniform uDet05ArrLayers (bind raz na klatkę)
         det05FreeLayers.Clear();
         for (int i = allocated - 1; i >= 0; i--)
         {
@@ -3889,8 +3925,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         Log.Information(
-            "[Det05] cell ARRAYS allocated: {Px}px, slice A {A} + slice B {B} layers ({GB:F1} GB with mips, {Fmt}), glGetError clean — per-fragment cell pick",
-            px, layersA, det05ArrayTextureB != 0 ? layersB : 0,
+            "[Det05] cell ARRAYS allocated: {Px}px, {N} warstw/tablicę × {Arrays} tablice = {Alloc} cel ({GB:F1} GB with mips, {Fmt}), glGetError clean — per-fragment cell pick",
+            px, layersA, allocated / Math.Max(1, layersA), allocated,
             allocated * (det05Bc1On
                 ? (double)MapaTur.Application.Terrain.GpuCellCache.ChainSize(px)
                 : OrthoVramBudget.CellResidentBytes(px, px)) / (1024.0 * 1024.0 * 1024.0),
@@ -4104,7 +4140,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // fallback RGBA zostaje na starym per-tile bindzie.
     private uint det25ArrayTexture;
     private readonly Stack<int> det25ArrFreeLayers = new();
-    private const int Det25ArrLayers = 32;
+    // 128 warstw 4096² BC1+mipy = 1,43 GiB — 8× taniej niż cela det05, a to WŁAŚNIE ta warstwa ma trzymać
+    // średni dystans. Przy 32 celach det25 sięgał ~2,4 km i między nim a horyzontem została goła baza
+    // („ostro blisko, ostro daleko, breja pomiędzy" — user 2026-07-25). 128 cel = ~4,9 km.
+    private const int Det25ArrLayers = 128;
     private int det25ArrSamplerLoc = -1, det25ArrAabbLoc = -1, det25ArrAlphaLoc = -1, useDet25ArrLoc = -1;
     private long det25ArrUniformsTick = -1;
 
@@ -4118,8 +4157,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         det25ArrUniformsTick = det25FrameTick;
-        Span<float> aabb = stackalloc float[32 * 4];
-        Span<float> alpha = stackalloc float[32];
+        Span<float> aabb = stackalloc float[Det25ArrLayers * 4];
+        Span<float> alpha = stackalloc float[Det25ArrLayers];
         alpha.Clear();
         for (int i = 0; i < aabb.Length; i += 4)
         {
@@ -4152,8 +4191,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.BindTexture(TextureTarget.Texture2DArray, det25ArrayTexture);
             gl.ActiveTexture(TextureUnit.Texture0);
             gl.Uniform1(det25ArrSamplerLoc, 10);
-            fixed (float* p = aabb) { gl.Uniform4(det25ArrAabbLoc, 32, p); }
-            fixed (float* p = alpha) { gl.Uniform1(det25ArrAlphaLoc, 32, p); }
+            // Licznik z ROZMIARU bufora, nie na sztywno — to był błąd bliźniaczy do det05 (sloty ≥ N
+            // nie dostawały AABB, więc podnoszenie capa było pozorne).
+            fixed (float* p = aabb) { gl.Uniform4(det25ArrAabbLoc, (uint)(aabb.Length / 4), p); }
+            fixed (float* p = alpha) { gl.Uniform1(det25ArrAlphaLoc, (uint)alpha.Length, p); }
             gl.Uniform1(useDet25ArrLoc, 1);
         }
         else
@@ -4528,7 +4569,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         double start = frameClock.ElapsedMilliseconds;
         uint bound = 0;
-        bool promotedA = false, promotedB = false;
+        bool promotedA = false, promotedB = false, promotedC = false;
         while (det05UploadQueue.Count > 0)
         {
             int key = det05UploadQueue[0];
@@ -4555,10 +4596,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 cell.UploadLevel = 0;
             }
 
-            // Global layer → slice + local z (slice A carries layers 0..det05LayersA-1, B the rest).
-            bool inA = cell.Layer < det05LayersA;
-            uint target = inA ? det05ArrayTexture : det05ArrayTextureB;
-            int z = inA ? cell.Layer : cell.Layer - det05LayersA;
+            // Global layer → (tablica, warstwa lokalna): TA SAMA arytmetyka co w shaderze (slot/L, slot%L).
+            int ai = cell.Layer / Math.Max(1, det05LayersA);
+            uint target = ai == 0 ? det05ArrayTexture : (ai == 1 ? det05ArrayTextureB : det05ArrayTextureC);
+            int z = cell.Layer - (ai * Math.Max(1, det05LayersA));
             if (target == 0)
             {
                 det05UploadQueue.RemoveAt(0); // slice B refused by the driver — cell waits for an A slot
@@ -4674,7 +4715,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 cell.PromoteMs = frameClock.ElapsedMilliseconds;
                 if (bc1 is null && mips is null)
                 {
-                    if (inA) { promotedA = true; } else { promotedB = true; } // no chain → slice-wide fallback below
+                    // no chain → slice-wide fallback below (per TABLICA, nie per cela)
+                    if (ai == 0) { promotedA = true; } else if (ai == 1) { promotedB = true; } else { promotedC = true; }
                 }
 
                 // Per-cell resident-bytes ledger: BC1 cells cost 1/8 of RGBA — record what THIS cell added so
@@ -4689,7 +4731,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 Log.Information(
                     "[Det05] cell ({Ci},{Cj}) {Src} {C:F0}ms | layer {Layer} ({Slice}) resident ({Levels} levels, {Fmt})",
                     cell.Ci, cell.Cj, cell.FromOpk ? "opk-read" : cell.FromCache ? "compose [CACHE-HIT]" : "compose",
-                    cell.ComposeMs, cell.Layer, inA ? "A" : "B", totalLevels, bc1 is not null ? "BC1" : "RGBA");
+                    cell.ComposeMs, cell.Layer, ai == 0 ? "A" : ai == 1 ? "B" : "C", totalLevels, bc1 is not null ? "BC1" : "RGBA");
             }
 
             if (frameClock.ElapsedMilliseconds - start >= OrthoUploadBudgetMsPerFrame)
@@ -4700,7 +4742,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         // FALLBACK ONLY (cells promoted without a worker-built chain — should not happen in practice): the old
         // slice-wide GenerateMipmap, kept so such a layer never samples garbage mips. Logged loudly.
-        if (promotedA || promotedB)
+        if (promotedA || promotedB || promotedC)
         {
             double t0 = frameClock.ElapsedMilliseconds;
             if (promotedA)
@@ -4712,6 +4754,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             if (promotedB && det05ArrayTextureB != 0)
             {
                 gl.BindTexture(TextureTarget.Texture2DArray, det05ArrayTextureB);
+                gl.GenerateMipmap(TextureTarget.Texture2DArray);
+            }
+
+            if (promotedC && det05ArrayTextureC != 0)
+            {
+                gl.BindTexture(TextureTarget.Texture2DArray, det05ArrayTextureC);
                 gl.GenerateMipmap(TextureTarget.Texture2DArray);
             }
 
@@ -4744,8 +4792,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         det05ArrayUniformsTick = det25FrameTick;
-        Span<float> aabb = stackalloc float[48 * 4];
-        Span<float> alpha = stackalloc float[48];
+        // ★ BŁĄD ZNALEZIONY 2026-07-25: bufory i licznik uploadu były na sztywno 48, mimo że cap podnoszono
+        // do 96 — sloty ≥48 NIGDY nie dostawały AABB, więc cele siedziały w VRAM i BYŁY NIEWIDOCZNE.
+        // Rozmiar musi wynikać z capa, inaczej każde podniesienie capa jest pozorne.
+        int slots = Math.Max(1, Det05HardCapCells);
+        Span<float> aabb = stackalloc float[Det05HardCapCells * 4];
+        Span<float> alpha = stackalloc float[Det05HardCapCells];
         alpha.Clear(); // stackalloc zero-init is not contractual — empty slots must read alpha 0
         for (int i = 0; i < aabb.Length; i += 4)
         {
@@ -4777,21 +4829,24 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.ActiveTexture(TextureUnit.Texture12);
             gl.BindTexture(TextureTarget.Texture2DArray, det05ArrayTexture);
             gl.ActiveTexture(TextureUnit.Texture13);
-            // Slice B on 13; when the driver refused B (or the cap fits A) alias A there — the branch is
-            // never taken for layers < 8, and an aliased bind keeps the sampler complete on every driver.
+            // Tablice B i C aliasują A, gdy sterownik ich odmówił — sampler musi być kompletny na każdym
+            // sterowniku, a gałąź i tak nie zostanie wzięta (mapowanie ucina pulę do zaalokowanych tablic).
             gl.BindTexture(TextureTarget.Texture2DArray, det05ArrayTextureB != 0 ? det05ArrayTextureB : det05ArrayTexture);
+            gl.ActiveTexture(TextureUnit.Texture7);
+            gl.BindTexture(TextureTarget.Texture2DArray, det05ArrayTextureC != 0 ? det05ArrayTextureC : det05ArrayTexture);
             gl.ActiveTexture(TextureUnit.Texture0);
             gl.Uniform1(det05ArrSamplerLocation, 12);
             gl.Uniform1(det05ArrBSamplerLocation, 13);
+            gl.Uniform1(det05ArrCSamplerLocation, 7);
             gl.Uniform1(det05ArrALoc, det05LayersA);
             fixed (float* p = aabb)
             {
-                gl.Uniform4(det05ArrAabbLocation, 48, p);
+                gl.Uniform4(det05ArrAabbLocation, (uint)slots, p);
             }
 
             fixed (float* p = alpha)
             {
-                gl.Uniform1(det05ArrAlphaLocation, 48, p);
+                gl.Uniform1(det05ArrAlphaLocation, (uint)slots, p);
             }
 
             gl.Uniform1(useDet05ArrLocation, 1);
@@ -5646,7 +5701,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             det05MaxXyLocation = -1;
             det05ArrSamplerLocation = -1;
             det05ArrBSamplerLocation = -1;
-            det05ArrALoc = -1;
+            det05ArrALoc = -1; det05ArrCSamplerLocation = -1;
             det05ArrAabbLocation = -1;
             det05ArrAlphaLocation = -1;
             useDet05ArrLocation = -1;
@@ -9237,7 +9292,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         det05MaxXyLocation = g.GetUniformLocation(program, "uDet05MaxXY");
         det05ArrSamplerLocation = g.GetUniformLocation(program, "uOrthoDet05Arr");
         det05ArrBSamplerLocation = g.GetUniformLocation(program, "uOrthoDet05ArrB");
-        det05ArrALoc = g.GetUniformLocation(program, "uDet05ArrA");
+        det05ArrCSamplerLocation = g.GetUniformLocation(program, "uOrthoDet05ArrC");
+        det05ArrALoc = g.GetUniformLocation(program, "uDet05ArrLayers");
         det05ArrAabbLocation = g.GetUniformLocation(program, "uDet05Aabb[0]");
         det05ArrAlphaLocation = g.GetUniformLocation(program, "uDet05Alpha[0]");
         useDet05ArrLocation = g.GetUniformLocation(program, "uUseDet05Arr");
@@ -9333,7 +9389,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // must never move a sampler onto a unit owned by a different sampler type.
         // Unit map (terrain program): 0=uOrtho 1=uReflectionTex 2/3/4=uShadowMap0..2 5=uTrailMask
         // 6=uWaterMask 8=uBaseCover 9=uOrthoDet25 (legacy mosaic) 10=uOrthoDet25Arr 11=uOrthoDet05
-        // 12=uOrthoDet05Arr 13=uOrthoDet05ArrB 14=uOrthoDet1m 15=uOrthoDet1mCov.
+        // 12=uOrthoDet05Arr 13=uOrthoDet05ArrB 14=uOrthoDet1m 15=uOrthoDet1mCov 7=uOrthoDet05ArrC.
+        // Unit 7 był JEDYNYM wolnym — wszystkie 16 jednostek fragmentu są teraz zajęte. Kolejna tekstura
+        // wymaga zwolnienia unitu (kandydat: 9 = legacy mozaika det25, do kasacji w kroku 8).
         g.UseProgram(program);
         g.Uniform1(orthoSamplerLocation, 0);
         g.Uniform1(reflectionTexLocation, 1);
@@ -9348,6 +9406,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.Uniform1(det05SamplerLocation, 11);
         g.Uniform1(det05ArrSamplerLocation, 12);
         g.Uniform1(det05ArrBSamplerLocation, 13);
+        g.Uniform1(det05ArrCSamplerLocation, 7);
         g.Uniform1(det1mSamplerLoc, 14);
         g.Uniform1(det1mCovLoc, 15);
         g.UseProgram(0);
@@ -13989,6 +14048,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             gl.DeleteTexture(det05ArrayTexture);
             det05ArrayTexture = 0;
+        }
+
+        if (det05ArrayTextureC != 0)
+        {
+            gl.DeleteTexture(det05ArrayTextureC);
+            det05ArrayTextureC = 0;
         }
 
         if (det05ArrayTextureB != 0)
