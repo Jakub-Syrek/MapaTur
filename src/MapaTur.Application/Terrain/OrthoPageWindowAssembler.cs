@@ -67,103 +67,103 @@ public static class OrthoPageWindowAssembler
         byte[] zstdScratch = MeshBufferPool.Shared.RentBytes(tailBytesMax);  // compressed <= raw
         try
         {
-        int ti0 = ci * pitchTiles, tj0 = cj * pitchTiles;         // okno kafli [ti0, ti0+coverage)
-        int giA = FloorDiv(ti0, groupTiles), giB = FloorDiv(ti0 + coverageTiles - 1, groupTiles);
-        int gjA = FloorDiv(tj0, groupTiles), gjB = FloorDiv(tj0 + coverageTiles - 1, groupTiles);
+            int ti0 = ci * pitchTiles, tj0 = cj * pitchTiles;         // okno kafli [ti0, ti0+coverage)
+            int giA = FloorDiv(ti0, groupTiles), giB = FloorDiv(ti0 + coverageTiles - 1, groupTiles);
+            int gjA = FloorDiv(tj0, groupTiles), gjB = FloorDiv(tj0 + coverageTiles - 1, groupTiles);
 
-        int level0Bytes = Bc1Encoder.EncodedSize(cellPx, cellPx);
-        int level1Off = level0Bytes;
-        int mip0Bytes = Bc1Encoder.EncodedSize(TilePx, TilePx);
-        int mip1Bytes = Bc1Encoder.EncodedSize(TilePx / 2, TilePx / 2);
-        int groupPx = groupTiles * TilePx;
+            int level0Bytes = Bc1Encoder.EncodedSize(cellPx, cellPx);
+            int level1Off = level0Bytes;
+            int mip0Bytes = Bc1Encoder.EncodedSize(TilePx, TilePx);
+            int mip1Bytes = Bc1Encoder.EncodedSize(TilePx / 2, TilePx / 2);
+            int groupPx = groupTiles * TilePx;
 
-        // Grupa dominująca = zawierająca środek okna (dla poziomów 9+ kopiowanych bez okna).
-        int domGi = FloorDiv(ti0 + (coverageTiles / 2), groupTiles);
-        int domGj = FloorDiv(tj0 + (coverageTiles / 2), groupTiles);
+            // Grupa dominująca = zawierająca środek okna (dla poziomów 9+ kopiowanych bez okna).
+            int domGi = FloorDiv(ti0 + (coverageTiles / 2), groupTiles);
+            int domGj = FloorDiv(tj0 + (coverageTiles / 2), groupTiles);
 
-        for (int gi = giA; gi <= giB; gi++)
-        {
-            for (int gj = gjA; gj <= gjB; gj++)
+            for (int gi = giA; gi <= giB; gi++)
             {
-                string packPath = System.IO.Path.Combine(packDir, $"{gi}_{gj}.opk");
-                if (!System.IO.File.Exists(packPath))
+                for (int gj = gjA; gj <= gjB; gj++)
                 {
-                    continue;
-                }
-
-                using OrthoPagePack? pack = OrthoPagePack.Open(packPath, groupPx);
-                if (pack is null)
-                {
-                    continue; // zła wersja / rozdarty plik → jak brak (baza kryje); bake naprawi
-                }
-
-                // Zakres kafli okna leżący w tej grupie.
-                int tiFrom = Math.Max(ti0, gi * groupTiles), tiTo = Math.Min(ti0 + coverageTiles, (gi + 1) * groupTiles);
-                int tjFrom = Math.Max(tj0, gj * groupTiles), tjTo = Math.Min(tj0 + coverageTiles, (gj + 1) * groupTiles);
-
-                // Poziomy 0-1: strony kafli (mip0 → level0, mip1 → level1), wklejane blokowo.
-                for (int ti = tiFrom; ti < tiTo; ti++)
-                {
-                    for (int tj = tjFrom; tj < tjTo; tj++)
+                    string packPath = System.IO.Path.Combine(packDir, $"{gi}_{gj}.opk");
+                    if (!System.IO.File.Exists(packPath))
                     {
-                        int lx = ti - (gi * groupTiles), ly = tj - (gj * groupTiles);
-                        if (!pack.TryReadPageInto((ushort)((lx * groupTiles) + ly), pageBuf, zstdScratch, out int payloadLen)
-                            || payloadLen < mip0Bytes + mip1Bytes)
+                        continue;
+                    }
+
+                    using OrthoPagePack? pack = OrthoPagePack.Open(packPath, groupPx);
+                    if (pack is null)
+                    {
+                        continue; // zła wersja / rozdarty plik → jak brak (baza kryje); bake naprawi
+                    }
+
+                    // Zakres kafli okna leżący w tej grupie.
+                    int tiFrom = Math.Max(ti0, gi * groupTiles), tiTo = Math.Min(ti0 + coverageTiles, (gi + 1) * groupTiles);
+                    int tjFrom = Math.Max(tj0, gj * groupTiles), tjTo = Math.Min(tj0 + coverageTiles, (gj + 1) * groupTiles);
+
+                    // Poziomy 0-1: strony kafli (mip0 → level0, mip1 → level1), wklejane blokowo.
+                    for (int ti = tiFrom; ti < tiTo; ti++)
+                    {
+                        for (int tj = tjFrom; tj < tjTo; tj++)
                         {
-                            continue; // kafel bez pokrycia → zostaje transparent
+                            int lx = ti - (gi * groupTiles), ly = tj - (gj * groupTiles);
+                            if (!pack.TryReadPageInto((ushort)((lx * groupTiles) + ly), pageBuf, zstdScratch, out int payloadLen)
+                                || payloadLen < mip0Bytes + mip1Bytes)
+                            {
+                                continue; // kafel bez pokrycia → zostaje transparent
+                            }
+
+                            int wx = ti - ti0, wy = tj - tj0; // pozycja kafla w OKNIE celi
+                            BlitTile(pageBuf, 0, TilePx, chainDest, 0, cellPx, wx, wy);
+                            BlitTile(pageBuf, mip0Bytes, TilePx / 2, chainDest, level1Off, cellPx / 2, wx, wy);
+                            pagesRead++;
+                        }
+                    }
+
+                    // Tail grupy: poziomy 2..8 celi wycinane oknem; 9+ tylko z grupy dominującej (bez okna).
+                    // Party tail-a: p=0 → 2048 px = POZIOM 1 CELI (wypełniany ze stron mip1, pomijamy),
+                    // p=level-1 → px identyczny z poziomem celi (grupa i cela mają ten sam metraż 4096 px).
+                    if (!pack.TryReadPageInto(OrthoPagePack.TailPageId, pageBuf, zstdScratch, out int tailLen))
+                    {
+                        continue;
+                    }
+
+                    byte[] tail = pageBuf; // alias — tail zajmuje pageBuf az do konca tej grupy
+
+                    int tailOff = Bc1Encoder.EncodedSize(groupPx / 2, groupPx / 2); // skip part 0 (poziom 1)
+                    int destOff = level0Bytes + Bc1Encoder.EncodedSize(cellPx / 2, cellPx / 2);
+                    for (int level = 2; cellPx >> level >= 1; level++)
+                    {
+                        int px = cellPx >> level;                      // rozmiar poziomu celi == rozmiar parta
+                        int tailPartBytes = Bc1Encoder.EncodedSize(px, px);
+                        if (tailOff + tailPartBytes > tailLen)
+                        {
+                            break; // tail krótszy niż oczekiwany — nie czytamy poza nim
                         }
 
-                        int wx = ti - ti0, wy = tj - tj0; // pozycja kafla w OKNIE celi
-                        BlitTile(pageBuf, 0, TilePx, chainDest, 0, cellPx, wx, wy);
-                        BlitTile(pageBuf, mip0Bytes, TilePx / 2, chainDest, level1Off, cellPx / 2, wx, wy);
-                        pagesRead++;
+                        int tilePxAtLevel = TilePx >> level;           // piksele kafla na tym poziomie
+                        int sx = (tiFrom - (gi * groupTiles)) * tilePxAtLevel, sy = (tjFrom - (gj * groupTiles)) * tilePxAtLevel;
+                        int dx = (tiFrom - ti0) * tilePxAtLevel, dy = (tjFrom - tj0) * tilePxAtLevel;
+                        int w = (tiTo - tiFrom) * tilePxAtLevel, h = (tjTo - tjFrom) * tilePxAtLevel;
+                        bool blockAligned = tilePxAtLevel >= 1 && px >= 4
+                            && sx % 4 == 0 && sy % 4 == 0 && dx % 4 == 0 && dy % 4 == 0 && w % 4 == 0 && h % 4 == 0;
+                        if (blockAligned)
+                        {
+                            BlitWindow(tail, tailOff, px, chainDest, destOff, px, sx, sy, dx, dy, w, h);
+                        }
+                        else if (gi == domGi && gj == domGj)
+                        {
+                            // Poziomy ≤8 px celi: kopiuj cały part grupy dominującej (przybliżenie — patrz nagłówek).
+                            System.Buffer.BlockCopy(tail, tailOff, chainDest, destOff, tailPartBytes);
+                        }
+
+                        tailOff += tailPartBytes;
+                        destOff += tailPartBytes;
                     }
-                }
-
-                // Tail grupy: poziomy 2..8 celi wycinane oknem; 9+ tylko z grupy dominującej (bez okna).
-                // Party tail-a: p=0 → 2048 px = POZIOM 1 CELI (wypełniany ze stron mip1, pomijamy),
-                // p=level-1 → px identyczny z poziomem celi (grupa i cela mają ten sam metraż 4096 px).
-                if (!pack.TryReadPageInto(OrthoPagePack.TailPageId, pageBuf, zstdScratch, out int tailLen))
-                {
-                    continue;
-                }
-
-                byte[] tail = pageBuf; // alias — tail zajmuje pageBuf az do konca tej grupy
-
-                int tailOff = Bc1Encoder.EncodedSize(groupPx / 2, groupPx / 2); // skip part 0 (poziom 1)
-                int destOff = level0Bytes + Bc1Encoder.EncodedSize(cellPx / 2, cellPx / 2);
-                for (int level = 2; cellPx >> level >= 1; level++)
-                {
-                    int px = cellPx >> level;                      // rozmiar poziomu celi == rozmiar parta
-                    int tailPartBytes = Bc1Encoder.EncodedSize(px, px);
-                    if (tailOff + tailPartBytes > tailLen)
-                    {
-                        break; // tail krótszy niż oczekiwany — nie czytamy poza nim
-                    }
-
-                    int tilePxAtLevel = TilePx >> level;           // piksele kafla na tym poziomie
-                    int sx = (tiFrom - (gi * groupTiles)) * tilePxAtLevel, sy = (tjFrom - (gj * groupTiles)) * tilePxAtLevel;
-                    int dx = (tiFrom - ti0) * tilePxAtLevel, dy = (tjFrom - tj0) * tilePxAtLevel;
-                    int w = (tiTo - tiFrom) * tilePxAtLevel, h = (tjTo - tjFrom) * tilePxAtLevel;
-                    bool blockAligned = tilePxAtLevel >= 1 && px >= 4
-                        && sx % 4 == 0 && sy % 4 == 0 && dx % 4 == 0 && dy % 4 == 0 && w % 4 == 0 && h % 4 == 0;
-                    if (blockAligned)
-                    {
-                        BlitWindow(tail, tailOff, px, chainDest, destOff, px, sx, sy, dx, dy, w, h);
-                    }
-                    else if (gi == domGi && gj == domGj)
-                    {
-                        // Poziomy ≤8 px celi: kopiuj cały part grupy dominującej (przybliżenie — patrz nagłówek).
-                        System.Buffer.BlockCopy(tail, tailOff, chainDest, destOff, tailPartBytes);
-                    }
-
-                    tailOff += tailPartBytes;
-                    destOff += tailPartBytes;
                 }
             }
-        }
 
-        return pagesRead > 0;
+            return pagesRead > 0;
         }
         finally
         {
