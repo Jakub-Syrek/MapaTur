@@ -2426,6 +2426,37 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         det25ComposeInFlight == 0 && det05ComposeInFlight == 0
         && det25UploadQueue.Count == 0 && det05UploadQueue.Count == 0;
 
+    /// <summary>Postęp cachowania detalu: ile cel jest już rezydentnych z tylu ŻĄDANYCH, per warstwa
+    /// (2026-07-25). <see cref="DetailStreamingIdle"/> mówi tylko „nic nie jest w locie W TEJ CHWILI" —
+    /// bywa prawdziwe w środku napełniania, między zakolejkowaniem partii a startem następnej, więc
+    /// bramka lotu F9 potrafiła na nim wystartować w trakcie cachowania (user: „freeze, a potem lagi,
+    /// bo wciąż cachuje, a kropka już leci"). To jest miara, którą widać i którą da się pokazać.</summary>
+    public (int Det05Resident, int Det05Desired, int Det25Resident, int Det25Desired) DetailStreamingProgress
+    {
+        get
+        {
+            int r05 = 0;
+            foreach (DetailCellGpu c in det05Cells.Values)
+            {
+                if (c.LayerReady)
+                {
+                    r05++;
+                }
+            }
+
+            int r25 = 0;
+            foreach (DetailCellGpu c in det25Cells.Values)
+            {
+                if (c.LayerReady)
+                {
+                    r25++;
+                }
+            }
+
+            return (r05, det05LastDesired, r25, det25LastDesired);
+        }
+    }
+
     private string? Det25CachePath(int ci, int cj)
         => string.IsNullOrEmpty(Det25GpuCacheDir) ? null : System.IO.Path.Combine(Det25GpuCacheDir, $"{ci}_{cj}.mtgc");
 
@@ -3041,6 +3072,19 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // Filmic look (C-package 2026-07-05): 1 = full ACES (0 = legacy linear, kept as the instant A/B
     // rollback); exposure is the pre-curve gain compensating ACES's mid-tone dip.
     private const float TonemapStrength = 1f;
+
+    // Diagnostyka koloru (2026-07-25, user: „wciąż mam wrażenie mocnego prześwietlenia kolorów").
+    // ZMIERZONE na pozie Szpiglasowego, render kontra BAZA NA DYSKU (jej własne źródło):
+    //   mediana luma 92,7 → 102,5 (+11%), p99 210,4 → 162,1 (−23%), kontrast 37,2 → 28,3 (−24%),
+    //   nasycenie 0,168 → 0,132 (−21%), przepalonych pikseli 0,00%.
+    // Czyli nic nie jest przepalone — to podpis KRZYWEJ: podniesione półtony, ścięte światła, wyprany kolor.
+    // Ekspozycja jest już neutralna (1.0, obniżona 07-07), więc zostaje sama krzywa ACES.
+    // MAPATUR_TONEMAP=0..1 pozwala to zważyć NA OBRAZIE bez rebuildu (0 = liniowo, 1 = pełne ACES).
+    private static readonly float TonemapStrengthEff =
+        float.TryParse(Environment.GetEnvironmentVariable("MAPATUR_TONEMAP"),
+            System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float t)
+            ? Math.Clamp(t, 0f, 1f)
+            : TonemapStrength;
     // 2026-07-07: 1.15 → 1.0. The +15% pre-curve exposure (with the ×1.15 sun-colour boost = ~×1.32 on lit
     // ground) pushed sunlit terrain and snow into ACES's shoulder and BLEW OUT the colour — the "wszystko
     // przepalone, bez kolorów, za jasno" the user reported across BOTH ortho sources. Neutral 1.0 keeps the
@@ -8139,7 +8183,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             g.BindTexture(TextureTarget.Texture2D, godrayTex);
             g.Uniform1(bloomCompGodrayLoc, 2);
             g.Uniform1(bloomCompIntensityLoc, wantBloom ? bloomIntensity : 0f);
-            g.Uniform1(bloomCompTonemapLoc, TonemapStrength);
+            g.Uniform1(bloomCompTonemapLoc, TonemapStrengthEff);
             g.Uniform1(bloomCompExposureLoc, TonemapExposure);
             g.Uniform1(bloomCompGodrayIntensityLoc, wantGodray ? godrayIntensity : 0f);
             g.DrawArrays(PrimitiveType.Triangles, 0, 3);
@@ -8169,7 +8213,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             g.ActiveTexture(TextureUnit.Texture0);
             g.BindTexture(TextureTarget.Texture2D, sourceTex);
             g.Uniform1(postTexLocation, 0);
-            g.Uniform1(postTonemapLoc, TonemapStrength);
+            g.Uniform1(postTonemapLoc, TonemapStrengthEff);
             g.Uniform1(postExposureLoc, TonemapExposure);
             g.DrawArrays(PrimitiveType.Triangles, 0, 3);
             g.BindTexture(TextureTarget.Texture2D, 0);
