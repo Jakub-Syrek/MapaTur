@@ -127,8 +127,10 @@ public sealed partial class MapPageViewModel : ObservableObject
     private string lodBadgeText = QuietLodBadgeText;
 
     // The always-on find-me / teleport (search + location) bar can be collapsed to free screen space.
+    // Default COLLAPSED (user 2026-07-24: „panel szukania domyślnie zamknięty") — the scene starts clean;
+    // one tap on the bar header expands it.
     [ObservableProperty]
-    private bool isLocateBarExpanded = true;
+    private bool isLocateBarExpanded;
 
     [RelayCommand]
     private void ToggleLocateBar() => IsLocateBarExpanded = !IsLocateBarExpanded;
@@ -1494,6 +1496,9 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <summary>Whether the contour-line (warstwice) overlay is draped on the 3D relief.</summary>
     [ObservableProperty] private bool showContours = true;
 
+    /// <summary>Whether the catalogued climbing-route overlay (topo lines + names on Mnich) is drawn.</summary>
+    [ObservableProperty] private bool showClimbingRoutes = true;
+
     /// <summary>Whether the avalanche slope-steepness ("Mapa nachylenia") shading is active.</summary>
     [ObservableProperty] private bool slopeMapMode;
 
@@ -2235,6 +2240,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             [nameof(AtmosphereEffectsEnabled)] = (() => AtmosphereEffectsEnabled, v => AtmosphereEffectsEnabled = v),
             [nameof(ShowNightSky)] = (() => ShowNightSky, v => ShowNightSky = v),
             [nameof(ShowContours)] = (() => ShowContours, v => ShowContours = v),
+            [nameof(ShowClimbingRoutes)] = (() => ShowClimbingRoutes, v => ShowClimbingRoutes = v),
             [nameof(ShowHuts)] = (() => ShowHuts, v => ShowHuts = v),
             [nameof(ShowWildernessHuts)] = (() => ShowWildernessHuts, v => ShowWildernessHuts = v),
             [nameof(ShowChalets)] = (() => ShowChalets, v => ShowChalets = v),

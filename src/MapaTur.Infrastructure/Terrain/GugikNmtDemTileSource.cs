@@ -63,6 +63,20 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
     private const int SubNativeSupersampleZoom = 17;
     private const int SubNativeSupersampleFactor = 2;
 
+    // NODE REGISTRATION of native-size grids (2026-07-15 late): the WCS/DMR5 256 px grids are pixel-CENTRE
+    // over the tile bbox (verified on real tifs: |A[edge]−B[0]| ≈ a one-cell step ⇒ contiguous), but the
+    // whole pipeline reads sample j as the NODE at ground j/(N−1) — the same registration flaw the z17
+    // supersample had, at 2× the magnitude. Measured on the baked pyramid: z16 borders ±1 p95 1.69 m vs
+    // 1.17 m control; SK↔SK legacy z17 medians ±4.3 cm. Applied from z16 up (the 1 m detail + baked pipeline
+    // family, incl. the injected legacy DMR5 z16/z17 tiles); coarser native fetches are legacy/diagnostic
+    // paths that nothing georeferences at sub-cell precision — kept byte-stable.
+    private const int NodeRegisterMinZoom = 16;
+
+    // Decoded (sanitized + zero-masked) tif grids by cache path. The bake reads every tif up to ~81 times
+    // (3×3 margin windows × the kernel's 8-neighbour padding) — without this the z17 re-bake ran for hours.
+    // Values are treated as immutable by all consumers (padding/upsampling only read them).
+    private readonly MapaTur.Application.Terrain.LruCache<string, float[]> decodedGridCache = new(192);
+
     private readonly HttpClient httpClient;
     private readonly string cacheDirectory;
     private readonly string endpoint;
@@ -159,20 +173,31 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
             // 0 marker AFTER, so the repair chain sees exactly the flat-0 semantics it always had. (Caveat:
             // ties this branch to highland products — real ground ≤0.5 m exists only far outside the current
             // z17 footprint; the bake's HoleBelow(100) carries the same assumption.)
-            for (int i = 0; i < samples.Length; i++)
-            {
-                if (samples[i] != NoDataSentinel && samples[i] <= 0.5f)
-                {
-                    samples[i] = NoDataSentinel;
-                }
-            }
+            MaskFlatZeroToSentinel(samples);
 
-            // Gaussian (overlapping) downsample, not a plain box: the box left a moiré ring-grid ("obwódki")
+            // Pad the window with the NEIGHBOURS' hi-res pixels (from this source's own cache) and downsample
+            // NODE-REGISTERED: output sample j is taken AT the node position the whole pipeline reads it as
+            // (pixel-is-point, node 0 ON the tile edge), not at the hi-res block centre. Two artefact classes
+            // die here at once, both measured on the baked z17 pyramid as the "tile grid" grooves:
+            //  1. the CLAMPED window at the tile edge (centroid pulled ~0.85 hi-px inward → a real kink,
+            //     p95 |curvature residual| ≈ 1.0 m at ±1 cell vs 0.44 m background), and
+            //  2. the block-centre SQUEEZE (content shifted ~half a hi-px toward the tile centre → adjacent
+            //     tiles separate by ~one hi-px at the border and the weld bridges the gap — the residual
+            //     ±1-cell excess the post-bake border gate flagged after fix 1 alone).
+            // A border node reads the IDENTICAL global window through either neighbour's padded buffer, so the
+            // baker's weld becomes a no-op. A missing/legacy/mis-sized neighbour leaves the sentinel, which
+            // the kernel excludes (deterministic clamp on that side). Cost: up to 8 cached-tif reads per tile
+            // read, on the bake/download path only (the app streams the baked pyramid, not this source, at z17).
+            int pad = MapaTur.Application.Terrain.DemTileSupersampler.LowPassKernelRadius(factor) + 1;
+            float[] padded = MapaTur.Application.Terrain.DemTileSupersampler.PadWithNeighbours(
+                samples, fetchPx, pad, NoDataSentinel,
+                (dx, dy) => TryReadNeighbourHiRes(key, dx, dy, fetchPx));
+
+            // Gaussian (overlapping) low-pass, not a plain box: the box left a moiré ring-grid ("obwódki")
             // on the base — disjoint blocks can't smooth across boundaries and the box passes WCS ripple that
-            // aliases. Gaussian low-pass at the output Nyquist removes it without flattening real terrain. Same
-            // factor/fetchPx → same cache key, so this needs NO re-fetch of already-cached tiles.
-            float[] averaged = MapaTur.Application.Terrain.DemTileSupersampler.LowPassDownsample(
-                samples, this.tileSize, factor, NoDataSentinel);
+            // aliases. Same factor/fetchPx → same cache key, so this needs NO re-fetch of already-cached tiles.
+            float[] averaged = MapaTur.Application.Terrain.DemTileSupersampler.LowPassDownsampleToNodes(
+                padded, this.tileSize, factor, NoDataSentinel, pad);
             for (int i = 0; i < averaged.Length; i++)
             {
                 if (averaged[i] == NoDataSentinel)
@@ -182,6 +207,31 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
             }
 
             raster = new DemRaster(this.tileSize, this.tileSize, bounds, averaged, NoDataSentinel);
+        }
+        else if (key.Zoom >= NodeRegisterMinZoom && grid.Width == this.tileSize && grid.Height == this.tileSize)
+        {
+            // NODE-REGISTER the native-size grid (z16 fetches + the injected legacy DMR5 z16/z17 tiles): the
+            // pixel-centre samples are Catmull-Rom-resampled onto the node lattice inside a ring of the
+            // neighbours' real pixels, so the border node of two adjacent tiles reads the identical global
+            // footprint (the baker's weld becomes a no-op) and the per-tile half-cell content squeeze is gone.
+            // Zero-void mask before / flat-0 restore after, exactly like the supersampled branch — an
+            // interpolating kernel must never treat GUGiK's out-of-coverage 0.0 as valid ground.
+            MaskFlatZeroToSentinel(samples);
+            float[] paddedNative = MapaTur.Application.Terrain.DemTileSupersampler.PadWithNeighbours(
+                samples, this.tileSize, MapaTur.Application.Terrain.DemTileSupersampler.NativeNodePadCells,
+                NoDataSentinel, (dx, dy) => TryReadNeighbourNative(key, dx, dy));
+            float[] nodes = MapaTur.Application.Terrain.DemTileSupersampler.ResampleToNodes(
+                paddedNative, this.tileSize, NoDataSentinel,
+                MapaTur.Application.Terrain.DemTileSupersampler.NativeNodePadCells);
+            for (int i = 0; i < nodes.Length; i++)
+            {
+                if (nodes[i] == NoDataSentinel)
+                {
+                    nodes[i] = 0f; // restore the flat-0 void marker for the repair chain
+                }
+            }
+
+            raster = new DemRaster(this.tileSize, this.tileSize, bounds, nodes, NoDataSentinel);
         }
         else
         {
@@ -251,6 +301,106 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
         }
 
         return samples;
+    }
+
+    // The "<=0.5 = void!" mask (see the call site in GetTileAsync): GUGiK's out-of-coverage flat-0 must never
+    // enter a kernel as a valid height. Applied to the tile's own buffer AND to every neighbour padding strip.
+    private static void MaskFlatZeroToSentinel(float[] samples)
+    {
+        for (int i = 0; i < samples.Length; i++)
+        {
+            if (samples[i] != NoDataSentinel && samples[i] <= 0.5f)
+            {
+                samples[i] = NoDataSentinel;
+            }
+        }
+    }
+
+    // The (dx, dy) neighbour's hi-res buffer for the padded downsample, read from this source's own cache and
+    // put through the SAME sanitisation as the tile itself. When the hi-res tif is absent but the neighbour
+    // exists as a LEGACY native tile (the injected Slovak DMR5 set — the PL↔SK borders that kept the border
+    // gate red), its 256 px grid is Catmull-Rom-upsampled onto the hi-res lattice so the kernel window still
+    // has real ground to read instead of clamping. Null when nothing usable exists on that side.
+    // Synchronous file IO: the padding callback is synchronous and this path runs at bake/download time.
+    private float[]? TryReadNeighbourHiRes(DemTileKey key, int dx, int dy, int fetchPx)
+    {
+        var neighbourKey = new DemTileKey(key.Zoom, key.X + dx, key.Y + dy);
+        float[]? hiRes = ReadGridCached(CachePath(neighbourKey), fetchPx);
+        if (hiRes is not null)
+        {
+            return hiRes;
+        }
+
+        string legacyPath = LegacyCachePath(neighbourKey);
+        try
+        {
+            if (!File.Exists(legacyPath))
+            {
+                return null;
+            }
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+
+        return this.decodedGridCache.GetOrAdd($"{legacyPath}#up{fetchPx}", _ =>
+        {
+            float[]? native = ReadGridCached(legacyPath, this.tileSize);
+            return native is null
+                ? null!
+                : MapaTur.Application.Terrain.DemTileSupersampler.UpsamplePixelCentreGrid(
+                    native, this.tileSize, fetchPx, NoDataSentinel);
+        });
+    }
+
+    // The (dx, dy) neighbour's NATIVE-size grid for the node resample. At the supersampled zooms the native
+    // 256 px family lives under the LEGACY name ({y}.tif — the injected DMR5 tiles); below them it IS the
+    // regular cache name.
+    private float[]? TryReadNeighbourNative(DemTileKey key, int dx, int dy)
+    {
+        var neighbourKey = new DemTileKey(key.Zoom, key.X + dx, key.Y + dy);
+        string path = neighbourKey.Zoom >= SubNativeSupersampleZoom
+            ? LegacyCachePath(neighbourKey)
+            : CachePath(neighbourKey);
+        return ReadGridCached(path, this.tileSize);
+    }
+
+    // Decoded + sanitized + zero-masked grid at `path`, LRU-cached, or null when the file is absent,
+    // undecodable, mis-sized, or torn — a neighbour read must never fail the tile itself (clamp on that side).
+    private float[]? ReadGridCached(string path, int expectedSize)
+    {
+        try
+        {
+            if (!File.Exists(path))
+            {
+                return null;
+            }
+
+            return this.decodedGridCache.GetOrAdd(path, p =>
+            {
+                try
+                {
+                    if (TryDecode(File.ReadAllBytes(p)) is not { } grid
+                        || grid.Width != expectedSize || grid.Height != expectedSize)
+                    {
+                        return null!;
+                    }
+
+                    float[] samples = SanitizeNoData(grid.Samples);
+                    MaskFlatZeroToSentinel(samples);
+                    return samples;
+                }
+                catch (IOException)
+                {
+                    return null!;
+                }
+            });
+        }
+        catch (IOException)
+        {
+            return null;
+        }
     }
 
     private async Task<byte[]?> DownloadAsync(DemTileKey key, int fetchPx, CancellationToken cancellationToken)

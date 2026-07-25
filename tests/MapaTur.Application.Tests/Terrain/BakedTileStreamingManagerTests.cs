@@ -242,28 +242,23 @@ public sealed class BakedTileStreamingManagerTests
     }
 
     [Fact]
-    public void OnlyToLoadKeysArePassedToTheLoader()
+    public void ResidentTilesAreNeverReMeshedOnAStaticCamera()
     {
-        var requested = new List<DemTileKey>();
-        BakedDemTile? Loader(DemTileKey k)
-        {
-            requested.Add(k);
-            return FakeTile(k);
-        }
-
-        var mgr = NewManager(AllBaked, Loader, maxConcurrentLoads: 8);
+        var mgr = NewManager(AllBaked, maxConcurrentLoads: 8);
         Camera3D camera = CameraAbove(RootTile(), 4000f);
 
-        Update(mgr, camera);
-        var loadedFirst = new HashSet<DemTileKey>(requested);
+        var loadedFirst = new HashSet<DemTileKey>(Update(mgr, camera).LoadedKeys);
         loadedFirst.Should().NotBeEmpty();
 
-        // A second update from the SAME pose must not re-load any tile already made resident: the loader only
-        // ever sees not-yet-resident (to-load) keys. The broad ground-ring desired set may still stream in MORE
-        // new tiles this update, but never one already loaded.
-        requested.Clear();
-        Update(mgr, camera);
-        requested.Should().NotContain(k => loadedFirst.Contains(k), "resident tiles are never re-requested");
+        // A second update from the SAME pose must not re-load and re-mesh a tile already resident. The broad
+        // ground-ring desired set may still stream in MORE new tiles this update, but never one already built.
+        //
+        // NB: the manager now ALSO reads each new tile's neighbours to halo its normals (the tile-seam fix), so
+        // the raw loader is legitimately called with resident keys — but that is a RAM-cache read in production
+        // (BakedDemTileCache sits in front of the loader) that never re-meshes or re-resides anything. The real
+        // anti-churn guarantee is about what gets BUILT, so it is asserted on LoadedKeys, not raw loader calls.
+        BakedStreamingUpdate second = Update(mgr, camera);
+        second.LoadedKeys.Should().NotContain(k => loadedFirst.Contains(k), "resident tiles are never re-meshed");
     }
 
     [Fact]

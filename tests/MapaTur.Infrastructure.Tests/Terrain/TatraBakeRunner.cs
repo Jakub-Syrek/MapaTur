@@ -237,6 +237,90 @@ public sealed class TatraBakeRunner
             0, $"the baked set must contain adjacent z{finestZoom} tiles to verify seams");
         Console.WriteLine($"[verify] z{finestZoom} edge agreement: {eastPairs} east + {southPairs} south adjacent pairs PASS");
 
+        // -------- VERIFY: the cross-border height PROFILE reads like mid-tile terrain (the border-kink gate) ----
+        // The bit-identity check above is structurally BLIND to a SYMMETRIC border artefact: a per-tile-clamped
+        // kernel biases the outer rows of every tile the same way, the shared line still matches bit-for-bit,
+        // and a real kink runs along every border (2026-07-15: p95 |curvature residual| ≈ 1.0 m at ±1 cell vs
+        // 0.44 m mid-tile, the visible "tile grid" grooves). This gate measures the residual PROFILE across a
+        // sample of borders against the terrain's own mid-tile floor — any border-concentrated height artefact,
+        // whatever stage introduced it, fails the bake here instead of waiting for eyes in the app.
+        var profileAudit = new TileBorderProfileAudit();
+        int profiledPairs = 0;
+        foreach (DemTileKey key in pickedKeys)
+        {
+            if (profiledPairs >= 80)
+            {
+                break;
+            }
+
+            BakedDemTile a = ReadKey(key);
+            profileAudit.AddControl(a);
+            var eastKey = new DemTileKey(finestZoom, key.X + 1, key.Y);
+            if (BakedExists(eastKey))
+            {
+                profileAudit.AddEastPair(a, ReadKey(eastKey));
+                profiledPairs++;
+            }
+
+            var southKey = new DemTileKey(finestZoom, key.X, key.Y + 1);
+            if (BakedExists(southKey))
+            {
+                profileAudit.AddSouthPair(a, ReadKey(southKey));
+                profiledPairs++;
+            }
+        }
+
+        TileBorderProfileReport profileReport = profileAudit.Report();
+        Console.WriteLine($"[verify] z{finestZoom} border-profile gate ({profiledPairs} pairs):");
+        Console.WriteLine(profileReport.Format());
+        profileReport.BorderProfileCount.Should().BeGreaterThan(
+            0, "the border gate needs valid (void-free) cross-border profiles to measure");
+        profileReport.IsWithin(ratio: 1.3, floorMeters: 0.10).Should().BeTrue(
+            $"border cells must read like the rest of the terrain (worst border p95 " +
+            $"{profileReport.WorstBorderP95:F3} m vs control {profileReport.ControlP95:F3} m) — a " +
+            "border-concentrated excess is a pipeline artefact (clamped kernel / repair / weld), not ground");
+
+        // INFORMATIONAL border profiles for the derived (coarser) levels: BakedDemDownsampler still reads a
+        // block MEAN as the node value (its own half-fine-cell registration bias — a known, deferred item),
+        // so these are reported for tracking, not asserted. When the derivation is node-aligned, promote them
+        // into the hard gate above.
+        foreach (int z in zoomLevels.Where(z => z != finestZoom))
+        {
+            string zdir = Path.Combine(bakedOut, z.ToString(CultureInfo.InvariantCulture));
+            if (!Directory.Exists(zdir))
+            {
+                continue;
+            }
+
+            var coarseAudit = new TileBorderProfileAudit();
+            int coarsePairs = 0;
+            foreach (string file in Directory
+                .EnumerateFiles(zdir, "*" + BakedDemTileStore.FileExtension, SearchOption.AllDirectories))
+            {
+                if (coarsePairs >= 20)
+                {
+                    break;
+                }
+
+                BakedDemTile a = ReadTile(file);
+                coarseAudit.AddControl(a);
+                var eastK = new DemTileKey(z, a.TileX + 1, a.TileY);
+                if (BakedExists(eastK))
+                {
+                    coarseAudit.AddEastPair(a, ReadKey(eastK));
+                    coarsePairs++;
+                }
+            }
+
+            if (coarsePairs > 0)
+            {
+                TileBorderProfileReport r = coarseAudit.Report();
+                Console.WriteLine(
+                    $"[verify] z{z} border profile (informational, derivation not yet node-aligned): " +
+                    $"worst border p95 {r.WorstBorderP95:F3} m vs control {r.ControlP95:F3} m ({coarsePairs} pairs)");
+            }
+        }
+
         // -------- VERIFY: a few coarser baked tiles read back as valid, finite, non-empty rasters --------
         foreach (int z in zoomLevels.Where(z => z != finestZoom))
         {

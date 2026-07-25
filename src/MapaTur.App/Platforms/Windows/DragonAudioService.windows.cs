@@ -166,6 +166,32 @@ public sealed partial class DragonAudioService
         }
     }
 
+    partial void SilenceImpl()
+    {
+        // Leaving flight: pause every loop and one-shot voice NOW (null-safe, so it is harmless if audio was never
+        // initialized) and reset the bed state, so a re-entry starts clean. SetFlightBed's smoothing can't do this.
+        try
+        {
+            fireActive = false;
+            firePlayer?.Pause();
+            windLoop?.Pause();
+            wingLoop?.Pause();
+            groundLoop?.Pause();
+            bedPlaying = false;
+            bedWindCurrent = bedWingCurrent = bedGroundCurrent = 0f;
+            roarBank?.Stop();
+            growlLongBank?.Stop();
+            growlShortBank?.Stop();
+            flapBank?.Stop();
+            boomBank?.Stop();
+            hissBank?.Stop();
+        }
+        catch (Exception ex)
+        {
+            LogPlayFailureOnce(ex);
+        }
+    }
+
     private static void UpdateLoopVolume(MediaPlayer player, double volume)
     {
         if (Math.Abs(player.Volume - volume) > 0.005)
@@ -325,6 +351,22 @@ public sealed partial class DragonAudioService
             catch (Exception ex)
             {
                 onFailure(ex);
+            }
+        }
+
+        // Pauses every voice — a hard cut for leaving the mode so a ringing roar/growl doesn't outlive the flight.
+        public void Stop()
+        {
+            foreach (MediaPlayer voice in voices)
+            {
+                try
+                {
+                    voice.Pause();
+                }
+                catch (Exception ex)
+                {
+                    onFailure(ex);
+                }
             }
         }
     }

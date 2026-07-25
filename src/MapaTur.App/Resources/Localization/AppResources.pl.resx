@@ -369,6 +369,7 @@
   <data name="LayerPeakNames" xml:space="preserve"><value>🗻 Nazwy szczytów</value></data>
   <data name="LayerNightSky" xml:space="preserve"><value>✨ Niebo nocne</value></data>
   <data name="LayerContours" xml:space="preserve"><value>〰️ Warstwice</value></data>
+  <data name="LayerClimbingRoutes" xml:space="preserve"><value>🧗 Drogi wspinaczkowe</value></data>
   <data name="PeakRangeLabel" xml:space="preserve"><value>Zasięg</value></data>
   <data name="PeakRangeHint" xml:space="preserve"><value>Zasięg nazw szczytów od kamery</value></data>
   <data name="PoiHeader" xml:space="preserve"><value>PUNKTY (POI)</value></data>

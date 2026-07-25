@@ -269,6 +269,175 @@ public sealed class WalkPhysicsTests
     }
 
     [Fact]
+    public void ClimbBlend_IsHighClimbingUp_AndLowTraversing()
+    {
+        var up = new WalkPhysics(new Vector2(1f, 0f), Ground(p => 2.0f * MathF.Max(0f, p.X)), Params);
+        up.Step(0.02f, new Vector2(1f, 0f), 2.5f, jumpRequested: false, hangHeld: true); // straight up the fall line
+
+        up.ClimbBlend.Should().BeGreaterThan(0.8f, "pushing up the fall line is almost all up-reach");
+
+        var side = new WalkPhysics(new Vector2(1f, 0f), Ground(p => 2.0f * MathF.Max(0f, p.X)), Params);
+        side.Step(0.02f, new Vector2(0f, 1f), 2.5f, jumpRequested: false, hangHeld: true); // along the contour
+
+        side.ClimbBlend.Should().BeLessThan(0.2f, "pushing along the contour is almost all sideways");
+    }
+
+    [Fact]
+    public void ClimbingAVerticalWall_IsSlowerThanAModerateOne()
+    {
+        // Same forward push; the steeper wall (grade 4 ≈ 76°) advances LESS per step than a moderate one
+        // (grade 0.6 ≈ 31°) because the climb rate fades with steepness.
+        var steep = new WalkPhysics(new Vector2(1f, 0f), Ground(p => 4.0f * MathF.Max(0f, p.X)), Params);
+        var moderate = new WalkPhysics(new Vector2(1f, 0f), Ground(p => 0.6f * MathF.Max(0f, p.X)), Params);
+
+        for (int i = 0; i < 20; i++)
+        {
+            steep.Step(0.02f, new Vector2(1f, 0f), 2.5f, jumpRequested: false, hangHeld: true);
+            moderate.Step(0.02f, new Vector2(1f, 0f), 2.5f, jumpRequested: false, hangHeld: true);
+        }
+
+        (steep.PositionXY.X - 1f).Should().BeLessThan(moderate.PositionXY.X - 1f, "the steeper the wall, the slower the climb");
+    }
+
+    [Fact]
+    public void FirstGrab_PlantsAnAnchorPiton()
+    {
+        var walk = new WalkPhysics(new Vector2(1f, 0f), Ground(p => 2.0f * MathF.Max(0f, p.X)), Params);
+
+        walk.Step(0.05f, new Vector2(1f, 0f), 2.5f, jumpRequested: false, hangHeld: true);
+
+        walk.Pitons.Should().NotBeEmpty("the first grab plants the belay anchor");
+    }
+
+    [Fact]
+    public void Climbing_KeepsAtMostThreePitons_RollingTheOldestOut()
+    {
+        var walk = new WalkPhysics(new Vector2(1f, 0f), Ground(p => 2.0f * MathF.Max(0f, p.X)), Params);
+
+        for (int i = 0; i < 500; i++)
+        {
+            walk.Step(0.05f, new Vector2(1f, 0f), 2.5f, jumpRequested: false, hangHeld: true);
+        }
+
+        walk.Pitons.Count.Should().Be(Params.MaxPitons, "protection rolls — a 4th piton pulls the oldest");
+        walk.Pitons[^1].Elevation.Should().BeGreaterThan(walk.Pitons[0].Elevation, "the kept pitons climb with you");
+    }
+
+    [Fact]
+    public void FallingWhileProtected_IsHeldByTheRope_NotDroppedToTheBase()
+    {
+        var walk = new WalkPhysics(new Vector2(1f, 0f), Ground(p => 2.0f * MathF.Max(0f, p.X)), Params);
+        for (int i = 0; i < 300; i++)
+        {
+            walk.Step(0.05f, new Vector2(1f, 0f), 2.5f, jumpRequested: false, hangHeld: true);
+        }
+
+        float topPiton = float.NegativeInfinity;
+        foreach (WalkPhysics.PitonPoint piton in walk.Pitons)
+        {
+            topPiton = MathF.Max(topPiton, piton.Elevation);
+        }
+
+        float climbedTo = walk.FeetElevation;
+
+        // Let go of the wall (no hold, no wish) and let the fall run.
+        for (int i = 0; i < 300; i++)
+        {
+            walk.Step(0.05f, Vector2.Zero, 0f, jumpRequested: false, hangHeld: false);
+        }
+
+        walk.IsRoped.Should().BeTrue("the rope catches the fall");
+        walk.FeetElevation.Should().BeInRange(
+            topPiton - Params.RopeLengthMeters - 1f,
+            topPiton - Params.RopeLengthMeters + 1f,
+            "held about a rope length below the top piton");
+        walk.FeetElevation.Should().BeLessThan(climbedTo, "you did drop before the rope went taut");
+    }
+
+    [Fact]
+    public void Teleport_ClearsThePitons()
+    {
+        var walk = new WalkPhysics(new Vector2(1f, 0f), Ground(p => 2.0f * MathF.Max(0f, p.X)), Params);
+        for (int i = 0; i < 200; i++)
+        {
+            walk.Step(0.05f, new Vector2(1f, 0f), 2.5f, jumpRequested: false, hangHeld: true);
+        }
+
+        walk.Pitons.Should().NotBeEmpty();
+        walk.Teleport(new Vector2(0f, 0f));
+        walk.Pitons.Should().BeEmpty("a fresh drop starts with no protection");
+    }
+
+    [Fact]
+    public void GripStamina_DrainsWhileClimbing()
+    {
+        var walk = new WalkPhysics(new Vector2(1f, 0f), Ground(p => 2.0f * MathF.Max(0f, p.X)), Params);
+        float start = walk.GripStamina;
+
+        for (int i = 0; i < 40; i++) // ~2 s of climbing
+        {
+            walk.Step(0.05f, new Vector2(1f, 0f), 2.5f, jumpRequested: false, hangHeld: true);
+        }
+
+        walk.GripStamina.Should().BeApproximately(start - 2f, 0.3f, "grip drains ~1/s while on the wall");
+    }
+
+    [Fact]
+    public void GripRunningOut_PeelsYouOffOntoTheRope()
+    {
+        // A modest grip pool so exhaustion happens within the step budget (independent of the default tuning), yet
+        // long enough to climb past a rope length so a high piton exists to catch the peel-off.
+        var shortGrip = Params with { MaxGripStaminaSeconds = 8f };
+        var walk = new WalkPhysics(new Vector2(1f, 0f), Ground(p => 2.0f * MathF.Max(0f, p.X)), shortGrip);
+
+        bool everRoped = false;
+        for (int i = 0; i < 240; i++) // climb well past the 8 s grip limit while holding on
+        {
+            walk.Step(0.05f, new Vector2(1f, 0f), 2.5f, jumpRequested: false, hangHeld: true);
+            everRoped |= walk.IsRoped;
+        }
+
+        everRoped.Should().BeTrue("running out of grip peels you off, and the rope catches the fall");
+    }
+
+    [Fact]
+    public void RestingOnTheRope_RegeneratesGrip()
+    {
+        var walk = new WalkPhysics(new Vector2(1f, 0f), Ground(p => 2.0f * MathF.Max(0f, p.X)), Params);
+        for (int i = 0; i < 120; i++)
+        {
+            walk.Step(0.05f, new Vector2(1f, 0f), 2.5f, jumpRequested: false, hangHeld: true); // drain grip climbing
+        }
+
+        float low = walk.GripStamina;
+
+        for (int i = 0; i < 100; i++)
+        {
+            walk.Step(0.05f, Vector2.Zero, 0f, jumpRequested: false, hangHeld: false); // let go → dangle on the rope
+        }
+
+        walk.IsRoped.Should().BeTrue();
+        walk.GripStamina.Should().BeGreaterThan(low, "resting on the rope regenerates grip");
+    }
+
+    [Fact]
+    public void ClimbingToALedge_MantlesOntoIt_AndStands()
+    {
+        // A grade-3 wall topping out at 15 m (x = 5), flat beyond.
+        var walk = new WalkPhysics(new Vector2(1f, 0f), Ground(p => p.X <= 0f ? 0f : MathF.Min(3f * p.X, 15f)), Params);
+
+        for (int i = 0; i < 400; i++)
+        {
+            walk.Step(0.05f, new Vector2(1f, 0f), 2.5f, jumpRequested: false, hangHeld: true);
+        }
+
+        walk.IsGrounded.Should().BeTrue("you mantle onto the ledge and stand");
+        walk.IsClimbing.Should().BeFalse();
+        walk.FeetElevation.Should().BeApproximately(15f, 1.5f, "standing on the flat top");
+        walk.PositionXY.X.Should().BeGreaterThan(5f, "topped out past the lip");
+    }
+
+    [Fact]
     public void HoldingBothCiupagas_WithNoInput_HangsInsteadOfClimbing()
     {
         // Holding the axes on a steep face with NO move wish is the self-arrest hang — no drift, no climb.
@@ -333,6 +502,76 @@ public sealed class WalkPhysicsTests
 
         walk.IsHanging.Should().BeFalse("flat ground is not a steep face to plant the ciupaga into");
         landed.Should().BeTrue("without a wall, holding the axe does not stop the fall");
+    }
+
+    // ── ReleaseProtection (X): deliberately drop the auto-belay — hanging on the rope becomes a free fall ──
+
+    /// <summary>Arranges a walker hanging on the rope high over the base (the post-catch state the climb
+    /// session hands back), using the same entry point the app uses (<see cref="WalkPhysics.SyncFromClimb"/>).</summary>
+    private static WalkPhysics HangingOnRope(out float hangFeet)
+    {
+        var walk = new WalkPhysics(Vector2.Zero, Ground(_ => 1000f), Params);
+        hangFeet = 1040f; // dangling 40 m above the base of the wall
+        walk.SyncFromClimb(
+            Vector2.Zero,
+            hangFeet,
+            [new WalkPhysics.PitonPoint(Vector2.Zero, hangFeet + Params.RopeLengthMeters)],
+            gripStamina: 10f,
+            roped: true);
+        return walk;
+    }
+
+    [Fact]
+    public void ReleaseProtection_WhileHangingOnTheRope_DropsIntoFreeFall()
+    {
+        WalkPhysics walk = HangingOnRope(out float hangFeet);
+
+        walk.ReleaseProtection();
+        for (int i = 0; i < 25; i++)
+        {
+            walk.Step(0.02f, Vector2.Zero, 0f, jumpRequested: false); // 0.5 s of gravity
+        }
+
+        walk.IsRoped.Should().BeFalse("the rope was deliberately released");
+        walk.FeetElevation.Should().BeLessThan(hangFeet - 0.5f, "nothing holds the fall any more");
+    }
+
+    [Fact]
+    public void ReleaseProtection_DropsEveryPiton_SoNothingReCatchesTheFall()
+    {
+        WalkPhysics walk = HangingOnRope(out float hangFeet);
+
+        walk.ReleaseProtection();
+        bool landed = false;
+        for (int i = 0; i < 800 && !landed; i++)
+        {
+            walk.Step(0.02f, Vector2.Zero, 0f, jumpRequested: false);
+            landed = walk.IsGrounded;
+        }
+
+        walk.Pitons.Should().BeEmpty("released protection leaves no anchors on the wall");
+        landed.Should().BeTrue("with no pitons the fall runs all the way to the base");
+        walk.FeetElevation.Should().Be(1000f);
+    }
+
+    [Fact]
+    public void ReleaseProtection_OnSafeGround_OnlyDropsTheGear()
+    {
+        var walk = new WalkPhysics(Vector2.Zero, Ground(_ => 1200f), Params);
+        walk.SyncFromClimb(
+            Vector2.Zero,
+            1200f,
+            [new WalkPhysics.PitonPoint(Vector2.Zero, 1195f)], // gear left BELOW the feet (a finished traverse)
+            gripStamina: 10f,
+            roped: false);
+        walk.Step(0.02f, Vector2.Zero, 0f, jumpRequested: false); // re-grounds on the flat terrain
+
+        walk.ReleaseProtection();
+        walk.Step(0.02f, Vector2.Zero, 0f, jumpRequested: false);
+
+        walk.Pitons.Should().BeEmpty();
+        walk.IsGrounded.Should().BeTrue("standing on the ground, dropping the rope changes nothing else");
+        walk.FeetElevation.Should().Be(1200f);
     }
 
     [Fact]

@@ -20,11 +20,16 @@ namespace MapaTur.Application.Terrain;
 /// that striped granite v4–v7.</item>
 /// </list>
 ///
-/// Seam safety by construction: shared-edge nodes evaluate Catmull-Rom at t=0 (the welded ancestor node value
-/// itself), the noise lattice is global, and the curvature amplitude is defined 0 on ancestor edge rows/cols
-/// (a symmetric rule both sides compute identically) — adjacent children join bit-exactly, within one parent
-/// and across welded parents, without any margin stitching. The cost is a ~1-parent-cell displacement dimple
-/// along parent borders (amplitude ramps from the first interior cell), visually negligible at 0.35 m caps.
+/// Seam safety by construction: the parent is rastered inside a 2-cell NEIGHBOUR HALO
+/// (<see cref="BakedTileMeshBuilder.AsRasterWithHalo"/>), sampling positions are EXACT dyadic grid fractions
+/// (<see cref="DemRasterResampler.SampleCatmullRomAt"/> — a shared-edge node evaluates at t=0 and reproduces
+/// the welded ancestor value bit-for-bit), the noise lattice is global, and the curvature at a border cell is
+/// computed from the same welded values by both parents — adjacent children join bit-exactly, within one
+/// parent and across welded parents. The halo also removes the old per-parent artefacts: Catmull-Rom taps no
+/// longer clamp at the parent edge, and the border curvature is REAL instead of a defined-0 edge row (which
+/// used to silence the displacement in a ~1-parent-cell band along every z17 border — a smooth strip
+/// repeating on the ~200 m grid). At the pyramid rim (no neighbour) the halo falls back to an edge-slope
+/// reflection: deterministic, and there is no adjacent child there to disagree with.
 ///
 /// The synthesised tile carries an ALL-ZERO <see cref="BakedDemTile.DetailRms"/>: the displaced geometry now
 /// carries the micro-relief, so the shader's NativeMicroDetail bump must not fire on top (anti-double-bump).
@@ -49,6 +54,10 @@ public static class VirtualDemTileSynthesizer
     // Distinct hash salts per octave so the two lattices are uncorrelated.
     private const ulong CoarseSalt = 0x9E3779B97F4A7C15UL;
     private const ulong FineSalt = 0xC2B2AE3D27D4EB4FUL;
+
+    // Halo width (in parent cells) the parent raster carries from its 8 neighbours: Catmull-Rom reaches 2
+    // taps past a node, and the curvature stencil reads ±1 around the bilinear lookup's +1 — both exactly 2.
+    private const int ParentHaloCells = 2;
 
     // Noise lattices are ROTATED against the tile grid and scaled by near-irrational factors. Value noise
     // sampled on its own axis-aligned lattice alternates full-variance corners with averaged midpoints —
@@ -88,7 +97,11 @@ public static class VirtualDemTileSynthesizer
             return null;
         }
 
-        DemRaster parent = BakedTileMeshBuilder.AsRaster(ancestor);
+        // The parent inside a halo of its neighbours' real cells: the Catmull-Rom taps and the curvature
+        // stencil then have genuine ground beyond the parent border instead of a clamp/defined-0 edge. 2 cells
+        // covers both consumers exactly (CR reaches 2 taps past a node; the curvature stencil ±1 around the
+        // bilinear lookup's +1). Same LRU-backed loader as the ancestor itself — 8 RAM-hit lookups.
+        DemRaster parent = BakedTileMeshBuilder.AsRasterWithHalo(ancestor, loadTile, ParentHaloCells);
         float[] curvature = CurvatureGrid(parent);
 
         int cols = ancestor.Columns;
@@ -107,13 +120,16 @@ public static class VirtualDemTileSynthesizer
 
         for (int r = 0; r < rows; r++)
         {
-            double latitude = north - ((double)r / (rows - 1) * (north - south));
-            // The child node's position on the ancestor grid (ancestor-cell units, node registration).
+            // The child node's position on the ancestor grid (ancestor-cell units, node registration) — an
+            // EXACT dyadic fraction, so sampling by GRID position (not geo) keeps a node-coincident child at
+            // t=0 exactly: the welded ancestor value comes back bit-for-bit and cross-parent seams stay
+            // bit-exact by construction. +ParentHaloCells shifts into the haloed raster's frame.
             double parentRow = ((key.Y - ((long)ancestor.TileY << shift)) * (rows - 1) + r) * step;
             for (int c = 0; c < cols; c++)
             {
-                double longitude = west + ((double)c / (cols - 1) * (east - west));
-                double smooth = DemRasterResampler.SampleCatmullRom(parent, longitude, latitude);
+                double parentCol = ((key.X - ((long)ancestor.TileX << shift)) * (cols - 1) + c) * step;
+                double smooth = DemRasterResampler.SampleCatmullRomAt(
+                    parent, ParentHaloCells + parentCol, ParentHaloCells + parentRow);
                 int i = (r * cols) + c;
                 if (smooth == noData)
                 {
@@ -121,8 +137,9 @@ public static class VirtualDemTileSynthesizer
                     continue;
                 }
 
-                double parentCol = ((key.X - ((long)ancestor.TileX << shift)) * (cols - 1) + c) * step;
-                double curv = Bilinear(curvature, cols, rows, parentCol, parentRow);
+                double curv = Bilinear(
+                    curvature, parent.Columns, parent.Rows,
+                    ParentHaloCells + parentCol, ParentHaloCells + parentRow);
 
                 // Global child-node index, expressed in each octave lattice's own units and ROTATED off the
                 // grid (see the lattice constants above) so the pattern never synchronises with the mesh.
@@ -154,9 +171,10 @@ public static class VirtualDemTileSynthesizer
     }
 
     // Per-cell curvature |z − mean(valid 4-neighbours)| in metres — the MEASURED displacement amplitude
-    // source. Edge rows/cols and cells short of 4 valid neighbours read 0: a symmetric rule adjacent parents
-    // compute identically, which pins the cross-parent seam (and fades displacement over ~1 parent cell at
-    // parent borders — negligible against the caps).
+    // source, computed over the HALOED parent raster: a cell on the parent BORDER has real neighbours on both
+    // sides, so its curvature is genuine and — because both adjacent parents read the same welded values into
+    // the same stencil slots — identical across the seam. Only the halo's outermost ring reads 0 (short of a
+    // stencil), and that ring sits ParentHaloCells beyond the border, out of reach of every lookup.
     private static float[] CurvatureGrid(DemRaster parent)
     {
         int cols = parent.Columns;

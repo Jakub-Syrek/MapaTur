@@ -369,6 +369,7 @@
   <data name="LayerPeakNames" xml:space="preserve"><value>🗻 Peak names</value></data>
   <data name="LayerNightSky" xml:space="preserve"><value>✨ Night sky</value></data>
   <data name="LayerContours" xml:space="preserve"><value>〰️ Contours</value></data>
+  <data name="LayerClimbingRoutes" xml:space="preserve"><value>🧗 Climbing routes</value></data>
   <data name="PeakRangeLabel" xml:space="preserve"><value>Range</value></data>
   <data name="PeakRangeHint" xml:space="preserve"><value>Peak-name range from the camera</value></data>
   <data name="PoiHeader" xml:space="preserve"><value>POINTS (POI)</value></data>

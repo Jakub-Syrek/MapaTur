@@ -81,4 +81,40 @@ public sealed class OrthoVramBudgetTests
 
         fit.Should().Be(0);
     }
+
+    // Shared-budget detail cap: the 8 base cells (~1.9 GB) and the 4096² detail cells (~89 MB) draw from ONE
+    // 3 GB budget. After the base, ~1.14 GB is free → ~14 detail cells; a smaller hard cap clamps it.
+    private static long BaseEightCellsBytes => 8 * OrthoVramBudget.CellResidentBytes(CellWidth, CellHeight);
+    private static long DetailCellBytes => OrthoVramBudget.CellResidentBytes(4096, 4096);
+
+    [Fact]
+    public void SharedDetailNearCap_AfterTheBase_FitsTheFreeBudget()
+    {
+        int cap = OrthoVramBudget.SharedDetailNearCap(BaseEightCellsBytes, DetailCellBytes, 3 * Gb, hardCap: 20);
+
+        cap.Should().Be(14); // (3 GB − 1.9 GB) / 89 MB
+    }
+
+    [Fact]
+    public void SharedDetailNearCap_IsClampedByTheHardCap()
+    {
+        int cap = OrthoVramBudget.SharedDetailNearCap(BaseEightCellsBytes, DetailCellBytes, 3 * Gb, hardCap: 9);
+
+        cap.Should().Be(9);
+    }
+
+    [Fact]
+    public void SharedDetailNearCap_WhenBaseFillsTheBudget_IsZero()
+    {
+        // No room left → detail off (base owns the frame), NOT forced to 1 like MaxResidentCells.
+        int cap = OrthoVramBudget.SharedDetailNearCap(3 * Gb, DetailCellBytes, 3 * Gb, hardCap: 12);
+
+        cap.Should().Be(0);
+    }
+
+    [Fact]
+    public void SharedDetailNearCap_UnknownCellSize_IsZero()
+    {
+        OrthoVramBudget.SharedDetailNearCap(BaseEightCellsBytes, 0, 3 * Gb, hardCap: 12).Should().Be(0);
+    }
 }

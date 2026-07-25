@@ -13,6 +13,11 @@
 *.local.props
 signing.local.props
 
+# Licensed climber character models — local use only, NOT for redistribution.
+# NEVER commit, embed in Resources/Raw, or add to installer/data packages.
+data/climber/
+data/mountain_climber.glb
+
 # User-specific files
 *.rsuser
 *.suo

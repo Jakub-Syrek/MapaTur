@@ -24,6 +24,7 @@ public sealed class MeshBufferPool
     private readonly Dictionary<int, Stack<Vector3[]>> vec3 = new();
     private readonly Dictionary<int, Stack<uint[]>> u32 = new();
     private readonly Dictionary<int, Stack<float[]>> f32 = new();
+    private readonly Dictionary<int, Stack<byte[]>> u8 = new();
     private readonly object gate = new();
 
     /// <summary>Rents a <see cref="Vector3"/> array of EXACTLY <paramref name="length"/> (reused or freshly allocated).</summary>
@@ -75,6 +76,40 @@ public sealed class MeshBufferPool
         }
 
         return new float[length];
+    }
+
+    /// <summary>Rents a <see cref="byte"/> array of EXACTLY <paramref name="length"/>. Used for the huge ortho
+    /// detail cell buffers (64 MiB det25 / 256 MiB det05) whose per-compose allocation was gigabytes of LOH
+    /// churn per traverse; only a handful circulate (composes in flight + pending uploads), so the retained
+    /// set stays tiny. The buffer arrives DIRTY — the compose path clears it (its hole semantics require it).</summary>
+    public byte[] RentBytes(int length)
+    {
+        if (Enabled)
+        {
+            lock (gate)
+            {
+                if (u8.TryGetValue(length, out Stack<byte[]>? s) && s.Count > 0)
+                {
+                    return s.Pop();
+                }
+            }
+        }
+
+        return new byte[length];
+    }
+
+    /// <summary>Returns a buffer for reuse. See <see cref="Return(Vector3[])"/>.</summary>
+    public void Return(byte[]? buffer)
+    {
+        if (!Enabled || buffer is null || buffer.Length == 0)
+        {
+            return;
+        }
+
+        lock (gate)
+        {
+            Push(u8, buffer.Length, buffer);
+        }
     }
 
     /// <summary>Returns a buffer for reuse. Null / empty is ignored. Caller must not touch the array afterwards.</summary>

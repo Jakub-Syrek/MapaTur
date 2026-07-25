@@ -1,6 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <ProjectReference Include="..\MapaTur.Climbing\MapaTur.Climbing.csproj" />
     <ProjectReference Include="..\MapaTur.Domain\MapaTur.Domain.csproj" />
     <ProjectReference Include="..\MapaTur.Routing\MapaTur.Routing.csproj" />
   </ItemGroup>
@@ -9,6 +10,8 @@
     <!-- glTF import + runtime skinning for the ridden dragon. -->
     <PackageReference Include="SharpGLTF.Core" />
     <PackageReference Include="SharpGLTF.Runtime" />
+    <!-- Kompresja stron .opk (zstd; pole zstdBytes w TOC od v1). -->
+    <PackageReference Include="ZstdSharp.Port" />
   </ItemGroup>
 
   <PropertyGroup>

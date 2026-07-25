@@ -110,7 +110,11 @@ całość 8741), (b) nowe mtime, (c) magic BDT2, (d) rozmiar kafla z16 = 262 209
 gruby z detail = 524 353 B. Aplikację ZRESTARTOWAĆ (indeks dostępności skanowany na starcie).
 **Poziomy do bake'u można nadpisać:** `$env:MAPATUR_BAKE_ZOOMS="17"` (lista po przecinku) — bake'uje TYLKO
 podane poziomy (z17 = Faza A sub-1m; finest z listy jest fetchowany ze źródła/cache, weryfikacja szwów działa
-na finest). Istniejąca piramida z13–z16 zostaje nietknięta. Źródło z17 = `gugik\17` (download:
+na finest). Istniejąca piramida z13–z16 zostaje nietknięta.
+⚠️ **Weryfikacja szwów sprawdza TYLKO bit-identyczność wspólnej krawędzi** (`TatraBakeRunner` east/south seam)
+— jest ŚLEPA na symetryczny bias kernela w wierszach ±1..2 od szwu (oba kafle mają go „po równo", krawędź
+się zgadza, a załom istnieje; zmierzony ±9 mm @z17 — patrz §2.5 i audyt §6b). Po bake'u nowego poziomu
+przepuść też `testdata/maps/audit-tile-border-grooves.py` (przekrój przez szew, nie tylko krawędź). Źródło z17 = `gugik\17` (download:
 `MAPATUR_DOWNLOAD_Z17=1` → `Z17DownloadRunner`, wznawialny; braki → `z17-download-missing.txt` = pas SK/graniczny
 do DMR5-merge zoom 17 + tereny poza pokryciem GUGiK, które po prostu zostają na z16).
 ⚠️ Weryfikuj, że zmiana w tif faktycznie weszła do .bdt (porównanie próbki wysokości tif vs .bdt) —
@@ -152,6 +156,16 @@ których `FillNarrowZeroStrips` nie rozpoznaje; kafel 72738/44860: weave 0.056�
 `GugikNmtDemTileSource`: maska ≤0.5→sentinel PRZED low-passem, przywrócenie markera 0 PO nim (test
 `DoesNotSmearFlatZeroVoidsInTheDownsample`). Wniosek na przyszłość: **każdy nowy krok przetwarzania rastrów
 GUGiK musi jawnie obsłużyć klasę flat-0, zanim uśredni cokolwiek.**
+⚠️ **ZNANY BIAS BRZEGOWY kernela (zmierzony 2026-07-15, audyt §6b):** fetch 512 px idzie na DOKŁADNYM bboxie
+kafla (bez apronu sąsiada), więc okno Gaussa `LowPassDownsample` (σ=1.8 hi-px, promień 4) na krawędzi kafla
+jest OBCINANE i renormalizowane → centroid próbkowania skrajnego wiersza/kolumny przesuwa się ~0.85 hi-px
+(~0.33 m gruntu) W GŁĄB kafla. Na stoku daje to antysymetryczny załom gradientu na komórkach ±1 od szwu:
+mediana ±9 mm (Dolina Pięciu Stawów), na stromym terenie proporcjonalnie więcej (~g·0.33 m w skrajnym
+wierszu). Weld krawędzi tego NIE usuwa (uzgadnia tylko wspólną kolumnę). Wizualnie od 07-15 pomijalne
+(dominujący artefakt siatki — klamp AO przy meszowaniu — naprawiony render-side halo; checklista §C.10).
+**Gdyby kiedyś robić re-fetch/re-bake z17: pobierać z apronem** (np. bbox poszerzony o 8 hi-px na stronę,
+low-pass na całości, crop do 512 po filtrze) — wtedy załom znika u źródła. Dotyczy WYŁĄCZNIE z≥17
+(z16 i niżej: fetch natywny 256 px, bez downsamplingu).
 
 ---
 
@@ -348,6 +362,56 @@ całe światło) = ZAPARKOWANE, `docs/DELIGHT-RESEARCH.md` (prototyp nie złapa�
 zortorektyfikowane → cień DEM nie leży na cieniu orto, patchwork nalotów o różnym słońcu). Ekspozycja renderu
 1.15→1.0 (`TonemapExposure`, `sunCol ×1.15→1.0`) — to była główna „przepalona jasność bazowa".
 
+### 3.14 De-shadow wielo-nalotowy: luminancja 2.0× + chroma 50% (PoC Rysy, 2026-07-21)
+**Następca §3.10/3.13** — usuwa nie tylko niebieski CAST, ale i CIEMNOŚĆ wypalonego cienia, offline na dysku,
+bez utraty detalu/materiału. To ten „prawdziwy de-lighting" z §3.13-KONTEKST — udało się, bo referencję
+oświetlenia bierzemy z **innych roczników orto** (nie z cienia DEM). Pipeline: `dev/ortho-deshadow/` (untracked).
+
+**Metoda (ZATWIERDZONA przez usera etapami 07-21):**
+1. **Maska cienia** z low-pass log-luminancji unii 2015/2022/2024 (`diag.py`): histereza 0.20/0.45, morfologia
+   7 m, komponenty >150 m², feather 15 m, bramka `dark21`. Reaguje na OŚWIETLENIE, nie fakturę skały.
+2. **Luminancja** (`lumfield.py`): ciągłe pole log-gain z unii; confidence per-rocznik = `ss(nadwyżka nad
+   2021, histereza T_LO/T_HI)`; śnieg wykluczony bramką TEKSTURY (gładki=śnieg, faktura=granit); blend gładkimi
+   wagami confidence (NIE argmax), envelope→0 bez referencji; clamp **DOPIERO na końcu do 1 stopa = 2.0×**.
+   Mnożenie liniowego RGB (chroma bez zmian). Rdzeń cienia realnie wymaga 1.5–3 stopy → przy capie 2.0× rdzeń
+   dostaje jednolity max-lift (odcienienie CZĘŚCIOWE, świadomy wybór usera — relief zachowany).
+3. **Chroma** (`chroma.py`): OKLab, tylko a,b; osobne gładkie pole `cast` (chroma cienia po skale − target,
+   wygładzone 32 m); referencja = **median oświetlonej skały 2021** (2015 tylko kontrola); maska = ta z pkt.1;
+   wyklucz śnieg/zieleń/NoData; **rescale liniowego Y** po przesunięciu → `ΔY=4e-16` (luminancja DOKŁADNIE
+   stała), `ΔL(OKLab)=0.0024`. Siła **50%** (25% za mało, 75% za brązowo — wybór usera).
+
+**Bake na kafle** (`bake.py [--write]` → `dem/ortho-detail/tatry/det05-deshadow/{i}/{j}.webp`, WebP lossless):
+- Pole korekcji liczone **GLOBALNIE** na footprincie 440 m (`49.1793,20.0783,HALF=220`), parametry ZAMROŻONE,
+  potem **samplowane per-kafel** (bilinear) — CHECKLIST §C.10: nigdy statystyki per-kafel (=patchwork).
+- Per-piksel: NoData `(0,0,0)` nietknięte; piksele bez korekcji (`gpk<1e-4 & gt<1e-4`) **bajt-identyczne** ze
+  źródłem. Źródła `det05/` **nietknięte** (osobny katalog, odzyskiwalne). PoC = blok 42 kafli (i 1640–1645,
+  j 957–963) straddlujący dolną granicę cień→światło; cały zakres korekcji footprintu = 183 kafle.
+
+**Weryfikacja (`verify.py`, czyta kafle Z DYSKU) — WYKONANA:**
+- **Szew systematyczny** (uśredniony skok w poprzek granicy 512 px): gain **max 0.0016 stopa** (próg
+  widoczności ~0.03), chroma b max 0.0002 → brak szwu. Per-piksel ratio granica/wnętrze 1.78 == ratio
+  SUROWEGO źródła 1.85 → nadwyżka jest wrodzoną własnością kafli det05, bake NIC nie dodaje.
+- **Tożsamość:** kafle w pełni lit **bajt-identyczne**; strefa feather ≤1 bajt (maleńka korekcja).
+- **Blue cast** (`audit-ortho-blue-cast.py --dir …/det05-deshadow`): w cieniu **src 14.4 → baked 9.3/255**
+  (redukcja ~35% = 50% chromy). Residual 9.3 to CELOWY częściowy de-blue.
+
+**★ KONSUMPCJA — WAŻNE:** te kafle są już skorygowane NA DYSKU → oglądać w **`uOrthoDetailColorMode=0`
+(klawisz 9 = raw)**. Mode 1 (shaderowy de-blue) = PODWÓJNA korekcja. Audyt §C.10a flaguje je jako „RAW"
+(oczekuje ~0), bo zatwierdzony wygląd 50% zostawia częściowy cast — to świadome odejście od reguły „usuń CAŁY
+cast"; docelowa semantyka det05-deshadow (mode 0 + residual) = **do potwierdzenia z userem**.
+
+**Podgląd w rendererze (ZAIMPLEMENTOWANE 07-21, env-gated):** `set MAPATUR_DET05_DESHADOW_PREVIEW=1` przed
+startem → loader det05 (`SetupDet05Streaming`, `Terrain3DView.xaml.cs`) dla każdego kafla sprawdza najpierw
+`det05-deshadow/{i}/{j}.webp`, fallback `det05/`. `_coverage.txt` z ORYGINALNEGO det05; źródła nietknięte;
+env-unset = zero zmian. Loguje `deshadow-preview served: {hits} deshadow / {fallback} det05`. **Oglądać w
+`OrthoDetailColorMode=0` (klawisz 9)**; klawisz 0 = detail on/off. Bake podglądowy = **cały footprint 197 kafli**
+(`bake.py --full --write`; blok 42 = `bake.py --write`) — feather domyka się w kaflach → bezszwowo z fallbackiem.
+
+**OTWARTE przed szerszym bakiem:** (a) detektor śniegu roczników źródłowych za restrykcyjny (0–0.2% mimo
+płatów) — poprawić przed gainem >2.0× lub chromą źródeł; (b) przypadek śniegu/zieleni (footprint Rysów = goła
+skała, 0%) — dodać zanim korekcja wyjdzie poza ścianę skalną; (c) nieclampowane pole 1.5–3 stopy NIEzatwierdzone
+do gainu >2.0×.
+
 ---
 
 ## 4. Render (kontekst, nie produkcja): co konsumuje te dane
@@ -364,3 +428,330 @@ zortorektyfikowane → cień DEM nie leży na cieniu orto, patchwork nalotów o 
   poza pokryciem GUGiK/ZBGIS). SK = ZBGIS. Patrz §3.11.
 - RAM desktopu ~16–17 GB przy pełnych masterach (duplikacja zdekodowanego zestawu w cache widoku) —
   do przycięcia (cache widoku w rozdzielczości master, nie źródła).
+
+## ⚠️⚠️ TWARDA REGUŁA — ORTO BEZ CIENI, ZAWSZE (2026-07-16, wytyczna usera)
+
+**W ortofoto NIE MA PRAWA być wypalonych cieni nalotu** — cienie generuje renderer (CSM). **KAŻDA nowa
+warstwa/fetch/bake orto** (baza, det25, det05, sk20, przyszłe) MUSI mieć korektę cieni ZANIM user ją zobaczy:
+- **w shaderze detalu** (`uOrthoDetailColorMode` — DEFAULT **1** dla WSZYSTKICH ścieżek det25/det05; klawisz
+  `9` = tylko diagnostyczny podgląd raw). Formuła (07-16, „właściwa metoda" z lekcji r1-c3 — de-blue §3.13
+  PRODUKUJE zieleń, nie usuwa castu): **desaturacja ku średniej RGB bramkowana niebieskim excessem**:
+  `ex=max(0,B−max(R,G)); sw=smoothstep(0.005,0.06,ex); rgb=mix(rgb, vec3(mean(rgb)), 0.85·sw)` — cień
+  neutralnie szary, las/oświetlone nietknięte (ex≈0), luma zachowana, per-piksel = seam-safe.
+- **na dysku dla warstw bez ścieżki shaderowej** (baza: §3.13 de-blue historycznie zaakceptowany; przy
+  następnym re-bake bazy rozważyć przejście na desaturację jak wyżej — decyzja usera).
+- Dodatkowo strome ściany (>45°, pełne od 60°) przejmuje proceduralny granit (`rockW`, §C.6) — top-down orto
+  nie ma tam pikseli niezależnie od rozdzielczości.
+
+**Po każdym fetchu/bake'u uruchom:** `python testdata/maps/audit-ortho-blue-cast.py --dir <warstwa> --pattern
+'*.webp'` — warstwa czytana bez shaderowej korekty musi mierzyć ~0; surowa warstwa (det25: mean 4.75/255,
+p95 15.8; det05: 1.83) jest legalna TYLKO za ścieżką z de-blue w shaderze. Historia naruszenia: det25/det05
+weszły surowe obok skorygowanej bazy → patchwork niebieski/zielony (07-16, user wściekły — zasadnie).
+
+## 6. Ortho DETAIL tiles — hi-res PoC (plate-carrée pyramid, 2026-07-13)
+
+**Osobny** produkt od 8 komórek bazowych (§3): drobna piramida kafli nakładana LOKALNIE, bez dotykania bazy.
+Motyw: baza (16384 px komórka → master 8192 → **~2 m/px E-W, ~3 m/px N-S** anizotropowo) wyrzuca ~8–40×
+detalu GUGiK. Plan: `docs/PLAN-ortho-highres-poc.md`.
+
+**Źródło (zweryfikowane empirycznie 2026-07-13):** GUGiK **WMS HighResolution**
+`https://mapy.geoportal.gov.pl/wss/service/PZGIK/ORTO/WMS/HighResolution`, warstwa `Raster`, **EPSG:4326
+(WMS 1.1.1 lon,lat)**. Nad Morskim Okiem serwuje **realne ~5 cm** (widać auta/ludzi/kalenice; residual
+5 cm-vs-20 cm = **12.5** poziomów szarości vs **0.7** dla StandardResolution — tj. ~18× więcej realnego
+detalu; StandardResolution jest natywnie grube i przy 5 cm tylko upsampluje). Skorowidz WFS
+`.../ORTO/WFS/Skorowidze` (typy `gugik:SkorowidzOrtofomapy{rok}`, lata 2019–2026) rocznikowo pokazuje nad MO
+tylko 2024 @ **piksel 0,25 m** z bezpośrednim GeoTIFF na `opendata.geoportal.gov.pl` — ale WMS HighResolution
+mozaikuje drobniejszą kampanię. **Dane otwarte PZGIK**, atrybucja: „Dane GUGiK / geoportal.gov.pl".
+
+**Dlaczego WMS+plate-carrée, nie GeoTIFF:** brak GDAL/rasterio w env (jest tylko PIL 12.2 + numpy + requests;
+PIL webp=True). Surowe arkusze są EPSG:2180 → ręczna reprojekcja ryzykowna. WMS w EPSG:4326 daje plate-carrée
+= **1:1 z `OrthoCoverage`** (mapuje lon/lat liniowo na UV), więc zero reprojekcji przy renderze.
+
+**Format:** siatka plate-carrée kluczowana lon/lat, kafle **512 px WebP q90**, każdy kafel = JEDEN WMS GetMap
+dokładnie na bbox kafla (bez zszywania → bezszwowo, ten sam sampler; wznawialne — pomija istniejące). Kafle są
+kwadratowe w METRACH gruntu (spany lon/lat różne). Wyjście: `dem/ortho-detail/<area>/<level>/<i>/<j>.webp`
++ `manifest.json` (west/north/dlon/dlat/n/res).
+
+**Komenda:**
+```
+python testdata/maps/fetch-ortho-detail-poc.py --level det05 --limit 9   # walidacja (bezszwowość)
+python testdata/maps/fetch-ortho-detail-poc.py --level all --workers 6   # pełny PoC
+```
+
+**Wykonano (Morskie Oko):**
+- `det25` = 0,25 m/px, 2×2 km wokół jeziora (środek 49.1989, 20.0706) → **16×16 = 256 kafli, 11 MB**, err=0, nodata=0.
+- `det05` = 0,05 m/px, 500×500 m wokół schroniska PTTK (środek 49.2010, 20.0712 — teksturowany showcase, NIE
+  gładka tafla) → **20×20 = 400 kafli, 9,7 MB**, err=0, nodata=0.
+- ⚠️ det05 najpierw wycentrowany na jeziorze (woda = zero showcase) → skasowany i przecentrowany na schronisko
+  (override `clon/clat` per-poziom w `LEVELS`). Lekcja: test rozdzielczości TYLKO na teksturze (piarg/las/budynki).
+
+**Weryfikacja (obraz = prawda):** ta sama scena zdegradowana do 2 m / 0,25 m / 0,05 m pokazuje ~40× skok
+detalu liniowego (głazy/krzesła/auta pojawiają się dopiero od 0,25 m; pod wodą kamienie od 0,05 m). Skrypty:
+`scratchpad/compare_poc.py`, obrazy `_compare/` w katalogu danych.
+
+**NASTĘPNY (osobny, bramkowany) krok — render:** addytywna nakładka detalu za flagą `OrthoDetailPoc` w bbox
+PoC, per-draw wybór najlepszego rezydentnego kafla, fallback do komórki bazowej. To zmiana pipeline'u →
+`docs/TERRAIN-GRAPHICS-CHECKLIST.md` + zgoda usera. NIE zrobione na 07-13.
+*(Aktualizacja tego samego dnia: render-wiring wykonany i przyjęty przez usera — mozaiki det25/det05 8192²,
+addytywna nakładka w shaderze, jednostki tekstur 10/11, toggle klawisz `0`; szczegóły w pamięci projektu.)*
+
+## 6b. AUDYT szwów piramidy baked — „siatka kafli / rowek parometrowy" (2026-07-15)
+
+**Objaw:** trwała siatka kwadratów ~200 m z „parometrowym rowkiem" na granicach, widoczna bez orto
+(Dolina Pięciu Stawów, kamera 1,5 km). **Diagnoza pomiarowa (nie zgadywana):**
+
+```
+# 1) Czy w WYSOKOŚCIACH .bdt jest rów na granicach kafli? (przekrój §A.2b przez każdy szew)
+python testdata/maps/audit-tile-border-grooves.py \
+  --root "<AppData>\Data\dem-cache\baked" --zoom 17 --bbox 20.00,49.19,20.07,49.23 --stride 8
+# 2) Ile kłamie curvature-AO na granicy? (replika TerrainCurvatureAo: kafel standalone vs zszyty)
+python testdata/maps/audit-ao-border-clamp.py \
+  --root "<AppData>\Data\dem-cache\baked" --zoom 17 --bbox 20.00,49.19,20.07,49.23 --pairs 12
+```
+
+**Wyniki 2026-07-15 (671 kafli z17 / 194 z16, okolice zrzutu):**
+- Szwy wysokości **bit-identyczne** (0 rozjazdów / 79 488 próbek z17; z16 też 0). W danych NIE ma rowu.
+- z17: antysymetryczny **załom gradientu ±9 mm** na komórkach ±1 od granicy (baseline 0,5 mm) — ślad
+  per-kaflowego, klampowanego kernela Gaussa w supersamplingu (§2.5, `DemTileSupersampler.LowPassDownsample`:
+  okno bez apronu sąsiada). z16 czyste (sygnał < szum kontrolny). Bake-side TODO (niski priorytet — mm-y):
+  fetch/downsample z apronem sąsiada.
+- **Winowajca wizualny: curvature-AO** — kafel meszowany standalone klampuje pierścienie 6/18/45 m na granicy:
+  skok **+0.080/−0.067 AO w linii granicy** (≈15% jasności, p95 0.20), pasma szerokości 6/17/44 m (schodki =
+  trzy pierścienie). Zapieczone w vertex-alpha ⇒ niezależne od orto i słońca, trwałe. **Fix = render-side:**
+  halo K komórek z 8 sąsiadów przy meszowaniu (`BakedTileMeshBuilder.AsRasterWithHalo` + `NormalApronCells`,
+  K = zasięg AO; checklista §C.10) — zero re-bake.
+- Synteza z18/z19: szwy bit-identyczne (przypięte testami); zostaje pas ~1,6 m spłaszczenia mikroreliefu wzdłuż
+  granic rodziców z17 (`VirtualDemTileSynthesizer` CurvatureGrid zeruje brzeg) — sub-0,5 m, osobny TODO.
+
+**AKTUALIZACJA (ten sam dzień, po pakiecie napraw + re-bake):**
+- **Kink kernela NAPRAWIONY u źródła:** `LowPassDownsample` dostaje apron 4 hi-px z sąsiednich `{y}_512.tif`
+  (`PadWithNeighbours`; brak sąsiada/legacy → sentinel = bit-identycznie stary klamp; maska ≤0.5 również na
+  paskach). Pas spłaszczenia syntezy z18/z19 też naprawiony (rodzic w `AsRasterWithHalo` K=2, CR adresowany
+  gridowo na dokładnych ułamkach dyadycznych — szwy bit-identyczne strukturalnie, testy przypięte).
+- **Re-bake z17 wykonany** (§2.4 + `ZEROSTRIP=48` + `DEALIAS=1`): 25 422 kafle / 6.2 GiB / 78 min (wolniej niż
+  historycznie — okno 3×3 bake'u × 9 tifów apronu = ~81 dekodów/kafel; TODO: LRU zdekodowanych tifów w źródle).
+- **Werdykt liczbowy po re-bake #1 (apron):** mediany załomu na ±1 **zniknęły** (±9 mm → ~0.000); ogon p95
+  spadł, ale nie do tła (MO 1.02→0.91; czysto-PL 0.31 vs tło 0.13, z systematycznymi medianami ±3.3 cm) —
+  rezyduum = **§1.3 „ściśnięcie"**: downsample próbkował ŚRODKI BLOKÓW (hi 2j+0.5), a pipeline czyta wynik
+  jako WĘZŁY (j/(N−1)) → treść kafla zsunięta ±0.39 m ku środkowi → sąsiedzi rozsunięci o 0.78 m na granicy,
+  spaw mostkuje lukę → zmarszczka ∝ nachyleniu. Konwencję siatki 512 potwierdzono na stromych parach tifów
+  (`scratchpad check-512-lattice`): |A[511]−B[0]| ≈ krok 1-komórkowy ⇒ pixel-centre ciągłe, apron poprawny.
+- **FIX #2 — downsample REJESTROWANY WĘZŁOWO** (`LowPassDownsampleToNodes`, pad = radius+1 = 5): węzeł j
+  próbkowany w hi-pozycji `j·512/255 − 0.5`; węzeł graniczny obu sąsiadów czyta IDENTYCZNE globalne okno →
+  bit-identyczny z konstrukcji (spaw = no-op), ściśnięcie znika w całym kaflu. **Re-bake #2 wykonany.**
+- **Werdykt po re-bake #2:** czysto-PL (Hala Gąsienicowa) — **granice IDEALNE**: ±1 p95 = 0.126/0.129 przy
+  tle 0.132 (1.0×), mediany +0.0007. MO: 0.667 vs tło 0.446 — nadwyżka została TYLKO tam, gdzie granice
+  dotykają kafli **legacy** (SK DMR5 z17, 256 px `{y}.tif` — omijają downsampler; PL-sąsiad nie ma od nich
+  hi-res do apronu → klamp na tej krawędzi). Drabinka MO ±1 p95: 1.02 → 0.91 → **0.667**.
+- **DOMKNIĘCIE (noc 07-15/16) — pakiet #3, OBIE BRAMKI ZIELONE:**
+  (1) `ResampleToNodes` (CR, pad 2) — rejestracja węzłowa natywnych 256 dla **z≥16** (`NodeRegisterMinZoom`):
+  naprawia z16 (WCS natywny) ORAZ kafle legacy DMR5 z16/z17 (SK↔SK; tify legacy zweryfikowane jako
+  pixel-centre-ciągłe); (2) apron PL↔SK: brakujący hi-res legacy syntetyzowany `UpsamplePixelCentreGrid`
+  256→512 (rezyduum ~0.05·g na 3 skrajnych kolumnach paska — 7× lepiej niż klamp); (3) `LruCache` zdekodowanych
+  tifów (bake czytał każdy tif ~81×; z13-16 = **9.7 min**, z17 = 80 min; ⚠️ pojemność 192 za mała na
+  working-set z17 ≈ 3 wiersze × ~370 kolumn — podnieść przy okazji); (4) bramka per-zoom (twardy assert na
+  finest; z13-15 informacyjnie). **Finalne audyty:** z17 PL↔PL 1.00×, SK↔SK 1.04× (mediany ±4.3 cm → −0.0007),
+  grań PL↔SK @MO 1.22× (drabinka ±1 p95: 1.02→0.91→0.667→**0.555** przy tle 0.451), z16 rdzeń **0.98×**
+  (było 1.45×). Bramki: z16-family PASS, z17 PASS (border 0.289 vs tło 0.272).
+- **OTWARTE po pakiecie #3:** (a) derywacja z13-15 (`BakedDemDownsampler` czyta block-mean jako węzeł —
+  własny pół-komórkowy bias; raportowany informacyjnie w każdym bake'u; fix = filtr centrowany NA węźle
+  fine 2j); (b) rezyduum ~0.05·g apronu PL↔SK (pełne domknięcie = podać hi-res PL do pada legacy);
+  (c) telefon: z16 cache tify + baked .bdt wymagają re-sync po tej zmianie rejestracji (desktop→phone).
+
+## 7. z17 pas graniczny PL/SK — naprawa voidów DMR5 (2026-07-13) — „blob" pod Mięguszami
+
+**Objaw:** gładki „blob" w Kotle Mięguszowieckim przy zbliżeniu od Morskiego Oka (user 07-13). **Diagnoza
+(4-agentowy fan-out + pełny skan 25 312 kafli z17):** checklista §D była NIEAKTUALNA — z16 nad ROI jest CZYSTE
+(naprawione merge'm 07-01/02); dziura żyła wyłącznie w **z17**: (a) pasy zer wzdłuż granic arkuszy WCS
+(krawędź dokładnie lon 20.0625 = 20+1/16°; mozaice GRID1 WCS brakuje arkusza M-34-101-A-c-3-4 — zweryfikowane
+świeżym GetCoverage: nadal flat-0, re-fetch NIE naprawia), (b) **8 kafli bez ŻADNEGO źródła** (GUGiK all-zero
+odrzucone przez guard EmptyTileFloor, DMR5-bake z17 pominął przez maskę poland_fraction>0.005 — luka MIĘDZY
+kampaniami), (c) 367 kafli partial-void w całym oknie (ta sama klasa wzdłuż całej granicy + wewnętrzne dziury
+mozaiki WCS). To udokumentowany OPEN item „pas graniczny PL/SK na z17: DMR5-merge".
+
+**Naprawa = `testdata/maps/repair-z17-border-dmr5.py`** (z17-owa wersja przyjętej recepty z16
+merge-sk-into-partial-tiles.py + sk-force-bake-tile.py; identyczny kontrakt siatki pixel-centre/transform
+3857→8353/SheetIndex z bake-sk-dmr5-tiles.py):
+- **MERGE:** per-piksel DMR5 w piksele void (`~finite | ≤−900 | ≤0.5`), realne piksele GUGiK NIETYKANE;
+  patchuje NIEZALEŻNIE oba pliki kafla (`{y}_512.tif` 512px i legacy `{y}.tif` 256px, każdy w natywnej siatce).
+- **CREATE:** brakujące kafle z17 (z rodzicem z16) tworzone z samego DMR5 jako legacy 256px (konwencja 18k
+  istniejących kafli SK), ale **TYLKO przy pokryciu ≥99%** — kafel w połowie pusty oddałby połowę w gładki
+  base-backfill = REGRESJA względem z16, które dziś tam rządzi. Poniżej progu kafel zostaje brakujący.
+- Bramki sanity 400–2700 m; dry-run domyślnie (`--write` zapisuje); backup oryginałów →
+  `testdata/maps/z17-repair-backup/` (restore = kopia zwrotna); lista → `z17-repaired-tiles.txt`.
+
+**Wykonanie 07-13:** MERGE **682 pliki** (48,6 mln px), CREATE **850 kafli**, insane=0, backup 430 MB.
+**Weryfikacja numeryczna:** (1) ciągłość szwu fill↔GUGiK: mediana kroku +0.02…±0.47 m, p95 ≤0.9 m (klasa
+cm–dm Bpv↔Kronstadt — zero błędu datum); (2) re-skan ROI x72828-45/y44901-20: **0 voidów, 0 brakujących**
+(było 23+8); (3) **krzyżowo vs arkusz opendata GUGiK** (NMT EVRF2007, inne źródło!): (49.1870,20.0550)
+2279.9 vs 2280.49 m, (49.1855,20.0600) 2261.5 vs 2262.91 m — zgodność ~1 m.
+
+**Po naprawie:** pełny re-bake samego z17 (§2.3: `MAPATUR_BAKE_TATRA=1 MAPATUR_BAKE_ZOOMS=17
+MAPATUR_BAKE_ZEROSTRIP=48 MAPATUR_BAKE_DEALIAS=1`, bez BOUNDS; z13–16 nietknięte) + restart apki.
+⚠️ Lekcje: (1) skanuj CAŁE okno — pas ciągnął się daleko poza zgłoszony bbox (83 kafle w samym rzędzie
+y=44908, lon 19.72–20.06); (2) klasa „brakujący kafel między bramkami dwóch kampanii" nie jest widoczna
+w skanie samych PLIKÓW — trzeba porównać z rodzicami z16; (3) nowe kafle twórz tylko przy ~pełnym pokryciu
+(anty-regresja vs poziom niżej).
+
+## 8. Hi-res orto DETAIL na cały masyw — fetch R1 (2026-07-13) — plan `docs/PLAN-ortho-massif-streaming.md`
+
+**Cel:** globalna krata plate-carrée kafli 512 px WebP nad całym oknem mapy (zasięg C: 19.50–20.40 ×
+49.10–49.40), warstwa **det25 = 0.25 m** ze źródła **WMS StandardResolution** (pełne jednolite pokrycie PL;
+HighResolution jest DZIURAWY — tylko najnowsze kampanie — więc zły dla warstwy masywowej; HighRes zostaje
+dla okien det05 5 cm przy POI). Skrypt: **`testdata/maps/fetch-ortho-detail.py`**.
+
+**Klucz — globalna krata**: kafle indeksowane absolutnym (i,j) od stałej kotwicy NW (`GRID_LON0=19.50`,
+`GRID_LAT0=49.40`, `GRID_REF_LAT=49.25` fiksuje pitch lon → kafle kwadratowe w metrach, krata niezależna od
+szerokości). ⇒ mniejszy zasięg jest ścisłym PODZBIOREM większego (A⊂B⊂C): A→B→C to DOCIĄGANIE, nie re-fetch.
+
+**Klucz — maska pokrycia**: jeden tani GetMap StandardResolution (4096 px) nad zasięgiem → heurystyka
+PL-danych (`max-kanał≥16 & min-kanał≤244`) → kafle <2% PL POMIJANE (strona SK = brak pokrycia GUGiK, WMS
+zwraca OPAQUE biały/czarny flat-fill, NIE alpha). Na pasie granicznym MO to pominęło 62% kafli za darmo.
+Do tego per-kafel heurystyka nodata (siatka bezpieczeństwa): >98% nodata → skip + wpis do `_nodata_skip.txt`;
+częściowy (2–98%) → zapis surowy + wpis do `_partial.txt` (filler z bazy = sprawa assemblera R2 / render).
+
+**Komendy:**
+```
+python testdata/maps/fetch-ortho-detail.py --bbox 20.03,49.15,20.10,49.21 --level det25 --area tatry  # walidacja
+python testdata/maps/fetch-ortho-detail.py --region C --level det25 --workers 6 --area tatry           # pełne C (~10-13 h)
+```
+**Wznawianie / monitoring:** wznawialne (istniejące .webp + skiplist pomijane) — ponowne uruchomienie tej
+samej komendy DOBIERA brakujące (w tym stragglery po sporadycznych 404 balancera, ~0.6% pierwszego passa —
+NIE są skiplistowane, więc pass 2 je łapie). Postęp: `find dem/ortho-detail/tatry/det25 -name '*.webp' | wc -l`.
+Wyjście: `dem/ortho-detail/tatry/det25/<i>/<j>.webp` + `manifest.json` (kotwica/pitch globalnej kraty).
+Weryfikacja walidacji (07-13): pas graniczny 2173 kafli → 815 zapisanych, 1352 sk-side, 1 nodata, 81 partial,
+5×404; tempo realne ~2 kafle/s. StandardResolution 25 cm potwierdzone (residual 25 vs 50 cm: Pięć Stawów 10.8,
+Kasprowy 8.5 — realny detal, nie mus).
+
+## 9. det05 coverage: próg 243→16 z 256 — cele CZĘŚCIOWE streamują (2026-07-20)
+
+**Problem** („10% hires przed sobą, dookoła rozmyte", Mnich z bliska): granica nalotu det05 jest
+SCHODKOWA, a bramka coverage była binarna z progiem 95% (`>=243/256` kafli na celę) — cela z 240/256
+kaflami (94% danych) była odrzucana W CAŁOŚCI. Wokół Mnicha wycinało to cały pas cel częściowych na
+płd.-zach. (widok = mała łata pełnych cel + det25/baza dookoła), mimo pełnej puli VRAM (9/9 cel).
+
+**Fakt architektoniczny**: `OrthoDetailCellComposer` od zawsze komponuje cele częściowe — brakujące
+kafle mają alpha 0, a shader (`w × dcs.a`) robi per-piksel spadek do det25/bazy. Próg 95% był reliktem
+sprzed tej funkcji; degradacja per-PIKSEL >>> odrzut per-CELA (zgodne z KONTRAKT-ORTO §3).
+
+**Proces (powtarzalny):**
+```
+python testdata/maps/regen-det05-coverage.py dem/ortho-detail/tatry/det05 --threshold 16   # ≥6% danych
+copy dem\ortho-detail\tatry\det05\_coverage.txt "<AD>\dem\ortho-detail\tatry\det05\_coverage.txt"
+```
+**Weryfikacja liczbowa (07-20):** 343 077 kafli → cele: 13 485 przeskanowanych, **10 133 covered**
+(było 8 906; +1 227 cel częściowych; 8 812 pełnych 256/256). Log appki po restarcie:
+`det05 streaming wired … (10133 covered cells)`. Mapa ASCII pokrycia wokół Mnicha (ci 253–269 ×
+cj 144–158): schodek przesunął się o ~2–6 cel na płd.-zach. — pas graniczny streamuje.
+
+**Uwaga na przyszłość:** próg 16 = kompromis; cela z <16 kaflami (≈<6%) nadal odpada (nie warto slotu
+341 MB dla pojedynczych kafli). Mądrzejszy model kosztu (priorytet wg fill-fraction) = ewentualny F2.
+
+## §9. Prebake pakietów GPU `.opk` — det25 + det1m (2026-07-23, ARCHITEKTURA-STREAMING §8 + ANEKS A)
+
+Narzędzie: `src/MapaTur.OrthoBake` (konsolowe; runtime NIGDY nie pisze `.opk`).
+
+```
+dotnet run --project src/MapaTur.OrthoBake -- --layer det25 \
+  --src "<AppData>/Data/dem/ortho-detail/tatry/det25" \
+  --out "<AppData>/Data/dem/ortho-detail/tatry/opk/det25" \
+  --det1m-out "<AppData>/Data/dem/ortho-detail/tatry/opk/det1m"
+```
+
+Wejście: 39 851 kafli WebP 512² det25. Wyjście: 684 pakiety det25 (strona = kafel 1:1 BC1 mip 512+256,
+tail = kompozyt grupy 8×8 → 2048↓) + 54 pakiety det1m (downsample 4× grup) + `index.bin` per warstwa.
+
+**Weryfikacja liczbowa (ZMIERZONA 2026-07-23):**
+- strony(TOC) − taile = 39 851 == kafle źródłowe (0 błędów dekodu) → ZGODNE
+- próbka CRC 128/128 OK
+- rozmiar: 7,86 GB det25 + 0,67 GB det1m (BC1 bez zstd — v1)
+- czas pełnego bake'u z pustym wyjściem: **10,4 min** (14 rdzeni; det25 7,4 min + det1m)
+- przyrostowość: ponowny bieg = 684/684 pominięte po srcHash, 0,1 min
+
+**Pełna walidacja (2026-07-23, `--verify-full`; domknięcie kamienia — poprzednie 128/128 było próbką):**
+- det25: 684 pakiety, **40 535/40 535 stron CRC OK** (39 851 kafli + 684 taile), offsety/długości rozłączne
+  i w granicach plików, 0 duplikatów pageId, 0 plików poza indeksem — 1,0 min
+- det1m: 54 pakiety, **3 510/3 510 stron CRC OK**, wszystkie kontrole czyste — 0,1 min
+
+Zakres: to pełny prebake WARSTW det25 + det1m; det05 pozostaje późniejszym etapem (krok 6 migracji).
+
+### §9.1 Nodata GUGiK → alfa 0 (format v4, 2026-07-24 — czarne trójkąty przy granicy PL/SK)
+
+**Przyczyna (zmierzona, nie teoria):** GUGiK WMS przycina orto na granicy PL; wypełnienie poza granicą to
+KRYJĄCA czerń — WebP **bez kanału alfa**, RGB dokładnie (0,0,0). Audyt kafli granicznych det25 w rejonie
+Temnosmrečinskej doliny (i∈[283,300], j∈[156,182]): **38 kafli z czernią, do 96,7% kafla**
+(`testdata/maps/audit-black-nodata.py`). Dekod nadawał im a=255 → alfa-ważone mipy (v3) uczciwie uśredniały
+czerń jak kolor → BC1 kodował opaque black → shaderowa bramka `dcs.a` bezradna → czarne trójkąty
+skwantowane do kafli (hipotenusa = skos granicy). Dowód per-piksel: tryb `MAPATUR_DET1M_DEBUG=1`
+(czerwony = opaque black w danych).
+
+**Fix (jedna implementacja, WSZYSTKIE ścieżki dekodu detalu):** `OrthoNodata.ZeroAlphaOnBlack` —
+piksel o dokładnym RGB=(0,0,0) dostaje alfa=0 (kanały koloru nietknięte; korekta POKRYCIA, nie koloru).
+Wpięte w: bake CLI (`DecodeWebp`), runtime compose det25 i det05 (lambdy `OrthoTileDecodeCache`).
+Bazy NIE dotyczy (pokrycie bazy = AABB, nie alfa; baza jest już klipowana maską GUGiK data-side).
+Realny cień po stratnym WebP nigdy nie jest dokładnym zerem (ma wartości ~2–15).
+
+**Inwalidacja:** `OrthoPagePack.Version` i `GpuCellCache.Version` 3→4 — stare `.opk` są odrzucane przy
+otwarciu (det1m degraduje się do bazy, zero czerni), stare `.mtgc` są kasowane i rekomponowane w locie.
+Rebake det25+det1m jak w §9 (bump wersji sam wymusza pełny bieg — skip po srcHash nie widzi pakietów v3).
+det05 `.opk` (67 GB, krok 6): przebake'ować PRZED wpięciem PumpPageReads.
+
+**Korekta det1m (2026-07-23, po poprawce pokrycia):** strony tylko nad realnym źródłem — 54 pakiety,
+**2 790/2 790 stron CRC OK** (720 czarnych stron spoza pokrycia odrzuconych względem pierwszego bake'u),
+0,56 GB; przyrostowy bieg z `--det1m-out` buduje fragmenty także dla pominiętych grup (dekod bez re-enkodu).
+
+### §9.2 RĄBEK nodata → alfa 0 (2026-07-25 — czarna kropkowana linia wzdłuż granicy PL)
+
+**Przyczyna (zmierzona).** §9.1 gasi alfę tylko na DOKŁADNYM (0,0,0). Stratny WebP zostawia jednak wokół
+kryjącej czerni pierścień pikseli near-black, które dokładnym zerem NIE są — więc przechodzą jako
+KRYJĄCY, czarny „teren" i malują czarną kropkowaną linię wzdłuż całej granicy pokrycia (profil poprzeczny
+na pozie Szpiglasowego: luma spada 120 → **8-9** na JEDNYM wierszu pikseli). Profil rąbka w źródłowych
+kaflach det25 (10 kafli granicznych, pierścienie wokół dokładnej czerni;
+`testdata/maps/audit-ortho-nodata-rim.py width <katalog-warstwy>`):
+
+| odległość od czerni | 1 px | 2 px | 3 px | 4 px | 5 px | 7 px+ |
+|---|---|---|---|---|---|---|
+| mediana luma | 1.0 | 1.3 | 8.0 | 90.8 | 102.3 | ~106 |
+| udział luma<16 | 95,3% | 76,4% | 51,1% | 30,7% | 12,5% | <3% |
+
+Kontrola (teren daleko od nodata, n=982 659 px): mediana **97.7**, udział luma<16 = **0,0%**.
+Uwaga historyczna: nota z §9.1 „realny cień nigdy nie jest dokładnym zerem (~2–15)" jest prawdziwa, ale
+to właśnie ten zakres zajmuje rąbek — dlatego sam próg jasności NIE wystarcza jako kryterium.
+
+**Fix:** `OrthoNodata.ZeroAlphaOnNodataRim(rgba, w, h, maxRimLuma: 16)` — zalew 8-spójny **od dokładnej
+czerni** przez piksele o lumie ≤ 16. Kryterium to SPÓJNOŚĆ, nie próg: głęboki cień w środku zdjęcia nie
+dotyka nodata, więc zostaje. Kanały koloru nietknięte. Wpięte we WSZYSTKIE 4 ścieżki dekodu (bake
+`DecodeWebp` + 3 lambdy runtime compose det25/det05/deshadow-preview). TDD:
+`tests/MapaTur.Application.Tests/Terrain/OrthoNodataRimTests.cs` (7 testów: rąbek gaszony, cień
+nieprzylegający zachowany, jasny teren zatrzymuje propagację, przekątna, kolor nietknięty, no-op bez nodata).
+
+**Audyt bezpieczeństwa reguły** (`audit-ortho-nodata-rim.py safety`, próbka 600 kafli det25): 579 kafli nie ma ANI
+JEDNEGO czarnego piksela ⇒ reguła jest **no-op na 96,5% zbioru**; 21 kafli granicznych; tylko 1 kafel ma
+śladową czerń (<0,5%). Rąbek dogaszony: średnio **+1,19 pkt proc.** pokrycia kafla (max 4,70%), luma rąbka:
+mediana 1.0, maksimum 16.0.
+
+**Zakres rebake'u — WYŁĄCZNIE det25 + det1m.** det05 (5 cm) NIE zawiera nodata: audyt 400 kafli z 343 077
+(`audit-ortho-nodata-rim.py scan`) dał **0 kafli z czernią** (warstwa pokrywa wnętrze masywu, nie sięga granicy PL). det1m powstaje z tego
+samego źródła co det25 (4× downsample grup), więc jeden bieg naprawia obie warstwy:
+
+```
+dotnet run --project src/MapaTur.OrthoBake -c Release -- --layer det25 \
+  --src "<AppData>/…/tatry/det25" --out "<AppData>/…/tatry/opk/det25-rim" \
+  --det1m-out "<AppData>/…/tatry/opk/det1m-rim"
+dotnet run --project src/MapaTur.OrthoBake -c Release -- --out "…/opk/det25-rim" --verify-full
+```
+`--verify-full` to tryb OSOBNY (weryfikuje istniejące wyjście) — nie flaga bake'u.
+
+**BEZ bumpu wersji formatu.** `OrthoPagePack.Version` zostaje 4: bump unieważniłby także 45 GB pakietów
+det05, które nie mają czego naprawiać. Zamiast tego bake idzie do NOWYCH katalogów, po `--verify-full`
+następuje podmiana, a stare zostają jako `*-prerim` (rollback).
+
+## §10. Pełny prebake v2 (DXT1a z alfą) — WSZYSTKIE warstwy (2026-07-23 wieczór, ZMIERZONE)
+
+Po regresji „czarnych dziur" (BC1-RGB gubił alfę bramkującą pokrycie) format v2 = DXT1a punch-through
+(0x83F1); wersje mtgc/opk 1→2, stare pliki odrzucane (samonaprawa).
+
+- det25+det1m v2: 684+54 pakietów, **12,1 min**, 7,86+0,56 GB; verify-full: 40 535 + 2 790 stron OK
+- **det05 v2: 1 412 pakietów, 344 489 stron (343 077 kafli + 1 412 taili), 67,07 GB, 60,0 min**;
+  verify-full: 344 489/344 489 CRC OK, layout/klucze/bijekcja czyste (7,3 min)
+- Razem: pełny prebake Tatr (det05+det25+det1m) = **~75,5 GB / ~72 min** jednorazowo, przyrostowość po srcHash

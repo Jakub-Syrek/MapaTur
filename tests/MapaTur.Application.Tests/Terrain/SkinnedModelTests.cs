@@ -105,6 +105,57 @@ public sealed class SkinnedModelTests
             .Should().BeGreaterThan(0.001f, "rotating the rig's bones must deform the skinned mesh");
     }
 
+    [Fact]
+    public void PoseBlend_AtWeightZero_MatchesPoseA()
+    {
+        var model = LoadFox();
+        int b = model.Animations.Count > 1 ? 1 : 0;
+        model.Pose(0, 0.2f);
+        Vector3[] a = SnapshotFirstPrimitive(model);
+
+        model.PoseBlend(0, 0.2f, b, 0.3f, 0f);
+
+        a.Zip(SnapshotFirstPrimitive(model), (x, y) => (x - y).Length()).Max()
+            .Should().BeLessThan(1e-4f, "weight 0 is fully pose A");
+    }
+
+    [Fact]
+    public void PoseBlend_AtWeightOne_MatchesPoseB()
+    {
+        var model = LoadFox();
+        int b = model.Animations.Count > 1 ? 1 : 0;
+        model.Pose(b, 0.3f);
+        Vector3[] poseB = SnapshotFirstPrimitive(model);
+
+        model.PoseBlend(0, 0.2f, b, 0.3f, 1f);
+
+        poseB.Zip(SnapshotFirstPrimitive(model), (x, y) => (x - y).Length()).Max()
+            .Should().BeLessThan(1e-4f, "weight 1 is fully pose B");
+    }
+
+    [Fact]
+    public void PoseBlend_AtHalf_LiesBetweenTheTwoPoses()
+    {
+        var model = LoadFox();
+        int b = model.Animations.Count > 1 ? 1 : 0;
+        model.Pose(0, 0.2f);
+        Vector3[] poseA = SnapshotFirstPrimitive(model);
+        model.Pose(b, 0.3f);
+        Vector3[] poseB = SnapshotFirstPrimitive(model);
+
+        model.PoseBlend(0, 0.2f, b, 0.3f, 0.5f);
+        Vector3[] mid = SnapshotFirstPrimitive(model);
+
+        poseA.Zip(poseB, (x, y) => (x - y).Length()).Max()
+            .Should().BeGreaterThan(0.01f, "the two clips are distinct poses");
+        for (int i = 0; i < mid.Length; i++)
+        {
+            float ab = (poseA[i] - poseB[i]).Length();
+            (mid[i] - poseA[i]).Length().Should().BeLessThanOrEqualTo(ab + 1e-3f, "the blend lies between the endpoints");
+            (mid[i] - poseB[i]).Length().Should().BeLessThanOrEqualTo(ab + 1e-3f);
+        }
+    }
+
     private static Vector3[] SnapshotFirstPrimitive(SkinnedModel model) =>
         model.Primitives[0].PosedPositions.ToArray();
 

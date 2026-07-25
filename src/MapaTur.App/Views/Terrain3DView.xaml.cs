@@ -359,6 +359,18 @@ public partial class Terrain3DView : ContentView
         set => SetValue(ShowContoursProperty, value);
     }
 
+    /// <summary>Whether the catalogued climbing-route overlay (topo lines + name labels on Mnich) is drawn.
+    /// Off hides the visible lines/names; the routes still feed the climb session's guaranteed holds.</summary>
+    public static readonly BindableProperty ShowClimbingRoutesProperty = BindableProperty.Create(
+        nameof(ShowClimbingRoutes), typeof(bool), typeof(Terrain3DView), true,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
+
+    public bool ShowClimbingRoutes
+    {
+        get => (bool)GetValue(ShowClimbingRoutesProperty);
+        set => SetValue(ShowClimbingRoutesProperty, value);
+    }
+
     /// <summary>Whether the on-screen camera control pads (altitude + pan/tilt) are shown. Set false in the
     /// immersive landscape mode so a phone screenshot of the scene is free of UI chrome.</summary>
     public static readonly BindableProperty ControlsVisibleProperty = BindableProperty.Create(
@@ -931,7 +943,11 @@ public partial class Terrain3DView : ContentView
 #endif
 
         animationTimer = Dispatcher.CreateTimer();
-        animationTimer.Interval = TimeSpan.FromMilliseconds(66); // ~15 fps
+        // Desktop 30 fps (2026-07-23): the 66 ms (~15 fps) cadence was THE perceived frame rate whenever the
+        // camera sat still with atmosphere on — the HUD read "13 FPS" on an idle RTX 5080 because nothing else
+        // invalidated. After the pano-streaming pass sumGpu is 10–23 ms, so 33 ms comfortably fits. Mobile
+        // keeps 66 ms (battery). Walk/dragon vsync loop is untouched (it self-invalidates per frame).
+        animationTimer.Interval = TimeSpan.FromMilliseconds(OperatingSystem.IsWindows() ? 33 : 66);
         animationTimer.Tick += OnAnimationTick;
         animationTimer.Start();
 
@@ -942,6 +958,121 @@ public partial class Terrain3DView : ContentView
         cameraSaveTimer.Interval = TimeSpan.FromMilliseconds(1200);
         cameraSaveTimer.Tick += OnCameraSaveTick;
         cameraSaveTimer.Start();
+
+        // BENCH harness (2026-07-23, perf/pano-streaming): MAPATUR_BENCH_F9=<runs> auto-runs the deterministic
+        // F9 Orla Perć flight <runs> times back-to-back (run 1 = cold in-process caches, run 2+ = warm) and
+        // quits, emitting [Bench] log markers so a script can slice the log per run and diff metrics between
+        // builds on an identical camera path. MP4 capture is suppressed for clean numbers.
+        if (int.TryParse(Environment.GetEnvironmentVariable("MAPATUR_BENCH_F9"), out int benchRuns) && benchRuns > 0)
+        {
+            benchRunsRemaining = benchRuns;
+            benchTotalRuns = benchRuns;
+            benchTimer = Dispatcher.CreateTimer();
+            benchTimer.Interval = TimeSpan.FromSeconds(2);
+            benchTimer.Tick += OnBenchTick;
+            benchTimer.Start();
+            Serilog.Log.Information("[Bench] armed: {Runs} F9 runs, waiting for scene", benchRuns);
+        }
+    }
+
+    // BENCH harness state — see the constructor arm. Runs the flight only once the world exists and a minimum
+    // settle time has passed (the same streaming warm-up a user gets before pressing F9 by hand).
+    private readonly IDispatcherTimer? benchTimer;
+    private int benchRunsRemaining;
+    private readonly int benchTotalRuns;
+    private int benchTicks;
+    private int benchIdleTicks; // kolejne ticki z pustymi kolejkami streamingu (bramka „scena dobudowana")
+
+    // Ręczny F9 z bramką gotowości sceny: start odroczony aż kolejki streamingu opustoszeją (≥2 ticki po
+    // 1 s), z awaryjnym capem 60 s. Drugi F9 w oczekiwaniu = natychmiastowy start (świadome nadpisanie).
+    private IDispatcherTimer? flightPendingTimer;
+    private int flightPendingTicks;
+    private int flightPendingIdleTicks;
+
+    private void RequestFlightStartWhenSceneReady()
+    {
+        if (flightActive)
+        {
+            StartOrlaPercFlight(); // istniejące zachowanie F9 w locie (restart) — bez zmian
+            return;
+        }
+
+        if (flightPendingTimer is not null)
+        {
+            StopFlightPendingTimer();
+            Serilog.Log.Information("[Flight] drugi F9 w oczekiwaniu — start natychmiast");
+            StartOrlaPercFlight();
+            return;
+        }
+
+        if (glRenderer?.DetailStreamingIdle ?? true)
+        {
+            StartOrlaPercFlight();
+            return;
+        }
+
+        flightPendingTicks = 0;
+        flightPendingIdleTicks = 0;
+        flightPendingTimer = Dispatcher.CreateTimer();
+        flightPendingTimer.Interval = TimeSpan.FromSeconds(1);
+        flightPendingTimer.Tick += OnFlightPendingTick;
+        flightPendingTimer.Start();
+        Serilog.Log.Information("[Flight] F9 odroczony — czekam aż teren się dobuduje (streaming w locie)");
+    }
+
+    private void OnFlightPendingTick(object? sender, EventArgs e)
+    {
+        flightPendingTicks++;
+        flightPendingIdleTicks = (glRenderer?.DetailStreamingIdle ?? true) ? flightPendingIdleTicks + 1 : 0;
+        if (flightPendingIdleTicks >= 2 || flightPendingTicks >= 60)
+        {
+            Serilog.Log.Information("[Flight] scena gotowa po {T}s (idle={I}) — start", flightPendingTicks, flightPendingIdleTicks >= 2);
+            StopFlightPendingTimer();
+            StartOrlaPercFlight();
+        }
+    }
+
+    private void StopFlightPendingTimer()
+    {
+        if (flightPendingTimer is { } t)
+        {
+            t.Stop();
+            t.Tick -= OnFlightPendingTick;
+            flightPendingTimer = null;
+        }
+    }
+
+    private void OnBenchTick(object? sender, EventArgs e)
+    {
+        benchTicks++;
+        if (flightActive || benchRunsRemaining <= 0)
+        {
+            return;
+        }
+
+        // Scene-ready gate (2026-07-24, user: „nie startuj dema zanim się nie skończy buildować teren, bo
+        // ścierwi okrutnie"): world frame + raster + STREAMING DETALU BEZ PRACY W LOCIE (kolejki puste)
+        // przez ≥2 kolejne ticki, min 20 s settle; awaryjny cap 120 s, żeby bench nigdy nie wisiał.
+        bool streamingIdle = glRenderer?.DetailStreamingIdle ?? true;
+        benchIdleTicks = streamingIdle ? benchIdleTicks + 1 : 0;
+        if (WorldFrame is null || Raster is null || benchTicks < 10
+            || (benchIdleTicks < 2 && benchTicks < 60))
+        {
+            if (benchTicks % 5 == 0)
+            {
+                Serilog.Log.Information("[Bench] waiting: frame={F} raster={R} streamingIdle={I} t={T}s",
+                    WorldFrame is not null, Raster is not null, streamingIdle, benchTicks * 2);
+            }
+
+            return;
+        }
+
+        int runIndex = benchTotalRuns - benchRunsRemaining + 1;
+        benchRunsRemaining--;
+        Serilog.Log.Information(
+            "[Bench] run {Run}/{Total} start ({Kind})", runIndex, benchTotalRuns, runIndex == 1 ? "cold" : "warm");
+        StartOrlaPercFlight();
+        recordingRequested = false; // no MP4 capture during bench — NVENC would skew the numbers
     }
 
     private readonly IDispatcherTimer cameraSaveTimer;
@@ -958,6 +1089,10 @@ public partial class Terrain3DView : ContentView
         {
             lastSavedCameraSerialized = serialized;
             CameraState = serialized; // flows to the view-model → settings store
+
+            // TEST HARNESS: sync pozy dla agenta (czyta %TEMP%\mapatur-pose.txt podczas testu manualnego).
+            try { System.IO.File.WriteAllText(HarnessPosePath, serialized); }
+            catch (System.IO.IOException) { }
 
             // LOD Krok 4: report a snapshot of the camera pose so the host can raycast the look-at point and
             // stream the detail patch to the gaze. Snapshot (not the live camera) so the async reload reads a
@@ -1215,6 +1350,50 @@ public partial class Terrain3DView : ContentView
         Canvas.InvalidateSurface();
     }
 
+    // ── KONTRAKT-ORTO §4: anchor camera presets (MAPATUR_CAM_PRESET) ─────────────────────────────
+    // Deterministic start-up views of the four anchor spots, so render changes can be verified with
+    // passive before/after screenshots WITHOUT the user driving the camera. Applied once, when the
+    // world frame is first available. docs/ORTO-CONTRACT.md defines the anchor list.
+    private bool cameraPresetApplied;
+
+    private static readonly Dictionary<string, (GeoPoint Geo, float DistanceMeters)> CameraPresets =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["mo"] = (new GeoPoint(49.1997, 20.0716), 900f),        // (a) MO shelter — 5 cm showcase
+            ["mnich"] = (new GeoPoint(49.19253, 20.05485), 500f),   // (b) Mnich face up close
+            ["dolinka"] = (new GeoPoint(49.1875, 20.0435), 700f),   // (c) Dolinka za Mnichem — survey seam
+            ["panorama"] = (new GeoPoint(49.19253, 20.05485), 6000f), // (d) massif-scale tone coherence
+            ["rysy"] = (new GeoPoint(49.1795, 20.0870), 900f)       // Czarny Staw pod Rysami — shadow blue-cast check
+        };
+
+    private void ApplyCameraPresetFromEnv()
+    {
+        if (cameraPresetApplied || WorldFrame is null)
+        {
+            return;
+        }
+
+        cameraPresetApplied = true; // one shot — even when unset, so the lookup runs once
+        string? preset = Environment.GetEnvironmentVariable("MAPATUR_CAM_PRESET");
+        if (string.IsNullOrWhiteSpace(preset))
+        {
+            return;
+        }
+
+        if (!CameraPresets.TryGetValue(preset.Trim(), out (GeoPoint Geo, float DistanceMeters) anchor))
+        {
+            Serilog.Log.Warning(
+                "[CamPreset] unknown preset '{Preset}' — expected one of: {Known}",
+                preset, string.Join(", ", CameraPresets.Keys));
+            return;
+        }
+
+        FocusOnGeo(anchor.Geo, anchor.DistanceMeters);
+        Serilog.Log.Information(
+            "[CamPreset] applied '{Preset}' — target ({Lat:F5},{Lon:F5}) distance {D:F0} m",
+            preset, anchor.Geo.Latitude, anchor.Geo.Longitude, anchor.DistanceMeters);
+    }
+
     /// <summary>
     /// Centres the camera on a geographic point (seated on the terrain), at a close framing distance.
     /// Used to fly to the first route stop when the user finishes planning.
@@ -1289,15 +1468,28 @@ public partial class Terrain3DView : ContentView
     private const double FlightCancelDragPx = 30.0;    // cumulative drag (px) before a touch cancels the fly-through
 
     // Time-of-day arc (flight progress → hour): a VERY long red morning, the largest stretch in full day, a
-    // sizable golden evening, then only a BRIEF night at the very end — just enough to whip the camera up to
+    // LONG golden evening, then only a BRIEF night at the very end — just enough to whip the camera up to
     // the Big Dipper + Moon for the finale.
+    // 2026-07-24 (user: „mignięcie golden hour, żeby było dłuższe — pomarańcz"): ZMIERZONE serią
+    // autoshotów (R−B nieba per klatka): silnik daje neutralny dzień aż do ~19:55, a barwowy pomarańcz
+    // dopiero ~20:10–21:00 tuż przed nocą — stary przebieg (19:00→21:48 w 10 % lotu) przelatywał przez to
+    // okno w kilka sekund. Teraz 19:40→21:00 trwa ~23 % lotu (0.70→0.93); dzień dalej największy.
+    // POLICZONE z Atmosphere (nie symulowane): silnik ma STAŁY łuk słońca SunriseHour=6/SunsetHour=18,
+    // elev = 1.118·sin(π(h−6)/12), a pomarańcz = warmth = 1−|elev|/0.55 ⇒ warmth>0.5 dla h∈(17:03, 18:00).
+    // Wcześniejsze plateau 20:00–20:40 leżało PO zachodzie silnika (elev −13°…−17° ⇒ SunColor=0 ⇒ ciemno).
+    // Plateau 17:10→17:50 (elev 14°→3°, warmth 0.56→0.91) położone na p 0.53–0.82 — odcinku trasy, który
+    // wg pomiaru autoshotów faktycznie patrzy pod niskie zachodnie słońce.
     private static readonly (float P, float Hour)[] FlightTimeKeys =
     {
         (0.00f, 5.0f),   // dawn — start in the pre-sunrise red
-        (0.28f, 8.5f),   // … a VERY long morning lingered in sunrise / red light (~28 % of the flight)
-        (0.68f, 16.0f),  // … the largest stretch in full day (~40 %)
-        (0.90f, 19.0f),  // … a sizable golden evening (~22 %)
-        (1.00f, 21.8f),  // … a brief night (~10 %) for the sky reveal — stars, Big Dipper, Moon
+        (0.26f, 8.5f),   // … a VERY long morning lingered in sunrise / red light (~26 % of the flight)
+        (0.46f, 14.0f),  // … full day (~20 %)
+        (0.53f, 17.17f), // … approach into the warm band (as before)
+        (0.62f, 17.75f), // … reach 17:45 — sun ~4.7° up, strong orange on the slopes
+        (0.85f, 17.75f), // … SUN HELD STILL at 17:45 for 23 % of the flight (≈20 s) — user 07-24:
+                         //    „zatrzymaj słońce w tym miejscu, reszta idzie jak wcześniej"
+        (0.92f, 18.5f),  // … sunset into dusk (as before)
+        (1.00f, 20.5f),  // … night for the sky reveal — stars, Big Dipper, Moon
     };
 
     // Piecewise-linear interpolation of FlightTimeKeys at flight progress p∈[0,1].
@@ -1381,7 +1573,17 @@ public partial class Terrain3DView : ContentView
             return;
         }
 
-        var pts = new Vector3[OrlaPercWaypoints.Length];
+        // 2026-07-24 (user): demo startuje DOKŁADNIE z bieżącej pozycji i kierunku kamery — path dostaje
+        // prefix na promieniu patrzenia użytkownika (start = jego kadr, ruch rusza w jego kierunku),
+        // po czym spline wchodzi w dotychczasową trasę; sam ruch/waypointy bez zmian.
+        Vector3 userPos = Camera.Position;
+        Vector3 userLook = Camera.Target;
+        Vector3 lookDir = userLook - userPos;
+        lookDir = lookDir.LengthSquared() > 1e-3f ? Vector3.Normalize(lookDir) : new Vector3(1f, 0f, 0f);
+
+        var pts = new Vector3[OrlaPercWaypoints.Length + 2];
+        pts[0] = userLook;
+        pts[1] = userLook + (lookDir * 1500f);
         for (int i = 0; i < OrlaPercWaypoints.Length; i++)
         {
             (double lat, double lon) = OrlaPercWaypoints[i];
@@ -1390,7 +1592,7 @@ public partial class Terrain3DView : ContentView
             {
                 elev = 2000; // fall back if the waypoint lands on a no-data cell
             }
-            pts[i] = frame.GeoToWorld(new GeoPoint(lat, lon), (float)elev);
+            pts[i + 2] = frame.GeoToWorld(new GeoPoint(lat, lon), (float)elev);
         }
 
         flightProgressKeys = null; // built-in demo: plain linear progress, no stop holds
@@ -1398,6 +1600,11 @@ public partial class Terrain3DView : ContentView
         flightBuildGated = false; // demo keeps its fixed FlightStartPauseSeconds eye-hold
         flightGateOpen = true;
         BeginFlight(pts);
+        // Pierwsza klatka lotu = kadr użytkownika (zamiast snapu do reguł lotu); low-pass follow=0.10
+        // płynnie przejmuje stąd do wysokości/odsunięcia lotu — start bez cięcia, ruch jak dotąd.
+        flightSmoothPos = userPos;
+        flightSmoothLook = userLook;
+        flightSmoothInit = true;
     }
 
     /// <summary>Starts a cinematic fly-through ALONG the planned tourist route — and records it to MP4 — so the
@@ -1822,6 +2029,20 @@ public partial class Terrain3DView : ContentView
         if (finished)
         {
             StopFlight();
+
+            // BENCH harness: mark the run boundary; OnBenchTick starts the next run (warm) on its next tick.
+            // After the last run, quit so the log ends exactly at the benchmark's edge.
+            if (benchTimer is not null)
+            {
+                int doneRun = benchTotalRuns - benchRunsRemaining;
+                Serilog.Log.Information("[Bench] run {Run}/{Total} complete", doneRun, benchTotalRuns);
+                if (benchRunsRemaining <= 0)
+                {
+                    Serilog.Log.Information("[Bench] all runs complete — quitting");
+                    benchTimer.Stop();
+                    Microsoft.Maui.Controls.Application.Current?.Quit();
+                }
+            }
         }
     }
 
@@ -1891,7 +2112,6 @@ public partial class Terrain3DView : ContentView
     private int walkDetailTick;
     private bool walkSwinging;          // a ciupaga swing (left click) is playing
     private double walkSwingStartSeconds;
-    private bool walkLmbDown;           // LEFT mouse held → ciupaga self-arrest (hang) while airborne against rock
     private const float CiupagaSwingSeconds = 0.5f; // one strike + recover
     // Held-movement state, set by the Windows key handlers and polled by the (cross-platform) tick. Plain bools
     // so the tick never references the Windows-only VirtualKey type.
@@ -2037,6 +2257,56 @@ public partial class Terrain3DView : ContentView
     // centre (where the code plants worldPos), BLUE=posed foot-bone anchor (the drawn feet), YELLOW=target
     // rendered-mesh point (where the feet SHOULD land). Cleared when not perched.
     private readonly List<MapaTur.App.Services.Terrain3DGlRenderer.DebugMarker> dragonDebugMarkers = [];
+    private readonly List<MapaTur.App.Services.Terrain3DGlRenderer.DebugMarker> climbMarkers = []; // climb session hold dots (overlay)
+
+    // Climb auto-belay dressed as real gear: a quickdraw on every bolt + the sagging rope, built by
+    // ClimbProtectionGeometry each walk tick and drawn by the renderer's depth-tested climb-gear pass.
+    private readonly List<Vector3> climbAnchorScratch = [];
+    private readonly List<MapaTur.Application.Terrain.ClimbProtectionGeometry.Quickdraw> climbQuickdraws = [];
+    private readonly List<Vector3> climbRopePoints = [];
+    private readonly List<MapaTur.App.Services.Terrain3DGlRenderer.GearRibbon> climbGearRibbons = [];
+    private readonly List<MapaTur.App.Services.Terrain3DGlRenderer.GearRing> climbGearRings = [];
+    private readonly List<List<Vector3>> climbSlingPool = []; // reused 2-point sling polylines, one per quickdraw
+
+    // Catalogued climbing topo: each massif (Mnich, Mnich Małołącki, …) anchors independently once the
+    // terrain around ITS summit is loaded — feeds the guaranteed-hold routes to the climb controller, and
+    // overlays a HIGHLIGHTED line + name label per route (the proposed passage), drawn through the
+    // climb-gear ribbon pass + the Skia label overlay.
+    private readonly Dictionary<string, IReadOnlyList<MapaTur.Application.Terrain.WorldClimbingRoute>> climbingMassifWorld = [];
+    private readonly List<MapaTur.Application.Terrain.WorldClimbingRoute> climbingAllWorldRoutes = [];
+    // Provisional anchors: snapped top still misses the catalogued elevation (coarse DEM smooths the
+    // needle away at startup) → re-snap while the 1 m terrain streams in, keep the best so far.
+    private readonly Dictionary<string, float> climbingMassifMissMeters = [];
+    private long climbingResnapNotBeforeTicks;
+
+    // CALIBRATION grid (temporary tooling): labelled marker chessboard pinned to a FIXED geo origin near
+    // Mnich. The user screenshots the wall from the topo-photo viewpoint; the grid labels visible in that
+    // shot let us transcribe route lines from the purchased topo into summit-relative offsets. Columns
+    // A.. run west→east every 20 m, rows 0.. run south→north. Disable after calibration.
+    private bool climbCalibMarkersVisible; // OFF by default (calibration tool only); the 'M' key toggles it on when needed
+    // Centred on the CORRECTED Mnich needle. DENSE (5 m) so route bends can be pinned to markers, and
+    // placed on the DETAIL surface ONLY (fine 1 m sampler, never the coarse base — the base is ~130 m
+    // below the needle, "całkiem inne miejsce"). Rebuilt as the fine terrain streams in until coverage
+    // is stable, so no half is left empty. Labels every 20 m show the (dx,dy) offset from the summit.
+    private static readonly GeoPoint ClimbCalibOrigin = new(49.192532, 20.054851);
+    private const float ClimbCalibStepMeters = 5f;
+    private const int ClimbCalibColumns = 35; // x from -70 (west) to +100 (east)
+    private const int ClimbCalibRows = 39;    // y from -110 (south) to +80 (north)
+    private const float ClimbCalibMinX = -70f;
+    private const float ClimbCalibMinY = -110f;
+    private long climbCalibNextBuildTicks;
+    private bool climbDemDumped;
+    private readonly List<MapaTur.App.Services.Terrain3DGlRenderer.DebugMarker> climbCalibMarkers = [];
+    private readonly List<(string Text, Vector3 World)> climbCalibLabels = [];
+    private readonly List<MapaTur.App.Services.Terrain3DGlRenderer.DebugMarker> debugMarkersRender = [];
+    private float climbCalibExaggeration = float.NaN;
+    private readonly List<MapaTur.App.Services.Terrain3DGlRenderer.GearRibbon> climbRouteRibbons = [];
+    private readonly List<(string Text, Vector3 World, SKColor Color)> climbRouteLabels = [];
+    private readonly List<MapaTur.App.Services.Terrain3DGlRenderer.GearRibbon> renderGearRibbons = []; // topo + session gear, rebuilt per paint
+    private float climbRouteOverlayExaggeration = float.NaN; // rebuild the overlay when the Pion slider changes
+    private readonly MapaTur.App.Services.GripClimbController gripClimb = new(); // hold-by-hold climbing (C toggles)
+    private bool walkClimbToggleQueued;
+    private bool walkBelayReleaseQueued; // X — deliberately drop the auto-belay (hanging → free fall)
 
     // ── AI DRAGON FLOCK ── a small mixed-species flock that circles the nearby peaks (ambient) and drifts toward
     // the player's dragon when it flies close. Each member owns its OWN posed model instance (independent pose),
@@ -2108,6 +2378,40 @@ public partial class Terrain3DView : ContentView
     private MapaTur.Application.Terrain.DragonFlightPhase dragonPrevPhase = MapaTur.Application.Terrain.DragonFlightPhase.Flying;
     private Matrix4x4 dragonWorldMatrix = Matrix4x4.Identity;
     private Matrix4x4 dragonNormalMatrix = Matrix4x4.Identity;
+
+    // ── 3rd-person walk avatar (KayKit "Adventurers" Rogue_Hooded → hiker.glb; loaded once per walk session) ──
+    private MapaTur.Application.Terrain.SkinnedModel? humanoidModel3D;
+    private bool humanoidModelLoading;
+    private int humanoidIdleAnimIndex = -1;        // resolved at load; base pose for the procedural climb + fallback
+    private MapaTur.Application.Terrain.HumanoidAnimator? humanoidAnimator;
+    private float humanoidClimbPhase;              // drives the alternating arm-reach while climbing / the hang sway
+    private const float ClimbCadenceHz = 1.1f;     // arm-plant beats per second while climbing
+    private const float ClimbReachDegrees = 55f;   // ⚠ TUNE visually: how far the arms reach up the wall
+    private Matrix4x4 humanoidWorldMatrix = Matrix4x4.Identity;
+    private Matrix4x4 humanoidNormalMatrix = Matrix4x4.Identity;
+    private System.Numerics.Vector2 walkPrevXY;    // last-tick walker XY → ground speed (drives clip + anti-skate)
+    private readonly bool walkThirdPerson = true;  // draw the 3D avatar + follow camera (vs the 1st-person ciupagas)
+    private bool walkShootQueued;                  // F pressed → fire the crossbow on the next tick
+    private int humanoidShootAnimIndex = -1;       // "1H_Ranged_Shoot" clip index (−1 = model has no ranged clip)
+    private float walkCamBack = WalkCamBackMeters;  // 3rd-person boom length behind the walker (mouse wheel zooms it)
+    private float walkCamYawOffset;                 // free-look (RMB while climbing): camera orbit yaw off the heading
+    private float walkCamPitchFree;                 // free-look extra pitch
+    private bool walkRmbHeld;                        // right button held → free-look camera (heading + climb unchanged)
+
+    // Crossbow bolts in flight. Positions are world metres (X,Y horizontal + Z real elevation); the renderer draws
+    // one static arrow model per entry through the reusable world/normal matrix lists (rebuilt each walk tick).
+    private MapaTur.Application.Terrain.SkinnedModel? arrowModel3D;
+    private bool arrowModelLoading;
+    private readonly List<ArrowProjectile> arrows = new();
+    private readonly List<Matrix4x4> arrowWorlds = new();
+    private readonly List<Matrix4x4> arrowNormals = new();
+
+    private struct ArrowProjectile
+    {
+        public Vector3 Pos; // X,Y world metres (unexaggerated horizontal) + Z real elevation metres
+        public Vector3 Vel; // metres / second (real)
+        public float Age;   // seconds since it was loosed
+    }
     private const float DragonModelSizeMeters = 24f; // target max extent of the dragon in world metres
     private const float DragonFlapLiftMeters = 1.6f; // rises on the down-stroke, sinks on the up-stroke
     // Model-orientation tuning (glTF bone/axis frames vary — adjusted by eye):
@@ -2117,6 +2421,25 @@ public partial class Terrain3DView : ContentView
     // BODY well above the flight point ("jest 10 m nade mną") — seat that variant much lower. Per-variant,
     // because the classic model's centring is already right.
     private const float DragonAnimatedDropMeters = 11f;
+
+    // 3rd-person avatar + follow-camera tuning (real metres; the exaggeration is applied only when placing in world).
+    private const float HumanoidHeightMeters = 1.8f;              // target model height (tallest bind extent → 1.8 m)
+    private static readonly float HumanoidYawOffset = MathF.PI / 2f; // ⚠ TUNE visually (same Y-up→Z-up basis as DragonYawOffset)
+    private const float WalkCamBackMeters = 4.0f;               // default eye distance behind the walker (wheel adjusts)
+    private const float WalkCamBackMinMeters = 1.6f;            // closest wheel-zoom (over-the-shoulder)
+    private const float WalkCamBackMaxMeters = 12f;             // farthest wheel-zoom
+    private const float WalkCamHeightMeters = 2.6f;             // eye height above the feet (over the head → looks past it)
+    private const float WalkCamMaxUpRadians = 1.20f;            // ~69° — crane the gaze up at a wall / peak above you
+    private const float WalkCamMaxDownRadians = 0.90f;          // ~51° — look down at your feet / the drop
+    private const float WalkCamGroundMarginMeters = 0.6f;       // keep the eye at least this far above the ground under it
+
+    // Crossbow bolt (F fires it).
+    private const float ArrowLengthMeters = 0.9f;
+    private const float ArrowSpeedMetersPerSecond = 55f;             // fast bolt
+    private const float ArrowGravityMetersPerSecondSquared = 6f;     // mild — barely drops over its short life
+    private const float ArrowLifetimeSeconds = 2.0f;
+    private const float ArrowSpawnHeightMeters = 1.3f;              // chest / crossbow height above the feet
+    private const int MaxArrowsInFlight = 16;
     private const float DragonPitchSign = -1f; // model noses DOWN when descending (↑ = dive), matched to the flight
     private const float DragonRollSign = 1f;
     private float dragonCamPitch;              // camera pitch LAGS the dragon's (dragon responds first, camera catches up)
@@ -2238,22 +2561,43 @@ public partial class Terrain3DView : ContentView
             return;
         }
 
-        Serilog.Log.Information("[Walk] entering walk mode at eye=({X:F0},{Y:F0})", Camera.Position.X, Camera.Position.Y);
+        // F7→F8 position continuity: capture the dragon's position/heading BEFORE the exit below tears it down, so
+        // the walker appears where the dragon was (facing the way it flew) — not at the far chase-cam eye.
+        System.Numerics.Vector2? carryXY = null;
+        float? carryHeading = null;
+        float? fromDragonElev = null;
+        if (dragon is { } dragonFrom)
+        {
+            carryXY = dragonFrom.PositionXY;
+            carryHeading = dragonFrom.HeadingRadians;
+            fromDragonElev = dragonFrom.ElevationMeters;
+        }
+
         StopFlight(); // never walk during a cinematic fly-through
         if (dragonActive)
         {
             IsDragonFlightActive = false; // walk and dragon are exclusive
         }
 
-        var startXY = new System.Numerics.Vector2(Camera.Position.X, Camera.Position.Y);
+        var startXY = carryXY ?? new System.Numerics.Vector2(Camera.Position.X, Camera.Position.Y);
         walker = new MapaTur.Application.Terrain.WalkPhysics(startXY, SampleWalkGround);
+        walkPrevXY = startXY;
+        MapaTur.App.Services.GripClimbController.PreloadClimberModel(); // ready before the first wall grab
+        Serilog.Log.Information(
+            "[Walk] enter from={From} startXY=({X:F0},{Y:F0}) ground={G} feet={F:F0} grounded={Gr} dragonElev={DE}",
+            carryXY is not null ? "dragon" : "orbit", startXY.X, startXY.Y,
+            SampleWalkGround(startXY) is { } gsample ? gsample.ToString("F0") : "null",
+            walker.FeetElevation, walker.IsGrounded, fromDragonElev is { } de ? de.ToString("F0") : "-");
 
         Vector3 viewDir = Camera.Target - Camera.Position;
-        walkHeadingRadians = MathF.Atan2(viewDir.Y, viewDir.X);
+        walkHeadingRadians = carryHeading ?? MathF.Atan2(viewDir.Y, viewDir.X);
         walkLookPitchRadians = 0f; // start looking at the horizon
         walkFwd = walkBack = walkStrafeLeft = walkStrafeRight = walkRun = false;
         walkJumpQueued = false;
-        walkLmbDown = false;
+        walkRmbHeld = false;
+        walkCamYawOffset = 0f;
+        walkCamPitchFree = 0f;
+        walkShootQueued = false;
         walkDetailTick = 0;
 
         walkActive = true;
@@ -2271,6 +2615,8 @@ public partial class Terrain3DView : ContentView
 #else
         walkTimer.Start();
 #endif
+        LoadHumanoidModelAsync(); // fire-and-forget; the follow camera runs even before the avatar streams in
+        LoadArrowModelAsync();    // crossbow bolt mesh (F fires it)
         Serilog.Log.Information("[Walk] walk mode ACTIVE (heading={H:F2} rad, feet={F:F0} m)", walkHeadingRadians, walker.FeetElevation);
         Canvas.InvalidateSurface();
     }
@@ -2298,6 +2644,7 @@ public partial class Terrain3DView : ContentView
             Camera.PitchRadians = 0.35f; // ~20° down
         }
 
+        arrows.Clear();
         walker = null;
         Canvas.InvalidateSurface();
     }
@@ -2329,14 +2676,135 @@ public partial class Terrain3DView : ContentView
         bool jump = walkJumpQueued;
         walkJumpQueued = false;
 
-        w.Step(dt, wish, speed, jump, hangHeld: walkLmbDown);
+        // Fire the crossbow (F): the animator plays the one-shot ranged clip; here we just loose the bolt.
+        bool shootThisTick = walkShootQueued && humanoidShootAnimIndex >= 0;
+        walkShootQueued = false;
+        if (shootThisTick && arrowModel3D is not null && arrows.Count < MaxArrowsInFlight)
+        {
+            // Loose a bolt where the camera aims (heading + look pitch), from chest height just in front of the walker.
+            float aim = Math.Clamp(walkLookPitchRadians, -WalkCamMaxDownRadians, WalkCamMaxUpRadians);
+            float ca = MathF.Cos(aim);
+            var dir = new Vector3(ca * ch, ca * sh, MathF.Sin(aim));
+            arrows.Add(new ArrowProjectile
+            {
+                Pos = new Vector3(w.PositionXY.X + (ch * 0.5f), w.PositionXY.Y + (sh * 0.5f), w.FeetElevation + ArrowSpawnHeightMeters),
+                Vel = dir * ArrowSpeedMetersPerSecond,
+                Age = 0f,
+            });
+        }
 
-        // Place the eye on the walker (real eye elevation × exaggeration), looking along heading + pitch.
+        // X — deliberate belay release. While the grip session owns the body its own pitons travel with it
+        // (no removal API — by design), so X applies only to WalkPhysics: hanging on the rope → free fall.
+        if (walkBelayReleaseQueued)
+        {
+            walkBelayReleaseQueued = false;
+            if (gripClimb.IsActive)
+            {
+                Serilog.Log.Information("[Walk] belay release (X) ignored — a grip session is active (let go first: C/Space)");
+            }
+            else if (w.Pitons.Count > 0 || w.IsRoped)
+            {
+                bool wasRoped = w.IsRoped;
+                w.ReleaseProtection();
+                Serilog.Log.Information(
+                    "[Walk] belay released (X) at ({X:F0},{Y:F0}) feet={Feet:F0} m{Fall}",
+                    w.PositionXY.X, w.PositionXY.Y, w.FeetElevation,
+                    wasRoped ? " — free fall from the rope" : " (gear dropped)");
+            }
+        }
+
+        // Hold-by-hold climbing: C grabs the wall ahead (or lets go). While a session is active it is the
+        // ONLY owner of the body — WalkPhysics is not stepped, just mirrored for the camera/HUD/rope.
+        bool releaseClimb = jump;
+        if (walkClimbToggleQueued)
+        {
+            walkClimbToggleQueued = false;
+            if (gripClimb.IsActive)
+            {
+                releaseClimb = true;
+            }
+            else if (gripClimb.TryEnter(w, SampleWalkGround, walkHeadingRadians))
+            {
+                Serilog.Log.Information(
+                    "[Climb] climb.session_started at ({X:F0},{Y:F0}) elev={E:F0} m",
+                    w.PositionXY.X, w.PositionXY.Y, w.FeetElevation);
+            }
+        }
+
+        if (gripClimb.IsActive)
+        {
+            var climbIntent = new System.Numerics.Vector2(
+                (walkStrafeRight ? 1f : 0f) - (walkStrafeLeft ? 1f : 0f),
+                (walkFwd ? 1f : 0f) - (walkBack ? 1f : 0f));
+            gripClimb.Tick(dt, climbIntent, releaseClimb, frame.VerticalExaggeration, w);
+        }
+        else
+        {
+            // hangHeld stays FALSE: the legacy continuous ciupaga-climb (LMB glue-to-slope + sinusoidal
+            // arm wave) is replaced by the hold-by-hold ClimbSession on C. Mixing both let the walker
+            // enter the old climb at the same wall and fight the session for the body. The rope arrest
+            // in WalkPhysics still protects falls after a session lets go.
+            w.Step(dt, wish, speed, jump, hangHeld: false);
+        }
+
         float exaggeration = frame.VerticalExaggeration;
-        var eye = new Vector3(w.PositionXY.X, w.PositionXY.Y, w.EyeElevation * exaggeration);
-        float cp = MathF.Cos(walkLookPitchRadians);
-        var look = new Vector3(cp * ch, cp * sh, MathF.Sin(walkLookPitchRadians));
-        ApplyFreeCamera(eye, eye + (look * WalkLookDistanceMeters));
+
+        // Third person: how far the walker actually moved this tick (the walk gate can block a wished step, so
+        // ground speed — not the input — drives the clip and, later, guards foot-skate). Then pose + seat the
+        // avatar; it may still be streaming in on the first frames, so the camera below runs regardless.
+        float groundSpeed = dt > 1e-4f ? (w.PositionXY - walkPrevXY).Length() / dt : 0f;
+        walkPrevXY = w.PositionXY;
+        if (humanoidModel3D is { } hm)
+        {
+            if (gripClimb.IsActive && gripClimb.HasPose)
+            {
+                // The climb controller already posed + skinned the model from the whole-body solve;
+                // just take its transforms instead of the walk seat/pose path.
+                humanoidWorldMatrix = gripClimb.HumanoidWorldMatrix;
+                humanoidNormalMatrix = gripClimb.HumanoidRotationMatrix;
+            }
+            else
+            {
+                PoseAndSeatHumanoid(hm, w, exaggeration, dt, groundSpeed, shootThisTick);
+            }
+        }
+
+        AdvanceAndBuildArrows(exaggeration, dt);
+        BuildClimbProtection(w, exaggeration, new Vector2(ch, sh));
+        climbMarkers.Clear();
+        gripClimb.AppendHoldMarkers(climbMarkers, exaggeration);
+
+        // Third-person camera: the eye sits a fixed boom BEHIND and ABOVE the walker (so it never dives into the
+        // ground), and the GAZE pitches freely with the look input — so you can crane the view UP at a wall or peak
+        // above you, or DOWN at your feet, not just flat ahead. Mouse drag / R + PgUp / PgDn feed walkLookPitchRadians
+        // (+ = up). WASD stays heading-relative and the mouse still turns the heading (the whole rig turns with it).
+        // Free-look (RMB while climbing) orbits the camera by walkCamYawOffset around the climber; when released it
+        // eases back behind the heading. The CLIMB direction (ch/sh from the heading) is untouched.
+        if (!walkRmbHeld)
+        {
+            walkCamYawOffset *= 0.85f;
+            walkCamPitchFree *= 0.85f;
+        }
+
+        float camYaw = walkHeadingRadians + walkCamYawOffset;
+        float cc = MathF.Cos(camYaw), sc = MathF.Sin(camYaw);
+        var eye = new Vector3(
+            w.PositionXY.X - (cc * walkCamBack),
+            w.PositionXY.Y - (sc * walkCamBack),
+            (w.FeetElevation + WalkCamHeightMeters) * exaggeration);
+        if (SampleWalkGround(new System.Numerics.Vector2(eye.X, eye.Y)) is float camGround)
+        {
+            float minEyeZ = (camGround * exaggeration) + WalkCamGroundMarginMeters;
+            if (eye.Z < minEyeZ)
+            {
+                eye.Z = minEyeZ;
+            }
+        }
+
+        float aimPitch = Math.Clamp(walkLookPitchRadians + walkCamPitchFree, -WalkCamMaxDownRadians, WalkCamMaxUpRadians);
+        float cosAim = MathF.Cos(aimPitch);
+        var lookDir = new Vector3(cosAim * cc, cosAim * sc, MathF.Sin(aimPitch));
+        ApplyFreeCamera(eye, eye + (lookDir * WalkLookDistanceMeters));
 
         // Stream the 1 m detail to the ground just ahead of the walker (~1×/s) so the surface under the feet is
         // the fine baked one, not the coarse base. The VM gates on look-at drift + cooldown, so a standing
@@ -2378,15 +2846,25 @@ public partial class Terrain3DView : ContentView
             return;
         }
 
+        // F8→F7 position continuity: capture the walker's position/heading BEFORE the exit below tears walk down, so
+        // the dragon launches from where the walker stood, facing the way it walked — not the orbit look-at point.
+        System.Numerics.Vector2? carryXY = null;
+        float? carryHeading = null;
+        if (walker is { } walkerFrom)
+        {
+            carryXY = walkerFrom.PositionXY;
+            carryHeading = walkHeadingRadians;
+        }
+
         StopFlight();
         if (walkActive)
         {
             IsWalkModeActive = false; // dragon and walk are exclusive
         }
 
-        var startXY = new System.Numerics.Vector2(Camera.Target.X, Camera.Target.Y);
+        var startXY = carryXY ?? new System.Numerics.Vector2(Camera.Target.X, Camera.Target.Y);
         Vector3 viewDir = Camera.Target - Camera.Position;
-        float heading = MathF.Atan2(viewDir.Y, viewDir.X);
+        float heading = carryHeading ?? MathF.Atan2(viewDir.Y, viewDir.X);
         // Contact-grade ground for the flight physics: per-tick AGL/terrain-follow over ground far ahead of
         // the camera must never trigger virtual-tile synthesis (landing seats on the FINE scan separately).
         dragon = new MapaTur.Application.Terrain.DragonFlight(startXY, heading, SampleContactGround);
@@ -2517,6 +2995,757 @@ public partial class Terrain3DView : ContentView
         {
             dragonModelLoading = false;
         }
+    }
+
+    // Loads the KayKit avatar (hiker.glb) once per session, off the UI thread, and resolves the locomotion clip
+    // indices the walk tick plays (Idle / Walking_A / Running_A). Fire-and-forget from EnterWalkMode; until it's
+    // ready the follow camera runs and nothing is drawn where the avatar will be.
+    private async void LoadHumanoidModelAsync()
+    {
+        if (humanoidModel3D is not null || humanoidModelLoading)
+        {
+            return;
+        }
+
+        humanoidModelLoading = true;
+        try
+        {
+            // The realistic climber (Mixamo-rigged walk build with the original textures, local-only data)
+            // is the DEFAULT avatar; the bundled KayKit hiker is the fallback when the file is absent.
+            MapaTur.Application.Terrain.SkinnedModel model;
+            string climberWalkPath = Path.Combine(
+                Microsoft.Maui.Storage.FileSystem.AppDataDirectory, "models", "RockClimber_Walk.glb");
+            if (File.Exists(climberWalkPath))
+            {
+                model = await Task.Run(() => MapaTur.Application.Terrain.SkinnedModel.Load(climberWalkPath)).ConfigureAwait(false);
+                Serilog.Log.Information("[Walk] avatar = realistic climber ({Path})", climberWalkPath);
+            }
+            else
+            {
+                await using Stream s = await Microsoft.Maui.Storage.FileSystem.OpenAppPackageFileAsync("hiker.glb").ConfigureAwait(false);
+                using var ms = new MemoryStream();
+                await s.CopyToAsync(ms).ConfigureAwait(false);
+                model = MapaTur.Application.Terrain.SkinnedModel.LoadGlb(ms.ToArray());
+                Serilog.Log.Information("[Walk] avatar = bundled hiker (no climber walk model found)");
+            }
+
+            int idle = -1, walk = -1, run = -1, shoot = -1, jumpIdle = -1, jumpLand = -1;
+            for (int i = 0; i < model.Animations.Count; i++)
+            {
+                string name = model.Animations[i].Name;
+                if (idle < 0 && string.Equals(name, "Idle", StringComparison.OrdinalIgnoreCase)) { idle = i; }
+                else if (walk < 0 && string.Equals(name, "Walking_A", StringComparison.OrdinalIgnoreCase)) { walk = i; }
+                else if (run < 0 && string.Equals(name, "Running_A", StringComparison.OrdinalIgnoreCase)) { run = i; }
+                else if (shoot < 0 && string.Equals(name, "1H_Ranged_Shoot", StringComparison.OrdinalIgnoreCase)) { shoot = i; }
+                else if (jumpIdle < 0 && string.Equals(name, "Jump_Idle", StringComparison.OrdinalIgnoreCase)) { jumpIdle = i; }
+                else if (jumpLand < 0 && string.Equals(name, "Jump_Land", StringComparison.OrdinalIgnoreCase)) { jumpLand = i; }
+            }
+
+            MainThread.BeginInvokeOnMainThread(() =>
+            {
+                humanoidModel3D = model;
+                humanoidIdleAnimIndex = idle >= 0 ? idle : 0;
+                humanoidShootAnimIndex = shoot; // -1 → F does nothing (no ranged clip)
+                humanoidAnimator = new MapaTur.Application.Terrain.HumanoidAnimator(
+                    new MapaTur.Application.Terrain.HumanoidAnimator.Clips(
+                        Idle: humanoidIdleAnimIndex,
+                        Walk: walk >= 0 ? walk : humanoidIdleAnimIndex,
+                        Run: run,
+                        JumpIdle: jumpIdle,
+                        JumpLand: jumpLand,
+                        Shoot: shoot),
+                    model.Animations.Select(x => x.Duration).ToList());
+                Canvas.InvalidateSurface();
+            });
+            Serilog.Log.Information(
+                "[Walk] humanoid model loaded: {Prims} prims, extent={Ext:F2}, anims={N}, idle={Idle} walk={Walk} run={Run} shoot={Shoot} jIdle={JI} jLand={JL}, tex={Tex}",
+                model.Primitives.Count, model.LocalExtent, model.Animations.Count, idle, walk, run, shoot, jumpIdle, jumpLand,
+                model.BaseColorImageBytes is { Length: > 0 } bytes ? $"{bytes.Length / 1024}kB" : "none");
+        }
+        catch (Exception ex)
+        {
+            Serilog.Log.Warning(ex, "[Walk] humanoid model load failed — no 3rd-person avatar this session");
+        }
+        finally
+        {
+            humanoidModelLoading = false;
+        }
+    }
+
+    // Loads the crossbow bolt mesh (arrow.glb — a static, unskinned KayKit prop) once per session. Posed to its
+    // bind pose immediately so its geometry/bounds are ready for the per-arrow world matrices.
+    private async void LoadArrowModelAsync()
+    {
+        if (arrowModel3D is not null || arrowModelLoading)
+        {
+            return;
+        }
+
+        arrowModelLoading = true;
+        try
+        {
+            await using Stream s = await Microsoft.Maui.Storage.FileSystem.OpenAppPackageFileAsync("arrow.glb").ConfigureAwait(false);
+            using var ms = new MemoryStream();
+            await s.CopyToAsync(ms).ConfigureAwait(false);
+            var model = MapaTur.Application.Terrain.SkinnedModel.LoadGlb(ms.ToArray());
+            model.Pose(0, 0f); // static mesh → hold bind pose so PosedPositions/bounds are ready to draw
+
+            MainThread.BeginInvokeOnMainThread(() => arrowModel3D = model);
+            Serilog.Log.Information(
+                "[Walk] arrow model loaded: {Prims} prims, extent={Ext:F2}, tex={Tex}",
+                model.Primitives.Count, model.LocalExtent,
+                model.BaseColorImageBytes is { Length: > 0 } bytes ? $"{bytes.Length / 1024}kB" : "none");
+        }
+        catch (Exception ex)
+        {
+            Serilog.Log.Warning(ex, "[Walk] arrow model load failed — F shows the shoot motion but no bolt flies");
+        }
+        finally
+        {
+            arrowModelLoading = false;
+        }
+    }
+
+    // Advances every live bolt (ballistic, mild gravity), drops those that expire or hit the ground, and rebuilds
+    // the per-arrow world/normal matrices. The arrow mesh's shaft is its local +Y axis, aligned to the bolt's
+    // flight direction in render space (Z exaggerated), scaled to ArrowLengthMeters, pivoted on its centre.
+    private void AdvanceAndBuildArrows(float exaggeration, float dt)
+    {
+        arrowWorlds.Clear();
+        arrowNormals.Clear();
+        if (arrowModel3D is not { } model)
+        {
+            arrows.Clear();
+            return;
+        }
+
+        float scale = ArrowLengthMeters / MathF.Max(0.001f, model.LocalExtent);
+        Matrix4x4 centre = Matrix4x4.CreateTranslation(-((model.BoundsMin + model.BoundsMax) * 0.5f));
+        Matrix4x4 scaleM = Matrix4x4.CreateScale(scale);
+
+        for (int i = arrows.Count - 1; i >= 0; i--)
+        {
+            ArrowProjectile a = arrows[i];
+            a.Vel.Z -= ArrowGravityMetersPerSecondSquared * dt;
+            a.Pos += a.Vel * dt;
+            a.Age += dt;
+
+            bool hitGround = SampleWalkGround(new System.Numerics.Vector2(a.Pos.X, a.Pos.Y)) is float g && a.Pos.Z <= g;
+            if (a.Age > ArrowLifetimeSeconds || hitGround)
+            {
+                arrows.RemoveAt(i);
+                continue;
+            }
+
+            arrows[i] = a;
+
+            // Orient the shaft (local +Y) along the flight direction, in render space (Z exaggerated).
+            var d = new Vector3(a.Vel.X, a.Vel.Y, a.Vel.Z * exaggeration);
+            d = d.LengthSquared() > 1e-6f ? Vector3.Normalize(d) : Vector3.UnitX;
+            Vector3 up = MathF.Abs(d.Z) < 0.99f ? Vector3.UnitZ : Vector3.UnitX;
+            Vector3 ax = Vector3.Normalize(Vector3.Cross(up, d)); // local X image
+            Vector3 az = Vector3.Cross(d, ax);                    // local Z image
+            var rot = new Matrix4x4(
+                ax.X, ax.Y, ax.Z, 0f,
+                d.X, d.Y, d.Z, 0f,   // local Y (shaft) → flight direction
+                az.X, az.Y, az.Z, 0f,
+                0f, 0f, 0f, 1f);
+
+            var worldPos = new Vector3(a.Pos.X, a.Pos.Y, a.Pos.Z * exaggeration);
+            arrowWorlds.Add(centre * scaleM * rot * Matrix4x4.CreateTranslation(worldPos));
+            arrowNormals.Add(rot);
+        }
+    }
+
+    // Poses the avatar via the HumanoidAnimator (crossfaded Idle/Walk/Run + Jump/Land + shoot, speed-matched) and
+    // builds its model→world matrix: scale the tallest bind extent to HumanoidHeightMeters, remap glTF Y-up → world
+    // Z-up, yaw to the walk heading, and seat the LOWEST posed vertex (the soles) on the feet elevation.
+    private void PoseAndSeatHumanoid(
+        MapaTur.Application.Terrain.SkinnedModel model, MapaTur.Application.Terrain.WalkPhysics w,
+        float exaggeration, float dt, float groundSpeed, bool shootRequested)
+    {
+        if (w.IsClimbing || w.IsHanging)
+        {
+            PoseClimb(model, w, dt); // procedural arm-reach on the wall (no baked climb clip)
+        }
+        else if (humanoidAnimator is { } anim)
+        {
+            MapaTur.Application.Terrain.HumanoidAnimator.Blend b =
+                anim.Update(dt, groundSpeed, w.IsGrounded, w.VerticalVelocity, shootRequested);
+            model.PoseBlend(b.ClipA, b.TimeA, b.ClipB, b.TimeB, b.Weight);
+        }
+        else
+        {
+            model.Pose(humanoidIdleAnimIndex >= 0 ? humanoidIdleAnimIndex : 0, 0f);
+        }
+
+        (Vector3 pmin, Vector3 pmax) = model.GetPosedBounds();
+        Vector3 posedCenter = (pmin + pmax) * 0.5f;
+        var footPivot = new Vector3(posedCenter.X, pmin.Y, posedCenter.Z); // lowest posed point = soles
+        float scale = HumanoidHeightMeters / MathF.Max(0.001f, model.LocalExtent);
+        Matrix4x4 remap = Matrix4x4.CreateRotationX(MathF.PI / 2f); // glTF Y-up → world Z-up
+        Matrix4x4 yawRot = Matrix4x4.CreateRotationZ(walkHeadingRadians + HumanoidYawOffset);
+        Matrix4x4 rot = remap * yawRot;
+        humanoidNormalMatrix = rot;
+
+        var worldPos = new Vector3(w.PositionXY.X, w.PositionXY.Y, w.FeetElevation * exaggeration);
+        humanoidWorldMatrix =
+            Matrix4x4.CreateTranslation(-footPivot) * Matrix4x4.CreateScale(scale) * rot * Matrix4x4.CreateTranslation(worldPos);
+    }
+
+    // Procedural climb pose (KayKit has no climb clip): an idle base with the arms reaching up the wall. Climbing =
+    // the two arms plant ALTERNATELY at ClimbCadenceHz (like the ciupaga beats); hanging = both arms up with a slow
+    // sway (self-arrest). SetFrame + overlays + Skin (the dragon wing-beat pattern), so no baked clip is needed.
+    private void PoseClimb(MapaTur.Application.Terrain.SkinnedModel model, MapaTur.Application.Terrain.WalkPhysics w, float dt)
+    {
+        model.SetFrame(humanoidIdleAnimIndex >= 0 ? humanoidIdleAnimIndex : 0, 0f); // arms-down base; overlays raise them
+
+        if (w.IsClimbing)
+        {
+            humanoidClimbPhase += dt * ClimbCadenceHz;
+            float s = MathF.Sin(humanoidClimbPhase * 2f * MathF.PI);
+            ApplyArmReach(model, MathF.Max(0f, s), MathF.Max(0f, -s)); // alternate left / right plant
+        }
+        else
+        {
+            humanoidClimbPhase += dt * 0.5f;
+            float sway = 0.15f * MathF.Sin(humanoidClimbPhase * 2f * MathF.PI);
+            ApplyArmReach(model, 0.85f + sway, 0.85f - sway); // hang: both arms up, gentle sway
+        }
+
+        model.Skin();
+    }
+
+    // Overlays an up-reach on each arm (0 = down, 1 = fully raised). ⚠ ClimbReachAxis/sign are a first guess — if the
+    // arms bend the wrong way, flip the axis or sign here (this is the one thing that needs a visual check).
+    private void ApplyArmReach(MapaTur.Application.Terrain.SkinnedModel model, float leftAmount, float rightAmount)
+    {
+        float reach = ClimbReachDegrees * (MathF.PI / 180f);
+        var axis = Vector3.UnitX;
+        model.RotateBoneOverlay("upperarm.l", Quaternion.CreateFromAxisAngle(axis, -reach * leftAmount));
+        model.RotateBoneOverlay("upperarm.r", Quaternion.CreateFromAxisAngle(axis, -reach * rightAmount));
+        model.RotateBoneOverlay("lowerarm.l", Quaternion.CreateFromAxisAngle(axis, -reach * 0.5f * leftAmount));
+        model.RotateBoneOverlay("lowerarm.r", Quaternion.CreateFromAxisAngle(axis, -reach * 0.5f * rightAmount));
+    }
+
+    // Rendered sizes/colours of the auto-belay gear. The rope is drawn a touch thicker than a real 10 mm line
+    // so it stays readable from the third-person boom; body height is NOT scaled by the vertical exaggeration
+    // (only terrain elevations are), so the harness sits a fixed 1 m above the feet.
+    private const float HarnessHeightMeters = 1.0f;
+    private const float HarnessForwardOffsetMeters = 0.18f; // tie-in at the FRONT of the harness (belly side, toward the wall) — never out of the back
+    private const float RopeHalfWidthMeters = 0.013f;
+    private const float SlingHalfWidthMeters = 0.011f;
+    private const float CarabinerRadiusMeters = 0.045f;
+    private static readonly Vector3 RopeColor = new(0.85f, 0.18f, 0.14f);          // classic red lead rope
+    private static readonly Vector3 SlingColor = new(0.92f, 0.80f, 0.12f);         // bright nylon sling
+    private static readonly Vector3 CarabinerColor = new(0.78f, 0.80f, 0.84f);     // bolt-end biner — bare aluminium
+    private static readonly Vector3 RopeCarabinerColor = new(0.86f, 0.68f, 0.22f); // rope-end bent gate — anodised gold
+    private static readonly Vector3 BoltColor = new(0.46f, 0.47f, 0.50f);          // steel hanger on the rock
+
+    // Dresses the climb auto-belay as real gear: a quickdraw (bolt hanger + sling + two carabiners) hanging from
+    // every planted anchor, and the rope sagging through the BOTTOM carabiners to the climber's harness.
+    // ClimbProtectionGeometry does the maths; the renderer's climb-gear pass draws the ribbons + rings.
+    // Rebuilt every walk tick from WalkPhysics (ClimbSession mirrors its pitons there).
+    private void BuildClimbProtection(MapaTur.Application.Terrain.WalkPhysics w, float exaggeration, Vector2 facing)
+    {
+        climbGearRibbons.Clear();
+        climbGearRings.Clear();
+        if (w.Pitons.Count == 0)
+        {
+            return;
+        }
+
+        climbAnchorScratch.Clear();
+        foreach (MapaTur.Application.Terrain.WalkPhysics.PitonPoint piton in w.Pitons)
+        {
+            climbAnchorScratch.Add(new Vector3(piton.PositionXY.X, piton.PositionXY.Y, piton.Elevation * exaggeration));
+        }
+
+        // The rope ties in at the FRONT of the harness — offset from the body axis toward the wall (the
+        // climber faces it), so from the chase camera the rope disappears in front of the hips, not the back.
+        var harness = new Vector3(
+            w.PositionXY.X + (facing.X * HarnessForwardOffsetMeters),
+            w.PositionXY.Y + (facing.Y * HarnessForwardOffsetMeters),
+            (w.FeetElevation * exaggeration) + HarnessHeightMeters);
+        MapaTur.Application.Terrain.ClimbProtectionGeometry.Build(climbAnchorScratch, harness, climbQuickdraws, climbRopePoints);
+
+        climbGearRibbons.Add(new(climbRopePoints, RopeColor, RopeHalfWidthMeters));
+        for (int i = 0; i < climbQuickdraws.Count; i++)
+        {
+            MapaTur.Application.Terrain.ClimbProtectionGeometry.Quickdraw quickdraw = climbQuickdraws[i];
+            if (climbSlingPool.Count <= i)
+            {
+                climbSlingPool.Add(new List<Vector3>(2));
+            }
+
+            List<Vector3> sling = climbSlingPool[i];
+            sling.Clear();
+            sling.Add(quickdraw.TopCarabiner);
+            sling.Add(quickdraw.BottomCarabiner);
+            climbGearRibbons.Add(new(sling, SlingColor, SlingHalfWidthMeters));
+
+            climbGearRings.Add(new(quickdraw.Anchor, BoltColor, 0.030f, 0f, 1f)); // solid disc = the bolt hanger
+            climbGearRings.Add(new(quickdraw.TopCarabiner, CarabinerColor, CarabinerRadiusMeters, 0.55f, 0.72f));
+            climbGearRings.Add(new(quickdraw.BottomCarabiner, RopeCarabinerColor, CarabinerRadiusMeters, 0.55f, 0.72f));
+        }
+    }
+
+    private const float RouteLineLiftMeters = 0.1f;    // sit basically ON the rock (was 0.45 → visibly levitating up close)
+    private const float RouteLineHalfPixels = 1.6f;    // SCREEN-space half-width: a thin thread at any zoom (not a fat world tube)
+    private const float RouteLineSampleStepMeters = 2.0f;
+    private const float RouteLabelMaxDistanceMeters = 3000f;
+
+    // Anchors each catalogued massif's topo onto the DEM once the terrain around its summit is loaded.
+    // The seed prefers the app's live OSM peak data (name match) over the catalogue coordinate; the
+    // two-stage snap (tight grid max + hill-climb) then finds the DEM tower top without wandering onto a
+    // higher neighbouring slope. Every anchored massif feeds its world routes to the climb controller
+    // (guaranteed hold ladders) and the highlighted passage lines + name labels. Unanchored massifs are
+    // retried every frame (one ground sample each); the overlay re-seats when the Pion slider changes.
+    private void EnsureClimbingRoutes()
+    {
+        if (WorldFrame is not { } frame)
+        {
+            return;
+        }
+
+        if (climbingAllWorldRoutes.Count > 0
+            && MathF.Abs(frame.VerticalExaggeration - climbRouteOverlayExaggeration) > 0.001f)
+        {
+            BuildClimbRouteOverlay(climbingAllWorldRoutes, frame); // Pion slider moved — re-seat the lines
+        }
+
+        bool allFinal = climbingMassifWorld.Count == MapaTur.Application.Terrain.TatraClimbingRoutes.Massifs.Count
+            && climbingMassifMissMeters.Count == 0;
+        if (allFinal)
+        {
+            return; // every massif anchored on terrain matching its catalogued height
+        }
+
+        // Provisional re-snaps are throttled — a full snap sweep is ~tens of ms, not a per-frame cost.
+        bool resnapDue = Environment.TickCount64 >= climbingResnapNotBeforeTicks;
+        bool anyProvisionalProcessed = false;
+
+        foreach (MapaTur.Application.Terrain.TatraClimbingRoutes.ClimbingMassif massif
+            in MapaTur.Application.Terrain.TatraClimbingRoutes.Massifs)
+        {
+            bool anchored = climbingMassifWorld.ContainsKey(massif.Name);
+            bool provisional = climbingMassifMissMeters.ContainsKey(massif.Name);
+            if (anchored && !provisional)
+            {
+                continue; // final
+            }
+
+            if (anchored && provisional && !resnapDue)
+            {
+                continue;
+            }
+
+            Vector3 seedWorld = frame.GeoToWorld(massif.Summit, 0f);
+            var seedXY = new Vector2(seedWorld.X, seedWorld.Y);
+            if (SampleWalkGround(seedXY) is null)
+            {
+                continue; // no terrain around this massif yet (different region or still streaming)
+            }
+
+            if (provisional)
+            {
+                anyProvisionalProcessed = true;
+            }
+
+            Vector2 summitXY = MapaTur.Application.Terrain.TatraClimbingRoutes.SnapToLocalMaximum(
+                SampleWalkGround, seedXY, radiusMeters: 120f, stepMeters: 2f,
+                targetElevationMeters: massif.SummitElevationMeters);
+            float? snappedElevation = SampleWalkGround(summitXY);
+            float miss = massif.SummitElevationMeters is { } target && snappedElevation is { } got
+                ? MathF.Abs(got - target)
+                : 0f;
+
+            // Re-snap of a provisional anchor: only take a MEANINGFUL improvement (less flicker).
+            if (anchored && provisional && miss >= climbingMassifMissMeters[massif.Name] - 3f)
+            {
+                if (miss <= 20f)
+                {
+                    climbingMassifMissMeters.Remove(massif.Name); // close enough — freeze as is
+                }
+
+                continue;
+            }
+
+            climbingMassifWorld[massif.Name] =
+                MapaTur.Application.Terrain.TatraClimbingRoutes.BuildWorldRoutes(massif.Routes, summitXY);
+            if (miss > 20f)
+            {
+                climbingMassifMissMeters[massif.Name] = miss; // provisional: coarse terrain, keep re-snapping
+            }
+            else
+            {
+                climbingMassifMissMeters.Remove(massif.Name);
+            }
+
+            climbingAllWorldRoutes.Clear();
+            foreach (IReadOnlyList<MapaTur.Application.Terrain.WorldClimbingRoute> routes in climbingMassifWorld.Values)
+            {
+                climbingAllWorldRoutes.AddRange(routes);
+            }
+
+            gripClimb.SetClimbingRoutes(climbingAllWorldRoutes);
+            BuildClimbRouteOverlay(climbingAllWorldRoutes, frame);
+            Serilog.Log.Information(
+                "[Climb] {Massif} topo {Kind}: summit world=({X:F0},{Y:F0}) snap={Snap:F1} m "
+                + "(seed elev={SeedElev:F0} m → top elev={TopElev:F0} m, drift=({Dx:F0},{Dy:F0})), {Count} routes",
+                massif.Name, anchored ? "RE-anchored" : miss > 20f ? "anchored PROVISIONALLY" : "anchored",
+                summitXY.X, summitXY.Y, Vector2.Distance(summitXY, seedXY),
+                SampleWalkGround(seedXY) ?? float.NaN, snappedElevation ?? float.NaN,
+                summitXY.X - seedXY.X, summitXY.Y - seedXY.Y, massif.Routes.Count);
+
+            // While the top misses the catalogued height, list the DEM's actual prominent tops around
+            // the seed — the log then SHOWS where this terrain currently puts its summits.
+            if (miss > 20f)
+            {
+                foreach ((Vector2 top, float topElev) in MapaTur.Application.Terrain.TatraClimbingRoutes
+                    .ListProminentTops(SampleWalkGround, seedXY, radiusMeters: 500f, stepMeters: 4f, maxCount: 6))
+                {
+                    GeoPoint topGeo = frame.WorldToGeo(new Vector3(top.X, top.Y, 0f));
+                    Serilog.Log.Information(
+                        "[Climb]   prominent top near {Massif}: elev={Elev:F0} m at world=({X:F0},{Y:F0}) "
+                        + "geo=({Lat:F6},{Lon:F6}) offset=({Dx:F0},{Dy:F0})",
+                        massif.Name, topElev, top.X, top.Y, topGeo.Latitude, topGeo.Longitude,
+                        top.X - seedXY.X, top.Y - seedXY.Y);
+                }
+            }
+
+            if (massif.Name == "Mnich" && miss <= 20f)
+            {
+                DumpMnichDemField(frame, summitXY); // probe the real east-face geometry, once, when finally on the needle
+            }
+        }
+
+        if (anyProvisionalProcessed)
+        {
+            climbingResnapNotBeforeTicks = Environment.TickCount64 + 3000;
+        }
+
+        BuildClimbCalibrationGrid(frame);
+    }
+
+    // Builds the calibration marker grid on the SAME surface the routes are drawn on (SampleWalkGround:
+    // fine 1 m detail where streamed, coarse base otherwise) — so markers and routes always coincide,
+    // never "in a different place". Rebuilt every few seconds so markers LIFT onto the detail as it
+    // streams in (and follow the Pion slider). Full coverage: the base underlies the whole massif.
+    private void BuildClimbCalibrationGrid(MapaTur.Application.Terrain.TerrainMesh3D frame)
+    {
+        if (!climbCalibMarkersVisible)
+        {
+            return;
+        }
+
+        float exaggeration = frame.VerticalExaggeration;
+        bool pionChanged = MathF.Abs(exaggeration - climbCalibExaggeration) > 0.001f;
+        if (!pionChanged && climbCalibMarkers.Count > 0 && Environment.TickCount64 < climbCalibNextBuildTicks)
+        {
+            return; // throttle — but keep refreshing so markers track the streaming surface
+        }
+
+        Vector3 originWorld = frame.GeoToWorld(ClimbCalibOrigin, 0f);
+        if (SampleWalkGround(new Vector2(originWorld.X, originWorld.Y)) is null)
+        {
+            return; // no terrain here at all yet
+        }
+
+        var markers = new List<MapaTur.App.Services.Terrain3DGlRenderer.DebugMarker>();
+        var labels = new List<(string, Vector3)>();
+        int onDetail = 0;
+        // Markers live on the EAST-FACE surface itself (same base-line→summit fan as the routes), so every
+        // node lands ON the narrow wall where the routes are — not scattered over the surrounding slopes.
+        // uu = position across the face (0 south → 1 north), vv = height (0 base → 1 summit).
+        const int uCount = 27, vCount = 24;
+        for (int iu = 0; iu < uCount; iu++)
+        {
+            float uu = iu / (float)(uCount - 1);
+            (float bx, float by) = EastFaceBase(uu);
+            for (int iv = 0; iv < vCount; iv++)
+            {
+                float vv = 0.04f + (iv / (float)(vCount - 1)) * 0.94f; // skip the exact summit (all converge)
+                float dx = bx * (1f - vv);
+                float dy = by * (1f - vv);
+                var xy = new Vector2(originWorld.X + dx, originWorld.Y + dy);
+                if (SampleWalkGround(xy) is not { } ground)
+                {
+                    continue;
+                }
+
+                if (SampleFineGroundOnly(xy) is not null)
+                {
+                    onDetail++;
+                }
+
+                var at = new Vector3(xy.X, xy.Y, (ground + 1.0f) * exaggeration);
+                // Labelled yellow node every ~4th u/v carries its (dx,dy) offset from the summit; the fine
+                // dots between (smaller, magenta/cyan) give dense reference for pinning route bends.
+                bool labelled = iu % 4 == 0 && iv % 4 == 0;
+                Vector3 colour = labelled
+                    ? new Vector3(1f, 0.9f, 0.15f)
+                    : (iu + iv) % 2 == 0 ? new Vector3(1f, 0.35f, 1f) : new Vector3(0.25f, 1f, 1f);
+                markers.Add(new(at, colour, labelled ? 1.0f : 0.5f));
+                if (labelled)
+                {
+                    labels.Add(($"{dx:+0;-0},{dy:+0;-0}", at + new Vector3(0f, 0f, 2.5f * exaggeration)));
+                }
+            }
+        }
+
+        climbCalibMarkers.Clear();
+        climbCalibMarkers.AddRange(markers);
+        climbCalibLabels.Clear();
+        climbCalibLabels.AddRange(labels);
+        climbCalibExaggeration = exaggeration;
+        climbCalibNextBuildTicks = Environment.TickCount64 + 3000;
+        Serilog.Log.Information(
+            "[Climb] calibration face-grid: {Count} markers on the east face ({Detail} on fine detail), fineWired={Wired}",
+            markers.Count, onDetail, FineElevationSampler is not null);
+    }
+
+    // East-face base line (dx east, dy north) — MUST match TatraClimbingRoutes' route base line, so the
+    // calibration markers land on exactly the same face surface the routes are drawn on.
+    private static (float X, float Y) EastFaceBase(float u)
+    {
+        (float X, float Y) bs = (42f, -80f), bc = (51f, 0f), bn = (36f, 55f);
+        return u <= 0.5f
+            ? (bs.X + (bc.X - bs.X) * (u / 0.5f), bs.Y + (bc.Y - bs.Y) * (u / 0.5f))
+            : (bc.X + (bn.X - bc.X) * ((u - 0.5f) / 0.5f), bc.Y + (bn.Y - bc.Y) * ((u - 0.5f) / 0.5f));
+    }
+
+    // Fine 1 m DETAIL elevation ONLY (no base fallback) — used to count how many grid nodes have detail.
+    private float? SampleFineGroundOnly(Vector2 xy)
+    {
+        if (WorldFrame is not { } frame || FineElevationSampler is not { } fine)
+        {
+            return null;
+        }
+
+        GeoPoint geo = frame.WorldToGeo(new Vector3(xy.X, xy.Y, 0f));
+        return fine(geo.Longitude, geo.Latitude) is { } e ? (float)e : (float?)null;
+    }
+
+    // One-shot terrain probe: dumps the ground-elevation field around the Mnich anchor to a CSV so the
+    // real east-face geometry (width, base run, orientation, steepness) can drive a faithful reproduction
+    // of the topo lines instead of guessed parallel offsets. Also logs east/north transect summaries.
+    private void DumpMnichDemField(MapaTur.Application.Terrain.TerrainMesh3D frame, Vector2 summitXY)
+    {
+        if (climbDemDumped)
+        {
+            return;
+        }
+
+        climbDemDumped = true;
+        try
+        {
+            string path = System.IO.Path.Combine(AppContext.BaseDirectory, "mnich-dem-dump.csv");
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("# Mnich east-face DEM probe. dx=east offset (m), dy=north offset (m) from summit.");
+            sb.AppendLine($"# summit world=({summitXY.X:F1},{summitXY.Y:F1}) elev={SampleWalkGround(summitXY):F1} m");
+            sb.AppendLine("dx,dy,elev");
+            for (float dy = -140f; dy <= 140f; dy += 4f)
+            {
+                for (float dx = -80f; dx <= 160f; dx += 4f)
+                {
+                    float? e = SampleWalkGround(new Vector2(summitXY.X + dx, summitXY.Y + dy));
+                    sb.AppendLine($"{dx:F0},{dy:F0},{(e.HasValue ? e.Value.ToString("F1") : "")}");
+                }
+            }
+
+            System.IO.File.WriteAllText(path, sb.ToString());
+            Serilog.Log.Information("[Climb] DEM dump written: {Path}", path);
+
+            // Compact east transect (dy=0): elevation every 8 m out to +120 east — the face drop profile.
+            var east = new System.Text.StringBuilder();
+            for (float dx = 0f; dx <= 120f; dx += 8f)
+            {
+                east.Append($"{dx:F0}m={SampleWalkGround(new Vector2(summitXY.X + dx, summitXY.Y)):F0} ");
+            }
+
+            Serilog.Log.Information("[Climb] Mnich east transect (dy=0): {Profile}", east.ToString());
+        }
+        catch (Exception ex)
+        {
+            Serilog.Log.Warning(ex, "[Climb] DEM dump failed");
+        }
+    }
+
+    // Labels for the calibration grid (drawn with the same projection as the route labels).
+    private void DrawClimbCalibrationLabels(SKCanvas canvas, int width, int height)
+    {
+        if (!climbCalibMarkersVisible || climbCalibLabels.Count == 0 || width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        Matrix4x4 viewProjection = Camera.BuildViewProjection((float)width / Math.Max(1, height));
+        using var textHalo = new SKPaint
+        { IsAntialias = true, Color = new SKColor(0, 0, 0, 220), Style = SKPaintStyle.Stroke, StrokeWidth = 3f };
+        using var textFill = new SKPaint { IsAntialias = true, Color = new SKColor(255, 255, 255) };
+        using var font = new SKFont { Size = 11f, Embolden = true };
+
+        foreach ((string text, Vector3 world) in climbCalibLabels)
+        {
+            if (Vector3.Distance(world, Camera.Position) > 4000f)
+            {
+                continue;
+            }
+
+            if (Camera.ProjectToScreen(world, viewProjection, width, height) is not { } screen)
+            {
+                continue;
+            }
+
+            canvas.DrawText(text, screen.X, screen.Y, SKTextAlign.Center, font, textHalo);
+            canvas.DrawText(text, screen.X, screen.Y, SKTextAlign.Center, font, textFill);
+        }
+    }
+
+    // The visible topo: one highlighted passage line per route (thin screen-space thread seated ON the DEM)
+    // and a name+grade label anchored ON its OWN line (staggered up the wall so a name maps to its line).
+    // Each route gets a DISTINCT colour (golden-angle hue spread) so 16+ routes don't share 5 palette colours.
+    private void BuildClimbRouteOverlay(
+        IReadOnlyList<MapaTur.Application.Terrain.WorldClimbingRoute> world, MapaTur.Application.Terrain.TerrainMesh3D frame)
+    {
+        climbRouteRibbons.Clear();
+        climbRouteLabels.Clear();
+        float exaggeration = frame.VerticalExaggeration;
+        int index = 0;
+        foreach (MapaTur.Application.Terrain.WorldClimbingRoute route in world)
+        {
+            var line = new List<Vector3>();
+            for (int segment = 0; segment + 1 < route.PathXY.Count; segment++)
+            {
+                Vector2 a = route.PathXY[segment];
+                Vector2 b = route.PathXY[segment + 1];
+                int steps = Math.Max(1, (int)MathF.Ceiling(Vector2.Distance(a, b) / RouteLineSampleStepMeters));
+                for (int s = segment == 0 ? 0 : 1; s <= steps; s++)
+                {
+                    Vector2 xy = Vector2.Lerp(a, b, s / (float)steps);
+                    if (SampleWalkGround(xy) is { } ground)
+                    {
+                        line.Add(new Vector3(xy.X, xy.Y, (ground + RouteLineLiftMeters) * exaggeration));
+                    }
+                }
+            }
+
+            if (line.Count < 2)
+            {
+                index++;
+                continue;
+            }
+
+            (Vector3 lineColor, SKColor labelColor) = DistinctRouteColor(index);
+            climbRouteRibbons.Add(new(line, lineColor, RouteLineHalfPixels, RopeTwist: false, ScreenSpace: true));
+
+            // Label sits ON the line, at a staggered height (so neighbouring routes' names don't overlap),
+            // lifted just a touch — you can trace name → its own line instead of a name floating up top.
+            float frac = 0.30f + (0.11f * ((index * 3) % 5));
+            int li = Math.Clamp((int)(line.Count * frac), 0, line.Count - 1);
+            Vector3 labelAnchor = line[li] + new Vector3(0f, 0f, 0.5f * exaggeration);
+            climbRouteLabels.Add(($"{route.Name} ({route.Grade})", labelAnchor, labelColor));
+            index++;
+        }
+
+        climbRouteOverlayExaggeration = exaggeration;
+    }
+
+    // A distinct vivid colour per route from a golden-angle hue spread — maximally separable so adjacent
+    // routes never share a colour. Returns the line RGB (0..1) and the matching label SKColor.
+    private static (Vector3 Line, SKColor Label) DistinctRouteColor(int index)
+    {
+        float hue = (index * 137.508f) % 360f;
+        (float r, float g, float b) = HsvToRgb(hue, 0.72f, 1.0f);
+        return (new Vector3(r, g, b), new SKColor((byte)(r * 255), (byte)(g * 255), (byte)(b * 255)));
+    }
+
+    private static (float R, float G, float B) HsvToRgb(float hueDegrees, float s, float v)
+    {
+        float c = v * s;
+        float x = c * (1f - MathF.Abs(((hueDegrees / 60f) % 2f) - 1f));
+        float m = v - c;
+        (float r, float g, float b) = (hueDegrees / 60f) switch
+        {
+            < 1f => (c, x, 0f),
+            < 2f => (x, c, 0f),
+            < 3f => (0f, c, x),
+            < 4f => (0f, x, c),
+            < 5f => (x, 0f, c),
+            _ => (c, 0f, x),
+        };
+        return (r + m, g + m, b + m);
+    }
+
+    // Name + grade labels over the topo lines (Skia overlay, same projection as the hold outlines).
+    // Only near the massif — beyond RouteLabelMaxDistanceMeters the lines alone mark the routes.
+    private void DrawClimbingRouteLabels(SKCanvas canvas, int width, int height)
+    {
+        if (!ShowClimbingRoutes || climbRouteLabels.Count == 0 || width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        Matrix4x4 viewProjection = Camera.BuildViewProjection((float)width / Math.Max(1, height));
+        using var textHalo = new SKPaint
+        { IsAntialias = true, Color = new SKColor(0, 0, 0, 210), Style = SKPaintStyle.Stroke, StrokeWidth = 3.5f };
+        using var textFill = new SKPaint { IsAntialias = true };
+        using var font = new SKFont { Size = 14f, Embolden = true };
+
+        foreach ((string text, Vector3 world, SKColor color) in climbRouteLabels)
+        {
+            if (Vector3.Distance(world, Camera.Position) > RouteLabelMaxDistanceMeters)
+            {
+                continue;
+            }
+
+            if (Camera.ProjectToScreen(world, viewProjection, width, height) is not { } screen)
+            {
+                continue;
+            }
+
+            textFill.Color = color;
+            canvas.DrawText(text, screen.X, screen.Y, SKTextAlign.Center, font, textHalo);
+            canvas.DrawText(text, screen.X, screen.Y, SKTextAlign.Center, font, textFill);
+        }
+    }
+
+    // Grip-stamina HUD: a small colour-coded bar (green → amber → red, shrinking as grip drains) shown while
+    // climbing / hanging / roped, or while grip is recovering. Bar-only to stay independent of the SkiaSharp text API.
+    private void DrawClimbStaminaHud(SKCanvas canvas, int width, int height)
+    {
+        if (!walkActive || walker is not { } w)
+        {
+            return;
+        }
+
+        float frac = w.GripStaminaFraction;
+        if (!(w.IsClimbing || w.IsHanging || w.IsRoped || frac < 0.999f))
+        {
+            return; // full grip and not on a wall → nothing to show
+        }
+
+        float barW = MathF.Min(320f, width * 0.28f);
+        const float barH = 16f;
+        float x = (width - barW) * 0.5f;
+        float y = height - 64f;
+
+        using (var bg = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill, Color = new SKColor(0, 0, 0, 150) })
+        {
+            canvas.DrawRoundRect(x - 3f, y - 3f, barW + 6f, barH + 6f, 6f, 6f, bg);
+        }
+
+        SKColor col = frac > 0.5f ? new SKColor(70, 200, 90)
+            : frac > 0.25f ? new SKColor(235, 185, 45)
+            : new SKColor(225, 70, 55);
+        using (var fill = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill, Color = col })
+        {
+            canvas.DrawRoundRect(x, y, MathF.Max(0f, barW * frac), barH, 5f, 5f, fill);
+        }
+
+        using var border = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 1.5f, Color = new SKColor(255, 255, 255, 130) };
+        canvas.DrawRoundRect(x, y, barW, barH, 5f, 5f, border);
     }
 
     // ── AI DRAGON FLOCK ─────────────────────────────────────────────────────────────────────────────────────
@@ -2839,8 +4068,8 @@ public partial class Terrain3DView : ContentView
         dragonRmbHeld = false;
         dragonCamPitch = 0f;
         dragonFireHeld = false;
-        dragonAudio.SetFireActive(false); // the roar must not outlive the flight (the fire tick stops with it)
-        dragonAudio.SetFlightBed(0f, 0f, 0f); // wind/wing/rush loops pause with the mode
+        dragonAudio.Silence(); // HARD-stop every looped layer (fire + wind/wing/ground) + ringing one-shots — a
+                               // single SetFlightBed(0,0,0) only fades 15%/call, so the loops used to play on
         dragonFireHoldSeconds = 0f;
         dragonFireOrbitAngle = 0f;
         dragonPerchGroundElev = null;
@@ -4188,7 +5417,7 @@ public partial class Terrain3DView : ContentView
 
         // A debug pinned camera (roughness-LOD tuning) wins over everything so redeploys reproduce one view;
         // otherwise restore the camera saved for this DEM; if none (or a different region), auto-frame.
-        if (!TryApplyPinnedCamera() && !TryRestoreCamera(frame))
+        if (!TryApplyPinnedCamera() && !TryApplyEnvPose() && !TryRestoreCamera(frame))
         {
             Camera.Target = Vector3.Zero;
             Camera.Distance = Math.Max(frame.HorizontalExtent * 2.5f, 5_000f);
@@ -4549,7 +5778,11 @@ public partial class Terrain3DView : ContentView
             DrawNightLights(canvas, projectedPois);
             DrawFlightMarker(canvas, e.Info.Width, e.Info.Height);
             DrawAiDragonMarkers(canvas, e.Info.Width, e.Info.Height);
-            DrawWalkViewmodel(canvas, e.Info.Width, e.Info.Height);
+            if (!walkThirdPerson) { DrawWalkViewmodel(canvas, e.Info.Width, e.Info.Height); }
+            DrawClimbStaminaHud(canvas, e.Info.Width, e.Info.Height);
+            DrawClimbSelectionOverlay(canvas, e.Info.Width, e.Info.Height);
+            DrawClimbingRouteLabels(canvas, e.Info.Width, e.Info.Height);
+            DrawClimbCalibrationLabels(canvas, e.Info.Width, e.Info.Height);
             DrawDragon(canvas, e.Info.Width, e.Info.Height);
             if (dragonActive)
             {
@@ -4571,6 +5804,7 @@ public partial class Terrain3DView : ContentView
             }
 
             // Recording capture for this path happens inside TryRenderTerrainGl (GL FBO readback), not here.
+            ServiceTestHarness(e, frame); // harness działa też na ścieżce GL (metoda kończy się tym returnem)
             return;
         }
 #endif
@@ -4600,6 +5834,106 @@ public partial class Terrain3DView : ContentView
         DrawWalkViewmodel(canvas, e.Info.Width, e.Info.Height);
         DrawDragon(canvas, e.Info.Width, e.Info.Height);
         ServiceRecording(e);
+        ServiceTestHarness(e, frame);
+    }
+
+    // ── TEST HARNESS (2026-07-24, na prośbę usera): deterministyczne testy bez rąk na klawiaturze ──
+    // MAPATUR_START_POSE="tx;ty;tz;dist;az;pitch" — start w dokładnej pozie (format pinned-camera);
+    // MAPATUR_CHROME=0 — panele schowane od startu; MAPATUR_SHOT_DIR=<dir> — F10 lub
+    // MAPATUR_AUTOSHOT_SEC=n zapisuje PNG bieżącej klatki Z POZIOMU APKI (działa mimo blokady ekranu);
+    // sync pozy: co ~1,2 s bieżąca poza + geo celu ląduje w %TEMP%\mapatur-pose.txt — agent czyta,
+    // gdzie user patrzy podczas testu manualnego, i może wystartować drugą instancję w TEJ pozie.
+    private static readonly string? HarnessStartPose = Environment.GetEnvironmentVariable("MAPATUR_START_POSE");
+    private static readonly bool HarnessChromeOff = Environment.GetEnvironmentVariable("MAPATUR_CHROME") == "0";
+    private static readonly string? HarnessShotDir = Environment.GetEnvironmentVariable("MAPATUR_SHOT_DIR");
+    private static readonly int HarnessAutoshotSec =
+        int.TryParse(Environment.GetEnvironmentVariable("MAPATUR_AUTOSHOT_SEC"), out int s) ? s : 0;
+    internal static readonly string HarnessPosePath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "mapatur-pose.txt");
+    private bool harnessChromeApplied;
+    private bool harnessPoseApplied;
+    private double harnessLastShotMs;
+    private double harnessLastPoseMs;
+    private volatile bool harnessShotRequested;
+
+    private bool TryApplyEnvPose()
+    {
+        if (harnessPoseApplied || string.IsNullOrEmpty(HarnessStartPose))
+        {
+            return false;
+        }
+
+        string[] parts = HarnessStartPose.Split(';');
+        var ci = System.Globalization.CultureInfo.InvariantCulture;
+        if (parts.Length == 6
+            && float.TryParse(parts[0], System.Globalization.NumberStyles.Float, ci, out float tx)
+            && float.TryParse(parts[1], System.Globalization.NumberStyles.Float, ci, out float ty)
+            && float.TryParse(parts[2], System.Globalization.NumberStyles.Float, ci, out float tz)
+            && float.TryParse(parts[3], System.Globalization.NumberStyles.Float, ci, out float dist)
+            && float.TryParse(parts[4], System.Globalization.NumberStyles.Float, ci, out float az)
+            && float.TryParse(parts[5], System.Globalization.NumberStyles.Float, ci, out float pitch))
+        {
+            Camera.Target = new Vector3(tx, ty, tz);
+            Camera.Distance = dist;
+            Camera.AzimuthRadians = az;
+            Camera.PitchRadians = pitch;
+            harnessPoseApplied = true;
+            Serilog.Log.Information("[Harness] start-poza z env: {Pose}", HarnessStartPose);
+            return true;
+        }
+
+        return false;
+    }
+
+    private void ServiceTestHarness(SKPaintGLSurfaceEventArgs e, TerrainMesh3D frame)
+    {
+        if (HarnessChromeOff && !harnessChromeApplied)
+        {
+            harnessChromeApplied = true;
+            SetChromeVisible(false);
+        }
+
+        double nowMs = Environment.TickCount64; // recordClock tyka tylko przy nagrywaniu — tu potrzebny zawsze
+        if (nowMs - harnessLastPoseMs >= 2000)
+        {
+            harnessLastPoseMs = nowMs;
+            try { System.IO.File.WriteAllText(HarnessPosePath, SerializeCamera(frame)); }
+            catch (System.IO.IOException) { }
+        }
+
+        if (harnessLastShotMs == 0)
+        {
+            harnessLastShotMs = nowMs; // pierwsza fotka dopiero po pełnym interwale (nie ekran ładowania)
+        }
+
+        bool due = HarnessAutoshotSec > 0 && nowMs - harnessLastShotMs >= HarnessAutoshotSec * 1000.0;
+        if (HarnessShotDir is null || (!harnessShotRequested && !due))
+        {
+            return;
+        }
+
+        harnessShotRequested = false;
+        harnessLastShotMs = nowMs;
+        try
+        {
+            using SkiaSharp.SKImage snap = e.Surface.Snapshot();
+            using SkiaSharp.SKData png = snap.Encode(SkiaSharp.SKEncodedImageFormat.Png, 90);
+            System.IO.Directory.CreateDirectory(HarnessShotDir);
+            string name = $"shot-{DateTime.Now:yyyyMMdd-HHmmss-fff}.png";
+            using System.IO.FileStream fs = System.IO.File.Create(System.IO.Path.Combine(HarnessShotDir, name));
+            png.SaveTo(fs);
+            double shotMoving = flightBuildGated
+                ? (flightGateOpen ? flightMovingClock.Elapsed.TotalSeconds : 0.0)
+                : flightClock.Elapsed.TotalSeconds - FlightStartPauseSeconds; // ta sama formuła co OnFlightTick
+            float shotP = flightActive && flightTotalMovingSeconds > 0
+                ? Math.Clamp((float)(shotMoving / flightTotalMovingSeconds), 0f, 1f)
+                : -1f;
+            Serilog.Log.Information("[Harness] zrzut {Name} | p={P:F3} hour={Hour:F2} | poza {Pose}",
+                name, shotP, shotP >= 0 ? FlightTimeOfDay(shotP) : -1f, SerializeCamera(frame));
+        }
+        catch (Exception ex) when (ex is System.IO.IOException or UnauthorizedAccessException)
+        {
+            Serilog.Log.Warning(ex, "[Harness] zapis zrzutu nieudany");
+        }
     }
 
     // Per-frame recording service: lazily starts the recording once the surface size is known, then
@@ -4961,9 +6295,9 @@ public partial class Terrain3DView : ContentView
             }
 
             if (occlusionRaster is not null
-                && !MapaTur.Application.Terrain.TerrainOcclusion.IsVisible(cameraPos, world, occlusionRaster, frame.ProjectionAnchor, frame.VerticalExaggeration))
+                && !MapaTur.Application.Terrain.TerrainOcclusion.IsVisibleFine(cameraPos, world, SampleWalkGround, frame.VerticalExaggeration))
             {
-                continue; // behind a ridge / rock — hidden like the peak + POI labels
+                continue; // behind the detailed rock — hidden like the peak + POI labels
             }
 
             Vector3? screen = Camera.ProjectToScreen(world, viewProjection, width, height);
@@ -5004,19 +6338,12 @@ public partial class Terrain3DView : ContentView
             System.Numerics.Vector3 cam = Camera.Position;
             int n = peaks.Count;
 
-            // Each marker's occlusion is an independent, read-only DEM raycast, so fan the march out across
-            // cores for large marker sets. keep[] preserves list order; small sets stay sequential.
+            // Sequential: the fine march samples the detail elevation delegate, which is not guaranteed
+            // thread-safe (the LOD stream can mutate it). The recompute is throttled, so this is cheap.
             var keep = new bool[n];
-            if (n >= OcclusionParallelThreshold)
+            for (int i = 0; i < n; i++)
             {
-                System.Threading.Tasks.Parallel.For(0, n, i => keep[i] = IsPeakVisible(peaks[i], cam, raster, frame));
-            }
-            else
-            {
-                for (int i = 0; i < n; i++)
-                {
-                    keep[i] = IsPeakVisible(peaks[i], cam, raster, frame);
-                }
+                keep[i] = IsPeakVisible(peaks[i], cam, frame);
             }
 
             visiblePeakLocations.Clear();
@@ -5044,16 +6371,18 @@ public partial class Terrain3DView : ContentView
         return visible;
     }
 
-    private static bool IsPeakVisible(ProjectedPeak p, System.Numerics.Vector3 cam, DemRaster raster, TerrainMesh3D frame)
+    private bool IsPeakVisible(ProjectedPeak p, System.Numerics.Vector3 cam, TerrainMesh3D frame)
     {
         if (p.ScreenPosition is null)
         {
             return false; // off-screen — it won't draw, so skip its raycast
         }
 
+        // March against the DETAILED rendered surface (SampleWalkGround), not the coarse raster — a name
+        // behind the detailed rock (Mnich needle) must hide even though the coarse DEM there is far lower.
         System.Numerics.Vector3 world = frame.GeoToWorld(p.Source.Location, (float)p.Source.ElevationMeters);
-        return MapaTur.Application.Terrain.TerrainOcclusion.IsVisible(
-            cam, world, raster, frame.ProjectionAnchor, frame.VerticalExaggeration);
+        return MapaTur.Application.Terrain.TerrainOcclusion.IsVisibleFine(
+            cam, world, SampleWalkGround, frame.VerticalExaggeration);
     }
 
     // As HideOccludedPeaks, for POIs — a hut / parking / viewpoint behind a ridge hides its marker too.
@@ -5070,18 +6399,11 @@ public partial class Terrain3DView : ContentView
             float poiLift = PoiMarkerLiftMeters;
             int n = pois.Count;
 
-            // As HideOccludedPeaks: independent read-only raycasts, fanned out across cores for large sets.
+            // Sequential (fine-march delegate is not thread-safe), like HideOccludedPeaks.
             var keep = new bool[n];
-            if (n >= OcclusionParallelThreshold)
+            for (int i = 0; i < n; i++)
             {
-                System.Threading.Tasks.Parallel.For(0, n, i => keep[i] = IsPoiVisible(pois[i], cam, raster, frame, poiLift));
-            }
-            else
-            {
-                for (int i = 0; i < n; i++)
-                {
-                    keep[i] = IsPoiVisible(pois[i], cam, raster, frame, poiLift);
-                }
+                keep[i] = IsPoiVisible(pois[i], cam, raster, frame, poiLift);
             }
 
             visiblePoiLocations.Clear();
@@ -5106,7 +6428,7 @@ public partial class Terrain3DView : ContentView
         return visible;
     }
 
-    private static bool IsPoiVisible(ProjectedPoi p, System.Numerics.Vector3 cam, DemRaster raster, TerrainMesh3D frame, float poiLift)
+    private bool IsPoiVisible(ProjectedPoi p, System.Numerics.Vector3 cam, DemRaster raster, TerrainMesh3D frame, float poiLift)
     {
         if (p.ScreenPosition is null)
         {
@@ -5119,9 +6441,10 @@ public partial class Terrain3DView : ContentView
             return true; // no terrain sample — don't hide it
         }
 
+        // March against the detailed rendered surface so a hut/POI behind the rock hides (see IsPeakVisible).
         System.Numerics.Vector3 world = frame.GeoToWorld(p.Source.Position, (float)ground + poiLift);
-        return MapaTur.Application.Terrain.TerrainOcclusion.IsVisible(
-            cam, world, raster, frame.ProjectionAnchor, frame.VerticalExaggeration);
+        return MapaTur.Application.Terrain.TerrainOcclusion.IsVisibleFine(
+            cam, world, SampleWalkGround, frame.VerticalExaggeration);
     }
 
     // Refuges that "light up" at night: everything with a roof a hiker could be inside. Viewpoints
@@ -5543,18 +6866,28 @@ public partial class Terrain3DView : ContentView
 
     private void OnPointerWheelChanged(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
     {
-        if (walkActive || dragonActive)
-        {
-            return; // no orbit-zoom while walking or flying the dragon
-        }
-
         int delta = e.GetCurrentPoint((Microsoft.UI.Xaml.UIElement)sender).Properties.MouseWheelDelta;
         if (delta == 0)
         {
             return;
         }
 
-        // One wheel notch = 120 units; ~10% per notch.
+        if (dragonActive)
+        {
+            return; // no wheel-zoom while flying the dragon
+        }
+
+        // One wheel notch = 120 units; ~10% per notch. Scroll up = zoom in (closer).
+        if (walkActive)
+        {
+            // Walk mode: the wheel dollies the 3rd-person camera in/out behind the walker.
+            walkCamBack = Math.Clamp(
+                walkCamBack * MathF.Pow(1f / 1.1f, delta / 120f), WalkCamBackMinMeters, WalkCamBackMaxMeters);
+            Canvas.InvalidateSurface();
+            e.Handled = true;
+            return;
+        }
+
         float scale = MathF.Pow(1.1f, delta / 120f);
         controller.ApplyZoom(scale);
         Canvas.InvalidateSurface();
@@ -5596,25 +6929,24 @@ public partial class Terrain3DView : ContentView
             return;
         }
 
-        // Walk mode: LEFT = swing the ciupaga (a strike), RIGHT-drag = look around. So the left button never
-        // starts a look-drag while walking.
+        // Walk mode: RIGHT-drag = look around; while climbing, LEFT = pick a hold (the PoC's manual
+        // mouse mode). Otherwise the LEFT button falls through to the UI — the legacy ciupaga swing
+        // retired with the hold-by-hold takeover.
         if (walkActive)
         {
-            if (props.IsLeftButtonPressed)
+            lastPointerPosition = e.GetCurrentPoint(element).Position;
+            if (props.IsLeftButtonPressed && gripClimb.IsActive)
             {
-                walkLmbDown = true; // held = ciupaga self-arrest (hang) while airborne against rock
-                StartCiupagaSwing();
-                element.CapturePointer(e.Pointer); // capture so the release reliably clears the hang
-                mouseDragButton = 0;
+                var clickAt = e.GetCurrentPoint(element).Position;
+                TryClimbHoldClick((float)clickAt.X, (float)clickAt.Y, element);
                 e.Handled = true;
                 return;
             }
 
-            mouseDragButton = props.IsRightButtonPressed ? 2 : 0;
-            if (mouseDragButton != 0)
+            if (props.IsRightButtonPressed)
             {
-                lastPointerPosition = e.GetCurrentPoint(element).Position;
-                element.CapturePointer(e.Pointer);
+                walkRmbHeld = true;
+                element.CapturePointer(e.Pointer); // capture so the release reliably clears the hold
                 e.Handled = true;
             }
 
@@ -5630,16 +6962,138 @@ public partial class Terrain3DView : ContentView
         }
     }
 
+    // Builds a view ray from a click position (camera basis + vertical FOV; walk camera never rolls,
+    // so world-Z is a safe up reference) and hands it to the climb controller's hold picking.
+    private void TryClimbHoldClick(float pixelX, float pixelY, Microsoft.UI.Xaml.UIElement element)
+    {
+        if (WorldFrame is not { } frame || element is not Microsoft.UI.Xaml.FrameworkElement fe
+            || fe.ActualWidth < 1 || fe.ActualHeight < 1)
+        {
+            return;
+        }
+
+        Vector3 forward = Vector3.Normalize(Camera.Target - Camera.Position);
+        Vector3 right = Vector3.Normalize(Vector3.Cross(forward, Vector3.UnitZ));
+        Vector3 up = Vector3.Cross(right, forward);
+        float ndcX = (float)((2.0 * pixelX / fe.ActualWidth) - 1.0);
+        float ndcY = (float)(1.0 - (2.0 * pixelY / fe.ActualHeight));
+        float tanY = MathF.Tan(Camera.FieldOfViewYRadians * 0.5f);
+        float tanX = tanY * (float)(fe.ActualWidth / fe.ActualHeight);
+        Vector3 direction = Vector3.Normalize(
+            forward + (right * (ndcX * tanX)) + (up * (ndcY * tanY)));
+        gripClimb.HandleClick(Camera.Position, direction, frame.VerticalExaggeration);
+    }
+
+    // Two-click climbing UI: outlines every hold the SELECTED limb can take (green = the strict solver
+    // approves, orange = permissive-only) with a small risk % under each, plus a white ring on the
+    // selected limb's current hold. Drawn on the Skia overlay after the HUD.
+    private void DrawClimbSelectionOverlay(SKCanvas canvas, int width, int height)
+    {
+        if (!gripClimb.IsActive || WorldFrame is not { } frame || gripClimb.SelectedLimb is null)
+        {
+            return;
+        }
+
+        float exaggeration = frame.VerticalExaggeration;
+        Matrix4x4 viewProjection = Camera.BuildViewMatrix() * Camera.BuildProjectionMatrix((float)width / height);
+        using var ringOk = new SKPaint
+        { IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 2.5f, Color = new SKColor(90, 255, 130) };
+        using var ringRisky = new SKPaint
+        { IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 2.5f, Color = new SKColor(255, 175, 60) };
+        using var ringSelected = new SKPaint
+        { IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 3.5f, Color = SKColors.White };
+        using var textFill = new SKPaint { IsAntialias = true, Color = SKColors.White };
+        using var textHalo = new SKPaint
+        { IsAntialias = true, Color = new SKColor(0, 0, 0, 200), Style = SKPaintStyle.Stroke, StrokeWidth = 3f };
+        using var statFont = new SKFont { Size = 12f };
+
+        foreach (GripClimbController.ClimbCandidateInfo candidate in gripClimb.Candidates)
+        {
+            Vector3 world = candidate.Hold.Position;
+            world.Z *= exaggeration;
+            if (Camera.ProjectToScreen(world, viewProjection, width, height) is not { } screen)
+            {
+                continue;
+            }
+
+            SKPaint ring = candidate.PlannerOk ? ringOk : ringRisky;
+            canvas.DrawCircle(screen.X, screen.Y, 10f, ring);
+            string stat = $"{candidate.RiskPercent:0}%";
+            canvas.DrawText(stat, screen.X, screen.Y + 24f, SKTextAlign.Center, statFont, textHalo);
+            canvas.DrawText(stat, screen.X, screen.Y + 24f, SKTextAlign.Center, statFont, textFill);
+        }
+
+        if (gripClimb.SelectedHoldPosition is { } selectedPos)
+        {
+            selectedPos.Z *= exaggeration;
+            if (Camera.ProjectToScreen(selectedPos, viewProjection, width, height) is { } screen)
+            {
+                canvas.DrawCircle(screen.X, screen.Y, 13f, ringSelected);
+                string limbLabel = gripClimb.SelectedLimb switch
+                {
+                    MapaTur.Climbing.ClimbLimb.LeftHand => "L ręka",
+                    MapaTur.Climbing.ClimbLimb.RightHand => "P ręka",
+                    MapaTur.Climbing.ClimbLimb.LeftFoot => "L noga",
+                    _ => "P noga",
+                };
+                canvas.DrawText(limbLabel, screen.X, screen.Y - 18f, SKTextAlign.Center, statFont, textHalo);
+                canvas.DrawText(limbLabel, screen.X, screen.Y - 18f, SKTextAlign.Center, statFont, textFill);
+            }
+        }
+    }
+
     private void OnPlatformPointerMoved(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
     {
+        var element = (Microsoft.UI.Xaml.UIElement)sender;
+        var point = e.GetCurrentPoint(element);
+        var props = point.Properties;
+
+        // Walk mode is driven from the LIVE button flags, not mouseDragButton: pressing a SECOND mouse button (right
+        // while the left is already held climbing) does not reliably fire PointerPressed on Windows — it arrives
+        // here with both flags set. LEFT alone = climb (no look). RIGHT = turn the head. LEFT+RIGHT = free-look
+        // (orbit the camera without changing the climb heading, so you keep climbing while you look around).
+        if (walkActive)
+        {
+            if (!props.IsLeftButtonPressed && !props.IsRightButtonPressed)
+            {
+                return; // hover, no button → ignore
+            }
+
+            float wdx = (float)(point.Position.X - lastPointerPosition.X);
+            float wdy = (float)(point.Position.Y - lastPointerPosition.Y);
+            lastPointerPosition = point.Position;
+
+            if (props.IsRightButtonPressed && props.IsLeftButtonPressed)
+            {
+                walkRmbHeld = true;
+                walkCamYawOffset -= wdx * WalkMouseLookRadiansPerPixel;
+                walkCamPitchFree = Math.Clamp(walkCamPitchFree - (wdy * WalkMouseLookRadiansPerPixel), -1.2f, 1.2f);
+            }
+            else if (props.IsRightButtonPressed)
+            {
+                walkRmbHeld = true;
+                walkHeadingRadians -= wdx * WalkMouseLookRadiansPerPixel;
+                walkLookPitchRadians = Math.Clamp(
+                    walkLookPitchRadians - (wdy * WalkMouseLookRadiansPerPixel),
+                    -WalkMaxLookPitchRadians,
+                    WalkMaxLookPitchRadians);
+            }
+            else
+            {
+                walkRmbHeld = false; // left-only: keep the baseline fresh (left is the climb hold, not a look)
+            }
+
+            Canvas.InvalidateSurface();
+            e.Handled = true;
+            return;
+        }
+
         if (mouseDragButton == 0)
         {
             return;
         }
 
-        var element = (Microsoft.UI.Xaml.UIElement)sender;
-        var point = e.GetCurrentPoint(element);
-        if (!point.Properties.IsLeftButtonPressed && !point.Properties.IsRightButtonPressed)
+        if (!props.IsLeftButtonPressed && !props.IsRightButtonPressed)
         {
             mouseDragButton = 0;
             return;
@@ -5658,20 +7112,6 @@ public partial class Terrain3DView : ContentView
             return;
         }
 
-        if (walkActive)
-        {
-            // Walk mode: drag turns the head (yaw) and tilts the gaze (pitch) in place — movement stays on WASD.
-            // Drag right → turn right (heading decreases); drag up → look up (pitch increases).
-            walkHeadingRadians -= dx * WalkMouseLookRadiansPerPixel;
-            walkLookPitchRadians = Math.Clamp(
-                walkLookPitchRadians - (dy * WalkMouseLookRadiansPerPixel),
-                -WalkMaxLookPitchRadians,
-                WalkMaxLookPitchRadians);
-            Canvas.InvalidateSurface();
-            e.Handled = true;
-            return;
-        }
-
         if (mouseDragButton == 1)
         {
             // Left-drag orbits around the focus (camera circles the scene).
@@ -5680,7 +7120,6 @@ public partial class Terrain3DView : ContentView
         else
         {
             // Right-drag looks around in place — the camera stays put and turns its view direction.
-            // dy is NOT inverted here (unlike orbit): dragging up looks up.
             controller.ApplyLookAround(dx, dy);
         }
 
@@ -5690,14 +7129,38 @@ public partial class Terrain3DView : ContentView
 
     private void OnPlatformPointerReleased(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
     {
-        mouseDragButton = 0;
-        walkLmbDown = false; // releasing the left button lets the ciupaga go — the hang drops
+        var released = (Microsoft.UI.Xaml.UIElement)sender;
+        var relProps = e.GetCurrentPoint(released).Properties;
+
+        // Only drop the hold whose button actually came up (RMB = free-look; LMB is free since the
+        // legacy ciupaga swing/hold retired with the hold-by-hold climbing takeover).
+        if (!relProps.IsRightButtonPressed)
+        {
+            walkRmbHeld = false;
+            if (mouseDragButton == 2)
+            {
+                mouseDragButton = 0;
+            }
+        }
+
+        if (!relProps.IsLeftButtonPressed && !relProps.IsRightButtonPressed)
+        {
+            mouseDragButton = 0;
+            released.ReleasePointerCapture(e.Pointer);
+        }
+
         dragonRmbHeld = false; // release the dragon attitude hold → pitch auto-levels again
-        ((Microsoft.UI.Xaml.UIElement)sender).ReleasePointerCapture(e.Pointer);
     }
 
+    private object? _lastKeyDownArgs;
     private void OnPlatformKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
     {
+        // DEDUP (2026-07-21): this handler is registered on BOTH this element AND the window root
+        // (handledEventsToo:true, see ~6500/6511) so it can receive keys the focus system pre-marks handled —
+        // but the SAME KeyDown args then bubble through twice, firing us twice per press, so TOGGLE keys (9, 0)
+        // cancel themselves out (net no change). Ignore the second fire of the same args object.
+        if (ReferenceEquals(e, _lastKeyDownArgs)) { return; }
+        _lastKeyDownArgs = e;
         // The handler also listens at the window root, so ignore keys unless 3D mode is actually showing.
         if (!IsVisible)
         {
@@ -5720,6 +7183,45 @@ public partial class Terrain3DView : ContentView
                 case Windows.System.VirtualKey.Number1: r.BakedShadowComp = 0f; Serilog.Log.Information("[BakedShadow] comp=0"); e.Handled = true; return;
                 case Windows.System.VirtualKey.Number2: r.BakedShadowComp = 0.5f; Serilog.Log.Information("[BakedShadow] comp=0.5"); e.Handled = true; return;
                 case Windows.System.VirtualKey.Number3: r.BakedShadowComp = 1.0f; Serilog.Log.Information("[BakedShadow] comp=1.0"); e.Handled = true; return;
+                // '0' toggles the hi-res ortho detail overlay (A/B): OFF = the plain base ortho everywhere.
+                case Windows.System.VirtualKey.Number0:
+                    r.OrthoDetailEnabled = !r.OrthoDetailEnabled;
+                    Serilog.Log.Information("[OrthoDetailSlice] overlay {State}", r.OrthoDetailEnabled ? "ON" : "OFF");
+                    e.Handled = true; return;
+                // '9' cycles the detail colour variant: raw detail <-> the base ortho's de-blue transform.
+                case Windows.System.VirtualKey.Number9:
+                    r.OrthoDetailColorMode = r.OrthoDetailColorMode == 0 ? 1 : 0;
+                    Serilog.Log.Information("[OrthoDetailSlice] colour = {Mode}", r.OrthoDetailColorMode == 1 ? "TONE-FROM-BASE (detail = fine frequencies only)" : "RAW");
+                    e.Handled = true; return;
+                case Windows.System.VirtualKey.F10:
+                    harnessShotRequested = true; // TEST HARNESS: zrzut biezacej klatki z poziomu apki
+                    e.Handled = true; return;
+                // '7' — A/B tier det1m (krok 3): przełącza WYŁĄCZNIE uniform użycia — dane zostają rezydentne
+                // na GPU, więc porównanie panoramy nie jest skażone streamingiem (warunek testu).
+                case Windows.System.VirtualKey.Number7:
+                    r.Det1mEnabled = !r.Det1mEnabled;
+                    Serilog.Log.Information("[Det1m] A/B: {State}", r.Det1mEnabled ? "ON" : "OFF");
+                    e.Handled = true; return;
+                // '8' toggles the cell-boundary outline (diagnostics).
+                case Windows.System.VirtualKey.Number8:
+                    r.OrthoDetailDebugBounds = !r.OrthoDetailDebugBounds;
+                    Serilog.Log.Information("[OrthoDetailSlice] cell-bounds outline {State}", r.OrthoDetailDebugBounds ? "ON" : "OFF");
+                    e.Handled = true; return;
+                // 'M' toggles the climbing-route calibration marker grid (clean view ↔ calibration).
+                case Windows.System.VirtualKey.M:
+                    climbCalibMarkersVisible = !climbCalibMarkersVisible;
+                    if (!climbCalibMarkersVisible)
+                    {
+                        climbCalibMarkers.Clear();
+                        climbCalibLabels.Clear();
+                    }
+                    else
+                    {
+                        climbCalibNextBuildTicks = 0; // force an immediate rebuild
+                    }
+
+                    Serilog.Log.Information("[Climb] calibration markers {State}", climbCalibMarkersVisible ? "ON" : "OFF");
+                    e.Handled = true; return;
             }
         }
 
@@ -5830,8 +7332,11 @@ public partial class Terrain3DView : ContentView
 
             // F9 starts the cinematic grand-tour fly-through (Orla Perć ridge → Western Tatras → Gerlach
             // finale, time-swept midday→night) — same entry point as the Widok panel's 🎬 button, for demos.
+            // Gate 2026-07-24: nie startuj, póki streaming detalu ma pracę w locie — film startujący w
+            // trakcie dociągania „ścierwi okrutnie" (rozmyte cele, zarywanie z uploadów). Odraczamy start
+            // do gotowości (OnFlightPendingTick), zamiast odpalać w breję.
             case Windows.System.VirtualKey.F9:
-                StartOrlaPercFlight();
+                RequestFlightStartWhenSceneReady();
                 break;
 
             // View pitch — tilt the gaze in place (same ApplyLookAround as the ⊺/ꓕ pad buttons, so the
@@ -5910,9 +7415,29 @@ public partial class Terrain3DView : ContentView
             case Windows.System.VirtualKey.PageUp:
                 walkLookPitchRadians = Math.Clamp(walkLookPitchRadians + WalkKeyTurnRadians, -WalkMaxLookPitchRadians, WalkMaxLookPitchRadians);
                 break;
-            case Windows.System.VirtualKey.F:
             case Windows.System.VirtualKey.PageDown:
                 walkLookPitchRadians = Math.Clamp(walkLookPitchRadians - WalkKeyTurnRadians, -WalkMaxLookPitchRadians, WalkMaxLookPitchRadians);
+                break;
+            case Windows.System.VirtualKey.F:
+                walkShootQueued = true; // F = fire the crossbow (the avatar plays its one-shot ranged clip)
+                break;
+            case Windows.System.VirtualKey.C:
+                // C = grab the wall ahead (hold-by-hold climbing) / let go. Key auto-repeat must NOT
+                // toggle the session on/off in a loop while held — accept only the initial press.
+                if (!e.KeyStatus.WasKeyDown)
+                {
+                    walkClimbToggleQueued = true;
+                }
+
+                break;
+            case Windows.System.VirtualKey.X:
+                // X = wypnij się: drop the auto-belay (pitons + rope). Hanging on the rope this is a
+                // deliberate free fall; on the ground it just clears the gear. Initial press only.
+                if (!e.KeyStatus.WasKeyDown)
+                {
+                    walkBelayReleaseQueued = true;
+                }
+
                 break;
         }
 
@@ -6956,9 +8481,58 @@ public partial class Terrain3DView : ContentView
             bool dragon3DVisible = dragonActive && dragonModel3D is not null;
             Vector3 dragonLight = tiles.Count > 0 ? tiles[0].LightDirection : new Vector3(0.4f, 0.4f, 1f);
             glRenderer.SetDragon(dragonModel3D, dragonWorldMatrix, dragonNormalMatrix, dragonLight, dragon3DVisible);
+            // Push the 3rd-person walk avatar into the same GL pass (visible only while walking AND the model has
+            // streamed in). Walk and dragon are mutually exclusive, so at most one of these is ever visible.
+            bool humanoid3DVisible = walkActive && humanoidModel3D is not null;
+            glRenderer.SetHumanoid(
+                gripClimb is { IsActive: true, HasPose: true, ActiveModel: { } climberModel } ? climberModel : humanoidModel3D,
+                humanoidWorldMatrix, humanoidNormalMatrix, dragonLight, humanoid3DVisible);
+            glRenderer.SetArrows(
+                walkActive ? arrowModel3D : null,
+                walkActive ? arrowWorlds : null,
+                walkActive ? arrowNormals : null,
+                dragonLight);
             glRenderer.SetFireballs(dragonActive && dragonFireSprites.Count > 0 ? dragonFireSprites : null);
             glRenderer.SetFireSmoke(dragonActive && dragonFireSmokeSprites.Count > 0 ? dragonFireSmokeSprites : null);
-            glRenderer.SetDebugMarkers(dragonActive && dragonDebugMarkers.Count > 0 ? dragonDebugMarkers : null);
+            debugMarkersRender.Clear();
+            // The calibration grid is for placing route lines — it is pure clutter during an actual climb
+            // session (the climb draws its own hold markers), so hide it while gripClimb is active.
+            if (climbCalibMarkers.Count > 0 && !gripClimb.IsActive)
+            {
+                debugMarkersRender.AddRange(climbCalibMarkers);
+            }
+
+            if (dragonActive && dragonDebugMarkers.Count > 0)
+            {
+                debugMarkersRender.AddRange(dragonDebugMarkers);
+            }
+
+            glRenderer.SetDebugMarkers(debugMarkersRender.Count > 0 ? debugMarkersRender : null);
+            // Climb hold dots go through the DEPTH-TESTED pass so the climber draws over them and the routes
+            // read under them (drawn between the route lines and the climber).
+            ApplyCameraPresetFromEnv(); // KONTRAKT-ORTO §4: one-shot anchor view once the frame exists
+            glRenderer.SetClimbHoldMarkers(walkActive && climbMarkers.Count > 0 ? climbMarkers : null);
+            // Sculpted rock skin around the climber: buffer lives in climb space, the shader applies the
+            // Pion exaggeration — so a slider move needs no geometry rebuild.
+            glRenderer.SetClimbRockSkin(
+                walkActive ? gripClimb.RockSkin : null, WorldFrame?.VerticalExaggeration ?? 1f);
+            EnsureClimbingRoutes();
+            // Topo passage lines render through the same climb-gear ribbon pass as the rope/quickdraws —
+            // always visible (not only while walking), with the session gear appended on top of them.
+            renderGearRibbons.Clear();
+            if (climbRouteRibbons.Count > 0 && ShowClimbingRoutes)
+            {
+                renderGearRibbons.AddRange(climbRouteRibbons);
+            }
+
+            if (walkActive && climbGearRibbons.Count > 0)
+            {
+                renderGearRibbons.AddRange(climbGearRibbons);
+            }
+
+            glRenderer.SetClimbGear(
+                renderGearRibbons.Count > 0 ? renderGearRibbons : null,
+                walkActive && climbGearRings.Count > 0 ? climbGearRings : null);
             UpdateAiFlock(); // advance + pose the flock in step with this frame (no separate timer — WinUI-safe)
             glRenderer.SetAiDragons(ShowAiDragons && aiFlockInstances.Count > 0 ? aiFlockInstances : null);
             double dbgPreRenderMs = dbgSwapPaintActive ? dbgPaintWatch.Elapsed.TotalMilliseconds : 0;
@@ -7039,6 +8613,7 @@ public partial class Terrain3DView : ContentView
         }
 
         string signature = string.Join("|", paths);
+        TryLoadOrthoDetailPoc(renderer, paths);
         if (signature == cachedOrthoSignature && cachedOrthoDecoded is not null)
         {
             renderer.SetOrthoTextures(cachedOrthoDecoded);
@@ -7141,6 +8716,377 @@ public partial class Terrain3DView : ContentView
         cachedOrthoSignature = null; // bypass the path-keyed cache; cells are the source of truth now
         cachedOrthoDecoded = null;
         renderer.SetOrthoTextures(decoded);
+    }
+
+    // The accepted 5 cm HighResolution Morskie-Oko demo: det05 + det25 mosaics → the sharp hut (yesterday's
+    // state). Decodes off the UI thread; absent files = silent no-op.
+    // Wire the det25 (25 cm) streaming: an OrthoTileDecodeCache in front of the SkiaSharp WebP decode of the
+    // on-disk tile pyramid (dem/ortho-detail/tatry/det25/<i>/<j>.webp), the OrthoDetailCellComposer that assembles
+    // cells from it, and the ring policy. The renderer then composes/uploads cells off-thread and binds them
+    // per-draw. baseFill is null (holes stay transparent → the shader resolves them against the base ortho).
+    private void SetupOrthoDetailStreaming(Services.Terrain3DGlRenderer renderer, IReadOnlyList<string>? basePaths)
+    {
+        string? demDir = basePaths is { Count: > 0 } ? System.IO.Path.GetDirectoryName(basePaths[0]) : null;
+        string? tilesDir = demDir is null ? null : System.IO.Path.Combine(demDir, "ortho-detail", "tatry", "det25");
+        if (tilesDir is null || !System.IO.Directory.Exists(tilesDir))
+        {
+            string alt = System.IO.Path.Combine(
+                Microsoft.Maui.Storage.FileSystem.AppDataDirectory, "dem", "ortho-detail", "tatry", "det25");
+            if (System.IO.Directory.Exists(alt))
+            {
+                tilesDir = alt;
+            }
+        }
+
+        if (tilesDir is null || !System.IO.Directory.Exists(tilesDir))
+        {
+            Serilog.Log.Information("[OrthoDetailStream] det25 tiles dir not found ({Dir}) — streaming off", tilesDir);
+            return;
+        }
+
+        string dir = tilesDir;
+        var grid = new MapaTur.Application.Terrain.OrthoDetailGrid();
+        var cache = new MapaTur.Application.Terrain.OrthoTileDecodeCache(
+            (i, j) =>
+            {
+                string p = System.IO.Path.Combine(
+                    dir, i.ToString(System.Globalization.CultureInfo.InvariantCulture), $"{j}.webp");
+                if (DecodeOrtho(p) is not { Width: 512, Height: 512 } t)
+                {
+                    return null;
+                }
+
+                MapaTur.Application.Terrain.OrthoNodata.ZeroAlphaOnNodataRim(t.Rgba, 512, 512); // nodata GUGiK + rąbek near-black WebP → punch-through
+                return t.Rgba;
+            },
+            // 2 GB desktop / 384 MB phone (2026-07-20): det25 cell = 64 decoded 512² tiles ≈ 64 MB; 2 GB holds
+            // ~30 cells so the coarse ring never re-decodes on a pan (same stutter cause as det05, smaller scale).
+            maxBytes: OperatingSystem.IsWindows() ? 2048L << 20 : 384L << 20);
+        var composer = new MapaTur.Application.Terrain.OrthoDetailCellComposer(grid, cache.Get, baseFill: null);
+        // det1m (krok 3): rezydentny tier 1 m z prebake'u — ładowany raz na starcie, A/B klawiszem '7'.
+        renderer.Det1mPackDir = System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(dir) ?? dir, "opk", "det1m");
+        // det25 (krok 6): strony .opk zamiast compose — pierwsza wizyta czyta prebake, nie dekoduje WebP.
+        renderer.Det25OpkDir = System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(dir) ?? dir, "opk", "det25");
+        // TIER REBALANCE (2026-07-23): desktop ring 1500 → 5000 m so the 28-cell det25 midground actually has
+        // candidates to fill (a 1500 m ring holds ~7 cells — the raised cap was starved at the source).
+        var policy = new MapaTur.Application.Terrain.OrthoDetailResidencyPolicy(
+            grid, ringRadiusMeters: OperatingSystem.IsWindows() ? 5000.0 : 1500.0,
+            fastMotionSpeedMps: 25.0, prefetchLeadMeters: 400.0);
+        renderer.Det25GpuCacheDir = System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(dir) ?? dir, "gpu-cache", System.IO.Path.GetFileName(dir) + "-25");
+        renderer.SetOrthoDetailStreaming(grid, policy, composer, cache);
+        Serilog.Log.Information("[OrthoDetailStream] det25 streaming wired from {Dir}", dir);
+    }
+
+    // Wire the det05 (5 cm) SECOND streamed level on unit 11, coverage-gated: a tile decode cache over the det05
+    // pyramid, the composer, and the covered-cell set (_coverage.txt = cells with ≥95% source, so 5 cm only
+    // streams where the tiles exist — the 07-14 map showed 5 cm is a partial strip). Behind MAPATUR_DET05_STREAM=1.
+    /// <summary>Skok kraty cel det05 w kaflach. 16 = CELE ROZŁĄCZNE (pitch = coverage): cela wnosi 409,6² m²
+    /// zamiast 153,6², czyli 7,1× więcej terenu z TEJ SAMEJ pamięci (192 cele = 32 km², promień ~3,2 km
+    /// zamiast ~1,2 km). Nakładka 2,7× była wymogiem wyboru celi PER DRAW (CellContains — kafel terenu nie
+    /// mógł przechodzić przez granicę celi); wybór jest PER FRAGMENT od 2026-07-20, więc wymóg jest martwy.
+    /// KAŻDA zmiana tej wartości WYMAGA wygenerowania listy pokrycia dla nowej kraty
+    /// (testdata/maps/build-det05-coverage.py --pitch N), inaczej warstwa 5 cm znika w całości.</summary>
+    private const int Det05PitchTiles = 16;
+
+    private bool SetupDet05Streaming(Services.Terrain3DGlRenderer renderer, IReadOnlyList<string>? basePaths)
+    {
+        string? demDir = basePaths is { Count: > 0 } ? System.IO.Path.GetDirectoryName(basePaths[0]) : null;
+        string? tilesDir = demDir is null ? null : System.IO.Path.Combine(demDir, "ortho-detail", "tatry", "det05");
+        if (tilesDir is null || !System.IO.Directory.Exists(tilesDir))
+        {
+            string alt = System.IO.Path.Combine(
+                Microsoft.Maui.Storage.FileSystem.AppDataDirectory, "dem", "ortho-detail", "tatry", "det05");
+            if (System.IO.Directory.Exists(alt))
+            {
+                tilesDir = alt;
+            }
+        }
+
+        if (tilesDir is null || !System.IO.Directory.Exists(tilesDir))
+        {
+            Serilog.Log.Information("[OrthoDetail05] det05 tiles dir not found — falling back to the static 5 cm showcase");
+            return false;
+        }
+
+        string dir = tilesDir;
+        var coveredKeys = new HashSet<int>();
+        // ★ KLUCZE POKRYCIA ZALEŻĄ OD SKOKU KRATY (klucz = ci*100000+cj). Zmiana pitchTiles unieważnia CAŁY
+        // plik — każda cela wypada jako „bez pokrycia", planer żąda ZERA cel i warstwa 5 cm ZNIKA (dwa
+        // nieudane podejścia 2026-07-25, objaw: `[Mem] det05 0 cells | desired 0`). Dlatego plik jest wybierany
+        // po skoku: `_coverage_p{pitch}.txt`, a `_coverage.txt` (krata pitch 6) zostaje jako zgodność wstecz.
+        // Generator: testdata/maps/build-det05-coverage.py <katalog-det05> --pitch N.
+        string covFile = System.IO.Path.Combine(dir, $"_coverage_p{Det05PitchTiles}.txt");
+        if (!System.IO.File.Exists(covFile))
+        {
+            covFile = System.IO.Path.Combine(dir, "_coverage.txt");
+        }
+        if (System.IO.File.Exists(covFile))
+        {
+            foreach (string line in System.IO.File.ReadLines(covFile))
+            {
+                if (int.TryParse(line.Trim(), out int k))
+                {
+                    coveredKeys.Add(k);
+                }
+            }
+        }
+
+        if (coveredKeys.Count == 0)
+        {
+            Serilog.Log.Information(
+                "[OrthoDetail05] no coverage cells in {File} — falling back to the static 5 cm showcase", covFile);
+            return false;
+        }
+
+        var grid = new MapaTur.Application.Terrain.OrthoDetailGrid(
+            resMeters: 0.05, coverageTiles: 16, pitchTiles: Det05PitchTiles);
+        // DESHADOW PREVIEW (env-gated, 2026-07-21): with MAPATUR_DET05_DESHADOW_PREVIEW=1, serve the corrected
+        // tile from a sibling deshadow dir when it exists, else fall back to the original det05 tile.
+        //   MAPATUR_DET05_DESHADOW_DIR selects the override dir (default "det05-deshadow" = Rysy PoC rollback;
+        //   set to "det05-deshadow-mo-v2" for the whole-cirque V2 preview). Fallback is ALWAYS raw det05.
+        // Coverage (_coverage.txt) stays the ORIGINAL det05's; sources are untouched; env-unset = identical
+        // behaviour. VIEW in OrthoDetailColorMode=0 (key 9): these tiles are de-shadowed ON DISK — mode 1 (the
+        // shader de-blue) would double-correct. This is a PREVIEW overlay, NOT yet a production shader-bypass layer.
+        string? dsDir = Environment.GetEnvironmentVariable("MAPATUR_DET05_DESHADOW_PREVIEW") == "1"
+            ? System.IO.Path.Combine(System.IO.Path.GetDirectoryName(dir) ?? dir,
+                Environment.GetEnvironmentVariable("MAPATUR_DET05_DESHADOW_DIR") ?? "det05-deshadow")
+            : null;
+        if (dsDir is not null)
+        {
+            // These tiles are de-shadowed ON DISK. H3 (2026-07-23): the old global RAW (colour mode 0) also
+            // stripped the shader de-blue from det25/base — the whole DISTANCE rendered with the raw blue cast
+            // ("pół Morskiego Oka na niebiesko"). Now the split is per-layer: the streamed det05 array renders
+            // RAW (no double-correction on the V2-baked cells) while det25/base/mosaic keep the mode-1 de-blue.
+            // User can still toggle to compare (keys 9/1/F2/F1).
+            renderer.OrthoDetailColorMode = 1;
+            renderer.Det05ArrayRawColor = true;
+            renderer.BakedShadowComp = 0f;
+            Serilog.Log.Information(
+                "[OrthoDetail05] DESHADOW PREVIEW ON — overlay {DsDir} over fallback {Dir}; per-layer colour: det05 array RAW, det25/base de-blue (mode 1)",
+                dsDir, dir);
+        }
+        int dsHits = 0, dsFallback = 0;
+        var cache = new MapaTur.Application.Terrain.OrthoTileDecodeCache(
+            (i, j) =>
+            {
+                if (dsDir is not null)
+                {
+                    string pd = System.IO.Path.Combine(
+                        dsDir, i.ToString(System.Globalization.CultureInfo.InvariantCulture), $"{j}.webp");
+                    if (System.IO.File.Exists(pd)
+                        && DecodeOrtho(pd) is { Width: 512, Height: 512 } td)
+                    {
+                        int served = System.Threading.Interlocked.Increment(ref dsHits);
+                        if ((served + dsFallback) % 256 == 0)
+                        {
+                            Serilog.Log.Information(
+                                "[OrthoDetail05] deshadow-preview served: {Hits} from det05-deshadow, {Fallback} fallback det05",
+                                served, dsFallback);
+                        }
+                        MapaTur.Application.Terrain.OrthoNodata.ZeroAlphaOnNodataRim(td.Rgba, 512, 512); // nodata GUGiK + rąbek near-black WebP → punch-through
+                        return td.Rgba;
+                    }
+                }
+                string p = System.IO.Path.Combine(
+                    dir, i.ToString(System.Globalization.CultureInfo.InvariantCulture), $"{j}.webp");
+                if (dsDir is not null) { System.Threading.Interlocked.Increment(ref dsFallback); }
+                if (DecodeOrtho(p) is not { Width: 512, Height: 512 } t)
+                {
+                    return null;
+                }
+
+                MapaTur.Application.Terrain.OrthoNodata.ZeroAlphaOnNodataRim(t.Rgba, 512, 512); // nodata GUGiK + rąbek near-black WebP → punch-through
+                return t.Rgba;
+            },
+            // 16 GB desktop (2026-07-20, "mając 64 GB RAM"): a det05 cell = 256 decoded 512² tiles ≈ 268 MB;
+            // 16 GB holds ~60 cells = the WHOLE Morskie-Oko cirque decoded. Root cause of the pan stutter was
+            // this cache at 2 GB (~7 cells): every camera revisit re-DECODED 256 WebP tiles (~1.4 s/cell, 767
+            // re-composes in one session). Cached, a revisit re-composes from RAM (memcpy, ~ms) — no re-decode.
+            // Phone stays tight (RAM-constrained). This is system RAM, not the 4.29 GB per-GPU-resource limit.
+            maxBytes: OperatingSystem.IsWindows() ? 16384L << 20 : 512L << 20);
+        var composer = new MapaTur.Application.Terrain.OrthoDetailCellComposer(grid, cache.Get, baseFill: null);
+        bool Coverage(int ci, int cj) => coveredKeys.Contains(grid.CellKey(ci, cj));
+        // BC1 GPU-cell cache (2026-07-23, ZASADA 11): composed+encoded cells persist next to the tile data —
+        // every revisit is a ~15 ms read instead of a 3–5 s WebP decode storm. Keyed by the SOURCE dir name,
+        // so the deshadow-preview overlay and raw det05 never share cached pixels.
+        renderer.Det05GpuCacheDir = System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(dir) ?? dir, "gpu-cache",
+            dsDir is not null ? System.IO.Path.GetFileName(dsDir) + "-over-det05" : System.IO.Path.GetFileName(dir));
+        // det05 (krok 6): strony .opk zamiast compose — jak det25.
+        renderer.Det05OpkDir = System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(dir) ?? dir, "opk", "det05");
+        renderer.SetOrthoDetail05Streaming(grid, composer, cache, Coverage);
+        Serilog.Log.Information("[OrthoDetail05] det05 streaming wired from {Dir} ({N} covered cells)", dir, coveredKeys.Count);
+        return true;
+    }
+
+    private void LoadOrthoDetailMosaics(Services.Terrain3DGlRenderer renderer, IReadOnlyList<string>? basePaths)
+    {
+        var candidates = new List<string>();
+        if (basePaths is { Count: > 0 })
+        {
+            string? d = System.IO.Path.GetDirectoryName(basePaths[0]);
+            if (!string.IsNullOrEmpty(d))
+            {
+                candidates.Add(System.IO.Path.Combine(d, "ortho-detail", "morskie-oko"));
+                candidates.Add(System.IO.Path.Combine(d, "dem", "ortho-detail", "morskie-oko"));
+            }
+        }
+        candidates.Add(System.IO.Path.Combine(Microsoft.Maui.Storage.FileSystem.AppDataDirectory, "dem", "ortho-detail", "morskie-oko"));
+
+        string? dir = candidates.FirstOrDefault(c => System.IO.File.Exists(System.IO.Path.Combine(c, "mosaics.json")));
+        if (dir is null)
+        {
+            Serilog.Log.Information("[OrthoDetailPoc] mosaics.json not found (looked in {Dirs})", string.Join(" ; ", candidates));
+            return;
+        }
+
+        string mosaicsDir = dir;
+        Task.Run(() =>
+        {
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(
+                    System.IO.File.ReadAllText(System.IO.Path.Combine(mosaicsDir, "mosaics.json")));
+                System.Text.Json.JsonElement levels = doc.RootElement.GetProperty("levels");
+                System.Text.Json.JsonElement d05 = levels.GetProperty("det05");
+
+                // det05 ONLY: the 5 cm Morskie-Oko showcase stays the static mosaic on unit 11. det25 is no longer
+                // a static mosaic here — it is STREAMED per-draw over the whole massif (SetupOrthoDetailStreaming).
+                var t05 = DecodeOrtho(System.IO.Path.Combine(mosaicsDir, d05.GetProperty("file").GetString() ?? "det05_mosaic.png"));
+                if (t05 is not { } m05)
+                {
+                    Serilog.Log.Warning("[OrthoDetailPoc] det05 mosaic decode failed");
+                    return;
+                }
+
+                static MapaTur.Domain.Geography.GeoPoint Sw(System.Text.Json.JsonElement e) =>
+                    new(e.GetProperty("south").GetDouble(), e.GetProperty("west").GetDouble());
+                static MapaTur.Domain.Geography.GeoPoint Ne(System.Text.Json.JsonElement e) =>
+                    new(e.GetProperty("north").GetDouble(), e.GetProperty("east").GetDouble());
+
+                renderer.SetOrthoDetailDet05Mosaic(m05.Rgba, m05.Width, m05.Height, Sw(d05), Ne(d05));
+                Serilog.Log.Information("[OrthoDetailPoc] loaded 5cm Morskie-Oko det05 {W05}x{H05} from {Dir}",
+                    m05.Width, m05.Height, mosaicsDir);
+                MainThread.BeginInvokeOnMainThread(() => Canvas.InvalidateSurface());
+            }
+            catch (Exception ex)
+            {
+                Serilog.Log.Warning(ex, "[OrthoDetailPoc] load failed");
+            }
+        });
+    }
+
+    // R3 vertical slice — feature flag MAPATUR_ORTHO_SLICE=1, DEFAULT OFF. Composes TWO adjacent detail cells
+    // (53,29)+(54,29) from the fetched det25 tiles via the REAL OrthoDetailGrid/OrthoDetailAssembler and hands
+    // them to the renderer's detail-overlay path — so we can judge the detail↔detail and detail↔base transitions,
+    // UV/mip/filtering, upload, and the raw-vs-de-blued colour variants in-app before any full streaming wiring.
+    // Off the UI thread; a normal run (no flag) loads no detail at all.
+    private bool orthoDetailPocLoaded;
+    private void TryLoadOrthoDetailPoc(Services.Terrain3DGlRenderer renderer, IReadOnlyList<string>? basePaths)
+    {
+        if (orthoDetailPocLoaded)
+        {
+            return;
+        }
+
+        orthoDetailPocLoaded = true; // one attempt regardless of outcome
+        if (Environment.GetEnvironmentVariable("MAPATUR_ORTHO_SLICE") != "1")
+        {
+            // DEFAULT: stream det25 (25 cm) cells over the whole massif on unit 10 (SetupOrthoDetailStreaming),
+            // UNDER the accepted static 5 cm Morskie-Oko det05 showcase on unit 11 (finest-wins, unit 11 untouched).
+            // MAPATUR_ORTHO_SLICE=1 keeps the old static 2-cell debug slice instead.
+            SetupOrthoDetailStreaming(renderer, basePaths);
+            // DEFAULT (2026-07-18, user OK after A/B): stream 5 cm det05 over the whole fetched area on
+            // unit 11 (coverage-gated). Verified it fully covers the Morskie-Oko showcase cells, so nothing
+            // regresses — MO stays 5 cm and the sharpness now extends across the fetched Tatra strip. Falls
+            // back to the static MO mosaic where the streamed tiles/coverage aren't present (fresh installs /
+            // mobile without the ~15 GB det05 sync). MAPATUR_DET05_STREAM=0 forces the static showcase.
+            bool wantStream = Environment.GetEnvironmentVariable("MAPATUR_DET05_STREAM") != "0";
+            if (!wantStream || !SetupDet05Streaming(renderer, basePaths))
+            {
+                LoadOrthoDetailMosaics(renderer, basePaths); // accepted static 5 cm Morskie-Oko showcase (fallback)
+            }
+
+            return;
+        }
+
+        string? demDir = basePaths is { Count: > 0 } ? System.IO.Path.GetDirectoryName(basePaths[0]) : null;
+        string? tilesDir = demDir is null
+            ? null : System.IO.Path.Combine(demDir, "ortho-detail", "tatry", "det25");
+        if (tilesDir is null || !System.IO.Directory.Exists(tilesDir))
+        {
+            Serilog.Log.Warning("[OrthoDetailSlice] det25 tiles dir not found: {Dir}", tilesDir);
+            return;
+        }
+
+        Task.Run(() =>
+        {
+            try
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                var grid = new MapaTur.Application.Terrain.OrthoDetailGrid();
+                var asm = new MapaTur.Application.Terrain.OrthoDetailAssembler(grid);
+                int decoded = 0, missing = 0;
+
+                // Cell pair (default a TEXTURED moraine/rock pair just south of Morskie Oko — NOT the smooth
+                // lake). Override with MAPATUR_ORTHO_SLICE_CELLS="ci1,cj1,ci2,cj2" to re-point without a rebuild.
+                int a0 = 53, a1 = 30, b0 = 54, b1 = 30;
+                string? cellsSpec = Environment.GetEnvironmentVariable("MAPATUR_ORTHO_SLICE_CELLS");
+                if (cellsSpec is not null)
+                {
+                    string[] parts = cellsSpec.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length == 4
+                        && int.TryParse(parts[0], out int p0) && int.TryParse(parts[1], out int p1)
+                        && int.TryParse(parts[2], out int p2) && int.TryParse(parts[3], out int p3))
+                    {
+                        (a0, a1, b0, b1) = (p0, p1, p2, p3);
+                    }
+                }
+
+                byte[]? Provide(int i, int j)
+                {
+                    string p = System.IO.Path.Combine(
+                        tilesDir, i.ToString(System.Globalization.CultureInfo.InvariantCulture), $"{j}.webp");
+                    if (DecodeOrtho(p) is { } t)
+                    {
+                        System.Threading.Interlocked.Increment(ref decoded);
+                        // Ta ścieżka (PoC slice) jest poza produkcją i do skasowania w kroku 8, ale nodata
+                        // gasimy i tu — inwariant „WSZYSTKIE ścieżki dekodu detalu" nie może mieć wyjątków.
+                        MapaTur.Application.Terrain.OrthoNodata.ZeroAlphaOnNodataRim(t.Rgba, t.Width, t.Height);
+                        return t.Rgba;
+                    }
+
+                    System.Threading.Interlocked.Increment(ref missing);
+                    return null;
+                }
+
+                byte[] ca = asm.Compose(a0, a1, Provide, null);
+                byte[] cb = asm.Compose(b0, b1, Provide, null);
+                MapaTur.Domain.Geography.MapBounds ba = grid.CellBounds(a0, a1);
+                MapaTur.Domain.Geography.MapBounds bb = grid.CellBounds(b0, b1);
+                renderer.SetOrthoDetailPoc(
+                    ca, grid.CellPx, grid.CellPx, ba.SouthWest, ba.NorthEast,
+                    cb, grid.CellPx, grid.CellPx, bb.SouthWest, bb.NorthEast);
+                renderer.OrthoDetailEnabled = true;
+                sw.Stop();
+                long vramMb = (2L * grid.CellPx * grid.CellPx * 4 * 4 / 3) / (1024 * 1024);
+                Serilog.Log.Information(
+                    "[OrthoDetailSlice] cells ({A0},{A1})+({B0},{B1}) composed in {Ms}ms | tiles decoded={D} missing={M} " +
+                    "| geo W{W:F4} S{S:F4} E{E:F4} N{N:F4} | cellPx={Px} resident=2 vram~{Vram}MB | keys: 0=on/off 9=colour 8=bounds",
+                    a0, a1, b0, b1, sw.ElapsedMilliseconds, decoded, missing,
+                    ba.SouthWest.Longitude, ba.SouthWest.Latitude, bb.NorthEast.Longitude, ba.NorthEast.Latitude,
+                    grid.CellPx, vramMb);
+                MainThread.BeginInvokeOnMainThread(() => Canvas.InvalidateSurface());
+            }
+            catch (Exception ex)
+            {
+                Serilog.Log.Warning(ex, "[OrthoDetailSlice] failed");
+            }
+        });
     }
 
     private static (byte[] Rgba, int Width, int Height)? DecodeOrtho(string path)

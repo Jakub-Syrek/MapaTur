@@ -168,6 +168,32 @@ public sealed class VirtualDemTileSynthesizerTests
     }
 
     [Fact]
+    public void Synthesize_AtTheParentBorder_KeepsTheDisplacementArmed_NoFlatteningBand()
+    {
+        // The old per-parent curvature grid zeroed the parent's edge rows/cols (a symmetric seam-safety
+        // rule), silencing the displacement in a ~1-parent-cell band along every parent border — a smooth
+        // strip repeating on the ~200 m z17 grid, readable against the surrounding micro-relief exactly like
+        // a tile seam. With the parent rastered inside a neighbour halo the border curvature is REAL (and
+        // still computed identically by both parents), so a border child node must displace like any other.
+        Func<DemTileKey, BakedDemTile?> loader = LoaderFor(Rolling);
+        var eastChildOfParent = new DemTileKey(18, (Parent.X << 1) + 1, Parent.Y << 1);
+        BakedDemTile parent = loader(Parent)!;
+        BakedDemTile child = VirtualDemTileSynthesizer.Synthesize(eastChildOfParent, RealMaxZoom, loader)!;
+
+        // The child's LAST column lies ON the parent's east border: child node (TilePx-1, 2r) coincides with
+        // parent node (TilePx-1, r), so the difference there is the displacement term alone.
+        double sumAbs = 0;
+        for (int r = 0; r < TilePx / 2; r++)
+        {
+            float p = parent.Heights[(r * TilePx) + (TilePx - 1)];
+            float v = child.Heights[((2 * r) * TilePx) + (TilePx - 1)];
+            sumAbs += Math.Abs(v - p);
+        }
+
+        sumAbs.Should().BeGreaterThan(0.1, "the parent-border column must carry displacement, not a silenced band");
+    }
+
+    [Fact]
     public void Synthesize_ParentNoData_PropagatesAsNoData_NeverFabricated()
     {
         // A void in the parent (out-of-coverage hole) must stay a hole — the mesh holes it to the coarser

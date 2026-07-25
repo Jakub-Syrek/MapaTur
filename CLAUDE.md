@@ -1,3 +1,14 @@
+## STAŁE ZASADY MAPATUR — MANDATORY, read FIRST, every session
+
+**[`docs/ZASADY-MAPATUR.md`](docs/ZASADY-MAPATUR.md) — 18 stałych zasad ustanowionych przez użytkownika
+(2026-07-23). Obowiązują KAŻDĄ pracę nad MapaTur i KAŻDEGO agenta. Nie wolno ich zmieniać bez wyraźnej
+zgody użytkownika.** Sedno: podwójne kryterium sukcesu (wygląd ORAZ płynność, w skompilowanym exe na danych
+z AppData, user = ostateczny sędzia wizualny); zmiany odwracalne, mierzone przed/po cold+warm w identycznych
+warunkach; zakaz whack-a-mole (spisz niezmienniki przed zmianą); ciężkie przetwarzanie assetów OFFLINE
+(runtime nie dekoduje setek WebP, nie generuje mipów przy powrocie kamery); małe jednostki streamingu; nie
+blokuj wątku renderu; stały gate odbioru panoramy (bez 10–15 s ostrzenia, bez utraty detalu od ruchu myszy,
+bez zacięć 150–300 ms, bez rozmytej większości kadru); testy TYLKO na monitorze DELL P2722H (Iiyama = user).
+
 ## Terrain graphics — MANDATORY before baking tiles / touching the terrain pipeline
 
 Before you (re)generate or bake any DEM / ortho / z16 tiles, OR change the terrain load / repair / render
