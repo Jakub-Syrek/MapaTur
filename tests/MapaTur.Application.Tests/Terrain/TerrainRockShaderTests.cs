@@ -69,6 +69,42 @@ public sealed class TerrainRockShaderTests
     }
 
     [Fact]
+    public void should_keep_the_photogrammetry_near_its_physical_detail_scale()
+    {
+        ShaderSource().Should().Contain("const float fineScale=1.0/4.0");
+    }
+
+    [Fact]
+    public void should_break_visible_repetition_with_a_decorrelated_macro_sample()
+    {
+        ShaderSource().Should().Contain("const float macroScale=1.0/53.0");
+    }
+
+    [Fact]
+    public void should_not_extrude_the_scan_into_large_moulded_forms()
+    {
+        ShaderSource().Should().Contain("0.035*rockW");
+    }
+
+    [Fact]
+    public void should_use_the_sampled_reference_photo_neutral_rock_colour()
+    {
+        ShaderSource().Should().Contain("vec3(0.400,0.412,0.373)");
+    }
+
+    [Fact]
+    public void should_use_the_sampled_reference_photo_lichen_colour()
+    {
+        ShaderSource().Should().Contain("vec3(0.424,0.447,0.400)");
+    }
+
+    [Fact]
+    public void should_use_the_sampled_reference_photo_rust_colour()
+    {
+        ShaderSource().Should().Contain("vec3(0.482,0.400,0.329)");
+    }
+
+    [Fact]
     public void should_not_use_the_cellwise_voronoi_facet_material()
     {
         string source = ShaderSource();
