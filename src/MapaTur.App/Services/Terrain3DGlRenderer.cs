@@ -272,41 +272,23 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // the scan from all three planes using the geometric normal, so there is no vertical ortho stretch and
         // no dominant-axis seam. Rock026 is real surface photogrammetry, packed RGB albedo + A displacement.
         "struct RockSample { vec3 albedo; float height; };\n" +
-        "vec4 sampleScannedRockTriplanar(vec3 worldPos, vec3 surfaceNormal, float scale, vec2 phase){\n" +
+        "vec4 sampleScannedRockTriplanar(vec3 worldPos, vec3 surfaceNormal){\n" +
         "  vec3 w=pow(abs(surfaceNormal)+vec3(0.0001),vec3(5.0)); w/=w.x+w.y+w.z;\n" +
-        "  vec2 uvX=worldPos.zy*scale+phase;\n" +
-        "  vec2 uvY=vec2(worldPos.x+worldPos.z,worldPos.z-worldPos.x)*(0.70710678*scale)+phase.yx;\n" +
-        "  vec2 uvZ=vec2(worldPos.x-worldPos.y,worldPos.x+worldPos.y)*(0.70710678*scale)-phase;\n" +
+        "  const float scale=1.0/18.0;\n" +
+        "  vec2 uvX=worldPos.zy*scale;\n" +
+        "  vec2 uvY=vec2(worldPos.x+worldPos.z,worldPos.z-worldPos.x)*(0.70710678*scale);\n" +
+        "  vec2 uvZ=vec2(worldPos.x-worldPos.y,worldPos.x+worldPos.y)*(0.70710678*scale);\n" +
         "  vec4 x=texture(uRockMaterial,uvX);\n" +
         "  vec4 y=texture(uRockMaterial,uvY+vec2(0.37,0.61));\n" +
         "  vec4 z=texture(uRockMaterial,uvZ+vec2(0.73,0.19));\n" +
         "  return x*w.x+y*w.y+z*w.z;\n" +
         "}\n" +
         "RockSample sampleRock(vec3 worldPos, vec3 surfaceNormal, float pixelMeters){\n" +
-        // Keep the photogrammetry close to its real surface scale. The rejected 18 m projection inflated
-        // centimetre/decimetre chips into identical buttresses, which read as a cast mould across the wall.
-        "  const float fineScale=1.0/4.0;\n" +
-        "  vec4 scanned=sampleScannedRockTriplanar(worldPos,surfaceNormal,fineScale,vec2(0.0));\n" +
-        // A weak, differently oriented 53 m sample changes only broad weathering tone. Its irrational scale and
-        // transformed frame break phase repetition without adding another fake relief layer or hard cell border.
-        "  const float macroScale=1.0/53.0;\n" +
-        "  vec3 macroPos=vec3(worldPos.x*0.819152-worldPos.y*0.573576,\n" +
-        "                     worldPos.x*0.573576+worldPos.y*0.819152,\n" +
-        "                     worldPos.z+worldPos.x*0.11);\n" +
-        "  vec4 macro=sampleScannedRockTriplanar(macroPos,surfaceNormal,macroScale,vec2(0.31,0.67));\n" +
-        // Reference-photo palette (sunlit upper quartiles, not its baked cast shadows): neutral granite
-        // RGB 102/105/95, lichen/weathering 108/114/102 and iron staining 123/102/84. The macro scan channels
-        // place the latter two as sparse continuous regions (~10% each), matching the measured photo coverage.
+        "  vec4 scanned=sampleScannedRockTriplanar(worldPos,surfaceNormal);\n" +
+        // The scan is a sunlit pale cliff. Neutralize and darken it toward exposed Tatra granite; its real
+        // fractures remain intact. Mips handle panorama stability, so pixelMeters needs no procedural fade.
         "  float grey=dot(scanned.rgb,vec3(0.299,0.587,0.114));\n" +
-        "  float macroGrey=dot(macro.rgb,vec3(0.299,0.587,0.114));\n" +
-        "  float tone=mix(0.72,1.16,smoothstep(0.22,0.84,grey));\n" +
-        "  float weather=mix(0.92,1.08,smoothstep(0.18,0.82,macroGrey));\n" +
-        "  float rustMask=smoothstep(0.032,0.050,macro.r-macro.b);\n" +
-        "  float lichenMask=smoothstep(0.830,0.855,macro.a)*(1.0-rustMask);\n" +
-        "  vec3 albedo=vec3(0.400,0.412,0.373)*tone;\n" +
-        "  albedo=mix(albedo,vec3(0.482,0.400,0.329)*tone,rustMask*0.72);\n" +
-        "  albedo=mix(albedo,vec3(0.424,0.447,0.400)*tone,lichenMask*0.62);\n" +
-        "  albedo*=weather;\n" +
+        "  vec3 albedo=mix(vec3(grey),scanned.rgb,0.38)*vec3(0.64,0.65,0.64);\n" +
         "  return RockSample(clamp(albedo,0.0,1.0),scanned.a);\n" +
         "}\n" +
         // Derivative-map bump mapping (Mikkelsen surface gradient): the normal follows one continuous height
@@ -799,7 +781,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    float pixelMeters = max(length(dFdx(vStableWorldPos)),length(dFdy(vStableWorldPos)));\n" +
         "    RockSample rock = sampleRock(vStableWorldPos,shN,pixelMeters);\n" +
         "    rockAlbedo = rock.albedo;\n" +
-        "    shN = perturbRockNormal(shN,vStableWorldPos,rock.height,0.035*rockW);\n" +
+        "    shN = perturbRockNormal(shN,vStableWorldPos,rock.height,0.42*rockW);\n" +
         "  }\n" +
         // Mid-frequency DETAIL (fix B): a coarse LOD tile box-averaged away the sub-cell bumps; vDetail carries the
         // REAL z16 residual RMS (metres) per vertex — it is 0 on flat ground, on the finest z16 (relief already in
