@@ -96,7 +96,6 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                                                // last (det05 wins where both cover). Sampled in the STABLE frame (vStableWorldPos.xy), same as the base
                                                // ortho coverage test, so the overlay stays pinned when the camera tilts (§C.1). uUseDet* fold in the
                                                // PoC master flag on the CPU side, so 0 = strict no-op (base ortho unchanged).
-        "uniform sampler2D uOrthoDet25;\n" +
         "uniform sampler2D uOrthoDet05;\n" +
         "uniform int uUseDet25;\n" +
         "uniform int uUseDet05;\n" +
@@ -161,6 +160,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform float uDebugUv;\n" +   // DIAGNOSTIC: 1 = render the raw ortho UV as colour (R=U, G=V)
         "uniform float uDebugTerrainView;\n" +   // DIAGNOSTIC: 0=final 1=albedo 2=baked-shadow mask 3=corrected albedo 4=lightSum
         "uniform float uRockStrength;\n" + // rock-material-on-steep blend strength; 0 = off (pure ortho)
+        "uniform sampler2D uRockMaterial;\n" + // ambientCG Rock026 scan: RGB albedo + A displacement
         "uniform vec3 uFogColor;\n" +
         "uniform float uFogDensity;\n" + // per-metre exponential; 0 = no aerial perspective
         "uniform vec3 uCameraPos;\n" +
@@ -268,6 +268,38 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "             mix(hashT(i + vec2(0.0,1.0)), hashT(i + vec2(1.0,1.0)), f.x), f.y);\n" +
         "}\n" +
         "float fbmT(vec2 p){ float v=0.0,a=0.5; for(int i=0;i<5;i++){ v+=a*noiseT(p); p*=2.0; a*=0.5;} return v; }\n" +
+        // World-aligned texture projection is the established production solution for steep terrain: blend
+        // the scan from all three planes using the geometric normal, so there is no vertical ortho stretch and
+        // no dominant-axis seam. Rock026 is real surface photogrammetry, packed RGB albedo + A displacement.
+        "struct RockSample { vec3 albedo; float height; };\n" +
+        "vec4 sampleScannedRockTriplanar(vec3 worldPos, vec3 surfaceNormal){\n" +
+        "  vec3 w=pow(abs(surfaceNormal)+vec3(0.0001),vec3(5.0)); w/=w.x+w.y+w.z;\n" +
+        "  const float scale=1.0/18.0;\n" +
+        "  vec2 uvX=worldPos.zy*scale;\n" +
+        "  vec2 uvY=vec2(worldPos.x+worldPos.z,worldPos.z-worldPos.x)*(0.70710678*scale);\n" +
+        "  vec2 uvZ=vec2(worldPos.x-worldPos.y,worldPos.x+worldPos.y)*(0.70710678*scale);\n" +
+        "  vec4 x=texture(uRockMaterial,uvX);\n" +
+        "  vec4 y=texture(uRockMaterial,uvY+vec2(0.37,0.61));\n" +
+        "  vec4 z=texture(uRockMaterial,uvZ+vec2(0.73,0.19));\n" +
+        "  return x*w.x+y*w.y+z*w.z;\n" +
+        "}\n" +
+        "RockSample sampleRock(vec3 worldPos, vec3 surfaceNormal, float pixelMeters){\n" +
+        "  vec4 scanned=sampleScannedRockTriplanar(worldPos,surfaceNormal);\n" +
+        // The scan is a sunlit pale cliff. Neutralize and darken it toward exposed Tatra granite; its real
+        // fractures remain intact. Mips handle panorama stability, so pixelMeters needs no procedural fade.
+        "  float grey=dot(scanned.rgb,vec3(0.299,0.587,0.114));\n" +
+        "  vec3 albedo=mix(vec3(grey),scanned.rgb,0.38)*vec3(0.64,0.65,0.64);\n" +
+        "  return RockSample(clamp(albedo,0.0,1.0),scanned.a);\n" +
+        "}\n" +
+        // Derivative-map bump mapping (Mikkelsen surface gradient): the normal follows one continuous height
+        // field. Unlike the old per-cell random tilt it cannot reveal procedural polygons in flat lighting.
+        "vec3 perturbRockNormal(vec3 n, vec3 worldPos, float height, float strength){\n" +
+        "  vec3 sigmaS=dFdx(worldPos), sigmaT=dFdy(worldPos);\n" +
+        "  vec3 r1=cross(sigmaT,n), r2=cross(n,sigmaS); float det=dot(sigmaS,r1);\n" +
+        "  if(abs(det)<1e-7){ return n; }\n" +
+        "  vec3 gradient=(r1*dFdx(height)+r2*dFdy(height))/det;\n" +
+        "  return normalize(n-gradient*strength);\n" +
+        "}\n" +
         // B-spline bicubic via 4 bilinear fetches — used ONLY when the ortho is MAGNIFIED (camera close enough
         // that one texel covers >1 screen px). Plain bilinear magnification renders each ~1-4 m ortho texel as a
         // hard-edged square ("pixeloza z bliska"); the cubic kernel replaces those edges with a smooth ramp for
@@ -726,10 +758,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // the warm direct-sun colour scaled by Lambert AND attenuated by any cloud blocking the
         // sun. Tinting (not just dimming) makes the terrain read as genuinely sunlit; the cloud
         // shadow term adds the moving dappled light that sells "sun + clouds" at any time of day.
-        // Rock material (steep faces): compute the slope weight + a triplanar granite noise field BEFORE
-        // lighting, then tilt the shading normal by the noise gradient (tangent detail normal) so the granite
-        // CATCHES THE SUN — sun-lit bumps + shaded crevices instead of a flat plate. rk/rockW are reused for
-        // the albedo blend below. Gentle ground keeps rockW=0 (shN = vNormal), so its lighting is unchanged.
+        // Rock material (steep faces): compute the slope weight + scanned triplanar material BEFORE lighting,
+        // then perturb the shading normal from the scan's height derivative so the granite CATCHES THE SUN
+        // without revealing synthetic facets. rockAlbedo/rockW are reused below. Gentle ground keeps rockW=0.
         "  vec3 shN = normalize(vNormal);\n" +
         "  float rockSlopeDeg = degrees(acos(clamp(shN.z, 0.0, 1.0)));\n" +
         // 45→60° (2026-07-16, was 55→75): the old ramp reached FULL granite only at ~75°, so a 50–70° wall —
@@ -742,75 +773,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // the imagery (Orla Perć read worse WITH the material than with plain ortho — user 2026-07-02);
         // the Slovak big north faces are 65°+ so they keep their granite rescue.
         "  float rockW = (uSlopeMode < 0.5) ? smoothstep(45.0, 60.0, rockSlopeDeg) * uRockStrength : 0.0;\n" +
-        // NESTED granite (v7, 2026-07-03, matched to user reference photos — Orla Perć chimney close-up +
-        // Granaty wall): real Tatra rock is MULTI-SCALE and follows the FALL LINE, not any single motif.
-        // Two nested Voronoi layers on the triplanar plane:
-        //   COARSE (18–40 m) = wall facets/buttresses — strong tonal patches (bleached vs grey faces, the
-        //     dominant read of the Granaty photo) + strong per-facet ANGULAR normal tilt;
-        //   FINE (3–8 m, decorrelated per coarse facet, stretched ~2x ALONG THE FALL LINE) = blocks —
-        //     vertically elongated like the chimney joints, each with its own smaller tone + facet, and
-        //     deep dark crack seams at the borders (the visible black fracture lines of the close-up).
-        // No domes and no global rotation — the reference is angular, and orientation comes from the
-        // fall-line anisotropy alone.
-        "  float rk = 0.0;\n" +
+        // SCANNED ROCK: smooth world-aligned triplanar projection of real photogrammetry replaces both the
+        // invalid top-down ortho and the synthetic Voronoi/noise surface. The DEM still owns silhouette and
+        // metre-scale form; the scan contributes real fracture colour and displacement-derived shading detail.
+        "  vec3 rockAlbedo = vec3(0.40);\n" +
         "  if (rockW > 0.001) {\n" +
-        "    vec3 anR = abs(shN);\n" +
-        "    int plR = (anR.z >= anR.x && anR.z >= anR.y) ? 0 : ((anR.x >= anR.y) ? 1 : 2);\n" +
-        "    vec2 rp = (plR == 0) ? vStableWorldPos.xy : ((plR == 1) ? vStableWorldPos.yz : vStableWorldPos.zx);\n" +
-        // Fall-line anisotropy: on steep faces one plane axis is world-Z; shrinking it stretches the fine
-        // cells vertically (blocks elongated down the gully). Flat ground stays isotropic.
-        "    vec2 anisoF = (plR == 0) ? vec2(1.0) : ((plR == 1) ? vec2(1.0, 0.5) : vec2(0.5, 1.0));\n" +
-        // COARSE facets. Cell sizes are CONSTANT: a spatially-varying size with floor(coord/size) on
-        // absolute coords makes cell indices sweep along the size-noise contours — dense wavy tone bands
-        // ("regularne pasy poziome", the stripe artifact that plagued v4–v7 regardless of the pattern).
-        // Size variety comes from the Voronoi jitter itself (~2:1 spread).
-        "    float csz = 26.0;\n" +
-        "    vec2 cwp = rp + (vec2(noiseT(rp * 0.03), noiseT(rp * 0.026 + 7.7)) - 0.5) * (csz * 0.5);\n" +
-        "    vec2 cg = floor(cwp / csz); vec2 cf = fract(cwp / csz);\n" +
-        "    float cF1 = 8.0; float cF2 = 8.0; vec2 cidC = cg;\n" +
-        "    for (int oy = -1; oy <= 1; oy++) { for (int ox = -1; ox <= 1; ox++) {\n" +
-        "      vec2 oc = vec2(float(ox), float(oy)); vec2 cid = cg + oc;\n" +
-        "      vec2 sv = oc + vec2(hashT(cid * 1.7 + 3.1), hashT(cid * 2.3 + 9.4)) - cf;\n" +
-        "      float d = length(sv);\n" +
-        "      if (d < cF1) { cF2 = cF1; cF1 = d; cidC = cid; } else if (d < cF2) { cF2 = d; }\n" +
-        "    } }\n" +
-        "    float toneC = hashT(cidC * 2.63 + 1.37);\n" +
-        "    float emC = (cF2 - cF1) * csz;\n" +
-        // FINE blocks: offset by a per-facet vector so the subdivision does not continue across facets.
-        "    float fsz = 5.0;\n" + // constant — see the csz comment (varying size = stripe artifact)
-        "    vec2 fwp = (rp + vec2(hashT(cidC * 4.9 + 0.7), hashT(cidC * 6.1 + 8.2)) * 37.0) * anisoF;\n" +
-        "    fwp += (vec2(noiseT(rp * 0.11), noiseT(rp * 0.09 + 4.4)) - 0.5) * (fsz * 0.7);\n" +
-        "    vec2 fg = floor(fwp / fsz); vec2 ff = fract(fwp / fsz);\n" +
-        "    float fF1 = 8.0; float fF2 = 8.0; vec2 cidF = fg;\n" +
-        "    for (int oy = -1; oy <= 1; oy++) { for (int ox = -1; ox <= 1; ox++) {\n" +
-        "      vec2 oc = vec2(float(ox), float(oy)); vec2 cid = fg + oc;\n" +
-        "      vec2 sv = oc + vec2(hashT(cid * 3.7 + 1.9), hashT(cid * 5.3 + 6.8)) - ff;\n" +
-        "      float d = length(sv);\n" +
-        "      if (d < fF1) { fF2 = fF1; fF1 = d; cidF = cid; } else if (d < fF2) { fF2 = d; }\n" +
-        "    } }\n" +
-        "    float toneF = hashT(cidF * 2.11 + 5.9);\n" +
-        "    float emF = (fF2 - fF1) * fsz;\n" +
-        // Cracks: fine joints are the visible dark fracture lines (depth varies by patch); coarse borders
-        // are BROAD soft tone breaks, not lines.
-        "    float aaF = max(fwidth(emF) * 1.8, 0.06);\n" +
-        "    float crack = (1.0 - smoothstep(0.16, 0.16 + aaF, emF)) * mix(0.45, 1.0, noiseT(rp * 0.07));\n" +
-        "    float aaC = max(fwidth(emC) * 1.8, 0.10);\n" +
-        "    crack = max(crack, (1.0 - smoothstep(0.55, 0.55 + aaC + 0.9, emC)) * 0.5);\n" +
-        // Tone: dominant coarse facet contrast + weathering BLEACH on some facets (the near-white faces in
-        // the reference) + smaller per-block variation + micro grain.
-        // ALBEDO contrast compressed ~2× + brighter base (2026-07-03): with snow OFF the painted seams/tones
-        // read as a regular UNNATURAL grid; at full snow the ~50% white blend compressed them to a faint
-        // trace and the rock "łapał zajebistą szarość" — so the bare rock now ships pre-compressed the same
-        // way. The block STRUCTURE stays carried by the facet normals (light), not by painted lines.
-        "    float bleach = smoothstep(0.68, 0.95, toneC) * 0.15;\n" +
-        "    float micro = 0.5 * noiseT(vStableWorldPos.xy * 1.1) + 0.5 * noiseT(vStableWorldPos.yz * 1.1);\n" +
-        "    rk = clamp(0.62 + (toneC - 0.5) * 0.24 + (toneF - 0.5) * 0.12 + bleach + (micro - 0.5) * 0.08 - crack * 0.22, 0.0, 1.0);\n" +
-        // Angular facet normals: strong constant tilt per coarse facet + smaller per-block tilt.
-        "    vec3 tcC = vec3(hashT(cidC * 3.3 + 6.1) - 0.5, hashT(cidC * 4.7 + 2.2) - 0.5, (hashT(cidC * 7.9 + 0.4) - 0.5) * 0.6);\n" +
-        "    vec3 tcF = vec3(hashT(cidF * 6.7 + 3.8) - 0.5, hashT(cidF * 8.1 + 7.5) - 0.5, 0.0);\n" +
-        "    vec3 tilt = tcC * 0.8 + tcF * 0.5;\n" +
-        "    tilt = tilt - shN * dot(tilt, shN);\n" +
-        "    shN = normalize(shN + tilt * (0.6 * rockW));\n" +
+        "    float pixelMeters = max(length(dFdx(vStableWorldPos)),length(dFdy(vStableWorldPos)));\n" +
+        "    RockSample rock = sampleRock(vStableWorldPos,shN,pixelMeters);\n" +
+        "    rockAlbedo = rock.albedo;\n" +
+        "    shN = perturbRockNormal(shN,vStableWorldPos,rock.height,0.42*rockW);\n" +
         "  }\n" +
         // Mid-frequency DETAIL (fix B): a coarse LOD tile box-averaged away the sub-cell bumps; vDetail carries the
         // REAL z16 residual RMS (metres) per vertex — it is 0 on flat ground, on the finest z16 (relief already in
@@ -903,8 +874,6 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // resident). The mirror shows base ortho; the REAL view keeps every detail layer.
         "    if (uReflectionPass < 0.5) {\n" +
         "      c = applyOrthoDet1m(vStableWorldPos.xy, c);\n" + // najgrubszy tier pierwszy — det25/det05 wygrywają nad nim
-        "      float det25Fade = 1.0 - smoothstep(uDet25FadeInner, uDet25FadeOuter, length(vStableWorldPos.xy - uDet25EyeXY));\n" +
-        "      c = applyOrthoDetail(uOrthoDet25, uUseDet25, uDet25MinXY, uDet25MaxXY, uDetailBlendMeters, vStableWorldPos.xy, c, det25Fade);\n" + // stary per-tile path (fallback RGBA)
         "      c = applyOrthoDet25Arr(vStableWorldPos.xy, c);\n" + // krok 4: per-fragment det25 (BC1 array)
         "      c = applyOrthoDetail(uOrthoDet05, uUseDet05, uDet05MinXY, uDet05MaxXY, uDetailBlendMeters, vStableWorldPos.xy, c, 1.0);\n" + // static 5 cm mosaic fallback (non-streaming installs)
         "      c = applyOrthoDet05Array(vStableWorldPos.xy, c, uDetailBlendMeters);\n" + // streamed det05: every resident cell paints (KONTRAKT-ORTO)
@@ -946,14 +915,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    bcol = mix(bcol, scree, screeBySlope * (1.0 - toSnow));\n" +
         "    base = bcol;\n" +
         "  }\n" +
-        // Granite albedo on rocky fragments — the slope weight + triplanar noise (rk) were computed above
-        // (with the detail normal), so here we only tint the base toward the stone colour with a sharp
-        // light/dark spread for visible grain.
+        // Granite albedo on rocky fragments — the slope weight + solid material sample were computed above
+        // together with the continuous detail normal, so this stage only replaces the invalid ortho projection.
         "  if (rockW > 0.001) {\n" +
-        // COOL granite grey (2026-07-03): the warm brown-grey albedo read as mud; at full snow the steep
-        // faces picked up the snow pass's cool-blue blend and "łapały zajebistą szarość" (user) — so the
-        // rock wears that cool grey permanently, snow or not.
-        "    vec3 rockCol = vec3(0.44, 0.46, 0.49) * (0.52 + 0.92 * rk);\n" +
+        // Preserve a small amount of the real photo's low-frequency local colour without letting the invalid
+        // top-down projection define structure on the wall. The solid field owns 90% at full rock weight.
+        "    vec3 orthoTone = vec3(dot(base,vec3(0.299,0.587,0.114)));\n" +
+        "    vec3 rockCol = mix(rockAlbedo,orthoTone,0.10);\n" +
         "    base = mix(base, rockCol, rockW);\n" +
         "  }\n" +
         // Avalanche slope-steepness map: replace the base colour with the band colour for this fragment's
@@ -2697,6 +2665,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     }
     private int slopeModeLocation = -1;
     private int rockStrengthLocation = -1;
+    private int rockMaterialSamplerLocation = -1;
+    private uint rockMaterialTexture;
     private int slopePaletteLocation = -1;
     private int biomeModeLocation = -1;
     private int biomeScreeSlopeLocation = -1;
@@ -5653,6 +5623,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             det25FadeOuterLocation = -1;
             slopeModeLocation = -1;
             rockStrengthLocation = -1;
+            rockMaterialSamplerLocation = -1;
+            rockMaterialTexture = 0;
             slopePaletteLocation = -1;
             terrainFogColorLocation = -1;
             terrainFogDensityLocation = -1;
@@ -5923,6 +5895,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         BeginGpuFrame(gl);
 
         EnsureProgram(gl);
+        EnsureRockMaterialTexture(gl);
 
         dbgTileSwapFrame = !ReferenceEquals(lastTiles, tiles);
         double dbgSetupMs = dbgTileSwapFrame ? dbgSwapWatch.Elapsed.TotalMilliseconds : 0;
@@ -6445,7 +6418,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Slope-steepness ("avalanche") map mode: a flag + the band palette (from the unit-tested
         // SlopePalette). The shader recolours each fragment by its slope angle when the flag is on.
         gl.Uniform1(slopeModeLocation, SlopeMapEnabled ? 1f : 0f);
-        gl.Uniform1(rockStrengthLocation, RockStrength);
+        gl.Uniform1(rockStrengthLocation, rockMaterialTexture != 0 ? RockStrength : 0f);
         gl.Uniform3(slopePaletteLocation, (uint)SlopeClassification.BandCount, SlopePaletteFloats);
 
         // Elevation-zone biomes ("Biomy"): the boundary thresholds are real elevations in metres, so convert
@@ -6480,6 +6453,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform1(reflectionEnabledLocation, 0f);
         bool reflectionDrawn = false;
         GpuBegin(gl, GpuPass.Reflection);
+        BindRockMaterial(gl);
         // Alternate-frame reflection (ThrottleReflection): on odd frames reuse the previous frame's texture
         // instead of re-rendering the whole mirrored terrain. Only when the target survived at the same size
         // — a resize, context loss or a disabled frame forces a fresh render first.
@@ -6698,6 +6672,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Drape the ortho: bind each mesh tile's own cell texture (OrthoTileIndex) so a multi-cell ortho
         // stays sharp. Without textures the shader uses the hypsometric tint.
         bool anyOrtho = orthoTiles.Count > 0 && OrthoEnabled;
+        BindRockMaterial(gl); // reflection texture also uses unit 1; restore the scanned rock for the main terrain
         gl.ActiveTexture(TextureUnit.Texture0);
         gl.Uniform1(orthoSamplerLocation, 0);
         uint boundTexture = 0;
@@ -6772,6 +6747,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.DrawElements(PrimitiveType.Triangles, (uint)tile.IndexCount, DrawElementsType.UnsignedInt, (void*)0);
         }
         GpuEnd(gl); // Terrain
+        BindReflectionTextureForLakes(gl, reflectionDrawn);
         gl.Uniform1(useDet25Location, 0); // det25 is per-tile terrain only — don't leak it into lake/forest draws
         if (det05StreamOn)
         {
@@ -9157,6 +9133,87 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl ??= PlatformGl.Get();
         EnsureGpuTimers(gl);
         EnsureProgram(gl);
+        EnsureRockMaterialTexture(gl);
+    }
+
+    private void EnsureRockMaterialTexture(GL g)
+    {
+        if (rockMaterialTexture != 0)
+        {
+            return;
+        }
+
+        const string resourceName = "MapaTur.App.Resources.RockMaterials.rock026-albedo-height.png";
+        try
+        {
+            using Stream? stream = typeof(Terrain3DGlRenderer).Assembly.GetManifestResourceStream(resourceName);
+            using SkiaSharp.SKBitmap? bitmap = stream is null ? null : SkiaSharp.SKBitmap.Decode(stream);
+            using SkiaSharp.SKBitmap? rgba = bitmap?.Copy(SkiaSharp.SKColorType.Rgba8888);
+            if (rgba is null)
+            {
+                Log.Warning("[RockMaterial] embedded scan unavailable: {Resource}", resourceName);
+                return;
+            }
+
+            rockMaterialTexture = g.GenTexture();
+            g.ActiveTexture(TextureUnit.Texture1);
+            g.BindTexture(TextureTarget.Texture2D, rockMaterialTexture);
+            g.TexImage2D(
+                TextureTarget.Texture2D,
+                0,
+                (int)InternalFormat.Rgba8,
+                (uint)rgba.Width,
+                (uint)rgba.Height,
+                0,
+                PixelFormat.Rgba,
+                PixelType.UnsignedByte,
+                (void*)rgba.GetPixels());
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.Repeat);
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.Repeat);
+            g.TexParameter(
+                TextureTarget.Texture2D,
+                TextureParameterName.TextureMinFilter,
+                (int)TextureMinFilter.LinearMipmapLinear);
+            g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+            g.GenerateMipmap(TextureTarget.Texture2D);
+            g.ActiveTexture(TextureUnit.Texture0);
+            Log.Information(
+                "[RockMaterial] ambientCG Rock026 scan uploaded ({Width}x{Height}, RGB albedo + A height)",
+                rgba.Width,
+                rgba.Height);
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "[RockMaterial] embedded scan decode/upload failed");
+            rockMaterialTexture = 0;
+            g.ActiveTexture(TextureUnit.Texture0);
+        }
+    }
+
+    private void BindRockMaterial(GL g)
+    {
+        if (rockMaterialTexture == 0)
+        {
+            return;
+        }
+
+        g.ActiveTexture(TextureUnit.Texture1);
+        g.BindTexture(TextureTarget.Texture2D, rockMaterialTexture);
+        g.Uniform1(rockMaterialSamplerLocation, 1);
+        g.ActiveTexture(TextureUnit.Texture0);
+    }
+
+    private void BindReflectionTextureForLakes(GL g, bool reflectionDrawn)
+    {
+        if (!reflectionDrawn)
+        {
+            return;
+        }
+
+        g.ActiveTexture(TextureUnit.Texture1);
+        g.BindTexture(TextureTarget.Texture2D, reflectionColorTex);
+        g.Uniform1(reflectionTexLocation, 1);
+        g.ActiveTexture(TextureUnit.Texture0);
     }
 
     private void EnsureProgram(GL g)
@@ -9258,6 +9315,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         det25FadeInnerLocation = g.GetUniformLocation(program, "uDet25FadeInner");
         det25FadeOuterLocation = g.GetUniformLocation(program, "uDet25FadeOuter");
         rockStrengthLocation = g.GetUniformLocation(program, "uRockStrength");
+        rockMaterialSamplerLocation = g.GetUniformLocation(program, "uRockMaterial");
         biomeModeLocation = g.GetUniformLocation(program, "uBiomeMode");
         biomeScreeSlopeLocation = g.GetUniformLocation(program, "uBiomeScreeSlopeDeg");
         biomeMeadowMaxZLocation = g.GetUniformLocation(program, "uBiomeMeadowMaxZ");
@@ -9326,14 +9384,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // whole terrain vanishes the moment a layer is off/not-yet-ready and its per-frame bind path is
         // skipped (same lesson as the CSM pin in Render). Per-frame paths may re-assert these values but
         // must never move a sampler onto a unit owned by a different sampler type.
-        // Unit map (terrain program): 0=uOrtho 1=uReflectionTex 2/3/4=uShadowMap0..2 5=uTrailMask
-        // 6=uWaterMask 8=uBaseCover 9=uOrthoDet25 (legacy mosaic) 10=uOrthoDet25Arr 11=uOrthoDet05
+        // Unit map (terrain program): 0=uOrtho 1=uReflectionTex/uRockMaterial (same sampler2D, rebound by pass)
+        // 2/3/4=uShadowMap0..2 5=uTrailMask
+        // 6=uWaterMask 8=uBaseCover 9=retired legacy det25 slot 10=uOrthoDet25Arr 11=uOrthoDet05
         // 12=uOrthoDet05Arr 13=uOrthoDet05ArrB 14=uOrthoDet1m 15=uOrthoDet1mCov 7=uOrthoDet05ArrC.
-        // Unit 7 był JEDYNYM wolnym — wszystkie 16 jednostek fragmentu są teraz zajęte. Kolejna tekstura
-        // wymaga zwolnienia unitu (kandydat: 9 = legacy mozaika det25, do kasacji w kroku 8).
+        // The rock sampler aliases unit 1 by pass. There are still 16 ACTIVE sampler uniforms, so adding a
+        // seventeenth fails the GLES linker even though the retired unit 9 has no bound shader sampler.
         g.UseProgram(program);
         g.Uniform1(orthoSamplerLocation, 0);
         g.Uniform1(reflectionTexLocation, 1);
+        g.Uniform1(rockMaterialSamplerLocation, 1);
         g.Uniform1(shadowMap0Loc, 2);
         g.Uniform1(shadowMap1Loc, 3);
         g.Uniform1(shadowMap2Loc, 4);
@@ -13961,6 +14021,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         waterMaskValid = false;
         gl.DeleteTexture(baseCoverTex);
         baseCoverTex = 0;
+        gl.DeleteTexture(rockMaterialTexture);
+        rockMaterialTexture = 0;
         uploadedBaseCoverageMask = null;
         if (orthoDet25Texture != 0) { gl.DeleteTexture(orthoDet25Texture); orthoDet25Texture = 0; }
         if (orthoDet05Texture != 0) { gl.DeleteTexture(orthoDet05Texture); orthoDet05Texture = 0; }
