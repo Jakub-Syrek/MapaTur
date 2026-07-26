@@ -755,3 +755,37 @@ Po regresji „czarnych dziur" (BC1-RGB gubił alfę bramkującą pokrycie) form
 - **det05 v2: 1 412 pakietów, 344 489 stron (343 077 kafli + 1 412 taili), 67,07 GB, 60,0 min**;
   verify-full: 344 489/344 489 CRC OK, layout/klucze/bijekcja czyste (7,3 min)
 - Razem: pełny prebake Tatr (det05+det25+det1m) = **~75,5 GB / ~72 min** jednorazowo, przyrostowość po srcHash
+
+## §11. SK det05 — pilot V3: fetch pasa przygranicznego z ZBGIS (2026-07-25, W TOKU)
+
+Rozpoznanie i pełny plan: [`PLAN-sk-det05-zbgis.md`](PLAN-sk-det05-zbgis.md); kolejność dalszych kroków:
+[`HANDOFF-2026-07-25-sk-det05-pilot.md`](HANDOFF-2026-07-25-sk-det05-pilot.md). Sondy odtwarzalne:
+`probe-zbgis-native-res.py`, `probe-zbgis-overlap-color.py`.
+
+**Krok 0 — rocznik mozaiki (OBOWIĄZKOWO przed każdym fetchem SK; východ-2025 15 cm ma wyjść „leto 2026"):**
+```
+# REST, pole DATUM (ms epoch); 2026-07-25: Rysy=2022-08-26 (20 cm), 20.03E i Krivan=2024-07-31 (15 cm)
+https://zbgis.skgeodesy.sk/zbgis/rest/services/Ortofoto/MapServer/0/query?geometry=LON,LAT&geometryType=esriGeometryPoint&inSR=4326&outFields=*&returnGeometry=false&f=json
+```
+Granica kampanii 2024/2022 przebiega MIĘDZY 20.03 a 20.088E — pilot obejmuje OBA roczniki i ich
+wewnętrzny szew (celowo: test harmonizacji).
+
+**Krok 1 — fetch pasa (poziom `sk05` = krata det05, maska "sk", nowy tryb `--strip-km`):**
+```
+# dry-run (tylko maska GUGiK, zero kafli): 409 440 pozycji -> would=52 395, sk_side=196 678, far=160 367
+python testdata/maps/fetch-ortho-detail.py --bbox 19.80,49.15,20.10,49.26 --level sk05 --strip-km 1.5 --dry-run
+# wlasciwy fetch (2026-07-25, w tle; ~8-10 h @ ~1.6-2 kafle/s):
+python testdata/maps/fetch-ortho-detail.py --bbox 19.80,49.15,20.10,49.26 --level sk05 --strip-km 1.5 --workers 6
+```
+`--strip-km 1.5` = tylko kafle do 1,5 km na płd. od południowej krawędzi danych GUGiK (≈granica państwa,
+wyznaczana per kolumna z maski Standard 4096 px, dokładność ~12 m). Wyjście: `dem/ortho-detail/tatry/sk05/`
+(OSOBNY katalog — do `det05` wchodzi dopiero PO harmonizacji koloru; manifest ma atrybucję
+„Ortofotomozaika SR (c) GKU/NLC/UGKK, CC BY 4.0" — poprawiona, wcześniej wszystkie poziomy dostawały GUGiK).
+
+**Weryfikacja po fetchu — WYKONANA 2026-07-25/26, zielona:** ok=52 395 (=dry-run), err=0, nodata=0,
+3,17 h, ~2,5 GB (~48 KB/kafel). Blue-cast 0,72/255 mean (surowy ZBGIS bez niebieskiego zafarbu — czyta
+się jak DISK-CORRECTED). **Fill nodata w pasie NIE WYSTĘPUJE** (nakładka za granicę pokryła 100%):
+audyt CAŁEJ listy `_partial.txt` (360) — exact-255 max 1,5% powierzchni = prześwietlenia; `_partial.txt`
+w sk05 to ŚNIEG/prześwietlenia (fałszywe pozytywy heurystyki min>244), NIE braki — **niczego nie wygaszać
+po bieli**. **SUROWE kafle sk05 NIE wchodzą do bake'u** — najpierw harmonizacja (zasada §3: każda warstwa
+orto dostaje korektę zanim user ją zobaczy); kolejność i bramki: HANDOFF-2026-07-25-sk-det05-pilot.md.
