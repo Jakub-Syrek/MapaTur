@@ -28,12 +28,13 @@ public readonly record struct RockMeshTriangle(Vector3 A, Vector3 B, Vector3 C)
 }
 
 /// <summary>
-/// Deterministic, seam-safe uniform triangle refinement for an offline rock page. Every source triangle in
-/// the selected cliff patch receives the same subdivision level, so shared edges never acquire T-junctions.
+/// Deterministic, seam-safe longest-edge refinement for an offline rock page. A midpoint is keyed by its exact
+/// shared edge, so both triangles adjoining an overlong edge insert the same vertex while unrelated short edges
+/// are not multiplied to match one tall DEM discontinuity.
 /// </summary>
 public static class RockMeshSubdivider
 {
-    private const int MaximumLevels = 12;
+    private const int MaximumOutputTriangles = 10_000_000;
 
     public static IReadOnlyList<RockMeshTriangle> Subdivide(
         IReadOnlyList<RockMeshTriangle> source,
@@ -45,35 +46,55 @@ public static class RockMeshSubdivider
             throw new ArgumentOutOfRangeException(nameof(maximumEdgeMeters));
         }
 
-        var current = source.ToList();
-        for (int level = 0; level < MaximumLevels; level++)
+        float maximumEdgeSquared = maximumEdgeMeters * maximumEdgeMeters;
+        var midpoints = new Dictionary<EdgeKey, Vector3>();
+        var pending = new Stack<RockMeshTriangle>(source.Reverse());
+        var result = new List<RockMeshTriangle>(source.Count);
+        while (pending.Count > 0)
         {
-            float longest = current.Count == 0
-                ? 0f
-                : current.Max(triangle => triangle.EdgeLengths.Max());
-            if (longest <= maximumEdgeMeters)
+            RockMeshTriangle triangle = pending.Pop();
+            float ab = Vector3.DistanceSquared(triangle.A, triangle.B);
+            float bc = Vector3.DistanceSquared(triangle.B, triangle.C);
+            float ca = Vector3.DistanceSquared(triangle.C, triangle.A);
+            float longest = MathF.Max(ab, MathF.Max(bc, ca));
+            if (longest <= maximumEdgeSquared * 1.000001f)
             {
-                return current;
+                result.Add(triangle);
+                continue;
             }
 
-            var midpoints = new Dictionary<EdgeKey, Vector3>();
-            var next = new List<RockMeshTriangle>(checked(current.Count * 4));
-            foreach (RockMeshTriangle triangle in current)
+            RockMeshTriangle first;
+            RockMeshTriangle second;
+            if (ab >= bc && ab >= ca)
             {
-                Vector3 ab = Midpoint(triangle.A, triangle.B, midpoints);
-                Vector3 bc = Midpoint(triangle.B, triangle.C, midpoints);
-                Vector3 ca = Midpoint(triangle.C, triangle.A, midpoints);
-                next.Add(new RockMeshTriangle(triangle.A, ab, ca));
-                next.Add(new RockMeshTriangle(ab, triangle.B, bc));
-                next.Add(new RockMeshTriangle(ca, bc, triangle.C));
-                next.Add(new RockMeshTriangle(ab, bc, ca));
+                Vector3 midpointAb = Midpoint(triangle.A, triangle.B, midpoints);
+                first = new RockMeshTriangle(triangle.A, midpointAb, triangle.C);
+                second = new RockMeshTriangle(midpointAb, triangle.B, triangle.C);
+            }
+            else if (bc >= ca)
+            {
+                Vector3 midpointBc = Midpoint(triangle.B, triangle.C, midpoints);
+                first = new RockMeshTriangle(triangle.A, triangle.B, midpointBc);
+                second = new RockMeshTriangle(triangle.A, midpointBc, triangle.C);
+            }
+            else
+            {
+                Vector3 midpointCa = Midpoint(triangle.C, triangle.A, midpoints);
+                first = new RockMeshTriangle(triangle.A, triangle.B, midpointCa);
+                second = new RockMeshTriangle(midpointCa, triangle.B, triangle.C);
             }
 
-            current = next;
+            if (result.Count + pending.Count + 2 > MaximumOutputTriangles)
+            {
+                throw new InvalidOperationException(
+                    $"Rock page refinement exceeded {MaximumOutputTriangles:N0} triangles.");
+            }
+
+            pending.Push(second);
+            pending.Push(first);
         }
 
-        throw new InvalidOperationException(
-            $"Rock page needs more than {MaximumLevels} subdivision levels for edge {maximumEdgeMeters} m.");
+        return result;
     }
 
     private static Vector3 Midpoint(

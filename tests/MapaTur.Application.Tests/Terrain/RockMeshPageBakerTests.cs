@@ -34,7 +34,7 @@ public sealed class RockMeshPageBakerTests
             static (_, _) => RockSurfaceSample.Unchanged);
 
         // Assert
-        page.IndexCount.Should().Be(12);
+        page.IndexCount.Should().Be(3);
     }
 
     [Fact]
@@ -113,6 +113,36 @@ public sealed class RockMeshPageBakerTests
 
         // Assert
         near.VertexCount.Should().BeGreaterThan(far.VertexCount);
+    }
+
+    [Fact]
+    public void should_fit_a_full_thirty_two_metre_lod0_wall_in_one_ushort_page()
+    {
+        // Arrange
+        var source = new List<RockMeshTriangle>();
+        for (int y = 0; y < 32; y++)
+        {
+            for (int z = 0; z < 32; z++)
+            {
+                var a = new Vector3(0f, y, z);
+                var b = new Vector3(0f, y + 1, z);
+                var c = new Vector3(0f, y, z + 1);
+                var d = new Vector3(0f, y + 1, z + 1);
+                source.Add(new RockMeshTriangle(a, b, c));
+                source.Add(new RockMeshTriangle(b, d, c));
+            }
+        }
+
+        // Act
+        RockMeshPage page = RockMeshPageBaker.Bake(
+            lod: 0,
+            pageX: 0,
+            pageY: 0,
+            source,
+            static (_, _) => RockSurfaceSample.Unchanged);
+
+        // Assert
+        page.VertexCount.Should().BeLessThanOrEqualTo(RockMeshPage.MaxVertices);
     }
 
     private static Vector3 DecodePosition(RockMeshPage page, int vertexIndex)

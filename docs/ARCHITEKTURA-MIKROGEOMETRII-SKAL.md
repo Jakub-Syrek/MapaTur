@@ -32,7 +32,7 @@ Nagłówek:
 | version | u16 | wersja układu wierzchołka |
 | lod | u8 | 0–2 |
 | flags | u8 | obecność AO/maski materiału/skirt |
-| pageX/pageY | i32 ×2 | globalny klucz strony 32 m |
+| pageX/pageY | i32 ×2 | globalny klucz strony 16 m |
 | vertexCount/indexCount | u32 ×2 | liczba elementów |
 | worldMin/worldExtent | f32 ×6 | ramka kwantyzacji i cullingu |
 | geometricError | f32 | maksymalny błąd LOD w metrach |
@@ -53,10 +53,11 @@ czyta stronę do bufora staging i wykonuje asynchroniczny upload.
 
 ## Podział i LOD
 
-- globalna strona: 32 × 32 m w układzie sceny;
-- LOD0: docelowa krawędź 0,25 m, używany do około 15 m;
-- LOD1: krawędź 0,50 m, około 15–40 m;
-- LOD2: krawędź 1,00 m, około 40–100 m;
+- globalna strona: 16 × 16 m w układzie sceny; pilot na realnym urwisku wykazał, że 32 m przekracza
+  limit 65 535 wierzchołków przez dużą powierzchnię ściany po skosie, mimo poprawnej gęstości 25 cm;
+- LOD0: docelowy rozstaw wierzchołków 0,25 m, używany do około 15 m;
+- LOD1: rozstaw 0,50 m, około 15–40 m;
+- LOD2: rozstaw 1,00 m, około 40–100 m;
 - dalej: istniejący DEM i obecny materiał bez mikrogeometrii.
 
 Odległości są tylko wartościami startowymi. Runtime wybiera LOD przez `geometricError / metresPerPixel`,
@@ -90,7 +91,7 @@ widocznej powierzchni przy równym LOD.
 ## Streaming i budżety
 
 - kolejka I/O i staging działają poza wątkiem renderującym;
-- jednostką rezydencji jest strona 32 m, nie cały masyw;
+- jednostką rezydencji jest strona 16 m, nie cały masyw;
 - strona widoczna nie może być usunięta przed rezydencją poprawnego fallbacku;
 - budżet VRAM pochodzi z profilu sprzętu; punkt startowy desktop to 256 MB, co daje setki stron;
 - upload ma budżet czasowy na klatkę, ale gotowa strona nie wymaga żadnej produkcji danych;

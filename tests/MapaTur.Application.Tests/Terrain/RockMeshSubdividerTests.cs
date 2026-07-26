@@ -59,4 +59,23 @@ public sealed class RockMeshSubdividerTests
         // Assert
         slope.Should().BeApproximately(90f, 0.001f);
     }
+
+    [Fact]
+    public void should_not_over_refine_short_edges_because_one_edge_is_very_long()
+    {
+        // Arrange
+        var source = new[]
+        {
+            new RockMeshTriangle(
+                Vector3.Zero,
+                new Vector3(64f, 0f, 0f),
+                new Vector3(0f, 0.25f, 0f)),
+        };
+
+        // Act
+        IReadOnlyList<RockMeshTriangle> result = RockMeshSubdivider.Subdivide(source, 0.25f);
+
+        // Assert
+        result.Count.Should().BeLessThan(25_000);
+    }
 }

@@ -5,6 +5,7 @@
     <Project Path="src/MapaTur.Climbing/MapaTur.Climbing.csproj" />
     <Project Path="src/MapaTur.Domain/MapaTur.Domain.csproj" />
     <Project Path="src/MapaTur.Infrastructure/MapaTur.Infrastructure.csproj" />
+    <Project Path="src/MapaTur.RockBake/MapaTur.RockBake.csproj" />
     <Project Path="src/MapaTur.Routing/MapaTur.Routing.csproj" />
   </Folder>
   <Folder Name="/tests/">

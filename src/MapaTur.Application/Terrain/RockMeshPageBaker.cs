@@ -20,7 +20,7 @@ public static class RockMeshPageBaker
 {
     public const float MinimumRockSlopeDegrees = 45f;
     private const float MinimumExtentMeters = 0.001f;
-    private static readonly float[] TargetEdgeMeters = [0.25f, 0.5f, 1f];
+    private static readonly float[] TargetSpacingMeters = [0.25f, 0.5f, 1f];
 
     public static RockMeshPage Bake(
         byte lod,
@@ -31,7 +31,7 @@ public static class RockMeshPageBaker
     {
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(sampleSurface);
-        if (lod >= TargetEdgeMeters.Length)
+        if (lod >= TargetSpacingMeters.Length)
         {
             throw new ArgumentOutOfRangeException(nameof(lod));
         }
@@ -44,7 +44,12 @@ public static class RockMeshPageBaker
             throw new InvalidOperationException("A rock mesh page needs at least one steep source triangle.");
         }
 
-        float targetEdge = TargetEdgeMeters[lod];
+        // A square grid with the requested pitch has a triangle diagonal of pitch×√2. Treating the pitch
+        // itself as the maximum edge over-refines every 1 m DEM cell by another factor of two: a 32 m page
+        // becomes 257² vertices and exceeds the ushort RMP1 index space. The diagonal limit preserves the
+        // promised 0.25/0.5/1 m vertex pitch without wasting four times the geometry.
+        float targetSpacing = TargetSpacingMeters[lod];
+        float targetEdge = (targetSpacing * MathF.Sqrt(2f)) + 1e-5f;
         IReadOnlyList<RockMeshTriangle> refined = RockMeshSubdivider.Subdivide(steep, targetEdge);
         BuildIndexedMesh(refined, out List<Vector3> positions, out List<TriangleIndices> triangles);
         if (positions.Count > RockMeshPage.MaxVertices)
@@ -83,7 +88,7 @@ public static class RockMeshPageBaker
             pageY,
             minimum,
             extent,
-            geometricError: maximumDisplacement + (targetEdge * 0.5f),
+            geometricError: maximumDisplacement + (targetSpacing * 0.5f),
             vertices,
             indices);
     }
