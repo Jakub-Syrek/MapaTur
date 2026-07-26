@@ -6,9 +6,15 @@ Pionowego ortofoto nie da się naprawić samym albedo. Mapa normalnych i paralla
 wewnątrz trójkąta, ale nie tworzą krawędzi bloków ani wiarygodnej sylwetki. Obecna siatka DEM jest ponadto
 zbyt rzadka, aby vertex displacement zbudował cechy skały widoczne z kilku–kilkudziesięciu metrów.
 
-Docelowym zasobem jest dlatego **prebake'owana, adaptacyjna siatka 3D stromych ścian**, podzielona na małe
-strony gotowe do bezpośredniego uploadu. Oryginalny DEM i materiał pozostają fallbackiem do chwili, gdy
-strona skały jest rezydentna.
+Docelowym zasobem jest dlatego **prebake'owana siatka fotogrametryczna stromych ścian**, podzielona na małe
+strony gotowe do bezpośredniego uploadu. Nie jest to displacement DEM: baker zachowuje prawdziwe uskoki,
+przewieszki, półki, osobne bloki i głębokie szczeliny skanu. Oryginalny DEM i materiał pozostają fallbackiem
+do chwili, gdy komplet geometrii i materiału strony skały jest rezydentny.
+
+Pilot displacementu skanowanych heightmap został odrzucony w teście z bliska. Mimo nieokresowego samplera
+dał równoległe bruzdy i efekt odlanej/nadrukowanej powierzchni, ponieważ topologia nadal była heightfieldem.
+`RMP1` pozostaje sprawdzonym kontenerem geometrii, ale nie jest kandydatem wizualnym bez prawdziwej siatki
+fotogrametrycznej.
 
 ## Zakres i bramka
 
@@ -20,15 +26,16 @@ strona skały jest rezydentna.
   między stronami albo pogorszeniu klatki;
 - panorama służy dopiero do kontroli LOD i kosztu po przejściu bramki bliskiej.
 
-## Format `RMP1`
+## Format produkcyjny `RMP2`
 
-Plik jednej strony ma rozszerzenie `.rmp` i jest gotowym obrazem dwóch buforów GPU.
+Plik jednej strony ma rozszerzenie `.rmp2` i jest gotowym obrazem dwóch buforów GPU. `RMP1` nie zawiera UV,
+więc nie może przenieść materiału skanu i nie jest używany przez produkcyjny renderer fotogrametrii.
 
 Nagłówek:
 
 | Pole | Typ | Znaczenie |
 |---|---:|---|
-| magic | 4 B | `RMP1` |
+| magic | 4 B | `RMP2` |
 | version | u16 | wersja układu wierzchołka |
 | lod | u8 | 0–2 |
 | flags | u8 | obecność AO/maski materiału/skirt |
@@ -38,48 +45,52 @@ Nagłówek:
 | geometricError | f32 | maksymalny błąd LOD w metrach |
 | vertexBytes/indexBytes | u32 ×2 | długości kolejnych bloków |
 
-Wierzchołek ma 16 bajtów:
+Wierzchołek ma 20 bajtów:
 
 - pozycja XYZ: trzy `u16`, kwantyzowane w AABB strony;
 - normalna: octahedral `snorm16 ×2`;
+- UV atlasu skanu: `unorm16 ×2`;
 - AO: `u8`;
 - maska przejścia DEM–skała: `u8`;
-- wariant materiału i orientacja warstw: `u16`;
-- dwa bajty rezerwy na zgodną rozbudowę formatu.
+- identyfikator strony materiału: `u16`;
+- flagi szwu/skirtu i bajt rezerwy: `u8 ×2`.
 
 Indeksy są `u16`; strona ma twardy limit 65 535 wierzchołków. Bloki wierzchołków i indeksów są wyrównane
-do 16 bajtów. Runtime nie dekoduje zdjęć, nie generuje normalnych, nie dzieli trójkątów i nie tworzy mipów:
-czyta stronę do bufora staging i wykonuje asynchroniczny upload.
+do 16 bajtów. Materiał jest osobnym plikiem `.rtex`: małe strony atlasu 1024², BC1 albedo z kompletem mipów.
+Mikronormalna nie jest wymagana do pilota, bo normalne gęstej siatki skanu niosą rzeczywistą formę; późniejszy
+BC5 normal może być dodany jako jawna flaga formatu. Runtime nie dekoduje JPEG/PNG, nie generuje normalnych,
+nie dzieli trójkątów, nie koduje BC ani nie tworzy mipów: wykonuje wyłącznie I/O i upload gotowych bloków.
 
 ## Podział i LOD
 
 - globalna strona: 16 × 16 m w układzie sceny; pilot na realnym urwisku wykazał, że 32 m przekracza
   limit 65 535 wierzchołków przez dużą powierzchnię ściany po skosie, mimo poprawnej gęstości 25 cm;
-- LOD0: docelowy rozstaw wierzchołków 0,25 m, używany do około 15 m;
-- LOD1: rozstaw 0,50 m, około 15–40 m;
-- LOD2: rozstaw 1,00 m, około 40–100 m;
+- LOD0: oryginalna lub tylko lekko oczyszczona topologia skanu, używana do rozmiaru błędu > 1 px;
+- LOD1: uproszczenie z błędem obiektowym do 2 cm;
+- LOD2: uproszczenie z błędem obiektowym do 8 cm;
 - dalej: istniejący DEM i obecny materiał bez mikrogeometrii.
 
-Odległości są tylko wartościami startowymi. Runtime wybiera LOD przez `geometricError / metresPerPixel`,
-z histerezą 25%. Nadal widoczna strona jest chroniona przez dwie klatki selekcji, a pierścień sąsiednich
-stron jest prefetchem.
+Runtime wybiera LOD wyłącznie przez `geometricError / metresPerPixel`, z histerezą 25%. Nadal widoczna
+strona jest chroniona przez dwie klatki selekcji, a pierścień sąsiednich stron jest prefetchem.
 
 ## Offline bake
 
-1. Z pełnego z17 DEM powstaje wspólna siatka bazowa z halo sąsiadów.
-2. Trójkąty przekraczające 45° są adaptacyjnie dzielone do krawędzi docelowej LOD-u.
-3. Wierzchołki dostają lokalną ramę styczną wynikającą z ciągłego pola normalnych DEM.
-4. Biblioteka kilku skanów displacement/normal jest próbkowana w fizycznej skali. Wybór patcha,
-   obrót i skala są deterministyczne dla globalnego klucza 8 m, ale przejścia używają ciągłej maski;
-   pojedynczy skan nie może pokryć całej ściany.
-5. Displacement zmienia pełne XYZ wzdłuż normalnej. Amplituda wynika z fizycznej skali skanu i jest
-   ograniczona błędem danego LOD-u, nie arbitralnym suwakiem shadera.
-6. Dodatkowa, rzadka sieć spękań wyznacza krawędzie bloków. Jej węzły są generowane globalnie przed
-   cięciem na strony, dlatego granica strony nie przecina ani nie przesuwa szczeliny.
-7. Brzegi 45–60° są spawane pozycją do DEM, a maska przejścia wygasza skałę bez szczeliny.
-8. Normalne, AO i wariant materiału są liczone po displacement. LOD1/2 powstają przez upraszczanie LOD0
-   z blokadą wspólnych brzegów, nie przez osobne losowanie.
-9. Baker zapisuje indeks przestrzenny z AABB, błędem geometrycznym, rozmiarem i offsetem każdej strony.
+1. Biblioteka wejściowa zawiera wyłącznie pełne skany 3D z metryczną skalą, UV i licencją pozwalającą na
+   dystrybucję. Heightmapy i triplanar nie są źródłem bryły.
+2. Z pełnego z17 DEM powstaje ciągła mapa segmentów ścian z halo sąsiadów. Segment ma ramę lokalną,
+   obrys, dominującą normalną i zakres wysokości.
+3. Baker dobiera skan do całego segmentu, a nie do regularnej siatki. Jeden egzemplarz skanu nie może być
+   kafelkowany obok własnej kopii; duża ściana wymaga biblioteki różnych skanów i nieregularnych cięć.
+4. Skan jest dopasowany jednolitą skalą w lokalnej ramie ściany. Głębokość nie jest spłaszczana ani
+   zastępowana heightmapą. Kolor skanu jest neutralizowany w przestrzeni liniowej, z zachowaniem rdzy i porostów.
+5. Obrys skanu jest przycinany do segmentu. Pas 45–60° oraz zewnętrzna krawędź patcha są spawane do DEM;
+   wnętrze zachowuje pełną geometrię skanu.
+6. Dopiero gotowa wspólna siatka LOD0 jest cięta na strony 16 m. Wierzchołki graniczne powstają raz i są
+   kopiowane bit-identycznie do obu stron.
+7. LOD1/2 powstają przez uproszczenie LOD0 z blokadą UV, sylwetki i wspólnych brzegów.
+8. Albedo jest offline przeskalowane, neutralizowane, mipowane i kodowane BC1 do stron `.rtex`.
+9. Baker zapisuje indeks przestrzenny z AABB, błędem geometrycznym, zależnością od strony materiału,
+   rozmiarem i offsetem każdej strony.
 
 ## Seam welding
 
@@ -99,11 +110,11 @@ widocznej powierzchni przy równym LOD.
 
 ## Kolejność implementacji
 
-1. `RockMeshPage` i `RockMeshPageStore` z round-tripem binarnym i walidacją limitów.
-2. Adaptacyjny subdivider z testami nachylenia, wspólnych brzegów i błędu LOD.
-3. Offline sampler biblioteki skanów oraz baker pilota Mięguszowieckich.
-4. Asynchroniczny reader/upload i screen-space selection.
-5. Bliski test EXE pilota; dopiero po jego przejściu bake całego pokrycia Tatr.
+1. Import siatki glTF, zachowanie pełnego XYZ/normalnych/UV i dopasowanie do ramy ściany.
+2. `RMP2` + `.rtex` z round-tripem, BC1, mipami i walidacją zależności.
+3. Offline baker jednego segmentu pilota Mięguszowieckich z prawdziwego skanu.
+4. Asynchroniczny reader/upload i screen-space selection z histerezą.
+5. Bliski test EXE pilota; dopiero po jego przejściu biblioteka wielu skanów i bake całego pokrycia Tatr.
 
 ## Odrzucone warianty
 
@@ -111,3 +122,7 @@ widocznej powierzchni przy równym LOD.
 - triplanar albedo ze skanu: nadrukowana tapeta;
 - normal map bez geometrii: marszczenie płaskiej powierzchni;
 - vertex displacement istniejącego DEM: zbyt mało wierzchołków, brak bloków i krawędzi.
+- subdivide DEM + skanowany displacement: nadal heightfield; w pilocie dał pionowe bruzdy, powtarzalny
+  rytm i „korę/tapetę” zamiast osobnych cel skalnych;
+- `Mountainside` jako skan źródłowy: geometria poprawna technicznie, ale zbyt łupkowa i warstwowa wobec
+  blokowej skały granitowej z referencji.
