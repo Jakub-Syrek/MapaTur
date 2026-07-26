@@ -1,8 +1,0 @@
-Rock026 by ambientCG
-Source: https://ambientcg.com/view?id=Rock026
-Technique: surface photogrammetry
-License: Creative Commons CC0 1.0 Universal
-License text: https://creativecommons.org/publicdomain/zero/1.0/
-
-The bundled rock026-albedo-height.png is a derived, GPU-oriented packing of the
-asset's Color map (RGB) and Displacement map (A), both from the 1K JPG package.
