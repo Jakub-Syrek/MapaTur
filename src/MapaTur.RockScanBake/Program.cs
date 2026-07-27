@@ -45,6 +45,7 @@ float? coverageHeightMeters = GetArgument("--cover-height") is { } coverageHeigh
 float coverageOverlap = ParsePositive(GetArgument("--cover-overlap") ?? "0.28", "--cover-overlap");
 int coverageSeed = int.Parse(GetArgument("--seed") ?? "271828", CultureInfo.InvariantCulture);
 bool mirrorVariants = HasFlag("--mirror-variants");
+bool internalWarp = HasFlag("--internal-warp");
 bool autoSteep = HasFlag("--auto-steep");
 bool analyzeSteepOnly = HasFlag("--analyze-steep");
 float steepSlopeDegrees = ParsePositive(GetArgument("--steep-slope") ?? "58", "--steep-slope");
@@ -139,6 +140,14 @@ if (mirrorVariants)
 }
 
 PhotogrammetryRockPrimitive source = sources[0];
+if (internalWarp && !coverageMode)
+{
+    source = PhotogrammetryRockInternalWarper.Warp(source, coverageSeed);
+    Console.WriteLine(
+        $"[rock-scan-bake] applied deterministic full-scan interior warp seed={coverageSeed}; "
+        + "outer frame and measured topology preserved");
+}
+
 var placement = new RockScanPatchPlacement(center, normal, heightMeters, depthMeters);
 PhotogrammetryRockPrimitive? fitted = coverageMode
     ? null
@@ -340,7 +349,8 @@ if (wallRmp1Root is not null || wallDemPath is not null)
                     atlasColumns,
                     atlasRows,
                     atlasBaseColorImageBytes: null,
-                    meshClusterCellMeters: meshClusterCellMeters);
+                    meshClusterCellMeters: meshClusterCellMeters,
+                    internalWarpSeed: internalWarp ? unchecked(coverageSeed + (regionIndex * 104729)) : null);
                 IReadOnlyList<ScannedRockMeshPage> regionPages = ScannedRockPageBaker.Bake(
                     conformedRegion,
                     pageMeters,
@@ -401,7 +411,8 @@ if (wallRmp1Root is not null || wallDemPath is not null)
                 atlasColumns,
                 atlasRows,
                 atlasBytes,
-                meshClusterCellMeters);
+                meshClusterCellMeters,
+                internalWarpSeed: internalWarp ? coverageSeed : null);
             Console.WriteLine(
                 $"[rock-scan-bake] coverage: {patches.Count} real 3D scan instances, "
                 + $"{coverageWidthMeters:F1}x{coverageHeightMeters:F1} m, variants={sources.Count}, "
@@ -814,6 +825,7 @@ static void PrintUsage()
           --cover-height <m>     height of multi-scan 3D wall shell
           --cover-overlap <f>    overlap used to hide scan borders (default 0.28)
           --seed <integer>       deterministic coverage variation (default 271828)
+          --internal-warp        vary the scan's interior 3D structure per seed/instance
           --auto-steep           detect coherent stretched-ortho DEM faces automatically
           --analyze-steep        list auto-detected facets without generating geometry
           --steep-slope <deg>    minimum auto-covered slope (default 58)

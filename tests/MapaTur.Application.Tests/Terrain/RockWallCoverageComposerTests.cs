@@ -86,6 +86,33 @@ public sealed class RockWallCoverageComposerTests
         combined.Positions.Should().Contain(position => position.Y > 1.5f);
     }
 
+    [Fact]
+    public void should_change_internal_geometry_between_reused_scan_instances()
+    {
+        // Arrange
+        PhotogrammetryRockPrimitive[] variants = [CreateTriangle(), CreateTriangle(), CreateTriangle()];
+        RockWallCoveragePatch[] patches =
+        [
+            CreatePatch(Vector3.Zero, variant: 0) with { Column = 0 },
+            CreatePatch(Vector3.Zero, variant: 0) with { Column = 1 },
+        ];
+
+        // Act
+        PhotogrammetryRockPrimitive combined = RockWallCoverageComposer.Compose(
+            variants,
+            patches,
+            CreateWall(),
+            edgeBlendFraction: 0.2f,
+            interiorClearanceMeters: 0.1f,
+            atlasColumns: 3,
+            atlasRows: 1,
+            atlasBaseColorImageBytes: null,
+            internalWarpSeed: 314159);
+
+        // Assert
+        combined.Positions[4].Should().NotBe(combined.Positions[9]);
+    }
+
     private static PhotogrammetryRockPrimitive CreateTriangle() => new(
         positions:
         [
