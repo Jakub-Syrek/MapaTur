@@ -6,6 +6,7 @@ using System.Text.Json;
 
 using MapaTur.Application.Terrain;
 using MapaTur.Domain.Geography;
+using MapaTur.Domain.Terrain;
 
 using SkiaSharp;
 
@@ -43,15 +44,35 @@ float? coverageHeightMeters = GetArgument("--cover-height") is { } coverageHeigh
     : null;
 float coverageOverlap = ParsePositive(GetArgument("--cover-overlap") ?? "0.28", "--cover-overlap");
 int coverageSeed = int.Parse(GetArgument("--seed") ?? "271828", CultureInfo.InvariantCulture);
-bool coverageMode = coverageWidthMeters is not null || coverageHeightMeters is not null || scanPaths.Length > 1;
+bool mirrorVariants = HasFlag("--mirror-variants");
+bool autoSteep = HasFlag("--auto-steep");
+bool analyzeSteepOnly = HasFlag("--analyze-steep");
+float steepSlopeDegrees = ParsePositive(GetArgument("--steep-slope") ?? "58", "--steep-slope");
+float steepBlockMeters = ParsePositive(GetArgument("--steep-block") ?? "28", "--steep-block");
+float steepCoverageFraction = ParsePositive(
+    GetArgument("--steep-coverage") ?? "0.20",
+    "--steep-coverage");
+int maxInstances = int.Parse(GetArgument("--max-instances") ?? "240", CultureInfo.InvariantCulture);
+if (maxInstances <= 0)
+{
+    throw new ArgumentOutOfRangeException("--max-instances");
+}
+bool coverageMode =
+    autoSteep || coverageWidthMeters is not null || coverageHeightMeters is not null || scanPaths.Length > 1;
 if (coverageMode
-    && (coverageWidthMeters is null || coverageHeightMeters is null || scanPaths.Length < 3))
+    && ((mirrorVariants ? scanPaths.Length < 2 : scanPaths.Length < 3)
+        || (!autoSteep && (coverageWidthMeters is null || coverageHeightMeters is null))))
 {
     throw new ArgumentException(
-        "Coverage requires --cover-width, --cover-height and at least three --scan variants.");
+        "Coverage requires at least three --scan variants "
+        + "(or two with --mirror-variants) "
+        + "and either --auto-steep or explicit dimensions.");
 }
 
 float pageMeters = ParsePositive(GetArgument("--page") ?? "16", "--page");
+float meshClusterCellMeters = ParseNonNegative(
+    GetArgument("--mesh-cell") ?? "0",
+    "--mesh-cell");
 string? wallRmp1Root = GetArgument("--wall-rmp1");
 string? wallDemPath = GetArgument("--wall-dem");
 string? wallAnchorText = GetArgument("--anchor");
@@ -74,7 +95,14 @@ if ((wallDemPath is null) != (wallAnchorText is null))
     throw new ArgumentException("--wall-dem and --anchor must be specified together.");
 }
 
+if (autoSteep && wallDemPath is null)
+{
+    throw new ArgumentException("--auto-steep requires --wall-dem and --anchor.");
+}
+
 ushort materialPageId = ushort.Parse(GetArgument("--material") ?? "1", CultureInfo.InvariantCulture);
+int? autoRegionCount = null;
+int? coveragePatchCount = null;
 var stopwatch = Stopwatch.StartNew();
 
 Console.WriteLine(
@@ -95,23 +123,44 @@ foreach (string scanPath in scanPaths)
     sources.Add(asset.Primitives[0]);
 }
 
+if (mirrorVariants)
+{
+    var oriented = new List<PhotogrammetryRockPrimitive>(sources.Count * 2);
+    foreach (PhotogrammetryRockPrimitive original in sources)
+    {
+        oriented.Add(original);
+        oriented.Add(PhotogrammetryRockVariantTransformer.MirrorHorizontal(original));
+    }
+
+    sources = oriented;
+    Console.WriteLine(
+        $"[rock-scan-bake] expanded {scanPaths.Length} complete captures into {sources.Count} "
+        + "full-detail orientation variants without cropping");
+}
+
 PhotogrammetryRockPrimitive source = sources[0];
 var placement = new RockScanPatchPlacement(center, normal, heightMeters, depthMeters);
 PhotogrammetryRockPrimitive? fitted = coverageMode
     ? null
     : RockScanPatchFitter.Fit(source, placement);
+Dictionary<ScannedRockPageKey, ScannedRockMeshPage>? prebakedAutoPages = null;
+byte[]? prebakedMaterialImageBytes = null;
 if (wallRmp1Root is not null || wallDemPath is not null)
 {
     List<Vector3> wallPoints;
     string wallSource;
+    DemRaster? wallRaster = null;
+    GeoPoint? wallProjectionAnchor = null;
     if (wallDemPath is not null)
     {
         EnsureFile(wallDemPath);
         GeoPoint anchor = ParseAnchor(wallAnchorText!);
+        wallProjectionAnchor = anchor;
         using FileStream stream = File.OpenRead(wallDemPath);
         BakedDemTile tile = BakedDemTileStore.Read(stream);
+        wallRaster = BakedTileMeshBuilder.AsRaster(tile);
         TerrainMesh3D mesh = TerrainMesh3D.Build(
-            BakedTileMeshBuilder.AsRaster(tile),
+            wallRaster,
             new TerrainMeshOptions
             {
                 VerticalExaggeration = 1f,
@@ -129,13 +178,13 @@ if (wallRmp1Root is not null || wallDemPath is not null)
             throw new DirectoryNotFoundException($"RMP1 wall source does not exist: {wallRmp1Root}");
         }
 
-        float coverageRadius = coverageMode
+        float coverageRadius = coverageMode && !autoSteep
             ? MathF.Max(coverageWidthMeters!.Value, coverageHeightMeters!.Value)
             : 0f;
-        Vector3 fittedMinimum = coverageMode
+        Vector3 fittedMinimum = coverageMode && !autoSteep
             ? center - new Vector3(coverageRadius)
             : fitted!.Positions.Aggregate(Vector3.Min);
-        Vector3 fittedMaximum = coverageMode
+        Vector3 fittedMaximum = coverageMode && !autoSteep
             ? center + new Vector3(coverageRadius)
             : fitted!.Positions.Aggregate(Vector3.Max);
         wallPoints = [];
@@ -168,17 +217,20 @@ if (wallRmp1Root is not null || wallDemPath is not null)
         wallSource = $"RMP1 {Path.GetFileName(Path.TrimEndingDirectorySeparator(wallRmp1Root))}";
     }
 
-    Vector3 outward = Vector3.Normalize(normal);
-    float referenceDepth = Vector3.Dot(center, outward);
-    wallPoints = wallPoints
-        .Where(point => MathF.Abs(Vector3.Dot(point, outward) - referenceDepth) <= 30f)
-        .ToList();
+    if (!autoSteep)
+    {
+        Vector3 outward = Vector3.Normalize(normal);
+        float referenceDepth = Vector3.Dot(center, outward);
+        wallPoints = wallPoints
+            .Where(point => MathF.Abs(Vector3.Dot(point, outward) - referenceDepth) <= 30f)
+            .ToList();
+    }
+
     if (wallPoints.Count == 0)
     {
         throw new InvalidDataException("No RMP1 wall points overlap the fitted scan.");
     }
 
-    var wall = new RockWallSurfaceSampler(wallPoints, normal, cellSizeMeters: 0.5f);
     if (coverageMode)
     {
         float[] aspectRatios = sources
@@ -189,35 +241,176 @@ if (wallRmp1Root is not null || wallDemPath is not null)
                 return width / height;
             })
             .ToArray();
-        var coverageOptions = new RockWallCoverageOptions(
-            center,
-            normal,
-            coverageWidthMeters!.Value,
-            coverageHeightMeters!.Value,
-            heightMeters,
-            depthMeters,
-            coverageOverlap,
-            coverageSeed);
-        IReadOnlyList<RockWallCoveragePatch> patches = RockWallCoveragePlanner.Plan(
-            coverageOptions,
-            aspectRatios);
         byte[] atlasBytes = BuildAtlas(sources, out int atlasColumns, out int atlasRows);
-        fitted = RockWallCoverageComposer.Compose(
-            sources,
-            patches,
-            wall,
-            edgeBlendFraction,
-            interiorClearanceMeters,
-            atlasColumns,
-            atlasRows,
-            atlasBytes);
-        Console.WriteLine(
-            $"[rock-scan-bake] coverage: {patches.Count} real 3D scan instances, "
-            + $"{coverageWidthMeters:F1}x{coverageHeightMeters:F1} m, variants={sources.Count}, "
-            + $"seed={coverageSeed}, overlap={coverageOverlap:P0}");
+        if (autoSteep)
+        {
+            var steepOptions = new SteepRockRegionOptions(
+                steepSlopeDegrees,
+                steepBlockMeters,
+                steepCoverageFraction,
+                MinimumWidthMeters: 10f,
+                MinimumHeightMeters: 10f,
+                BorderOverlapMeters: 4f);
+            IReadOnlyList<SteepRockRegion> regions = SteepRockRegionPlanner.Plan(
+                wallRaster!,
+                wallProjectionAnchor!.Value,
+                steepOptions);
+            if (regions.Count == 0)
+            {
+                throw new InvalidDataException("No coherent steep DEM regions passed the auto-coverage gate.");
+            }
+
+            autoRegionCount = regions.Count;
+            IReadOnlyList<IReadOnlyList<RockWallCoveragePatch>> regionPatchPlans = regions
+                .Select((region, regionIndex) =>
+                    RockWallCoveragePlanner.Plan(
+                        new RockWallCoverageOptions(
+                            region.Center,
+                            region.OutwardNormal,
+                            region.WidthMeters,
+                            region.HeightMeters,
+                            heightMeters,
+                            depthMeters,
+                            coverageOverlap,
+                            unchecked(coverageSeed + (regionIndex * 104729))),
+                        aspectRatios))
+                .ToArray();
+            int plannedPatchCount = regionPatchPlans.Sum(plan => plan.Count);
+            Console.WriteLine(
+                $"[rock-scan-bake] auto-steep analysis: regions={regions.Count}, "
+                + $"slope>={steepSlopeDegrees:F1}°, block={steepBlockMeters:F1} m, "
+                + $"coverage>={steepCoverageFraction:P0}, real 3D instances={plannedPatchCount}");
+            for (int index = 0; index < regions.Count; index++)
+            {
+                SteepRockRegion region = regions[index];
+                Console.WriteLine(
+                    $"[rock-scan-bake] candidate {index + 1}: "
+                    + $"{region.WidthMeters:F1}x{region.HeightMeters:F1} m, "
+                    + $"normal={region.OutwardNormal}, samples={region.SteepSampleCount}, "
+                    + $"instances={regionPatchPlans[index].Count}");
+            }
+
+            if (analyzeSteepOnly)
+            {
+                return 0;
+            }
+
+            if (plannedPatchCount > maxInstances)
+            {
+                throw new InvalidOperationException(
+                    $"Auto-steep plan needs {plannedPatchCount} scan instances, above the "
+                    + $"--max-instances safety budget of {maxInstances}. No geometry was generated.");
+            }
+
+            var pageAccumulator = new Dictionary<ScannedRockPageKey, ScannedRockMeshPage>();
+            int totalPatches = 0;
+            int bakedRegionCount = 0;
+            for (int regionIndex = 0; regionIndex < regions.Count; regionIndex++)
+            {
+                SteepRockRegion region = regions[regionIndex];
+                Vector3 regionOutward = Vector3.Normalize(region.OutwardNormal);
+                Vector3 regionTangent = Vector3.Normalize(Vector3.Cross(Vector3.UnitZ, regionOutward));
+                float centerDepth = Vector3.Dot(region.Center, regionOutward);
+                float centerTangent = Vector3.Dot(region.Center, regionTangent);
+                float tangentRadius = (region.WidthMeters * 0.5f) + 8f;
+                float elevationRadius = (region.HeightMeters * 0.5f) + 8f;
+                List<Vector3> localWallPoints = wallPoints
+                    .Where(point =>
+                        MathF.Abs(Vector3.Dot(point, regionOutward) - centerDepth) <= steepBlockMeters + 12f
+                        && MathF.Abs(Vector3.Dot(point, regionTangent) - centerTangent) <= tangentRadius
+                        && MathF.Abs(point.Z - region.Center.Z) <= elevationRadius)
+                    .ToList();
+                if (localWallPoints.Count < 32)
+                {
+                    continue;
+                }
+
+                var localWall = new RockWallSurfaceSampler(
+                    localWallPoints,
+                    regionOutward,
+                    cellSizeMeters: 0.5f);
+                IReadOnlyList<RockWallCoveragePatch> patches = regionPatchPlans[regionIndex];
+                totalPatches += patches.Count;
+                PhotogrammetryRockPrimitive conformedRegion = RockWallCoverageComposer.Compose(
+                    sources,
+                    patches,
+                    localWall,
+                    edgeBlendFraction,
+                    interiorClearanceMeters,
+                    atlasColumns,
+                    atlasRows,
+                    atlasBaseColorImageBytes: null,
+                    meshClusterCellMeters: meshClusterCellMeters);
+                IReadOnlyList<ScannedRockMeshPage> regionPages = ScannedRockPageBaker.Bake(
+                    conformedRegion,
+                    pageMeters,
+                    lod: 0,
+                    geometricError: 0f,
+                    materialPageId);
+                foreach (ScannedRockMeshPage page in regionPages)
+                {
+                    var key = new ScannedRockPageKey(page.PageX, page.PageY, page.Lod);
+                    pageAccumulator[key] = pageAccumulator.TryGetValue(key, out ScannedRockMeshPage? existing)
+                        ? ScannedRockMeshPageCombiner.Combine(existing, page)
+                        : page;
+                }
+
+                bakedRegionCount++;
+                Console.WriteLine(
+                    $"[rock-scan-bake] steep region {regionIndex + 1}/{regions.Count}: "
+                    + $"{region.WidthMeters:F1}x{region.HeightMeters:F1} m, "
+                    + $"normal={regionOutward}, patches={patches.Count}, "
+                    + $"streaming pages={regionPages.Count}, accumulated={pageAccumulator.Count}");
+            }
+
+            if (bakedRegionCount == 0)
+            {
+                throw new InvalidDataException("Steep regions had no usable local DEM wall samples.");
+            }
+
+            coveragePatchCount = totalPatches;
+            prebakedAutoPages = pageAccumulator;
+            prebakedMaterialImageBytes = atlasBytes;
+            Console.WriteLine(
+                $"[rock-scan-bake] auto-steep coverage: regions={bakedRegionCount}, "
+                + $"real 3D scan instances={totalPatches}, variants={sources.Count}, "
+                + $"incrementally packed pages={pageAccumulator.Count}");
+        }
+        else
+        {
+            var wall = new RockWallSurfaceSampler(wallPoints, normal, cellSizeMeters: 0.5f);
+            var coverageOptions = new RockWallCoverageOptions(
+                center,
+                normal,
+                coverageWidthMeters!.Value,
+                coverageHeightMeters!.Value,
+                heightMeters,
+                depthMeters,
+                coverageOverlap,
+                coverageSeed);
+            IReadOnlyList<RockWallCoveragePatch> patches = RockWallCoveragePlanner.Plan(
+                coverageOptions,
+                aspectRatios);
+            coveragePatchCount = patches.Count;
+            fitted = RockWallCoverageComposer.Compose(
+                sources,
+                patches,
+                wall,
+                edgeBlendFraction,
+                interiorClearanceMeters,
+                atlasColumns,
+                atlasRows,
+                atlasBytes,
+                meshClusterCellMeters);
+            Console.WriteLine(
+                $"[rock-scan-bake] coverage: {patches.Count} real 3D scan instances, "
+                + $"{coverageWidthMeters:F1}x{coverageHeightMeters:F1} m, variants={sources.Count}, "
+                + $"seed={coverageSeed}, overlap={coverageOverlap:P0}");
+        }
     }
     else
     {
+        var wall = new RockWallSurfaceSampler(wallPoints, normal, cellSizeMeters: 0.5f);
         fitted = RockWallSurfaceConformer.Conform(
             fitted!,
             placement,
@@ -235,13 +428,22 @@ else if (coverageMode)
     throw new ArgumentException("Coverage requires --wall-rmp1 or --wall-dem to preserve the terrain shape.");
 }
 
-IReadOnlyList<ScannedRockMeshPage> pages = ScannedRockPageBaker.Bake(
-    fitted!,
-    pageMeters,
-    lod: 0,
-    geometricError: 0f,
-    materialPageId);
-RockMaterialPage material = BakeMaterial(fitted!, materialPageId);
+IReadOnlyList<ScannedRockMeshPage> pages = prebakedAutoPages is not null
+    ? prebakedAutoPages.Values
+        .OrderBy(page => page.PageX)
+        .ThenBy(page => page.PageY)
+        .ThenBy(page => page.Lod)
+        .ToArray()
+    : ScannedRockPageBaker.Bake(
+        fitted!,
+        pageMeters,
+        lod: 0,
+        geometricError: 0f,
+        materialPageId);
+byte[] materialImageBytes = prebakedMaterialImageBytes
+    ?? fitted?.BaseColorImageBytes
+    ?? throw new InvalidDataException("Photogrammetric coverage has no base-colour texture.");
+RockMaterialPage material = BakeMaterial(materialImageBytes, materialPageId);
 
 string temporaryRoot = outputRoot + $".tmp-{Guid.NewGuid():N}";
 try
@@ -302,7 +504,16 @@ try
         coverageHeightMeters,
         coverageOverlap = coverageMode ? coverageOverlap : (float?)null,
         coverageSeed = coverageMode ? coverageSeed : (int?)null,
+        mirrorVariants,
+        variantCount = sources.Count,
+        autoSteep,
+        autoRegionCount,
+        coveragePatchCount,
+        steepSlopeDegrees = autoSteep ? steepSlopeDegrees : (float?)null,
+        steepBlockMeters = autoSteep ? steepBlockMeters : (float?)null,
+        steepCoverageFraction = autoSteep ? steepCoverageFraction : (float?)null,
         pageMeters,
+        meshClusterCellMeters,
         wallRmp1 = wallRmp1Root is null ? null : Path.GetFileName(Path.TrimEndingDirectorySeparator(wallRmp1Root)),
         wallDem = wallDemPath is null ? null : Path.GetFileName(wallDemPath),
         wallAnchor = wallAnchorText,
@@ -352,6 +563,8 @@ string? GetArgument(string name)
     int index = Array.IndexOf(args, name);
     return index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
 }
+
+bool HasFlag(string name) => Array.IndexOf(args, name) >= 0;
 
 string[] GetArguments(string name)
 {
@@ -469,10 +682,8 @@ static void ApplyRgba(SKBitmap bitmap, byte[] rgba)
     }
 }
 
-static RockMaterialPage BakeMaterial(PhotogrammetryRockPrimitive source, ushort pageId)
+static RockMaterialPage BakeMaterial(byte[] encoded, ushort pageId)
 {
-    byte[] encoded = source.BaseColorImageBytes
-        ?? throw new InvalidDataException("Photogrammetric scan has no base-colour texture.");
     using SKBitmap bitmap = SKBitmap.Decode(encoded)
         ?? throw new InvalidDataException("Cannot decode the scan base-colour texture.");
     var rgba = new byte[checked(bitmap.Width * bitmap.Height * 4)];
@@ -593,14 +804,22 @@ static void PrintUsage()
 
         Optional:
           --scan <model>         repeat at least 3 times for non-repeating wall coverage
+          --mirror-variants      add a full-outline horizontal orientation of every scan
           --height <metres>      fitted scan/coverage-patch height (default 18)
           --depth <metres>       maximum outward relief (default 25% of height)
           --page <metres>        streaming page size (default 16)
+          --mesh-cell <metres>   offline 3D vertex clustering cell; 0 keeps full scan
           --material <id>        material-page id (default 1)
           --cover-width <m>      width of multi-scan 3D wall shell
           --cover-height <m>     height of multi-scan 3D wall shell
           --cover-overlap <f>    overlap used to hide scan borders (default 0.28)
           --seed <integer>       deterministic coverage variation (default 271828)
+          --auto-steep           detect coherent stretched-ortho DEM faces automatically
+          --analyze-steep        list auto-detected facets without generating geometry
+          --steep-slope <deg>    minimum auto-covered slope (default 58)
+          --steep-block <m>      local wall-facet size (default 28)
+          --steep-coverage <f>   steep-cell fraction required in a facet (default 0.20)
+          --max-instances <n>    abort auto bake before geometry above this count (default 240)
           --wall-rmp1 <root>     pilot DEM-wall samples used for conforming/welding
           --wall-dem <tile.bdt>   exact raw runtime DEM used for conforming/welding
           --anchor <lat;lon>      shared world anchor required by --wall-dem

@@ -56,15 +56,16 @@ Wierzchołek ma 20 bajtów:
 - flagi szwu/skirtu i bajt rezerwy: `u8 ×2`.
 
 Indeksy są `u16`; strona ma twardy limit 65 535 wierzchołków. Bloki wierzchołków i indeksów są wyrównane
-do 16 bajtów. Materiał jest osobnym plikiem `.rtex`: małe strony atlasu 1024², BC1 albedo z kompletem mipów.
+do 16 bajtów. Materiał jest osobnym plikiem `.rtex`: bieżąca biblioteka czterech orientacji używa atlasu
+2048², BC1 albedo z kompletem mipów.
 Mikronormalna nie jest wymagana do pilota, bo normalne gęstej siatki skanu niosą rzeczywistą formę; późniejszy
 BC5 normal może być dodany jako jawna flaga formatu. Runtime nie dekoduje JPEG/PNG, nie generuje normalnych,
 nie dzieli trójkątów, nie koduje BC ani nie tworzy mipów: wykonuje wyłącznie I/O i upload gotowych bloków.
 
 ## Podział i LOD
 
-- globalna strona: 16 × 16 m w układzie sceny; pilot na realnym urwisku wykazał, że 32 m przekracza
-  limit 65 535 wierzchołków przez dużą powierzchnię ściany po skosie, mimo poprawnej gęstości 25 cm;
+- globalna strona produkcyjna: 4 × 4 m w układzie sceny dla pełnodetalowych skanów; większe strony
+  przekraczają limit 65 535 wierzchołków na gęstych, wielowarstwowych fragmentach;
 - LOD0: oryginalna lub tylko lekko oczyszczona topologia skanu, używana do rozmiaru błędu > 1 px;
 - LOD1: uproszczenie z błędem obiektowym do 2 cm;
 - LOD2: uproszczenie z błędem obiektowym do 8 cm;
@@ -79,14 +80,16 @@ strona jest chroniona przez dwie klatki selekcji, a pierścień sąsiednich stro
    dystrybucję. Heightmapy i triplanar nie są źródłem bryły.
 2. Z pełnego z17 DEM powstaje ciągła mapa segmentów ścian z halo sąsiadów. Segment ma ramę lokalną,
    obrys, dominującą normalną i zakres wysokości.
-3. Baker dobiera skan do całego segmentu, a nie do regularnej siatki. Jeden egzemplarz skanu nie może być
-   kafelkowany obok własnej kopii; duża ściana wymaga biblioteki różnych skanów i nieregularnych cięć.
+3. Baker pokrywa segment pełnymi naturalnymi obrysami różnych skanów. Poziome odbicie pełnego skanu jest
+   dozwoloną orientacją, ale nie wolno ciąć skanu centroidami trójkątów: próba v8/v9 utworzyła postrzępione
+   brzegi i rozpoznawalne poziome stemple.
 4. Skan jest dopasowany jednolitą skalą w lokalnej ramie ściany. Głębokość nie jest spłaszczana ani
    zastępowana heightmapą. Kolor skanu jest neutralizowany w przestrzeni liniowej, z zachowaniem rdzy i porostów.
 5. Obrys skanu jest przycinany do segmentu. Pas 45–60° oraz zewnętrzna krawędź patcha są spawane do DEM;
    wnętrze zachowuje pełną geometrię skanu.
-6. Dopiero gotowa wspólna siatka LOD0 jest cięta na strony 16 m. Wierzchołki graniczne powstają raz i są
-   kopiowane bit-identycznie do obu stron.
+6. Każdy wykryty region jest komponowany i od razu cięty na strony RMP2; surowa geometria regionu jest
+   następnie zwalniana. Strony o wspólnym kluczu są scalane już jako skwantyzowane bufory GPU z ponowną
+   kwantyzacją wspólnego AABB. Pełny bake nie tworzy monolitu wszystkich regionów w RAM.
 7. LOD1/2 powstają przez uproszczenie LOD0 z blokadą UV, sylwetki i wspólnych brzegów.
 8. Albedo jest offline przeskalowane, neutralizowane, mipowane i kodowane BC1 do stron `.rtex`.
 9. Baker zapisuje indeks przestrzenny z AABB, błędem geometrycznym, zależnością od strony materiału,
@@ -116,6 +119,19 @@ widocznej powierzchni przy równym LOD.
 4. Asynchroniczny reader/upload i screen-space selection z histerezą.
 5. Bliski test EXE pilota; dopiero po jego przejściu biblioteka wielu skanów i bake całego pokrycia Tatr.
 
+## Wynik pilota 2026-07-27
+
+- kandydat v11 używa pełnych skanów
+  [Namaqualand Cliff 01](https://polyhaven.com/a/namaqualand_cliff_01) i
+  [Namaqualand Cliff 02](https://polyhaven.com/a/namaqualand_cliff_02), oba CC0;
+- 20 instancji na ścianie 48 × 42 m, cztery pełne orientacje, 2,40 mln trójkątów przed zapisem,
+  39,4 MiB geometrii RMP2 i 2,67 MiB BC1 z mipami;
+- clustering 10 cm zachowuje bloki w teście z 30 m; 25 cm został odrzucony przez widoczne fasety;
+- automatyczny detektor dla badanego kafla DEM znalazł siedem spójnych ścian. Przy skali 18 m pełny plan
+  ma 370 instancji, więc baker raportuje koszt przed produkcją i respektuje `--max-instances`;
+- pełny bake musi używać ścieżki przyrostowej region→RMP2. Stare scalanie wszystkich surowych meshy jest
+  zabronione ze względu na skok RAM i czas.
+
 ## Odrzucone warianty
 
 - proceduralny nested Voronoi: gipsowe, regularne płyty;
@@ -126,3 +142,7 @@ widocznej powierzchni przy równym LOD.
   rytm i „korę/tapetę” zamiast osobnych cel skalnych;
 - `Mountainside` jako skan źródłowy: geometria poprawna technicznie, ale zbyt łupkowa i warstwowa wobec
   blokowej skały granitowej z referencji.
+- nieregularne wycinki dwóch skanów (v8/v9): mniej trójkątów, lecz nowe granice topologii dały zęby,
+  poziome pasy i rozpoznawalny stempel;
+- skala patcha 30 m (v12): mniej instancji, ale pojedyncze bloki stały się nienaturalnie wielkie i znów
+  wyglądały jak odlew.

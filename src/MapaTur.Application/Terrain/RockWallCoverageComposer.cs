@@ -16,7 +16,8 @@ public static class RockWallCoverageComposer
         float interiorClearanceMeters,
         int atlasColumns,
         int atlasRows,
-        byte[]? atlasBaseColorImageBytes)
+        byte[]? atlasBaseColorImageBytes,
+        float meshClusterCellMeters = 0f)
     {
         ArgumentNullException.ThrowIfNull(variants);
         ArgumentNullException.ThrowIfNull(patches);
@@ -28,7 +29,9 @@ public static class RockWallCoverageComposer
 
         if (atlasColumns <= 0
             || atlasRows <= 0
-            || checked(atlasColumns * atlasRows) < variants.Count)
+            || checked(atlasColumns * atlasRows) < variants.Count
+            || !float.IsFinite(meshClusterCellMeters)
+            || meshClusterCellMeters < 0f)
         {
             throw new ArgumentOutOfRangeException(nameof(atlasColumns), "Atlas cannot hold all scan variants.");
         }
@@ -56,6 +59,13 @@ public static class RockWallCoverageComposer
                 wall,
                 edgeBlendFraction,
                 interiorClearanceMeters);
+            if (meshClusterCellMeters > 0f)
+            {
+                conformed = PhotogrammetryRockMeshClusterer.Cluster(
+                    conformed,
+                    meshClusterCellMeters);
+            }
+
             uint vertexOffset = checked((uint)positions.Count);
             positions.AddRange(conformed.Positions);
             normals.AddRange(conformed.Normals);
