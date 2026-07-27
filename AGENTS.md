@@ -1,5 +1,16 @@
 # AGENTS.md — wytyczne dla każdej sesji i każdego agenta MapaTur
 
+## ⚠ DWAJ AGENCI NA JEDNEJ MASZYNIE — BLOKADA APKI (zasada 20, obowiązkowa)
+
+Gdy równolegle pracuje więcej niż jeden agent (Claude / Codex, różne gałęzie i worktree), **przed
+uruchomieniem `MapaTur.App` albo `OrthoBake`/`RockBake` przeczytaj i zaktualizuj
+[`C:\Repos\APP-LOCK.md`](file:///C:/Repos/APP-LOCK.md)** (plik leży POZA repo, bo gałęzie są różne).
+Zajmujesz → ustaw ZAJĘTE i dopisz do dziennika. **Po teście ZAMKNIJ apkę i ustaw WOLNE.** Nigdy nie
+zamykaj cudzej instancji i nie uruchamiaj drugiej obok. Powód: bake potrzebuje ~8 GB RAM i zamkniętej
+apki (inaczej `Unable to allocate pixels`), dwie instancje to 2×8 GB VRAM na karcie 16 GB, a katalog
+danych w AppData jest WSPÓLNY — podmiana kafli/`_coverage_p16.txt`/`.opk` w cudzej sesji potrafi
+sprawić, że drugiemu agentowi zniknie cała warstwa 5 cm. Pełne brzmienie: `docs/ZASADY-MAPATUR.md` §20.
+
 ## P0 — architektura renderingu i streamingu
 
 Cały projekt jest uznawany za niesprawny, dopóki nie zapewnia jednocześnie jakości obrazu i płynności. Wszystkie inne zadania, tuning shaderów, deshadow, nowe funkcje i kosmetyka są wstrzymane.

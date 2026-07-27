@@ -4,9 +4,43 @@ Pilot pasa przygranicznego ODEBRANY („jest ok, szew trochę razi ale z bliska"
 liczby i rollback: [`HANDOFF-2026-07-25-sk-det05-pilot.md`](HANDOFF-2026-07-25-sk-det05-pilot.md).
 Recepta produkcyjna: [`TILE-PRODUCTION.md`](TILE-PRODUCTION.md) §11. Ten plik = rozszerzenie na rdzeń.
 
-## Decyzja zakresu (user: „jedziemy dalej z resztą Tatr", 2026-07-26)
+## ══ STAŁA DECYZJA ARCHITEKTONICZNA: DWAJ AGENCI = BLOKADA APKI ══
 
-**Wybrane V2, nie V1 — bo V1 NIE MIEŚCI SIĘ NA DYSKU.** Zmierzone dry-runem (metoda trafiła co do
+**Ustanowione przez użytkownika 2026-07-27, obowiązuje KAŻDĄ kolejną sesję, w której nad MapaTur
+pracuje więcej niż jeden agent.** Pełne brzmienie: `docs/ZASADY-MAPATUR.md` §20; wskaźnik w `AGENTS.md`
+i `CLAUDE.md`; sam protokół i dziennik: **`C:\Repos\APP-LOCK.md`** (POZA repozytoriami — agenci
+siedzą na różnych gałęziach i w różnych worktree'ach, więc plik w repo byłby dla nich niewidoczny).
+
+Kontekst, który to wymusił: Codex pracuje równolegle w `C:\Repos\MapaTur-rock-material` na gałęzi
+`codex/realistic-rock-material` (proceduralne skały), a Claude w `C:\Repos\MapaTur` na
+`perf/pano-streaming`. Katalogi robocze są rozłączne, ale **cztery zasoby są wspólne**: proces apki,
+katalog danych w AppData, RAM/VRAM i dysk.
+
+Reguła: przed uruchomieniem apki lub bake'u czytasz STATUS → zajmujesz (kto/od/cel + wiersz
+w dzienniku) → **po teście ZAMYKASZ apkę i ustawiasz WOLNE**. Nigdy nie zamykasz cudzej instancji
+i nie uruchamiasz drugiej obok. Trzy zmierzone powody: bake potrzebuje ~8 GB RAM i zamkniętej apki
+(2026-07-26 padł na `Unable to allocate pixels`); dwie instancje to 2×8 GB tablic det05 na karcie
+16 GB i wygląda to identycznie jak „detal się nie odświeża"; podmiana kafli / `_coverage_p16.txt` /
+`.opk` w trakcie cudzej sesji może sprawić, że drugi agent wczyta plik ucięty i **zniknie mu cała
+warstwa 5 cm** — a będzie to diagnozował jako własny błąd.
+
+**Stan na teraz: ZAJĘTE przez Codeksa.** Claude NIE uruchamia apki ani bake'u do zwolnienia; kroki
+1–6 poniżej (fetch, harmonizacja, merge, alfa, integracja, coverage) są bezpieczne i nie wymagają apki.
+
+## Decyzja zakresu — ZMIENIONA 2026-07-27 na PEŁNY ZAKRES (V1)
+
+Użytkownik zwolnił ~470 GB („zwolniłem ci miejsce do ściągania, jedziesz z kitem") — wolne na C:
+**162 → 632,9 GB**, więc jedyny powód odrzucenia V1 (dysk) zniknął. Fetch przełączony na pełny
+footprint: `--bbox 19.80,49.10,20.30,49.21` (V2 zatrzymany po ~102 tys. kafli; fetcher jest
+resumable, więc nic nie przepadło — pobrane kafle są pomijane).
+
+Pozostało do pobrania ≈ **508 tys. kafli**; przy zmierzonym tempie **~1,8 kafla/s** (spadek z 4,6 na
+pilocie — najpewniej throttling ZBGIS przy długiej sesji, maszyna NIE spała) to **~3 doby**.
+Workers zostaje 6: przy tej wartości pilot dał 0 błędów na 52 tys. kafli, a to obca usługa publiczna.
+
+### Poprzednia analiza (dla historii)
+
+**Wybrane wtedy V2, nie V1 — bo V1 NIE MIEŚCIŁ SIĘ NA DYSKU.** Zmierzone dry-runem (metoda trafiła co do
 sztuki na pilocie: przewidziane 52 395 = pobrane 52 395):
 
 | wariant | nowe kafle | źródła ×2 kopie | przyrost opk | dysk razem | werdykt |
