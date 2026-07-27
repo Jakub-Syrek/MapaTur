@@ -81,6 +81,9 @@ float edgeBlendFraction = ParsePositive(GetArgument("--edge-blend") ?? "0.15", "
 float interiorClearanceMeters = ParseNonNegative(
     GetArgument("--clearance") ?? "0.35",
     "--clearance");
+float maximumReliefMeters = ParsePositive(
+    GetArgument("--max-relief") ?? "3",
+    "--max-relief");
 if (edgeBlendFraction > 0.5f)
 {
     throw new ArgumentOutOfRangeException("--edge-blend", "Edge blend must not exceed 0.5.");
@@ -350,7 +353,8 @@ if (wallRmp1Root is not null || wallDemPath is not null)
                     atlasRows,
                     atlasBaseColorImageBytes: null,
                     meshClusterCellMeters: meshClusterCellMeters,
-                    internalWarpSeed: internalWarp ? unchecked(coverageSeed + (regionIndex * 104729)) : null);
+                    internalWarpSeed: internalWarp ? unchecked(coverageSeed + (regionIndex * 104729)) : null,
+                    maximumReliefMeters: maximumReliefMeters);
                 IReadOnlyList<ScannedRockMeshPage> regionPages = ScannedRockPageBaker.Bake(
                     conformedRegion,
                     pageMeters,
@@ -412,7 +416,8 @@ if (wallRmp1Root is not null || wallDemPath is not null)
                 atlasRows,
                 atlasBytes,
                 meshClusterCellMeters,
-                internalWarpSeed: internalWarp ? coverageSeed : null);
+                internalWarpSeed: internalWarp ? coverageSeed : null,
+                maximumReliefMeters: maximumReliefMeters);
             Console.WriteLine(
                 $"[rock-scan-bake] coverage: {patches.Count} real 3D scan instances, "
                 + $"{coverageWidthMeters:F1}x{coverageHeightMeters:F1} m, variants={sources.Count}, "
@@ -427,12 +432,15 @@ if (wallRmp1Root is not null || wallDemPath is not null)
             placement,
             wall,
             edgeBlendFraction,
-            interiorClearanceMeters);
+            interiorClearanceMeters,
+            maximumReliefMeters: maximumReliefMeters);
     }
 
     Console.WriteLine(
         $"[rock-scan-bake] conformed+welded to {wallPoints.Count:N0} {wallSource} samples, "
         + $"edge blend={edgeBlendFraction:P0}, clearance={interiorClearanceMeters:F2} m");
+    Console.WriteLine(
+        $"[rock-scan-bake] relief bounded to <= {maximumReliefMeters:F2} m from local DEM wall");
 }
 else if (coverageMode)
 {
@@ -516,6 +524,7 @@ try
         coverageOverlap = coverageMode ? coverageOverlap : (float?)null,
         coverageSeed = coverageMode ? coverageSeed : (int?)null,
         mirrorVariants,
+        internalWarp,
         variantCount = sources.Count,
         autoSteep,
         autoRegionCount,
@@ -837,5 +846,6 @@ static void PrintUsage()
           --anchor <lat;lon>      shared world anchor required by --wall-dem
           --edge-blend <0..0.5>  welded boundary fraction (default 0.15)
           --clearance <metres>    interior-only anti-z-fighting offset (default 0.35)
+          --max-relief <metres>   hard distance limit from local DEM wall (default 3)
         """);
 }

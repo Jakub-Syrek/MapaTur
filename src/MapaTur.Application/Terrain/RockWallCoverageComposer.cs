@@ -18,7 +18,8 @@ public static class RockWallCoverageComposer
         int atlasRows,
         byte[]? atlasBaseColorImageBytes,
         float meshClusterCellMeters = 0f,
-        int? internalWarpSeed = null)
+        int? internalWarpSeed = null,
+        float maximumReliefMeters = float.PositiveInfinity)
     {
         ArgumentNullException.ThrowIfNull(variants);
         ArgumentNullException.ThrowIfNull(patches);
@@ -72,7 +73,8 @@ public static class RockWallCoverageComposer
                 wall,
                 edgeBlendFraction,
                 interiorClearanceMeters,
-                sourceSeamWeights[patch.VariantIndex]);
+                sourceSeamWeights[patch.VariantIndex],
+                maximumReliefMeters);
             if (meshClusterCellMeters > 0f)
             {
                 conformed = PhotogrammetryRockMeshClusterer.Cluster(

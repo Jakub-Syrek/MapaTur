@@ -194,7 +194,8 @@ public static class RockWallSurfaceConformer
         RockWallSurfaceSampler wall,
         float edgeBlendFraction,
         float interiorClearanceMeters = 0f,
-        IReadOnlyList<byte>? precomputedSeamWeights = null)
+        IReadOnlyList<byte>? precomputedSeamWeights = null,
+        float maximumReliefMeters = float.PositiveInfinity)
     {
         ArgumentNullException.ThrowIfNull(fitted);
         ArgumentNullException.ThrowIfNull(wall);
@@ -206,6 +207,11 @@ public static class RockWallSurfaceConformer
         if (!float.IsFinite(interiorClearanceMeters) || interiorClearanceMeters < 0f)
         {
             throw new ArgumentOutOfRangeException(nameof(interiorClearanceMeters));
+        }
+
+        if (float.IsNaN(maximumReliefMeters) || maximumReliefMeters <= 0f)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumReliefMeters));
         }
 
         if (precomputedSeamWeights is not null
@@ -229,8 +235,11 @@ public static class RockWallSurfaceConformer
             float measuredDepth = MathF.Max(0f, Vector3.Dot(position, outward) - backingPlane);
             float edgeMask = seamWeights[i] / (float)byte.MaxValue;
             float wallCoordinate = wall.SamplePlaneCoordinate(position);
+            float boundedRelief = MathF.Min(
+                measuredDepth + interiorClearanceMeters,
+                maximumReliefMeters);
             float desiredCoordinate =
-                wallCoordinate + ((measuredDepth + interiorClearanceMeters) * edgeMask);
+                wallCoordinate + (boundedRelief * edgeMask);
             positions[i] = position + (outward * (desiredCoordinate - Vector3.Dot(position, outward)));
         }
 

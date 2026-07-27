@@ -84,6 +84,37 @@ public sealed class RockWallSurfaceConformerTests
     }
 
     [Fact]
+    public void should_limit_relief_to_a_few_metres_from_the_local_dem_wall()
+    {
+        // Arrange
+        PhotogrammetryRockPrimitive source = CreateFittedPatch();
+        var fitted = new PhotogrammetryRockPrimitive(
+            positions:
+            [
+                new Vector3(-1f, 1f, -1f),
+                new Vector3(1f, 1f, -1f),
+                new Vector3(1f, 1f, 1f),
+                new Vector3(-1f, 1f, 1f),
+                new Vector3(0f, 21f, 0f),
+            ],
+            source.Normals,
+            source.TexCoords,
+            source.Indices,
+            source.BaseColorImageBytes);
+
+        // Act
+        PhotogrammetryRockPrimitive conformed = RockWallSurfaceConformer.Conform(
+            fitted,
+            new RockScanPatchPlacement(Vector3.Zero, Vector3.UnitY, HeightMeters: 2f),
+            CreateWall(y: 2f),
+            edgeBlendFraction: 0.25f,
+            maximumReliefMeters: 3f);
+
+        // Assert
+        conformed.Positions[4].Y.Should().BeApproximately(5f, 0.0001f);
+    }
+
+    [Fact]
     public void should_emit_zero_to_one_seam_weight_from_outline_to_patch_interior()
     {
         // Arrange
