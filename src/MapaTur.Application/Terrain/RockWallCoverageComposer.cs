@@ -44,6 +44,11 @@ public static class RockWallCoverageComposer
         var texCoords = new List<Vector2>(vertexCapacity);
         var seamWeights = new List<byte>(vertexCapacity);
         var indices = new List<uint>(indexCapacity);
+        byte[][] sourceSeamWeights = variants
+            .Select(variant => RockWallSurfaceConformer.CalculateSourceSeamWeights(
+                variant,
+                edgeBlendFraction))
+            .ToArray();
         foreach (RockWallCoveragePatch patch in patches)
         {
             if ((uint)patch.VariantIndex >= (uint)variants.Count)
@@ -66,7 +71,8 @@ public static class RockWallCoverageComposer
                 patch.Placement,
                 wall,
                 edgeBlendFraction,
-                interiorClearanceMeters);
+                interiorClearanceMeters,
+                sourceSeamWeights[patch.VariantIndex]);
             if (meshClusterCellMeters > 0f)
             {
                 conformed = PhotogrammetryRockMeshClusterer.Cluster(

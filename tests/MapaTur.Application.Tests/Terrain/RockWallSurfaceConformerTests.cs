@@ -102,6 +102,27 @@ public sealed class RockWallSurfaceConformerTests
     }
 
     [Fact]
+    public void should_reuse_precomputed_outline_weights_without_changing_the_weld()
+    {
+        // Arrange
+        PhotogrammetryRockPrimitive fitted = CreateFittedPatch();
+        byte[] precomputed = RockWallSurfaceConformer.CalculateSourceSeamWeights(
+            CreateSourcePatch(),
+            edgeBlendFraction: 0.25f);
+
+        // Act
+        PhotogrammetryRockPrimitive conformed = RockWallSurfaceConformer.Conform(
+            fitted,
+            new RockScanPatchPlacement(Vector3.Zero, Vector3.UnitY, HeightMeters: 2f),
+            CreateWall(y: 2f),
+            edgeBlendFraction: 0.25f,
+            precomputedSeamWeights: precomputed);
+
+        // Assert
+        conformed.SeamWeights.Should().Equal(0, 0, 0, 0, 255);
+    }
+
+    [Fact]
     public void should_weld_concave_scan_outline_not_only_bounding_box()
     {
         // Arrange
@@ -205,6 +226,20 @@ public sealed class RockWallSurfaceConformerTests
             new Vector3(0f, 1f, 0f),
         ],
         normals: Enumerable.Repeat(Vector3.UnitY, 5).ToArray(),
+        texCoords: [Vector2.Zero, Vector2.UnitX, Vector2.One, Vector2.UnitY, new Vector2(0.5f)],
+        indices: [0, 1, 4, 1, 2, 4, 2, 3, 4, 3, 0, 4],
+        baseColorImageBytes: null);
+
+    private static PhotogrammetryRockPrimitive CreateSourcePatch() => new(
+        positions:
+        [
+            new Vector3(-1f, -1f, 0f),
+            new Vector3(1f, -1f, 0f),
+            new Vector3(1f, 1f, 0f),
+            new Vector3(-1f, 1f, 0f),
+            new Vector3(0f, 0f, 1f),
+        ],
+        normals: Enumerable.Repeat(Vector3.UnitZ, 5).ToArray(),
         texCoords: [Vector2.Zero, Vector2.UnitX, Vector2.One, Vector2.UnitY, new Vector2(0.5f)],
         indices: [0, 1, 4, 1, 2, 4, 2, 3, 4, 3, 0, 4],
         baseColorImageBytes: null);

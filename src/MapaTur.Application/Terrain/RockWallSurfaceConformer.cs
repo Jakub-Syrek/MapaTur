@@ -71,8 +71,9 @@ public sealed class RockWallSurfaceSampler
         float u = Vector3.Dot(worldPosition, tangent);
         float v = Vector3.Dot(worldPosition, up);
         (int centerU, int centerV) = CellFor(u, v);
-        var candidates = new List<(Sample Sample, float DistanceSquared)>();
-        for (int radius = 0; radius <= 3 && candidates.Count < 8; radius++)
+        Span<Candidate> nearest = stackalloc Candidate[8];
+        int nearestCount = 0;
+        for (int radius = 0; radius <= 3 && nearestCount < nearest.Length; radius++)
         {
             for (int dv = -radius; dv <= radius; dv++)
             {
@@ -92,41 +93,83 @@ public sealed class RockWallSurfaceSampler
                     {
                         float deltaU = sample.U - u;
                         float deltaV = sample.V - v;
-                        candidates.Add((sample, (deltaU * deltaU) + (deltaV * deltaV)));
+                        InsertNearest(
+                            nearest,
+                            ref nearestCount,
+                            new Candidate(sample, (deltaU * deltaU) + (deltaV * deltaV)));
                     }
                 }
             }
         }
 
-        if (candidates.Count == 0)
+        if (nearestCount == 0)
         {
-            candidates.AddRange(allSamples.Select(sample =>
+            foreach (Sample sample in allSamples)
             {
                 float deltaU = sample.U - u;
                 float deltaV = sample.V - v;
-                return (sample, (deltaU * deltaU) + (deltaV * deltaV));
-            }));
+                InsertNearest(
+                    nearest,
+                    ref nearestCount,
+                    new Candidate(sample, (deltaU * deltaU) + (deltaV * deltaV)));
+            }
         }
 
-        (Sample Sample, float DistanceSquared)[] nearest = candidates
-            .OrderBy(candidate => candidate.DistanceSquared)
-            .Take(8)
-            .ToArray();
-        float front = nearest.Max(candidate => candidate.Sample.Depth);
-        (Sample Sample, float DistanceSquared)[] frontLayer = nearest
-            .Where(candidate => candidate.Sample.Depth >= front - 2f)
-            .Take(4)
-            .ToArray();
+        float front = float.NegativeInfinity;
+        for (int index = 0; index < nearestCount; index++)
+        {
+            front = MathF.Max(front, nearest[index].Sample.Depth);
+        }
+
         float weighted = 0f;
         float totalWeight = 0f;
-        foreach ((Sample sample, float distanceSquared) in frontLayer)
+        int frontLayerCount = 0;
+        for (int index = 0; index < nearestCount && frontLayerCount < 4; index++)
         {
-            float weight = 1f / MathF.Max(0.0001f, distanceSquared);
-            weighted += sample.Depth * weight;
+            Candidate candidate = nearest[index];
+            if (candidate.Sample.Depth < front - 2f)
+            {
+                continue;
+            }
+
+            float weight = 1f / MathF.Max(0.0001f, candidate.DistanceSquared);
+            weighted += candidate.Sample.Depth * weight;
             totalWeight += weight;
+            frontLayerCount++;
         }
 
         return weighted / totalWeight;
+    }
+
+    private static void InsertNearest(
+        Span<Candidate> nearest,
+        ref int count,
+        Candidate candidate)
+    {
+        int insertionIndex;
+        if (count < nearest.Length)
+        {
+            insertionIndex = count;
+            count++;
+        }
+        else
+        {
+            if (candidate.DistanceSquared >= nearest[^1].DistanceSquared)
+            {
+                return;
+            }
+
+            insertionIndex = nearest.Length - 1;
+        }
+
+        while (insertionIndex > 0
+            && candidate.DistanceSquared < nearest[insertionIndex - 1].DistanceSquared)
+        {
+            nearest[insertionIndex] = nearest[insertionIndex - 1];
+            insertionIndex--;
+        }
+
+        nearest[insertionIndex] = candidate;
     }
 
     private (int U, int V) CellFor(float u, float v) =>
@@ -135,6 +178,7 @@ public sealed class RockWallSurfaceSampler
     private static bool IsFinite(Vector3 value) =>
         float.IsFinite(value.X) && float.IsFinite(value.Y) && float.IsFinite(value.Z);
 
+    private readonly record struct Candidate(Sample Sample, float DistanceSquared);
     private readonly record struct Sample(float U, float V, float Depth);
 }
 
@@ -149,7 +193,8 @@ public static class RockWallSurfaceConformer
         RockScanPatchPlacement placement,
         RockWallSurfaceSampler wall,
         float edgeBlendFraction,
-        float interiorClearanceMeters = 0f)
+        float interiorClearanceMeters = 0f,
+        IReadOnlyList<byte>? precomputedSeamWeights = null)
     {
         ArgumentNullException.ThrowIfNull(fitted);
         ArgumentNullException.ThrowIfNull(wall);
@@ -163,28 +208,26 @@ public static class RockWallSurfaceConformer
             throw new ArgumentOutOfRangeException(nameof(interiorClearanceMeters));
         }
 
+        if (precomputedSeamWeights is not null
+            && precomputedSeamWeights.Count != fitted.Positions.Length)
+        {
+            throw new ArgumentException(
+                "Precomputed seam weights must match the fitted vertex count.",
+                nameof(precomputedSeamWeights));
+        }
+
         Vector3 outward = Vector3.Normalize(placement.OutwardNormal);
         Vector3 up = Vector3.Normalize(Vector3.UnitZ - (outward * Vector3.Dot(Vector3.UnitZ, outward)));
         Vector3 tangent = Vector3.Normalize(Vector3.Cross(up, outward));
-        float[] tangentCoordinates = fitted.Positions.Select(position => Vector3.Dot(position, tangent)).ToArray();
-        float[] upCoordinates = fitted.Positions.Select(position => Vector3.Dot(position, up)).ToArray();
-        float minTangent = tangentCoordinates.Min();
-        float maxTangent = tangentCoordinates.Max();
-        float minUp = upCoordinates.Min();
-        float maxUp = upCoordinates.Max();
-        float blendMeters = MathF.Max(
-            0.001f,
-            MathF.Min(maxTangent - minTangent, maxUp - minUp) * edgeBlendFraction);
-        float[] distanceToBoundary = CalculateBoundaryDistances(fitted.Positions, fitted.Indices);
+        byte[] seamWeights = precomputedSeamWeights?.ToArray()
+            ?? CalculateWorldSeamWeights(fitted, tangent, up, edgeBlendFraction);
         float backingPlane = Vector3.Dot(placement.Center, outward);
         var positions = new Vector3[fitted.Positions.Length];
-        var seamWeights = new byte[fitted.Positions.Length];
         for (int i = 0; i < positions.Length; i++)
         {
             Vector3 position = fitted.Positions[i];
             float measuredDepth = MathF.Max(0f, Vector3.Dot(position, outward) - backingPlane);
-            float edgeMask = SmoothStep(Math.Clamp(distanceToBoundary[i] / blendMeters, 0f, 1f));
-            seamWeights[i] = (byte)MathF.Round(edgeMask * byte.MaxValue);
+            float edgeMask = seamWeights[i] / (float)byte.MaxValue;
             float wallCoordinate = wall.SamplePlaneCoordinate(position);
             float desiredCoordinate =
                 wallCoordinate + ((measuredDepth + interiorClearanceMeters) * edgeMask);
@@ -199,6 +242,66 @@ public static class RockWallSurfaceConformer
             fitted.Indices.ToArray(),
             fitted.BaseColorImageBytes,
             seamWeights);
+    }
+
+    /// <summary>
+    /// Calculates the topology-aware outer-outline blend once in the scan's local XY frame. The result can be
+    /// reused by every fitted, warped instance because those operations preserve vertex and triangle ordering.
+    /// </summary>
+    public static byte[] CalculateSourceSeamWeights(
+        PhotogrammetryRockPrimitive source,
+        float edgeBlendFraction)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ValidateEdgeBlend(edgeBlendFraction);
+        float minX = source.Positions.Min(position => position.X);
+        float maxX = source.Positions.Max(position => position.X);
+        float minY = source.Positions.Min(position => position.Y);
+        float maxY = source.Positions.Max(position => position.Y);
+        float blendDistance = MathF.Max(
+            0.001f,
+            MathF.Min(maxX - minX, maxY - minY) * edgeBlendFraction);
+        return ToSeamWeights(
+            CalculateBoundaryDistances(source.Positions, source.Indices),
+            blendDistance);
+    }
+
+    private static byte[] CalculateWorldSeamWeights(
+        PhotogrammetryRockPrimitive fitted,
+        Vector3 tangent,
+        Vector3 up,
+        float edgeBlendFraction)
+    {
+        float[] tangentCoordinates = fitted.Positions
+            .Select(position => Vector3.Dot(position, tangent))
+            .ToArray();
+        float[] upCoordinates = fitted.Positions
+            .Select(position => Vector3.Dot(position, up))
+            .ToArray();
+        float blendDistance = MathF.Max(
+            0.001f,
+            MathF.Min(
+                tangentCoordinates.Max() - tangentCoordinates.Min(),
+                upCoordinates.Max() - upCoordinates.Min()) * edgeBlendFraction);
+        return ToSeamWeights(
+            CalculateBoundaryDistances(fitted.Positions, fitted.Indices),
+            blendDistance);
+    }
+
+    private static byte[] ToSeamWeights(
+        IReadOnlyList<float> distances,
+        float blendDistance) =>
+        distances
+            .Select(distance => (byte)MathF.Round(
+                SmoothStep(Math.Clamp(distance / blendDistance, 0f, 1f)) * byte.MaxValue))
+            .ToArray();
+
+    private static void ValidateEdgeBlend(float edgeBlendFraction)
+    {
+        if (!float.IsFinite(edgeBlendFraction) || edgeBlendFraction <= 0f || edgeBlendFraction > 0.5f)
+        {
+            throw new ArgumentOutOfRangeException(nameof(edgeBlendFraction));
+        }
     }
 
     private static Vector3[] RecalculateNormals(
