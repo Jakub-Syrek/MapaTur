@@ -67,4 +67,33 @@ public sealed class ScannedRockPageBakerTests
         // Assert
         BinaryPrimitives.ReadUInt16LittleEndian(page.VertexData.AsSpan(16, 2)).Should().Be(37);
     }
+
+    [Fact]
+    public void should_pack_offline_seam_weight_for_edge_feathering()
+    {
+        // Arrange
+        var primitive = new PhotogrammetryRockPrimitive(
+            positions:
+            [
+                new Vector3(1f, 1f, 10f),
+                new Vector3(2f, 1f, 10f),
+                new Vector3(1f, 2f, 11f),
+            ],
+            normals: [Vector3.UnitY, Vector3.UnitY, Vector3.UnitY],
+            texCoords: [Vector2.Zero, Vector2.UnitX, Vector2.One],
+            indices: [0, 1, 2],
+            baseColorImageBytes: null,
+            seamWeights: [0, 127, 255]);
+
+        // Act
+        ScannedRockMeshPage page = ScannedRockPageBaker.Bake(
+            primitive,
+            pageSizeMeters: 16f,
+            lod: 0,
+            geometricError: 0f,
+            materialPageId: 1).Single();
+
+        // Assert
+        page.VertexData[15].Should().Be(0);
+    }
 }

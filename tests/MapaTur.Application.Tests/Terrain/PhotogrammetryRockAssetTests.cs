@@ -78,4 +78,63 @@ public sealed class PhotogrammetryRockAssetTests
         // Assert
         fitted.TexCoords.Should().Equal(expectedUvs);
     }
+
+    [Fact]
+    public void should_limit_outward_relief_independently_from_patch_height()
+    {
+        // Arrange
+        var primitive = new PhotogrammetryRockPrimitive(
+            positions:
+            [
+                new Vector3(-1f, -1f, 0f),
+                new Vector3(1f, -1f, 0f),
+                new Vector3(0f, 1f, 2f),
+            ],
+            normals: [Vector3.UnitZ, Vector3.UnitZ, Vector3.UnitZ],
+            texCoords: [Vector2.Zero, Vector2.UnitX, Vector2.UnitY],
+            indices: [0u, 1u, 2u],
+            baseColorImageBytes: null);
+        var placement = new RockScanPatchPlacement(
+            Center: Vector3.Zero,
+            OutwardNormal: Vector3.UnitY,
+            HeightMeters: 18f,
+            DepthMeters: 4.5f);
+
+        // Act
+        PhotogrammetryRockPrimitive fitted = RockScanPatchFitter.Fit(primitive, placement);
+
+        // Assert
+        fitted.Positions.Max(position => Vector3.Dot(position, Vector3.UnitY))
+            .Should().BeApproximately(4.5f, 0.0001f);
+    }
+
+    [Fact]
+    public void should_roll_scan_geometry_inside_the_wall_tangent_plane()
+    {
+        // Arrange
+        var primitive = new PhotogrammetryRockPrimitive(
+            positions:
+            [
+                new Vector3(0f, -1f, 0f),
+                new Vector3(0f, 1f, 0f),
+                new Vector3(1f, 0f, 0f),
+            ],
+            normals: [Vector3.UnitZ, Vector3.UnitZ, Vector3.UnitZ],
+            texCoords: [Vector2.Zero, Vector2.UnitY, Vector2.UnitX],
+            indices: [0u, 1u, 2u],
+            baseColorImageBytes: null);
+        var placement = new RockScanPatchPlacement(
+            Center: Vector3.Zero,
+            OutwardNormal: Vector3.UnitY,
+            HeightMeters: 2f,
+            DepthMeters: 0f,
+            RollRadians: MathF.PI * 0.5f);
+
+        // Act
+        PhotogrammetryRockPrimitive fitted = RockScanPatchFitter.Fit(primitive, placement);
+
+        // Assert
+        MathF.Abs(fitted.Positions[1].X - fitted.Positions[0].X)
+            .Should().BeApproximately(2f, 0.0001f);
+    }
 }

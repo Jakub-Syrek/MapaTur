@@ -1222,6 +1222,10 @@ public partial class Terrain3DView : ContentView
             && float.TryParse(parts[5], System.Globalization.NumberStyles.Float, ci, out float pitch))
         {
             Camera.Target = new Vector3(tx, ty, tz);
+            // The production orbit stays at a conservative 150 m minimum, but deterministic material QA
+            // must be able to inspect metre-scale geometry. Only an explicit harness pose may lower the
+            // controller clamp, and only as far as the requested positive distance.
+            controller.MinDistance = MathF.Min(controller.MinDistance, MathF.Max(1f, dist));
             Camera.Distance = dist;
             Camera.AzimuthRadians = az;
             Camera.PitchRadians = pitch;
@@ -5703,7 +5707,7 @@ public partial class Terrain3DView : ContentView
         // AND in dragon flight: the chase camera sits ~13 m behind the dragon, far under the orbit
         // controller's MinDistance (150 m), so this clamp silently shoved the eye out to 150 m every frame
         // ("smok zawsze daleko"). The dragon keeps its own 30 m swoop clearance above terrain.
-        if (!walkActive && !dragonActive)
+        if (!walkActive && !dragonActive && string.IsNullOrEmpty(HarnessStartPose))
         {
             controller.ClampToBounds();
         }
@@ -5948,6 +5952,7 @@ public partial class Terrain3DView : ContentView
             && float.TryParse(parts[5], System.Globalization.NumberStyles.Float, ci, out float pitch))
         {
             Camera.Target = new Vector3(tx, ty, tz);
+            controller.MinDistance = MathF.Min(controller.MinDistance, MathF.Max(1f, dist));
             Camera.Distance = dist;
             Camera.AzimuthRadians = az;
             Camera.PitchRadians = pitch;
@@ -8501,6 +8506,8 @@ public partial class Terrain3DView : ContentView
         try
         {
             glRenderer ??= new Services.Terrain3DGlRenderer();
+            glRenderer.SetPhotogrammetricRockRoot(ResolvePhotogrammetricRockRoot());
+            glRenderer.PhotogrammetricRockEnabled = RockMaterialEnabled;
             glRenderer.OrthoEnabled = ShowOrtho; // premium menu "Ortofoto" toggle (textures stay resident)
             // "2D map" mode fade: 1 = full ortho (normal 3D), 0 = pure hypsometric (top-down map view).
             float mapT = mapMode.Blend;
@@ -8674,6 +8681,18 @@ public partial class Terrain3DView : ContentView
             glRenderer = null;
             return false;
         }
+    }
+
+    private static string ResolvePhotogrammetricRockRoot()
+    {
+        string? developmentOverride = Environment.GetEnvironmentVariable("MAPATUR_ROCK_RMP2_ROOT");
+        return !string.IsNullOrWhiteSpace(developmentOverride)
+            ? developmentOverride
+            : System.IO.Path.Combine(
+                Microsoft.Maui.Storage.FileSystem.AppDataDirectory,
+                "dem",
+                "rock-photogrammetry",
+                "tatry");
     }
 
     // Decodes the ortho tiles to tightly-packed top-row-first RGBA8 (row 0 = north, matching the mesh UVs)

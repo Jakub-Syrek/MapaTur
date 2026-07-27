@@ -15,7 +15,8 @@ public sealed class PhotogrammetryRockPrimitive
         Vector3[] normals,
         Vector2[] texCoords,
         uint[] indices,
-        byte[]? baseColorImageBytes)
+        byte[]? baseColorImageBytes,
+        byte[]? seamWeights = null)
     {
         ArgumentNullException.ThrowIfNull(positions);
         ArgumentNullException.ThrowIfNull(normals);
@@ -31,6 +32,11 @@ public sealed class PhotogrammetryRockPrimitive
             throw new ArgumentException("Rock vertex attributes must have identical counts.");
         }
 
+        if (seamWeights is not null && seamWeights.Length != positions.Length)
+        {
+            throw new ArgumentException("Rock seam weights must match the vertex count.", nameof(seamWeights));
+        }
+
         if (indices.Length == 0 || indices.Length % 3 != 0 || indices.Any(index => index >= positions.Length))
         {
             throw new ArgumentException("Rock indices must contain valid complete triangles.", nameof(indices));
@@ -41,6 +47,7 @@ public sealed class PhotogrammetryRockPrimitive
         TexCoords = texCoords;
         Indices = indices;
         BaseColorImageBytes = baseColorImageBytes;
+        SeamWeights = seamWeights ?? Enumerable.Repeat(byte.MaxValue, positions.Length).ToArray();
     }
 
     public Vector3[] Positions { get; }
@@ -48,6 +55,7 @@ public sealed class PhotogrammetryRockPrimitive
     public Vector2[] TexCoords { get; }
     public uint[] Indices { get; }
     public byte[]? BaseColorImageBytes { get; }
+    public byte[] SeamWeights { get; }
 }
 
 /// <summary>CPU representation used only by the offline rock baker and its preview tool.</summary>
@@ -129,7 +137,9 @@ public sealed class PhotogrammetryRockAsset
 public readonly record struct RockScanPatchPlacement(
     Vector3 Center,
     Vector3 OutwardNormal,
-    float HeightMeters);
+    float HeightMeters,
+    float DepthMeters = 0f,
+    float RollRadians = 0f);
 
 /// <summary>
 /// Fits a real scan to a steep terrain plane using a rigid local frame and uniform scale. Unlike heightfield
@@ -147,6 +157,16 @@ public static class RockScanPatchFitter
             throw new ArgumentOutOfRangeException(nameof(placement), "Patch height must be finite and positive.");
         }
 
+        if (!float.IsFinite(placement.DepthMeters) || placement.DepthMeters < 0f)
+        {
+            throw new ArgumentOutOfRangeException(nameof(placement), "Patch depth must be finite and non-negative.");
+        }
+
+        if (!float.IsFinite(placement.RollRadians))
+        {
+            throw new ArgumentOutOfRangeException(nameof(placement), "Patch roll must be finite.");
+        }
+
         if (!IsFinite(placement.OutwardNormal) || placement.OutwardNormal.LengthSquared() < 0.25f)
         {
             throw new ArgumentOutOfRangeException(nameof(placement), "Patch normal must be finite and non-zero.");
@@ -161,11 +181,22 @@ public static class RockScanPatchFitter
 
         up = Vector3.Normalize(up);
         Vector3 tangent = Vector3.Normalize(Vector3.Cross(up, outward));
+        if (placement.RollRadians != 0f)
+        {
+            float cosine = MathF.Cos(placement.RollRadians);
+            float sine = MathF.Sin(placement.RollRadians);
+            Vector3 unrolledTangent = tangent;
+            Vector3 unrolledUp = up;
+            tangent = (unrolledTangent * cosine) + (unrolledUp * sine);
+            up = (-unrolledTangent * sine) + (unrolledUp * cosine);
+        }
+
         float minX = primitive.Positions.Min(position => position.X);
         float maxX = primitive.Positions.Max(position => position.X);
         float minY = primitive.Positions.Min(position => position.Y);
         float maxY = primitive.Positions.Max(position => position.Y);
         float minZ = primitive.Positions.Min(position => position.Z);
+        float maxZ = primitive.Positions.Max(position => position.Z);
         float sourceHeight = maxY - minY;
         if (sourceHeight <= 1e-5f)
         {
@@ -173,6 +204,15 @@ public static class RockScanPatchFitter
         }
 
         float scale = placement.HeightMeters / sourceHeight;
+        float sourceDepth = maxZ - minZ;
+        if (placement.DepthMeters > 0f && sourceDepth <= 1e-5f)
+        {
+            throw new ArgumentException("The scan has no outward depth extent.", nameof(primitive));
+        }
+
+        float outwardScale = placement.DepthMeters > 0f
+            ? placement.DepthMeters / sourceDepth
+            : scale;
         float centerX = (minX + maxX) * 0.5f;
         float centerY = (minY + maxY) * 0.5f;
         var positions = new Vector3[primitive.Positions.Length];
@@ -183,11 +223,13 @@ public static class RockScanPatchFitter
             positions[i] = placement.Center
                 + (tangent * ((source.X - centerX) * scale))
                 + (up * ((source.Y - centerY) * scale))
-                + (outward * ((source.Z - minZ) * scale));
+                + (outward * ((source.Z - minZ) * outwardScale));
 
             Vector3 sourceNormal = primitive.Normals[i];
             Vector3 transformed =
-                (tangent * sourceNormal.X) + (up * sourceNormal.Y) + (outward * sourceNormal.Z);
+                (tangent * (sourceNormal.X / scale))
+                + (up * (sourceNormal.Y / scale))
+                + (outward * (sourceNormal.Z / outwardScale));
             normals[i] = transformed.LengthSquared() > 1e-10f
                 ? Vector3.Normalize(transformed)
                 : outward;
@@ -198,7 +240,8 @@ public static class RockScanPatchFitter
             normals,
             primitive.TexCoords.ToArray(),
             primitive.Indices.ToArray(),
-            primitive.BaseColorImageBytes);
+            primitive.BaseColorImageBytes,
+            primitive.SeamWeights.ToArray());
     }
 
     private static bool IsFinite(Vector3 value) =>

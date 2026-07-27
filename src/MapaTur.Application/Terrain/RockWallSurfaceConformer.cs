@@ -148,13 +148,19 @@ public static class RockWallSurfaceConformer
         PhotogrammetryRockPrimitive fitted,
         RockScanPatchPlacement placement,
         RockWallSurfaceSampler wall,
-        float edgeBlendFraction)
+        float edgeBlendFraction,
+        float interiorClearanceMeters = 0f)
     {
         ArgumentNullException.ThrowIfNull(fitted);
         ArgumentNullException.ThrowIfNull(wall);
         if (!float.IsFinite(edgeBlendFraction) || edgeBlendFraction <= 0f || edgeBlendFraction > 0.5f)
         {
             throw new ArgumentOutOfRangeException(nameof(edgeBlendFraction));
+        }
+
+        if (!float.IsFinite(interiorClearanceMeters) || interiorClearanceMeters < 0f)
+        {
+            throw new ArgumentOutOfRangeException(nameof(interiorClearanceMeters));
         }
 
         Vector3 outward = Vector3.Normalize(placement.OutwardNormal);
@@ -172,26 +178,33 @@ public static class RockWallSurfaceConformer
         float[] distanceToBoundary = CalculateBoundaryDistances(fitted.Positions, fitted.Indices);
         float backingPlane = Vector3.Dot(placement.Center, outward);
         var positions = new Vector3[fitted.Positions.Length];
+        var seamWeights = new byte[fitted.Positions.Length];
         for (int i = 0; i < positions.Length; i++)
         {
             Vector3 position = fitted.Positions[i];
             float measuredDepth = MathF.Max(0f, Vector3.Dot(position, outward) - backingPlane);
             float edgeMask = SmoothStep(Math.Clamp(distanceToBoundary[i] / blendMeters, 0f, 1f));
+            seamWeights[i] = (byte)MathF.Round(edgeMask * byte.MaxValue);
             float wallCoordinate = wall.SamplePlaneCoordinate(position);
-            float desiredCoordinate = wallCoordinate + (measuredDepth * edgeMask);
+            float desiredCoordinate =
+                wallCoordinate + ((measuredDepth + interiorClearanceMeters) * edgeMask);
             positions[i] = position + (outward * (desiredCoordinate - Vector3.Dot(position, outward)));
         }
 
-        Vector3[] normals = RecalculateNormals(positions, fitted.Indices);
+        Vector3[] normals = RecalculateNormals(positions, fitted.Indices, outward);
         return new PhotogrammetryRockPrimitive(
             positions,
             normals,
             fitted.TexCoords.ToArray(),
             fitted.Indices.ToArray(),
-            fitted.BaseColorImageBytes);
+            fitted.BaseColorImageBytes,
+            seamWeights);
     }
 
-    private static Vector3[] RecalculateNormals(IReadOnlyList<Vector3> positions, IReadOnlyList<uint> indices)
+    private static Vector3[] RecalculateNormals(
+        IReadOnlyList<Vector3> positions,
+        IReadOnlyList<uint> indices,
+        Vector3 outward)
     {
         var normals = new Vector3[positions.Count];
         for (int i = 0; i < indices.Count; i += 3)
@@ -209,7 +222,11 @@ public static class RockWallSurfaceConformer
         {
             normals[i] = normals[i].LengthSquared() > 1e-10f
                 ? Vector3.Normalize(normals[i])
-                : Vector3.UnitZ;
+                : outward;
+            if (Vector3.Dot(normals[i], outward) < 0f)
+            {
+                normals[i] = -normals[i];
+            }
         }
 
         return normals;
@@ -219,15 +236,39 @@ public static class RockWallSurfaceConformer
         IReadOnlyList<Vector3> positions,
         IReadOnlyList<uint> indices)
     {
+        const float weldToleranceMeters = 0.001f;
+        var weldedByPosition = new Dictionary<(int X, int Y, int Z), int>();
+        var weldedPositions = new List<Vector3>();
+        var weldedForVertex = new int[positions.Count];
+        for (int vertex = 0; vertex < positions.Count; vertex++)
+        {
+            Vector3 position = positions[vertex];
+            var key = (
+                (int)MathF.Round(position.X / weldToleranceMeters),
+                (int)MathF.Round(position.Y / weldToleranceMeters),
+                (int)MathF.Round(position.Z / weldToleranceMeters));
+            if (!weldedByPosition.TryGetValue(key, out int welded))
+            {
+                welded = weldedPositions.Count;
+                weldedByPosition.Add(key, welded);
+                weldedPositions.Add(position);
+            }
+
+            weldedForVertex[vertex] = welded;
+        }
+
         var edgeCounts = new Dictionary<(int A, int B), int>();
         for (int i = 0; i < indices.Count; i += 3)
         {
-            CountEdge(checked((int)indices[i]), checked((int)indices[i + 1]), edgeCounts);
-            CountEdge(checked((int)indices[i + 1]), checked((int)indices[i + 2]), edgeCounts);
-            CountEdge(checked((int)indices[i + 2]), checked((int)indices[i]), edgeCounts);
+            int a = weldedForVertex[checked((int)indices[i])];
+            int b = weldedForVertex[checked((int)indices[i + 1])];
+            int c = weldedForVertex[checked((int)indices[i + 2])];
+            CountEdge(a, b, edgeCounts);
+            CountEdge(b, c, edgeCounts);
+            CountEdge(c, a, edgeCounts);
         }
 
-        var adjacency = new List<(int Vertex, float Distance)>[positions.Count];
+        var adjacency = new List<(int Vertex, float Distance)>[weldedPositions.Count];
         for (int i = 0; i < adjacency.Length; i++)
         {
             adjacency[i] = [];
@@ -235,32 +276,77 @@ public static class RockWallSurfaceConformer
 
         foreach ((int a, int b) in edgeCounts.Keys)
         {
-            float distance = Vector3.Distance(positions[a], positions[b]);
+            float distance = Vector3.Distance(weldedPositions[a], weldedPositions[b]);
             adjacency[a].Add((b, distance));
             adjacency[b].Add((a, distance));
         }
 
-        var distances = Enumerable.Repeat(float.PositiveInfinity, positions.Count).ToArray();
+        var weldedDistances = Enumerable.Repeat(float.PositiveInfinity, weldedPositions.Count).ToArray();
         var queue = new PriorityQueue<int, float>();
-        foreach (KeyValuePair<(int A, int B), int> edge in edgeCounts)
+        (int A, int B)[] boundaryEdges = edgeCounts
+            .Where(edge => edge.Value == 1)
+            .Select(edge => edge.Key)
+            .ToArray();
+        if (boundaryEdges.Length == 0)
         {
-            if (edge.Value != 1)
+            return Enumerable.Repeat(float.PositiveInfinity, positions.Count).ToArray();
+        }
+
+        var boundaryAdjacency = new Dictionary<int, List<int>>();
+        foreach ((int a, int b) in boundaryEdges)
+        {
+            AddBoundaryNeighbour(a, b);
+            AddBoundaryNeighbour(b, a);
+        }
+
+        var visitedBoundary = new HashSet<int>();
+        HashSet<int>? outerBoundary = null;
+        float outerPerimeter = float.NegativeInfinity;
+        foreach (int start in boundaryAdjacency.Keys)
+        {
+            if (!visitedBoundary.Add(start))
             {
                 continue;
             }
 
-            Seed(edge.Key.A);
-            Seed(edge.Key.B);
+            var component = new HashSet<int> { start };
+            var pending = new Stack<int>();
+            pending.Push(start);
+            while (pending.TryPop(out int vertex))
+            {
+                foreach (int neighbour in boundaryAdjacency[vertex])
+                {
+                    if (visitedBoundary.Add(neighbour))
+                    {
+                        component.Add(neighbour);
+                        pending.Push(neighbour);
+                    }
+                }
+            }
+
+            float perimeter = boundaryEdges
+                .Where(edge => component.Contains(edge.A) && component.Contains(edge.B))
+                .Sum(edge => Vector3.Distance(weldedPositions[edge.A], weldedPositions[edge.B]));
+            if (perimeter > outerPerimeter)
+            {
+                outerPerimeter = perimeter;
+                outerBoundary = component;
+            }
+        }
+
+        foreach (int vertex in outerBoundary!)
+        {
+            Seed(vertex);
         }
 
         if (queue.Count == 0)
         {
-            return distances;
+            return Enumerable.Repeat(float.PositiveInfinity, positions.Count).ToArray();
         }
 
         while (queue.TryDequeue(out int vertex, out float queuedDistance))
         {
-            if (queuedDistance > distances[vertex])
+            if (queuedDistance > weldedDistances[vertex])
             {
                 continue;
             }
@@ -268,27 +354,38 @@ public static class RockWallSurfaceConformer
             foreach ((int neighbour, float edgeDistance) in adjacency[vertex])
             {
                 float candidate = queuedDistance + edgeDistance;
-                if (candidate >= distances[neighbour])
+                if (candidate >= weldedDistances[neighbour])
                 {
                     continue;
                 }
 
-                distances[neighbour] = candidate;
+                weldedDistances[neighbour] = candidate;
                 queue.Enqueue(neighbour, candidate);
             }
         }
 
-        return distances;
+        return weldedForVertex.Select(welded => weldedDistances[welded]).ToArray();
 
         void Seed(int vertex)
         {
-            if (distances[vertex] == 0f)
+            if (weldedDistances[vertex] == 0f)
             {
                 return;
             }
 
-            distances[vertex] = 0f;
+            weldedDistances[vertex] = 0f;
             queue.Enqueue(vertex, 0f);
+        }
+
+        void AddBoundaryNeighbour(int vertex, int neighbour)
+        {
+            if (!boundaryAdjacency.TryGetValue(vertex, out List<int>? neighbours))
+            {
+                neighbours = [];
+                boundaryAdjacency.Add(vertex, neighbours);
+            }
+
+            neighbours.Add(neighbour);
         }
     }
 
@@ -297,6 +394,11 @@ public static class RockWallSurfaceConformer
         int b,
         IDictionary<(int A, int B), int> counts)
     {
+        if (a == b)
+        {
+            return;
+        }
+
         (int A, int B) edge = a < b ? (a, b) : (b, a);
         counts.TryGetValue(edge, out int count);
         counts[edge] = count + 1;

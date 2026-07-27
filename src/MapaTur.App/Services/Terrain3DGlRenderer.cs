@@ -24,6 +24,10 @@ namespace MapaTur.App.Services;
 /// </summary>
 internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 {
+    // Kept in its own renderer so the photogrammetric path adds only narrow integration points here. This
+    // materially reduces merge conflicts with the parallel ortho-streaming work in this already-large class.
+    private readonly PhotogrammetricRockGlLayer photogrammetricRock = new();
+
     // Terrain vertex shader: carries the UNSHADED base colour, world-space normal, UV and world-space
     // position to the fragment stage. Position is needed so the fragment can compute an exponential-fog
     // (aerial-perspective) blend against the camera position without re-deriving it from depth.
@@ -3461,6 +3465,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// </summary>
     public float RockStrength { get; set; } = 1f;
 
+    /// <summary>Enables prebaked RMP2 geometry when a catalog is present; missing/not-ready pages stay DEM.</summary>
+    public bool PhotogrammetricRockEnabled { get; set; } = true;
+
+    public void SetPhotogrammetricRockRoot(string? root) =>
+        photogrammetricRock.Configure(
+            root,
+            Math.Clamp(OrthoVramBudgetBytes / 32, 128L << 20, 512L << 20));
+
     /// <summary>
     /// When <c>true</c>, the terrain base albedo is painted by elevation-zone biomes (meadow/hala, scree/piargi,
     /// snow, ice) from elevation + slope + aspect — the unit-tested <see cref="BiomeClassifier"/> mirrored in the
@@ -6010,6 +6022,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             StreamOrthoTextures(gl, mvp, tiles, camera.Position);
         }
 
+        // RMP2 residency runs before every geometry pass: it only harvests completed worker I/O and uploads
+        // at most two pages, so the render thread never opens a file or produces mesh/material data.
+        photogrammetricRock.PrepareFrame(
+            gl,
+            camera,
+            vpWidth,
+            vpHeight,
+            PhotogrammetricRockEnabled);
+
         // Cascaded Shadow Maps depth pass (Krok 5): render terrain depth from the sun's POV into the cascade
         // shadow maps before the sky/terrain passes. Self-contained — restores the bound FBO + viewport.
         double dbgShadowStart = dbgTileSwapFrame ? dbgSwapWatch.Elapsed.TotalMilliseconds : 0;
@@ -6562,6 +6583,22 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 gl.DrawElements(PrimitiveType.Triangles, (uint)entry.Value.IndexCount, DrawElementsType.UnsignedInt, (void*)0);
             }
 
+            if (PhotogrammetricRockEnabled)
+            {
+                photogrammetricRock.DrawMain(
+                    gl,
+                    reflMvp,
+                    camera,
+                    light,
+                    ambient,
+                    sunCol,
+                    skyAmbient,
+                    fogColor,
+                    fogDensity,
+                    sceneDepthTexture: 0);
+                gl.UseProgram(program);
+            }
+
             // Restore the scene framebuffer + viewport + the main MVP, and reset the reflection-pass flag.
             gl.BindFramebuffer(FramebufferTarget.Framebuffer, useMsaa ? msaaFbo : presentFbo);
             gl.Viewport(0, 0, (uint)vpWidth, (uint)vpHeight);
@@ -6770,6 +6807,46 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
             gl.BindVertexArray(tile.Vao);
             gl.DrawElements(PrimitiveType.Triangles, (uint)tile.IndexCount, DrawElementsType.UnsignedInt, (void*)0);
+        }
+
+        if (PhotogrammetricRockEnabled)
+        {
+            uint rockSceneDepthTexture = 0;
+            uint rockSceneFbo = useMsaa ? msaaFbo : presentFbo;
+            if (photogrammetricRock.HasDrawablePages
+                && ResolveSceneDepthToGhost(gl, rockSceneFbo, width, height))
+            {
+                rockSceneDepthTexture = ghostDepthTex;
+            }
+
+            photogrammetricRock.DrawMain(
+                gl,
+                mvp,
+                camera,
+                light,
+                ambient,
+                sunCol,
+                skyAmbient,
+                fogColor,
+                fogDensity,
+                rockSceneDepthTexture);
+            if (rockSceneDepthTexture != 0)
+            {
+                // RMP2 writes replacement depth after the terrain snapshot. Later soft-particle and ghost-line
+                // consumers must resolve again so their depth texture also includes the rock geometry.
+                ghostDepthFrameValid = false;
+            }
+
+            // The following cleanup uniforms belong to the terrain program, not the RMP2 program.
+            gl.UseProgram(program);
+            if (reflectionDrawn)
+            {
+                // RMP2 temporarily owns unit 1 for the resolved terrain depth. Restore the lake reflection
+                // binding expected by the shared terrain/water program before later water draws.
+                gl.ActiveTexture(TextureUnit.Texture1);
+                gl.BindTexture(TextureTarget.Texture2D, reflectionColorTex);
+                gl.ActiveTexture(TextureUnit.Texture0);
+            }
         }
         GpuEnd(gl); // Terrain
         gl.Uniform1(useDet25Location, 0); // det25 is per-tile terrain only — don't leak it into lake/forest draws
@@ -8266,6 +8343,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
                 g.BindVertexArray(entry.Value.Vao);
                 g.DrawElements(PrimitiveType.Triangles, (uint)entry.Value.IndexCount, DrawElementsType.UnsignedInt, (void*)0);
+            }
+
+            if (PhotogrammetricRockEnabled)
+            {
+                photogrammetricRock.DrawShadow(g, lightVp);
+                // The isolated layer owns a separate quantized-position shader. Restore the terrain depth
+                // program before the next cascade uploads its matrix and draws regular terrain.
+                g.UseProgram(shadowDepthProgram);
             }
             sliceNear = sliceFar;
         }
@@ -13888,9 +13973,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     {
         if (gl is null)
         {
+            photogrammetricRock.Dispose(null);
             return;
         }
 
+        photogrammetricRock.Dispose(gl);
         ReleaseTiles(gl);
         DeleteLine(gl, ref trailLines);
         DeleteLine(gl, ref trailLinesBlack);

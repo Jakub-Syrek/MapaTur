@@ -57,4 +57,41 @@ public sealed class ScannedRockPageStoreTests
         // Assert
         act.Should().Throw<ArgumentException>();
     }
+
+    [Fact]
+    public void should_read_only_fixed_header_when_indexing_rmp2_page()
+    {
+        // Arrange
+        var expected = new ScannedRockMeshPage(
+            lod: 2,
+            pageX: -3,
+            pageY: 8,
+            worldMin: new Vector3(-48f, 128f, 1800f),
+            worldExtent: new Vector3(16f, 16f, 90f),
+            geometricError: 0.08f,
+            materialPageId: 4,
+            vertexData: new byte[ScannedRockMeshPage.VertexStrideBytes * 3],
+            indices: [0, 1, 2]);
+        using var stream = new MemoryStream();
+        ScannedRockMeshPageStore.Write(stream, expected);
+        stream.Position = 0;
+
+        // Act
+        ScannedRockMeshPageHeader header = ScannedRockMeshPageStore.ReadHeader(stream);
+
+        // Assert
+        stream.Position.Should().Be(ScannedRockMeshPageStore.HeaderBytes);
+        header.Should().BeEquivalentTo(new
+        {
+            expected.Lod,
+            expected.PageX,
+            expected.PageY,
+            expected.WorldMin,
+            expected.WorldExtent,
+            expected.GeometricError,
+            expected.MaterialPageId,
+            expected.VertexCount,
+            expected.IndexCount,
+        });
+    }
 }

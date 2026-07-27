@@ -95,6 +95,7 @@ public static class ScannedRockPageBaker
                 source.Positions[sourceIndex],
                 source.Normals[sourceIndex],
                 source.TexCoords[sourceIndex],
+                source.SeamWeights[sourceIndex],
                 minimum,
                 extent,
                 materialPageId);
@@ -142,6 +143,7 @@ public static class ScannedRockPageBaker
         Vector3 position,
         Vector3 normal,
         Vector2 uv,
+        byte seamWeight,
         Vector3 minimum,
         Vector3 extent,
         ushort materialPageId)
@@ -155,7 +157,7 @@ public static class ScannedRockPageBaker
         BinaryPrimitives.WriteUInt16LittleEndian(destination[10..], QuantizeUnorm(uv.X, 0f, 1f));
         BinaryPrimitives.WriteUInt16LittleEndian(destination[12..], QuantizeUnorm(uv.Y, 0f, 1f));
         destination[14] = byte.MaxValue;
-        destination[15] = byte.MaxValue;
+        destination[15] = seamWeight;
         BinaryPrimitives.WriteUInt16LittleEndian(destination[16..], materialPageId);
         destination[18] = 0;
         destination[19] = 0;
