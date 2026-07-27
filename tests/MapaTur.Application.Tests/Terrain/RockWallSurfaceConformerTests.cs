@@ -46,6 +46,36 @@ public sealed class RockWallSurfaceConformerTests
         conformed.Positions[4].Y.Should().BeApproximately(3f, 0.0001f);
     }
 
+    [Fact]
+    public void should_weld_concave_scan_outline_not_only_bounding_box()
+    {
+        // Arrange
+        var fitted = new PhotogrammetryRockPrimitive(
+            positions:
+            [
+                new Vector3(-1f, 1f, -1f),
+                new Vector3(1f, 1f, -1f),
+                new Vector3(1f, 1f, 1f),
+                new Vector3(0f, 1f, 0f),
+                new Vector3(-1f, 1f, 1f),
+            ],
+            normals: Enumerable.Repeat(Vector3.UnitY, 5).ToArray(),
+            texCoords: Enumerable.Repeat(Vector2.Zero, 5).ToArray(),
+            indices: [0, 1, 3, 1, 2, 3, 0, 3, 4],
+            baseColorImageBytes: null);
+        RockWallSurfaceSampler wall = CreateWall(y: 2f);
+
+        // Act
+        PhotogrammetryRockPrimitive conformed = RockWallSurfaceConformer.Conform(
+            fitted,
+            new RockScanPatchPlacement(Vector3.Zero, Vector3.UnitY, HeightMeters: 2f),
+            wall,
+            edgeBlendFraction: 0.25f);
+
+        // Assert
+        conformed.Positions[3].Y.Should().BeApproximately(2f, 0.0001f);
+    }
+
     private static PhotogrammetryRockPrimitive CreateFittedPatch() => new(
         positions:
         [

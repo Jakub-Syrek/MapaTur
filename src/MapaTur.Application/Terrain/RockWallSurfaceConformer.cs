@@ -166,22 +166,17 @@ public static class RockWallSurfaceConformer
         float maxTangent = tangentCoordinates.Max();
         float minUp = upCoordinates.Min();
         float maxUp = upCoordinates.Max();
-        float blendTangent = MathF.Max(0.001f, (maxTangent - minTangent) * edgeBlendFraction);
-        float blendUp = MathF.Max(0.001f, (maxUp - minUp) * edgeBlendFraction);
+        float blendMeters = MathF.Max(
+            0.001f,
+            MathF.Min(maxTangent - minTangent, maxUp - minUp) * edgeBlendFraction);
+        float[] distanceToBoundary = CalculateBoundaryDistances(fitted.Positions, fitted.Indices);
         float backingPlane = Vector3.Dot(placement.Center, outward);
         var positions = new Vector3[fitted.Positions.Length];
         for (int i = 0; i < positions.Length; i++)
         {
             Vector3 position = fitted.Positions[i];
             float measuredDepth = MathF.Max(0f, Vector3.Dot(position, outward) - backingPlane);
-            float edgeDistance = MathF.Min(
-                MathF.Min(
-                    (tangentCoordinates[i] - minTangent) / blendTangent,
-                    (maxTangent - tangentCoordinates[i]) / blendTangent),
-                MathF.Min(
-                    (upCoordinates[i] - minUp) / blendUp,
-                    (maxUp - upCoordinates[i]) / blendUp));
-            float edgeMask = SmoothStep(Math.Clamp(edgeDistance, 0f, 1f));
+            float edgeMask = SmoothStep(Math.Clamp(distanceToBoundary[i] / blendMeters, 0f, 1f));
             float wallCoordinate = wall.SamplePlaneCoordinate(position);
             float desiredCoordinate = wallCoordinate + (measuredDepth * edgeMask);
             positions[i] = position + (outward * (desiredCoordinate - Vector3.Dot(position, outward)));
@@ -218,6 +213,93 @@ public static class RockWallSurfaceConformer
         }
 
         return normals;
+    }
+
+    private static float[] CalculateBoundaryDistances(
+        IReadOnlyList<Vector3> positions,
+        IReadOnlyList<uint> indices)
+    {
+        var edgeCounts = new Dictionary<(int A, int B), int>();
+        for (int i = 0; i < indices.Count; i += 3)
+        {
+            CountEdge(checked((int)indices[i]), checked((int)indices[i + 1]), edgeCounts);
+            CountEdge(checked((int)indices[i + 1]), checked((int)indices[i + 2]), edgeCounts);
+            CountEdge(checked((int)indices[i + 2]), checked((int)indices[i]), edgeCounts);
+        }
+
+        var adjacency = new List<(int Vertex, float Distance)>[positions.Count];
+        for (int i = 0; i < adjacency.Length; i++)
+        {
+            adjacency[i] = [];
+        }
+
+        foreach ((int a, int b) in edgeCounts.Keys)
+        {
+            float distance = Vector3.Distance(positions[a], positions[b]);
+            adjacency[a].Add((b, distance));
+            adjacency[b].Add((a, distance));
+        }
+
+        var distances = Enumerable.Repeat(float.PositiveInfinity, positions.Count).ToArray();
+        var queue = new PriorityQueue<int, float>();
+        foreach (KeyValuePair<(int A, int B), int> edge in edgeCounts)
+        {
+            if (edge.Value != 1)
+            {
+                continue;
+            }
+
+            Seed(edge.Key.A);
+            Seed(edge.Key.B);
+        }
+
+        if (queue.Count == 0)
+        {
+            return distances;
+        }
+
+        while (queue.TryDequeue(out int vertex, out float queuedDistance))
+        {
+            if (queuedDistance > distances[vertex])
+            {
+                continue;
+            }
+
+            foreach ((int neighbour, float edgeDistance) in adjacency[vertex])
+            {
+                float candidate = queuedDistance + edgeDistance;
+                if (candidate >= distances[neighbour])
+                {
+                    continue;
+                }
+
+                distances[neighbour] = candidate;
+                queue.Enqueue(neighbour, candidate);
+            }
+        }
+
+        return distances;
+
+        void Seed(int vertex)
+        {
+            if (distances[vertex] == 0f)
+            {
+                return;
+            }
+
+            distances[vertex] = 0f;
+            queue.Enqueue(vertex, 0f);
+        }
+    }
+
+    private static void CountEdge(
+        int a,
+        int b,
+        IDictionary<(int A, int B), int> counts)
+    {
+        (int A, int B) edge = a < b ? (a, b) : (b, a);
+        counts.TryGetValue(edge, out int count);
+        counts[edge] = count + 1;
     }
 
     private static float SmoothStep(float value) => value * value * (3f - (2f * value));
