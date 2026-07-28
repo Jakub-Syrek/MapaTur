@@ -62,6 +62,48 @@ public sealed class RockAlbedoHarmonizerTests
             .Should().Equal(10, 140, 20, 150, 30, 160);
     }
 
+    [Fact]
+    public void should_match_scan_contrast_to_the_reference_pattern()
+    {
+        // Arrange
+        byte[][] tiles =
+        [
+            PixelStrip(55, 90, 125),
+            PixelStrip(20, 90, 160),
+            PixelStrip(75, 90, 105),
+        ];
+
+        // Act
+        IReadOnlyList<byte[]> result = RockAlbedoHarmonizer.Harmonize(tiles);
+
+        // Assert
+        result
+            .Select(tile => tile[8] - tile[0])
+            .Should()
+            .OnlyContain(range => Math.Abs(range - 70) <= 2);
+    }
+
+    [Fact]
+    public void should_remove_scan_specific_colour_casts_using_the_reference_rock()
+    {
+        // Arrange
+        byte[][] tiles =
+        [
+            [70, 74, 78, 255, 100, 104, 108, 255],
+            [145, 85, 35, 255, 175, 115, 65, 255],
+        ];
+
+        // Act
+        IReadOnlyList<byte[]> result = RockAlbedoHarmonizer.Harmonize(tiles);
+
+        // Assert
+        ChannelMeans(result[1]).Should().BeEquivalentTo(
+            ChannelMeans(result[0]),
+            options => options.Using<double>(
+                context => context.Subject.Should().BeApproximately(context.Expectation, 1.1))
+                .WhenTypeIs<double>());
+    }
+
     private static byte[] PixelStrip(params byte[] luminances) =>
         luminances.SelectMany(value => new[] { value, value, value, byte.MaxValue }).ToArray();
 
@@ -71,4 +113,11 @@ public sealed class RockAlbedoHarmonizerTests
                 (0.2126 * rgba[index * 4])
                 + (0.7152 * rgba[(index * 4) + 1])
                 + (0.0722 * rgba[(index * 4) + 2]));
+
+    private static double[] ChannelMeans(byte[] rgba) =>
+    [
+        Enumerable.Range(0, rgba.Length / 4).Average(index => rgba[index * 4]),
+        Enumerable.Range(0, rgba.Length / 4).Average(index => rgba[(index * 4) + 1]),
+        Enumerable.Range(0, rgba.Length / 4).Average(index => rgba[(index * 4) + 2]),
+    ];
 }

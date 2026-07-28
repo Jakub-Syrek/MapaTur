@@ -1,8 +1,8 @@
 namespace MapaTur.Application.Terrain;
 
 /// <summary>
-/// Removes exposure differences between independently captured photogrammetry scans before they enter one
-/// atlas. It applies one luminance offset per scan, preserving all local contrast, colour variation and alpha.
+/// Matches independently captured scans to the first, product-approved reference pattern before they enter
+/// one atlas. Exposure and contrast are harmonized while local texture, colour differences and alpha remain.
 /// </summary>
 public static class RockAlbedoHarmonizer
 {
@@ -15,21 +15,38 @@ public static class RockAlbedoHarmonizer
             throw new ArgumentException("Albedo tiles must contain complete RGBA pixels.", nameof(rgbaTiles));
         }
 
-        double[] means = rgbaTiles.Select(MeanLuminance).Order().ToArray();
-        double target = means.Length % 2 == 1
-            ? means[means.Length / 2]
-            : (means[(means.Length / 2) - 1] + means[means.Length / 2]) * 0.5;
+        LuminanceStatistics target = CalculateStatistics(rgbaTiles[0]);
         var result = new byte[rgbaTiles.Count][];
         for (int tileIndex = 0; tileIndex < rgbaTiles.Count; tileIndex++)
         {
             byte[] source = rgbaTiles[tileIndex];
             byte[] destination = source.ToArray();
-            double offset = target - MeanLuminance(source);
+            LuminanceStatistics statistics = CalculateStatistics(source);
+            double contrastGain = statistics.StandardDeviation > 0.5
+                ? Math.Clamp(target.StandardDeviation / statistics.StandardDeviation, 0.4, 2.5)
+                : 1.0;
             for (int pixel = 0; pixel < destination.Length; pixel += 4)
             {
-                destination[pixel] = Shift(source[pixel], offset);
-                destination[pixel + 1] = Shift(source[pixel + 1], offset);
-                destination[pixel + 2] = Shift(source[pixel + 2], offset);
+                if (source[pixel + 3] == 0)
+                {
+                    continue;
+                }
+
+                destination[pixel] = Match(
+                    source[pixel],
+                    statistics.RedMean,
+                    target.RedMean,
+                    contrastGain);
+                destination[pixel + 1] = Match(
+                    source[pixel + 1],
+                    statistics.GreenMean,
+                    target.GreenMean,
+                    contrastGain);
+                destination[pixel + 2] = Match(
+                    source[pixel + 2],
+                    statistics.BlueMean,
+                    target.BlueMean,
+                    contrastGain);
             }
 
             result[tileIndex] = destination;
@@ -38,9 +55,13 @@ public static class RockAlbedoHarmonizer
         return result;
     }
 
-    private static double MeanLuminance(byte[] rgba)
+    private static LuminanceStatistics CalculateStatistics(byte[] rgba)
     {
         double sum = 0;
+        double squaredSum = 0;
+        double redSum = 0;
+        double greenSum = 0;
+        double blueSum = 0;
         int count = 0;
         for (int pixel = 0; pixel < rgba.Length; pixel += 4)
         {
@@ -49,9 +70,12 @@ public static class RockAlbedoHarmonizer
                 continue;
             }
 
-            sum += (0.2126 * rgba[pixel])
-                + (0.7152 * rgba[pixel + 1])
-                + (0.0722 * rgba[pixel + 2]);
+            double luminance = Luminance(rgba, pixel);
+            sum += luminance;
+            squaredSum += luminance * luminance;
+            redSum += rgba[pixel];
+            greenSum += rgba[pixel + 1];
+            blueSum += rgba[pixel + 2];
             count++;
         }
 
@@ -60,9 +84,31 @@ public static class RockAlbedoHarmonizer
             throw new ArgumentException("Albedo tile contains no visible pixels.", nameof(rgba));
         }
 
-        return sum / count;
+        double mean = sum / count;
+        double variance = Math.Max(0.0, (squaredSum / count) - (mean * mean));
+        return new LuminanceStatistics(
+            mean,
+            Math.Sqrt(variance),
+            redSum / count,
+            greenSum / count,
+            blueSum / count);
     }
 
-    private static byte Shift(byte value, double offset) =>
-        (byte)Math.Clamp(Math.Round(value + offset), byte.MinValue, byte.MaxValue);
+    private static double Luminance(byte[] rgba, int pixel) =>
+        (0.2126 * rgba[pixel])
+        + (0.7152 * rgba[pixel + 1])
+        + (0.0722 * rgba[pixel + 2]);
+
+    private static byte Match(byte value, double sourceMean, double targetMean, double contrastGain) =>
+        (byte)Math.Clamp(
+            Math.Round(targetMean + ((value - sourceMean) * contrastGain)),
+            byte.MinValue,
+            byte.MaxValue);
+
+    private readonly record struct LuminanceStatistics(
+        double Mean,
+        double StandardDeviation,
+        double RedMean,
+        double GreenMean,
+        double BlueMean);
 }

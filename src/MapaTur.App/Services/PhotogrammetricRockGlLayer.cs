@@ -17,6 +17,7 @@ namespace MapaTur.App.Services;
 internal sealed unsafe class PhotogrammetricRockGlLayer
 {
     private const uint GlCompressedRgbaS3tcDxt1 = 0x83F1;
+    private const ushort ContinuousWorldMaterialPageId = 20;
     private const int GeometryUploadsPerFrame = 2;
     private const int MaterialUploadsPerFrame = 1;
 
@@ -56,6 +57,7 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
         "in vec3 vWorldPos;\n" +
         "in float vSeam;\n" +
         "uniform sampler2D uAlbedo;\n" +
+        "uniform float uWorldProjected;\n" +
         "uniform vec3 uLightDir;\n" +
         "uniform float uAmbient;\n" +
         "uniform vec3 uSunColor;\n" +
@@ -68,6 +70,19 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
         "uniform vec2 uDepthNearFar;\n" +
         "uniform float uMaxBehindTerrain;\n" +
         "out vec4 fragColor;\n" +
+        "vec2 mirrorUv(vec2 value){ vec2 m=mod(value,2.0); return 1.0-abs(m-1.0); }\n" +
+        "vec3 worldPattern(vec2 p,vec2 offset){\n" +
+        "  mat2 r=mat2(0.819152,-0.573576,0.573576,0.819152);\n" +
+        "  vec3 broad=texture(uAlbedo,mirrorUv((p/43.0)+offset)).rgb;\n" +
+        "  return broad;\n" +
+        "}\n" +
+        "vec3 worldTriplanar(vec3 p,vec3 n){\n" +
+        "  vec3 w=pow(abs(n),vec3(5.0)); w/=max(w.x+w.y+w.z,0.0001);\n" +
+        "  vec3 x=worldPattern(p.yz,vec2(0.11,0.47));\n" +
+        "  vec3 y=worldPattern(p.xz,vec2(0.53,0.19));\n" +
+        "  vec3 z=worldPattern(p.xy,vec2(0.79,0.31));\n" +
+        "  return (x*w.x)+(y*w.y)+(z*w.z);\n" +
+        "}\n" +
         "void main(){\n" +
         "  if(uSceneDepthOn>0.5){\n" +
         "    vec2 duv=gl_FragCoord.xy/vec2(textureSize(uSceneDepth,0));\n" +
@@ -80,7 +95,7 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
         "  }\n" +
         "  vec3 n=normalize(vNormal);\n" +
         "  float ndl=max(dot(n,normalize(uLightDir)),0.0);\n" +
-        "  vec3 albedo=texture(uAlbedo,vUv).rgb;\n" +
+        "  vec3 albedo=uWorldProjected>0.5?worldTriplanar(vWorldPos,n):texture(uAlbedo,vUv).rgb;\n" +
         "  float skyVis=0.55+(0.45*clamp(n.z,0.0,1.0));\n" +
         "  vec3 lightSum=(uSkyAmbient*uAmbient*skyVis*vAo)+(uSunColor*ndl);\n" +
         "  lightSum=max(lightSum,uSkyAmbient*(0.42+(0.23*clamp(n.z,0.0,1.0))));\n" +
@@ -88,8 +103,11 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
         "  float d=length(vWorldPos-uCameraPos);\n" +
         "  float fog=1.0-exp(-uFogDensity*d);\n" +
         "  float seamAlpha=smoothstep(0.02,0.98,vSeam);\n" +
-        "  if(seamAlpha<=0.001){ discard; }\n" +
-        "  fragColor=vec4(mix(lit,uFogColor,clamp(fog,0.0,1.0)),seamAlpha);\n" +
+        "  vec3 viewDir=normalize(uCameraPos-vWorldPos);\n" +
+        "  float grazingAlpha=smoothstep(0.06,0.22,abs(dot(n,viewDir)));\n" +
+        "  float rockAlpha=seamAlpha*grazingAlpha;\n" +
+        "  if(rockAlpha<=0.001){ discard; }\n" +
+        "  fragColor=vec4(mix(lit,uFogColor,clamp(fog,0.0,1.0)),rockAlpha);\n" +
         "}\n";
 
     private const string ShadowVertexShaderSource =
@@ -133,6 +151,7 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
     private int worldMinLocation = -1;
     private int worldExtentLocation = -1;
     private int albedoLocation = -1;
+    private int worldProjectedLocation = -1;
     private int lightLocation = -1;
     private int ambientLocation = -1;
     private int sunColorLocation = -1;
@@ -337,6 +356,9 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
                 boundTexture = material.Texture;
             }
 
+            g.Uniform1(
+                worldProjectedLocation,
+                page.MaterialPageId == ContinuousWorldMaterialPageId ? 1f : 0f);
             g.Uniform3(worldMinLocation, page.WorldMin.X, page.WorldMin.Y, page.WorldMin.Z);
             g.Uniform3(worldExtentLocation, page.WorldExtent.X, page.WorldExtent.Y, page.WorldExtent.Z);
             g.BindVertexArray(page.Vao);
@@ -679,6 +701,7 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
         worldMinLocation = g.GetUniformLocation(program, "uWorldMin");
         worldExtentLocation = g.GetUniformLocation(program, "uWorldExtent");
         albedoLocation = g.GetUniformLocation(program, "uAlbedo");
+        worldProjectedLocation = g.GetUniformLocation(program, "uWorldProjected");
         lightLocation = g.GetUniformLocation(program, "uLightDir");
         ambientLocation = g.GetUniformLocation(program, "uAmbient");
         sunColorLocation = g.GetUniformLocation(program, "uSunColor");

@@ -145,34 +145,29 @@ public sealed class RockScanReliefSampler
     private float SampleProjection(Vector2 projectedMeters, uint seed)
     {
         Vector2 uv = projectedMeters * inverseFeatureSize;
-        int x0 = (int)MathF.Floor(uv.X);
-        int y0 = (int)MathF.Floor(uv.Y);
-        float tx = Smooth(uv.X - x0);
-        float ty = Smooth(uv.Y - y0);
-        float w00 = (1f - tx) * (1f - ty);
-        float w10 = tx * (1f - ty);
-        float w01 = (1f - tx) * ty;
-        float w11 = tx * ty;
+        float warpU = FractalValueNoise((uv * 0.29f) + new Vector2(13.7f, -8.3f), seed ^ 0x9E3779B9u);
+        float warpV = FractalValueNoise((uv * 0.23f) + new Vector2(-5.9f, 17.1f), seed ^ 0x85EBCA6Bu);
+        var warp = new Vector2(warpU, warpV);
+        ReadOnlySpan<float> scales = [0.23f, 0.41f, 0.67f, 1.03f, 1.61f];
+        ReadOnlySpan<float> weights = [0.43f, 0.27f, 0.16f, 0.09f, 0.05f];
+        float centered = 0f;
+        float weightEnergySquared = 0f;
+        for (int layer = 0; layer < scales.Length; layer++)
+        {
+            uint hash = Hash(layer, unchecked((int)seed), seed ^ ((uint)layer * 0x27d4eb2du));
+            RockHeightMap map = scans[(int)((hash + (uint)layer) % (uint)scans.Length)];
+            float angle = ((hash & 0xffffu) / 65535f) * MathF.Tau;
+            Vector2 layerPosition =
+                (uv * scales[layer]) + (warp * (0.21f + (layer * 0.037f)));
+            Vector2 transformed = Rotate(layerPosition.X, layerPosition.Y, angle);
+            float offsetU = ((hash >> 12) & 1023u) / 1024f;
+            float offsetV = ((hash >> 22) & 1023u) / 1024f;
+            float sample = map.SampleWrapped(transformed.X + offsetU, transformed.Y + offsetV) - map.Mean;
+            centered += sample * weights[layer];
+            weightEnergySquared += weights[layer] * weights[layer];
+        }
 
-        float centered =
-            (w00 * SampleVariant(uv, x0, y0, seed))
-            + (w10 * SampleVariant(uv, x0 + 1, y0, seed))
-            + (w01 * SampleVariant(uv, x0, y0 + 1, seed))
-            + (w11 * SampleVariant(uv, x0 + 1, y0 + 1, seed));
-        float weightEnergy = MathF.Sqrt(
-            (w00 * w00) + (w10 * w10) + (w01 * w01) + (w11 * w11));
-        return centered / weightEnergy;
-    }
-
-    private float SampleVariant(Vector2 uv, int cellX, int cellY, uint seed)
-    {
-        uint hash = Hash(cellX, cellY, seed);
-        RockHeightMap map = scans[(int)(hash % (uint)scans.Length)];
-        int orientation = (int)((hash >> 8) & 7u);
-        float offsetU = ((hash >> 12) & 1023u) / 1024f;
-        float offsetV = ((hash >> 22) & 1023u) / 1024f;
-        Vector2 transformed = Transform(uv, orientation);
-        return map.SampleWrapped(transformed.X + offsetU, transformed.Y + offsetV) - map.Mean;
+        return centered / MathF.Sqrt(weightEnergySquared);
     }
 
     private static Vector2 Rotate(float u, float v, float angle)
@@ -182,19 +177,44 @@ public sealed class RockScanReliefSampler
         return new Vector2((u * cosine) - (v * sine), (u * sine) + (v * cosine));
     }
 
-    private static Vector2 Transform(Vector2 value, int orientation) => orientation switch
-    {
-        0 => value,
-        1 => new Vector2(-value.Y, value.X),
-        2 => -value,
-        3 => new Vector2(value.Y, -value.X),
-        4 => new Vector2(-value.X, value.Y),
-        5 => new Vector2(value.X, -value.Y),
-        6 => new Vector2(value.Y, value.X),
-        _ => new Vector2(-value.Y, -value.X),
-    };
-
     private static float Smooth(float value) => value * value * (3f - (2f * value));
+
+    private static float FractalValueNoise(Vector2 position, uint seed)
+    {
+        float value = 0f;
+        float amplitude = 0.5714286f;
+        for (int octave = 0; octave < 3; octave++)
+        {
+            value += ValueNoise(position, seed + ((uint)octave * 0x9e3779b9u)) * amplitude;
+            position = new Vector2(
+                (position.X * 2.03f) - (position.Y * 0.17f) + 1.31f,
+                (position.X * 0.13f) + (position.Y * 2.07f) - 2.17f);
+            amplitude *= 0.5f;
+        }
+
+        return value;
+    }
+
+    private static float ValueNoise(Vector2 position, uint seed)
+    {
+        int x0 = (int)MathF.Floor(position.X);
+        int y0 = (int)MathF.Floor(position.Y);
+        float tx = Smooth(position.X - x0);
+        float ty = Smooth(position.Y - y0);
+        float a = HashSigned(x0, y0, seed);
+        float b = HashSigned(x0 + 1, y0, seed);
+        float c = HashSigned(x0, y0 + 1, seed);
+        float d = HashSigned(x0 + 1, y0 + 1, seed);
+        float top = a + ((b - a) * tx);
+        float bottom = c + ((d - c) * tx);
+        return top + ((bottom - top) * ty);
+    }
+
+    private static float HashSigned(int x, int y, uint seed)
+    {
+        uint hash = Hash(x, y, seed);
+        return ((hash & 0x00ffffffu) / 8_388_607.5f) - 1f;
+    }
 
     private static uint Hash(int x, int y, uint seed)
     {
