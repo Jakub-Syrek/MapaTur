@@ -149,6 +149,31 @@ public sealed class ContinuousScannedRockSurfaceBuilderTests
             position.X > 19f && MathF.Abs(position.Z) < 0.001f);
     }
 
+    [Fact]
+    public void should_only_fade_mesh_boundaries_that_are_on_the_outer_region_edge()
+    {
+        // Arrange
+        IReadOnlyList<RockMeshTriangle> strip = CreateGridWall(size: 8);
+
+        // Act
+        PhotogrammetryRockPrimitive result = ContinuousScannedRockSurfaceBuilder.Build(
+            strip,
+            static (_, _) => new RockSurfaceSample(0f, 255, 0),
+            sampleAmplitudeMeters: 1f,
+            maximumReliefMeters: 1f,
+            maximumEdgeMeters: 1.5f,
+            seed: 612,
+            baseColorImageBytes: null,
+            fadeBoundaryVertex: position => position.Y < 0.01f);
+
+        // Assert
+        result.Positions
+            .Select((position, index) => (position, weight: result.SeamWeights[index]))
+            .Where(vertex => vertex.position.Y > 7.5f)
+            .Should()
+            .OnlyContain(vertex => vertex.weight > 240);
+    }
+
     private static IReadOnlyList<RockMeshTriangle> CreateWall()
     {
         var a = new Vector3(0f, 0f, 0f);

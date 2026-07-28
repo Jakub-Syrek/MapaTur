@@ -92,4 +92,29 @@ public sealed class RockScanReliefSamplerTests
         // Assert
         MathF.Abs(after - before).Should().BeLessThan(0.01f);
     }
+
+    [Fact]
+    public void should_put_most_geometric_energy_into_broad_rock_forms()
+    {
+        // Arrange
+        var sampler = new RockScanReliefSampler(Scans, featureSizeMeters: 4f, amplitudeMeters: 1f);
+        var normal = Vector3.UnitX;
+        Vector3[] positions = Enumerable.Range(0, 120)
+            .Select(index => new Vector3(0f, index * 0.71f, index * -0.37f))
+            .ToArray();
+
+        // Act
+        float closeDifference = positions
+            .Average(position => MathF.Abs(
+                sampler.Sample(position + new Vector3(0f, 0.25f, 0.1f), normal).DisplacementMeters
+                - sampler.Sample(position, normal).DisplacementMeters));
+        float broadDifference = positions
+            .Average(position => MathF.Abs(
+                sampler.Sample(position + new Vector3(0f, 8f, 3f), normal).DisplacementMeters
+                - sampler.Sample(position, normal).DisplacementMeters));
+
+        // Assert
+        closeDifference.Should().BeLessThan(broadDifference * 0.08f);
+    }
+
 }

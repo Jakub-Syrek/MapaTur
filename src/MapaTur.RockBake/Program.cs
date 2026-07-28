@@ -10,11 +10,11 @@ using MapaTur.Infrastructure.Terrain;
 
 using SkiaSharp;
 
-string? demPath = GetArgument("--dem");
+string? demArgument = GetArgument("--dem");
 string? baseDemPath = GetArgument("--base-dem");
 string? heightArgument = GetArgument("--height");
 string? outputRoot = GetArgument("--out");
-if (demPath is null || baseDemPath is null || heightArgument is null || outputRoot is null)
+if (demArgument is null || baseDemPath is null || heightArgument is null || outputRoot is null)
 {
     PrintUsage();
     return 2;
@@ -43,8 +43,14 @@ byte[] lods = (GetArgument("--lod") ?? "0,1,2")
     .ToArray();
 string[] heightPaths = heightArgument
     .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+string[] demPaths = demArgument
+    .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
-EnsureFile(demPath);
+foreach (string path in demPaths)
+{
+    EnsureFile(path);
+}
+
 EnsureFile(baseDemPath);
 foreach (string path in heightPaths)
 {
@@ -66,51 +72,36 @@ if (continuousRmp2 && scanPaths.Length < 2)
     throw new ArgumentException("--continuous-rmp2 requires at least two glTF paths in --scan.");
 }
 
+if (!continuousRmp2 && demPaths.Length != 1)
+{
+    throw new ArgumentException("Multiple --dem paths require --continuous-rmp2.");
+}
+
 if (Directory.Exists(outputRoot))
 {
     throw new IOException($"Output already exists: {outputRoot}");
 }
 
 var stopwatch = Stopwatch.StartNew();
-Console.WriteLine($"[rock-bake] DEM: {demPath}");
+Console.WriteLine($"[rock-bake] DEM tiles: {demPaths.Length}");
 Console.WriteLine($"[rock-bake] scans: {heightPaths.Length}, feature={featureMeters:F2} m, amplitude={amplitudeMeters:F2} m");
 
-BakedDemTile tile;
-using (FileStream stream = File.OpenRead(demPath))
+BakedDemTile[] tiles = new BakedDemTile[demPaths.Length];
+for (int index = 0; index < demPaths.Length; index++)
 {
-    tile = BakedDemTileStore.Read(stream);
+    using FileStream stream = File.OpenRead(demPaths[index]);
+    tiles[index] = BakedDemTileStore.Read(stream);
 }
 
 DemRaster baseDem = DemRasterReader.Read(baseDemPath);
 var anchor = new GeoPoint(
     (baseDem.North + baseDem.South) * 0.5,
     (baseDem.East + baseDem.West) * 0.5);
-DemRaster tileRaster = BakedTileMeshBuilder.AsRaster(tile);
-TerrainMesh3D mesh = TerrainMesh3D.Build(
-    tileRaster,
-    new TerrainMeshOptions
-    {
-        VerticalExaggeration = 1f,
-        SkirtDepthMeters = 0f,
-        NormalApronCells = 0,
-    },
-    anchor);
-
-var sourceTriangles = new List<RockMeshTriangle>(mesh.Indices.Length / 3);
-for (int i = 0; i < mesh.Indices.Length; i += 3)
-{
-    sourceTriangles.Add(new RockMeshTriangle(
-        mesh.Vertices[mesh.Indices[i]],
-        mesh.Vertices[mesh.Indices[i + 1]],
-        mesh.Vertices[mesh.Indices[i + 2]]));
-}
-
 RockHeightMap[] heightMaps = heightPaths.Select(LoadHeightMap).ToArray();
 var relief = new RockScanReliefSampler(heightMaps, featureMeters, amplitudeMeters);
 if (continuousRmp2)
 {
     return BakeContinuousRmp2(
-        sourceTriangles,
         relief,
         scanPaths,
         outputRoot,
@@ -125,11 +116,13 @@ if (continuousRmp2)
         flatAlbedo,
         reliefScanPaths,
         featureMeters,
-        tile,
+        tiles,
         anchor,
         stopwatch);
 }
 
+IReadOnlyList<RockMeshTriangle> sourceTriangles =
+    RockDemRegionAssembler.Assemble(tiles, anchor);
 IReadOnlyList<RockMeshPage> pages = RockMeshPageSetBaker.Bake(
     sourceTriangles,
     pageMeters,
@@ -170,7 +163,7 @@ try
     var manifest = new
     {
         format = "RMP1",
-        source = new { tile.Zoom, tile.TileX, tile.TileY },
+        source = new { tiles[0].Zoom, tiles[0].TileX, tiles[0].TileY },
         anchor = new { anchor.Latitude, anchor.Longitude },
         pageMeters,
         featureMeters,
@@ -278,7 +271,6 @@ static RockHeightMap LoadHeightMap(string path)
 }
 
 static int BakeContinuousRmp2(
-    IReadOnlyList<RockMeshTriangle> sourceTriangles,
     RockScanReliefSampler relief,
     IReadOnlyList<string> scanPaths,
     string outputRoot,
@@ -293,7 +285,7 @@ static int BakeContinuousRmp2(
     bool flatAlbedo,
     IReadOnlyList<string> reliefScanPaths,
     float featureMeters,
-    BakedDemTile tile,
+    IReadOnlyList<BakedDemTile> tiles,
     GeoPoint anchor,
     Stopwatch stopwatch)
 {
@@ -342,20 +334,68 @@ static int BakeContinuousRmp2(
             synthesizedAlbedo[pixel + 3] = byte.MaxValue;
         }
     }
-    PhotogrammetryRockPrimitive surface = ContinuousScannedRockSurfaceBuilder.Build(
-        sourceTriangles,
-        relief.Sample,
-        sampleAmplitudeMeters,
-        maximumReliefMeters,
-        maximumEdgeMeters,
-        synthesisSeed,
-        baseColorImageBytes: null);
-    IReadOnlyList<ScannedRockMeshPage> pages = ScannedRockPageBaker.Bake(
-        surface,
-        pageMeters,
-        lod: 0,
-        geometricError: maximumReliefMeters + maximumEdgeMeters,
-        materialPageId);
+    MapBounds regionBounds = tiles
+        .Select(tile => tile.Bounds)
+        .Aggregate((combined, current) => combined.Union(current));
+    Vector3 southWest = LocalTangentProjection.GeoToWorld(
+        regionBounds.SouthWest,
+        elevationMeters: 0f,
+        anchor,
+        verticalExaggeration: 1f);
+    Vector3 northEast = LocalTangentProjection.GeoToWorld(
+        regionBounds.NorthEast,
+        elevationMeters: 0f,
+        anchor,
+        verticalExaggeration: 1f);
+    const float outerBoundaryToleranceMeters = 0.1f;
+    bool IsOuterBoundary(Vector3 position) =>
+        MathF.Abs(position.X - southWest.X) <= outerBoundaryToleranceMeters
+        || MathF.Abs(position.X - northEast.X) <= outerBoundaryToleranceMeters
+        || MathF.Abs(position.Y - southWest.Y) <= outerBoundaryToleranceMeters
+        || MathF.Abs(position.Y - northEast.Y) <= outerBoundaryToleranceMeters;
+
+    var pagesByKey = new Dictionary<(byte Lod, int X, int Y), ScannedRockMeshPage>();
+    BakedDemTile[][] rowChunks = tiles
+        .GroupBy(tile => tile.TileY)
+        .OrderBy(group => group.Key)
+        .Select(group => group.OrderBy(tile => tile.TileX).ToArray())
+        .ToArray();
+    for (int chunkIndex = 0; chunkIndex < rowChunks.Length; chunkIndex++)
+    {
+        BakedDemTile[] row = rowChunks[chunkIndex];
+        Console.WriteLine(
+            $"[rock-bake] region chunk {chunkIndex + 1}/{rowChunks.Length}: "
+            + $"z{row[0].Zoom} y{row[0].TileY}, tiles={row.Length}");
+        IReadOnlyList<RockMeshTriangle> rowTriangles =
+            RockDemRegionAssembler.Assemble(row, anchor);
+        PhotogrammetryRockPrimitive surface = ContinuousScannedRockSurfaceBuilder.Build(
+            rowTriangles,
+            relief.Sample,
+            sampleAmplitudeMeters,
+            maximumReliefMeters,
+            maximumEdgeMeters,
+            synthesisSeed,
+            baseColorImageBytes: null,
+            fadeBoundaryVertex: IsOuterBoundary);
+        foreach (ScannedRockMeshPage page in ScannedRockPageBaker.Bake(
+            surface,
+            pageMeters,
+            lod: 0,
+            geometricError: maximumReliefMeters + maximumEdgeMeters,
+            materialPageId))
+        {
+            var key = (page.Lod, page.PageX, page.PageY);
+            pagesByKey[key] = pagesByKey.TryGetValue(key, out ScannedRockMeshPage? existing)
+                ? ScannedRockMeshPageCombiner.Combine(existing, page)
+                : page;
+        }
+    }
+
+    ScannedRockMeshPage[] pages = pagesByKey.Values
+        .OrderBy(page => page.Lod)
+        .ThenBy(page => page.PageX)
+        .ThenBy(page => page.PageY)
+        .ToArray();
     RockMaterialPage material = RockMaterialPageBaker.Bake(
         materialPageId,
         synthesizedAlbedo,
@@ -407,7 +447,9 @@ static int BakeContinuousRmp2(
         var manifest = new
         {
             format = "RMP2+RTX1-continuous-dem",
-            source = new { tile.Zoom, tile.TileX, tile.TileY },
+            source = tiles
+                .Select(tile => new { tile.Zoom, tile.TileX, tile.TileY })
+                .ToArray(),
             anchor = new { anchor.Latitude, anchor.Longitude },
             pageMeters,
             maximumEdgeMeters,
@@ -424,7 +466,7 @@ static int BakeContinuousRmp2(
                 material.MipCount,
                 bc1Bytes = material.Bc1Data.Length,
             },
-            pages = pages.Count,
+            pages = pages.Length,
             vertexCount,
             triangleCount,
             geometryBytes,
@@ -435,7 +477,7 @@ static int BakeContinuousRmp2(
         Directory.Move(temporaryRoot, outputRoot);
 
         Console.WriteLine(
-            $"[rock-bake] OK continuous RMP2: pages={pages.Count}, vertices={vertexCount:N0}, "
+            $"[rock-bake] OK continuous RMP2: pages={pages.Length}, vertices={vertexCount:N0}, "
             + $"triangles={triangleCount:N0}, geometry={geometryBytes / (1024.0 * 1024.0):F1} MiB, "
             + $"material={material.Bc1Data.Length / (1024.0 * 1024.0):F2} MiB, "
             + $"time={stopwatch.Elapsed.TotalSeconds:F1}s");
@@ -484,7 +526,7 @@ static void PrintUsage()
         MapaTur.RockBake — offline scanned-rock microgeometry bake
 
         Required:
-          --dem <z17 .bdt>
+          --dem <z17 .bdt[;adjacent .bdt;...]>
           --base-dem <tatry.dem>
           --height <scan1.jpg;scan2.jpg;scan3.jpg>
           --out <new output directory>

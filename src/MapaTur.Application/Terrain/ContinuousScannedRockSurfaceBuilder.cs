@@ -19,7 +19,8 @@ public static class ContinuousScannedRockSurfaceBuilder
         float maximumReliefMeters,
         float maximumEdgeMeters,
         int seed,
-        byte[]? baseColorImageBytes)
+        byte[]? baseColorImageBytes,
+        Func<Vector3, bool>? fadeBoundaryVertex = null)
     {
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(sampleSurface);
@@ -43,14 +44,16 @@ public static class ContinuousScannedRockSurfaceBuilder
             baseNormals,
             sampleSurface,
             sampleAmplitudeMeters,
-            maximumReliefMeters);
+            maximumReliefMeters,
+            seed);
         Vector3[] normals = CalculateNormals(displaced, triangles);
         Vector2[] texCoords = CalculateContinuousTexCoords(jittered, baseNormals);
         byte[] seamWeights = CalculateSeamWeights(
             basePositions,
             baseNormals,
             triangles,
-            BoundaryFadeMeters);
+            BoundaryFadeMeters,
+            fadeBoundaryVertex);
         uint[] indices = triangles
             .SelectMany(triangle => new[] { (uint)triangle.A, (uint)triangle.B, (uint)triangle.C })
             .ToArray();
@@ -163,7 +166,8 @@ public static class ContinuousScannedRockSurfaceBuilder
         IReadOnlyList<Vector3> baseNormals,
         Func<Vector3, Vector3, RockSurfaceSample> sampleSurface,
         float sampleAmplitudeMeters,
-        float maximumReliefMeters)
+        float maximumReliefMeters,
+        int seed)
     {
         var result = new Vector3[positions.Count];
         for (int i = 0; i < positions.Count; i++)
@@ -176,7 +180,16 @@ public static class ContinuousScannedRockSurfaceBuilder
 
             float signedNormalized = sample.DisplacementMeters / sampleAmplitudeMeters;
             float outward = Math.Clamp((signedNormalized * 0.5f) + 0.5f, 0f, 1f);
-            float relief = outward * outward * outward * maximumReliefMeters * CalculateSlopeWeight(baseNormals[i]);
+            float macroStrength = RockReliefMacroEnvelope.GetStrength(
+                positions[i],
+                regionSizeMeters: 80f,
+                seed);
+            float relief = outward
+                * outward
+                * outward
+                * maximumReliefMeters
+                * CalculateSlopeWeight(baseNormals[i])
+                * macroStrength;
             result[i] = positions[i] + (baseNormals[i] * relief);
         }
 
@@ -246,7 +259,8 @@ public static class ContinuousScannedRockSurfaceBuilder
         IReadOnlyList<Vector3> positions,
         IReadOnlyList<Vector3> normals,
         IReadOnlyList<TriangleIndices> triangles,
-        float boundaryFadeMeters)
+        float boundaryFadeMeters,
+        Func<Vector3, bool>? fadeBoundaryVertex)
     {
         var edgeCounts = new Dictionary<EdgeKey, byte>(triangles.Count * 2);
         var neighbours = new List<EdgeLink>?[positions.Count];
@@ -262,8 +276,15 @@ public static class ContinuousScannedRockSurfaceBuilder
         {
             if (count == 1)
             {
-                boundaryVertices.Add(edge.First);
-                boundaryVertices.Add(edge.Second);
+                if (fadeBoundaryVertex is null || fadeBoundaryVertex(positions[edge.First]))
+                {
+                    boundaryVertices.Add(edge.First);
+                }
+
+                if (fadeBoundaryVertex is null || fadeBoundaryVertex(positions[edge.Second]))
+                {
+                    boundaryVertices.Add(edge.Second);
+                }
             }
         }
 

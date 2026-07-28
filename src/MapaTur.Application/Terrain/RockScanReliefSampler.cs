@@ -143,13 +143,19 @@ public sealed class RockScanReliefSampler
     }
 
     private float SampleProjection(Vector2 projectedMeters, uint seed)
+        => SampleProjectionFamily(projectedMeters, seed);
+
+    private float SampleProjectionFamily(Vector2 projectedMeters, uint seed)
     {
         Vector2 uv = projectedMeters * inverseFeatureSize;
         float warpU = FractalValueNoise((uv * 0.29f) + new Vector2(13.7f, -8.3f), seed ^ 0x9E3779B9u);
         float warpV = FractalValueNoise((uv * 0.23f) + new Vector2(-5.9f, 17.1f), seed ^ 0x85EBCA6Bu);
         var warp = new Vector2(warpU, warpV);
-        ReadOnlySpan<float> scales = [0.23f, 0.41f, 0.67f, 1.03f, 1.61f];
-        ReadOnlySpan<float> weights = [0.43f, 0.27f, 0.16f, 0.09f, 0.05f];
+        // Geometry carries broad blocks and fissures; sub-metre grain belongs in the material.
+        // Keeping high-frequency scan energy out of vertex displacement prevents a large cliff from
+        // turning into a uniformly repeated carpet of bright micro-facets.
+        ReadOnlySpan<float> scales = [0.09f, 0.17f, 0.31f, 0.55f];
+        ReadOnlySpan<float> weights = [0.65f, 0.25f, 0.08f, 0.02f];
         float centered = 0f;
         float weightEnergySquared = 0f;
         for (int layer = 0; layer < scales.Length; layer++)
