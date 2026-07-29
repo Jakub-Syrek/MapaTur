@@ -158,6 +158,30 @@ public sealed class HybridTerrainStreamingManagerTests
     }
 
     [Fact]
+    public void should_select_screen_space_cut_before_starting_streaming()
+    {
+        // Arrange
+        HybridTerrainPageDescriptor[] hierarchy =
+        [
+            Descriptor(lod: 0, x: 0, y: 0),
+            Descriptor(lod: 1, x: 0, y: 0),
+            Descriptor(lod: 2, x: 0, y: 0),
+        ];
+        using var manager = new HybridTerrainStreamingManager(
+            hierarchy,
+            (_, _) => new TaskCompletionSource<HybridTerrainMeshPage>().Task,
+            maxResidentBytes: 4096,
+            maxStagingBytes: 4096,
+            maxConcurrentLoads: 1);
+
+        // Act
+        HybridTerrainStreamingUpdate update = manager.Update(SelectionOptions(distance: 1000f));
+
+        // Assert
+        update.DesiredKeys.Should().ContainSingle(key => key.Lod == 2);
+    }
+
+    [Fact]
     public async Task should_reject_loaded_page_whose_identity_differs_from_descriptor()
     {
         // Arrange
@@ -204,4 +228,24 @@ public sealed class HybridTerrainStreamingManagerTests
             new byte[HybridTerrainMeshPage.VertexStrideBytes * 3],
             [0, 1, 2]);
     }
+
+    private static HybridTerrainPageSelectionOptions SelectionOptions(float distance) =>
+        new()
+        {
+            Camera = new Camera3D
+            {
+                Target = new Vector3(64f, 64f, 1825f),
+                Distance = distance,
+                AzimuthRadians = 0f,
+                PitchRadians = 0f,
+                FieldOfViewYRadians = MathF.PI / 2f,
+                NearPlane = 0.1f,
+                FarPlane = 10_000f,
+            },
+            AspectRatio = 1f,
+            ViewportHeightPixels = 1000,
+            MaxErrorPixels = 1.0,
+            HysteresisFraction = 0.25,
+            PrefetchRootRing = 0,
+        };
 }

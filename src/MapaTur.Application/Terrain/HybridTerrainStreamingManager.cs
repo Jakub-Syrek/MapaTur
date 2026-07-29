@@ -5,6 +5,7 @@ public sealed record HybridTerrainStreamingUpdate(
     IReadOnlyList<HybridTerrainMeshPage> ReadyForUpload,
     IReadOnlyList<HybridTerrainPageKey> LegacyDemFallbacks,
     int Desired,
+    IReadOnlyList<HybridTerrainPageKey> DesiredKeys,
     int InFlight,
     long StagingBytes,
     long ResidentBytes,
@@ -22,6 +23,7 @@ public sealed class HybridTerrainStreamingManager : IDisposable
     private const int StaleGraceUpdates = 2;
     private const byte MaximumLod = 2;
 
+    private readonly HybridTerrainPageSelectionIndex selectionIndex;
     private readonly IReadOnlyDictionary<HybridTerrainPageKey, HybridTerrainPageDescriptor> descriptors;
     private readonly Func<HybridTerrainPageDescriptor, CancellationToken, Task<HybridTerrainMeshPage>> loader;
     private readonly long maxResidentBytes;
@@ -32,6 +34,7 @@ public sealed class HybridTerrainStreamingManager : IDisposable
     private readonly Dictionary<HybridTerrainPageKey, HybridTerrainMeshPage> readyForUpload = [];
     private readonly Dictionary<HybridTerrainPageKey, PendingLoad> inFlight = [];
     private readonly Dictionary<HybridTerrainPageKey, int> staleUpdates = [];
+    private HashSet<HybridTerrainPageKey> previousSelection = [];
     private bool disposed;
 
     public HybridTerrainStreamingManager(
@@ -58,11 +61,7 @@ public sealed class HybridTerrainStreamingManager : IDisposable
             throw new ArgumentOutOfRangeException(nameof(maxConcurrentLoads));
         }
 
-        if (descriptors.Count > 0)
-        {
-            HybridTerrainPageHierarchyValidator.Validate(descriptors);
-        }
-
+        selectionIndex = new HybridTerrainPageSelectionIndex(descriptors);
         HybridTerrainPageDescriptor? oversized = descriptors
             .Where(descriptor =>
                 descriptor.ResidentBytes > maxResidentBytes
@@ -101,6 +100,21 @@ public sealed class HybridTerrainStreamingManager : IDisposable
     public long InFlightBytes => inFlight.Values.Sum(pending => pending.Descriptor.ResidentBytes);
     public long StagingBytes => InFlightBytes + readyForUpload.Values.Sum(page => page.ResidentBytes);
 
+    public HybridTerrainStreamingUpdate Update(HybridTerrainPageSelectionOptions options)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        ArgumentNullException.ThrowIfNull(options);
+        HybridTerrainPageSelectionOptions stableOptions = options.PreviousSelection is null
+            ? options with { PreviousSelection = previousSelection }
+            : options;
+        HybridTerrainPageKey[] requested = HybridTerrainPageSelector
+            .Select(selectionIndex, stableOptions)
+            .Select(item => item.Descriptor.Key)
+            .ToArray();
+        previousSelection = requested.ToHashSet();
+        return Update(requested);
+    }
+
     public HybridTerrainStreamingUpdate Update(
         IReadOnlyCollection<HybridTerrainPageKey> requested)
     {
@@ -108,20 +122,21 @@ public sealed class HybridTerrainStreamingManager : IDisposable
         ArgumentNullException.ThrowIfNull(requested);
         var loaded = new List<HybridTerrainPageKey>();
         var failed = new List<HybridTerrainPageKey>();
+        HybridTerrainPageKey[] desiredKeys = requested.Distinct().ToArray();
         HarvestCompleted(loaded, failed);
-        PruneUnrequestedStaging(requested);
+        PruneUnrequestedStaging(desiredKeys);
 
         HybridTerrainDrawPlan drawPlan = HybridTerrainResidencyPlanner.Resolve(
-            requested,
+            desiredKeys,
             resident.Keys.ToHashSet());
         HybridTerrainMeshPage[] drawable = drawPlan.Pages
             .Select(key => resident[key])
             .ToArray();
         IReadOnlyList<HybridTerrainPageKey> evicted = EvictStale(
-            requested.ToHashSet(),
+            desiredKeys.ToHashSet(),
             drawPlan.Pages.ToHashSet());
-        StartLoads(requested);
-        HybridTerrainMeshPage[] uploadQueue = BuildLoadPlan(requested)
+        StartLoads(desiredKeys);
+        HybridTerrainMeshPage[] uploadQueue = BuildLoadPlan(desiredKeys)
             .Where(descriptor => readyForUpload.ContainsKey(descriptor.Key))
             .Select(descriptor => readyForUpload[descriptor.Key])
             .ToArray();
@@ -130,7 +145,8 @@ public sealed class HybridTerrainStreamingManager : IDisposable
             drawable,
             uploadQueue,
             drawPlan.LegacyDemFallbacks,
-            requested.Distinct().Count(),
+            desiredKeys.Length,
+            desiredKeys,
             inFlight.Count,
             StagingBytes,
             ResidentBytes,

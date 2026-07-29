@@ -111,6 +111,13 @@ dzieci; rodzic i dziecko nigdy nie trafiają razem do planu rysowania. Gdy nie m
 zostawia dany region staremu DEM. Relacja rodzic–dziecko używa dzielenia z podłogą także dla ujemnych
 współrzędnych stron.
 
+`HybridTerrainPageSelector` buduje przekrój quadtree według rzeczywistego błędu geometrycznego
+rzutowanego na piksele. Próg jest stosowany osobno na każdej granicy 128→64→32 m. Poprzednio wybrany
+rodzic wymaga przekroczenia 125% progu przed refinacją, a poprzednie dzieci pozostają do spadku poniżej
+75%; drobny ruch kamery nie może więc przełączać LOD w obie strony. Sąsiednie korzenie wchodzą do
+prefetchu przed frustum, a wynik jest zawsze niepokrywającym się przekrojem akceptowanym bezpośrednio
+przez planner rezydencji.
+
 ## RMP3 — hybrydowy kafel zastępujący DEM
 
 RMP3 nie jest kolejną powłoką nad terenem. Jedna strona zawiera jedną widoczną powierzchnię:
@@ -189,6 +196,8 @@ Runtime rozróżnia trzy stany strony: asynchroniczny odczyt `in-flight`, gotowy
 gotowych payloadów mieści się w limicie stagingu 64 MiB; osobno obowiązuje budżet rezydencji 384 MiB
 (twardo najwyżej 512 MiB). Loader żąda najpierw najgrubszego dostępnego rodzica, aby możliwie szybko
 zastąpić fallback DEM, a dopiero potem dzieci wybranego przekroju.
+Manager przyjmuje także bezpośrednio parametry kamery, zachowuje poprzedni przekrój dla histerezy i
+porządkuje żądania widoczne przed prefetchowymi; warstwa widoku nie składa ręcznie kluczy LOD.
 
 Budżet po zmierzonym stanie ortofoto 2026-07-29:
 
