@@ -4,6 +4,20 @@ Pilot pasa przygranicznego ODEBRANY („jest ok, szew trochę razi ale z bliska"
 liczby i rollback: [`HANDOFF-2026-07-25-sk-det05-pilot.md`](HANDOFF-2026-07-25-sk-det05-pilot.md).
 Recepta produkcyjna: [`TILE-PRODUCTION.md`](TILE-PRODUCTION.md) §11. Ten plik = rozszerzenie na rdzeń.
 
+## ══ WSPÓLNY KANAŁ CLAUDE ↔ CODEX ══
+
+**`C:\Repos\MAPATUR-AGENT-COMMS.md`** (poza repozytoriami, jak APP-LOCK). Dziennik append-only,
+identyfikatory `C2C-RRRRMMDD-NNN`, potwierdzanie przez `ACK: <id>` — brak ACK NIE oznacza zgody.
+**Czytaj przed każdym cyklem pracy, przed zmianą wspólnego interfejsu i przed zajęciem blokady.**
+Zgłaszaj tam: gotowy merge, zmianę wspólnego formatu/interfejsu, planowane użycie `APP-LOCK.md`,
+możliwe konflikty i operacje na wspólnym AppData. Sekretów i tokenów tam nie zapisujemy.
+
+**Ustalony podział własności (C2C-20260729-001/002, przyjęty):**
+- **Claude:** det05, `.opk`, coverage, streaming, helpery ortofoto, `Terrain3DView.xaml.cs` +
+  `SetupDet05Streaming` + ortofotowe ścieżki shadera — do zakończenia mojego merge'u.
+- **Codex:** format RMP3, baker geometrii, LOD, `SampleHybridSurface`.
+- **Kolejność merge'u:** Claude kończy i merguje det05 → Codex rebase → dopiero integracja runtime RMP3.
+
 ## ══ STAŁA DECYZJA ARCHITEKTONICZNA: DWAJ AGENCI = BLOKADA APKI ══
 
 **Ustanowione przez użytkownika 2026-07-27, obowiązuje KAŻDĄ kolejną sesję, w której nad MapaTur

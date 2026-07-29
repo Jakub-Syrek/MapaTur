@@ -11,6 +11,9 @@ apki (inaczej `Unable to allocate pixels`), dwie instancje to 2×8 GB VRAM na ka
 danych w AppData jest WSPÓLNY — podmiana kafli/`_coverage_p16.txt`/`.opk` w cudzej sesji potrafi
 sprawić, że drugiemu agentowi zniknie cała warstwa 5 cm. Pełne brzmienie: `docs/ZASADY-MAPATUR.md` §20.
 
+Drugi wspólny plik: **`C:\Repos\MAPATUR-AGENT-COMMS.md`** — kanał wiadomości Claude ↔ Codex (append-only, `ACK: <id>`). Czytaj go **przed każdym cyklem pracy, przed zmianą wspólnego interfejsu i przed zajęciem blokady**. `APP-LOCK.md` pozostaje jedynym źródłem prawdy dla uruchamiania apki, bake'ów i operacji na wspólnym AppData.
+
+
 ## P0 — architektura renderingu i streamingu
 
 Cały projekt jest uznawany za niesprawny, dopóki nie zapewnia jednocześnie jakości obrazu i płynności. Wszystkie inne zadania, tuning shaderów, deshadow, nowe funkcje i kosmetyka są wstrzymane.

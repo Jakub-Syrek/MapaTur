@@ -20,6 +20,9 @@ apki (inaczej `Unable to allocate pixels`), dwie instancje to 2×8 GB VRAM na ka
 danych w AppData jest WSPÓLNY — podmiana kafli/`_coverage_p16.txt`/`.opk` w cudzej sesji potrafi
 sprawić, że drugiemu agentowi zniknie cała warstwa 5 cm. Pełne brzmienie: `docs/ZASADY-MAPATUR.md` §20.
 
+Drugi wspólny plik: **`C:\Repos\MAPATUR-AGENT-COMMS.md`** — kanał wiadomości Claude ↔ Codex (append-only, `ACK: <id>`). Czytaj go **przed każdym cyklem pracy, przed zmianą wspólnego interfejsu i przed zajęciem blokady**. `APP-LOCK.md` pozostaje jedynym źródłem prawdy dla uruchamiania apki, bake'ów i operacji na wspólnym AppData.
+
+
 ## Terrain graphics — MANDATORY before baking tiles / touching the terrain pipeline
 
 Before you (re)generate or bake any DEM / ortho / z16 tiles, OR change the terrain load / repair / render
