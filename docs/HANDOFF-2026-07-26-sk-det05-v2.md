@@ -129,8 +129,19 @@ Bramki i pułapki są opisane w handoffie pilota; tu tylko różnice skali.
    `_sk-pilot-added.txt`.
 6. **Coverage:** `build-det05-coverage.py <det05> --pitch 16` (pilot: 1222 → 1416 cel).
 7. **Sync do AppData** (robocopy) — runtime czyta AppData, nie repo.
-8. **Bake:** `--layer det05 --parallel 6`, **apka UBITA** (OOM przy działającej). Pilot: 302 pakiety
-   / 7,1 min; V2 to ~1000+ pakietów ⇒ **~25–40 min**. Potem `--verify-full`.
+8. **Bake:** `--layer det05 --parallel 6`, **apka UBITA** (OOM przy działającej). Potem `--verify-full`.
+   **POLICZONE 2026-07-29 (nie szacowane):**
+   ```
+   det05 dzisiaj:        394 217 kafli / 1 619 grup
+   sk05 do wpięcia:      662 450 kafli / 2 719 grup
+   grupy CAŁKIEM NOWE:   2 417       do przepieczenia: 302
+   po integracji:      ~1 056 667 kafli / ~4 036 grup
+   ```
+   2 719 pakietów × 1,41 s/pakiet (tempo zmierzone na pilocie, `--parallel 6`) ≈ **65 min bake'u**
+   + dłuższy skan 1,06 mln plików + `--verify-full` na 4 036 pakietach ≈ 16 min.
+   ⇒ **OKNO BLOKADY ~1,5–2 h** (bake + verify + sync do AppData). Dysk: opk det05 **52,2 → ~145 GB
+   (+93 GB)**. Wcześniejsza deklaracja „~40 min / +84 GB" była zaniżona — przeskalowana z pilota
+   na oko zamiast policzona. **Lekcja: czas operacji liczyć z LICZBY PAKIETÓW, nie z proporcji kafli.**
 9. **Werdykt usera** na DELL P2722H: Rysy od SK, Gierlach, Łomnica, przelot F7/F9, **MO bez regresji**.
 
 ## Otwarte (bez zmian)
