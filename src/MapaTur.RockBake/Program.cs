@@ -7,6 +7,7 @@ using MapaTur.Application.Terrain;
 using MapaTur.Domain.Geography;
 using MapaTur.Domain.Terrain;
 using MapaTur.Infrastructure.Terrain;
+using MapaTur.RockBake;
 
 using SkiaSharp;
 
@@ -18,6 +19,11 @@ if (HasFlag("--analyze-rock-coverage"))
 if (HasFlag("--build-page-index"))
 {
     return BuildPageIndex();
+}
+
+if (HasFlag("--build-rock-lods"))
+{
+    return BuildRockLods();
 }
 
 string? demArgument = GetArgument("--dem");
@@ -674,6 +680,77 @@ int BuildPageIndex()
     return 0;
 }
 
+int BuildRockLods()
+{
+    string sourceRoot = GetArgument("--lod-source")
+        ?? throw new ArgumentException("--build-rock-lods requires --lod-source.");
+    string outputRoot = GetArgument("--out")
+        ?? throw new ArgumentException("--build-rock-lods requires --out.");
+    float lod1Fraction = ParseFloat(
+        GetArgument("--lod1-fraction") ?? "0.35",
+        "--lod1-fraction");
+    float lod1Error = ParseFloat(
+        GetArgument("--lod1-error") ?? "0.35",
+        "--lod1-error");
+    float lod2Fraction = ParseFloat(
+        GetArgument("--lod2-fraction") ?? "0.12",
+        "--lod2-fraction");
+    float lod2Error = ParseFloat(
+        GetArgument("--lod2-error") ?? "1.2",
+        "--lod2-error");
+    int workers = ParseNonNegativeInt(
+        GetArgument("--lod-workers") ?? "0",
+        "--lod-workers");
+    ScannedRockPageRange? range = ParseOptionalPageRange(GetArgument("--lod-page-range"));
+    var options = new ScannedRockLodPackageOptions(
+        lod1Fraction,
+        lod1Error,
+        lod2Fraction,
+        lod2Error,
+        workers,
+        range);
+    Console.WriteLine(
+        $"[rock-lod] source={Path.GetFullPath(sourceRoot)}, "
+        + $"range={(range is null ? "all" : range.ToString())}, "
+        + $"LOD1={lod1Fraction:P0}/{lod1Error:F2}m, "
+        + $"LOD2={lod2Fraction:P0}/{lod2Error:F2}m");
+    ScannedRockLodPackageResult result = ScannedRockLodPackageBaker.Bake(
+        sourceRoot,
+        outputRoot,
+        options,
+        new MeshoptimizerScannedRockIndexSimplifier());
+    double triangleRatio = result.SourceTriangleCount == 0
+        ? 0.0
+        : result.OutputTriangleCount / (double)(result.SourceTriangleCount * 3);
+    Console.WriteLine(
+        $"[rock-lod] OK source-pages={result.SourcePageCount:N0}, "
+        + $"output-pages={result.OutputPageCount:N0}, "
+        + $"all-level triangles={result.OutputTriangleCount:N0} ({triangleRatio:P1} of 3x LOD0), "
+        + $"geometry={result.OutputGeometryBytes / (1024.0 * 1024.0):F1} MiB, "
+        + $"time={result.Elapsed.TotalSeconds:F1}s");
+    Console.WriteLine($"[rock-lod] output: {Path.GetFullPath(outputRoot)}");
+    return 0;
+}
+
+static ScannedRockPageRange? ParseOptionalPageRange(string? text)
+{
+    if (string.IsNullOrWhiteSpace(text))
+    {
+        return null;
+    }
+
+    int[] values = text
+        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Select(value => int.Parse(value, CultureInfo.InvariantCulture))
+        .ToArray();
+    if (values.Length != 4 || values[0] > values[2] || values[1] > values[3])
+    {
+        throw new ArgumentException("--lod-page-range must be xmin,ymin,xmax,ymax.");
+    }
+
+    return new ScannedRockPageRange(values[0], values[1], values[2], values[3]);
+}
+
 static RockAlbedoTile DecodeAlbedo(PhotogrammetryRockPrimitive primitive)
 {
     byte[] encoded = primitive.BaseColorImageBytes
@@ -740,5 +817,16 @@ static void PrintUsage()
         Existing RMP2 index:
           --build-page-index
           --page-root <RMP2 package root>
+
+        Existing RMP2 LOD package:
+          --build-rock-lods
+          --lod-source <LOD0-only RMP2 package>
+          --out <new output directory>
+          --lod-page-range <xmin,ymin,xmax,ymax>  optional pilot subset
+          --lod1-fraction <0..1>  target triangle fraction (default 0.35)
+          --lod1-error <m>        absolute geometric error (default 0.35)
+          --lod2-fraction <0..1>  target triangle fraction (default 0.12)
+          --lod2-error <m>        absolute geometric error (default 1.2)
+          --lod-workers <n>       worker count; 0 = half logical CPUs
         """);
 }

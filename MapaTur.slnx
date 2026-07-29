@@ -15,6 +15,7 @@
     <Project Path="tests/MapaTur.Domain.Tests/MapaTur.Domain.Tests.csproj" />
     <Project Path="tests/MapaTur.Infrastructure.Tests/MapaTur.Infrastructure.Tests.csproj" />
     <Project Path="tests/MapaTur.Integration.Tests/MapaTur.Integration.Tests.csproj" />
+    <Project Path="tests/MapaTur.RockBake.Tests/MapaTur.RockBake.Tests.csproj" />
     <Project Path="tests/MapaTur.Routing.Tests/MapaTur.Routing.Tests.csproj" />
   </Folder>
 </Solution>

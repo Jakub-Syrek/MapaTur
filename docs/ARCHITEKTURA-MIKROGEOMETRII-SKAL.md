@@ -70,9 +70,18 @@ nie dzieli trójkątów, nie koduje BC ani nie tworzy mipów: wykonuje wyłączn
 
 ## Podział i LOD
 
-V91 ma strony 32 × 32 m i tylko LOD0. Selektor oraz format rozumieją poziomy 0–2, lecz pakiet nie zawiera
-uproszczonych rodziców, więc `geometricError` nie może jeszcze zmniejszyć liczby trójkątów ani draw calli.
-To jest główny pozostały dług wydajnościowy.
+Źródłowy V91 ma strony 32 × 32 m i tylko LOD0. Produkcyjny kandydat `RMP2-same-cell-LOD` zachowuje tę samą
+komórkę na wszystkich trzech poziomach:
+
+- LOD0: dokładny payload V91; zmienia się wyłącznie błędny historyczny `geometricError=4 m` na rzeczywisty
+  błąd kwantyzacji;
+- LOD1: cel 35% trójkątów, bezwzględny budżet błędu 0,35 m;
+- LOD2: cel 12% trójkątów, bezwzględny budżet błędu 1,2 m.
+
+Każdy poziom powstaje offline bez zmiany zachowanych wierzchołków, normalnych, UV ani materiału. Selektor
+wybiera dokładnie jedną reprezentację komórki według błędu ekranowego z histerezą. To bezpieczny etap
+redukcji geometrii oraz I/O, zgodny z obecnym runtime, ale nie zmniejsza liczby draw calli, bo rozmiar komórki
+pozostaje równy 32 m.
 
 Docelowa hierarchia `RMP3`:
 
@@ -106,7 +115,9 @@ wszystkie wymagane dzieci nie są rezydentne; przejście nigdy nie może odsłon
 6. Każdy wykryty region jest komponowany i od razu cięty na strony RMP2; surowa geometria regionu jest
    następnie zwalniana. Strony o wspólnym kluczu są scalane już jako skwantyzowane bufory GPU z ponowną
    kwantyzacją wspólnego AABB. Pełny bake nie tworzy monolitu wszystkich regionów w RAM.
-7. LOD1/2 powstają przez uproszczenie LOD0 z blokadą UV, sylwetki i wspólnych brzegów.
+7. LOD1/2 powstają bezpośrednio z LOD0 przez QEM `meshoptimizer`, z blokadą topologicznych brzegów i
+   bezwzględnym błędem w metrach. Indeksy wskazują wyłącznie oryginalne wierzchołki, więc zachowane pozycje,
+   normalne, UV i materiał pozostają bitowo identyczne z LOD0.
 8. Albedo jest offline przeskalowane, neutralizowane, mipowane i kodowane BC1 do stron `.rtex`.
 9. Baker zapisuje indeks przestrzenny z AABB, błędem geometrycznym, zależnością od strony materiału,
    rozmiarem i offsetem każdej strony.
@@ -115,8 +126,8 @@ wszystkie wymagane dzieci nie są rezydentne; przejście nigdy nie może odsłon
 
 Każdy wierzchołek na granicy strony ma globalny klucz kwantyzowanej pozycji bazowej. Baker najpierw tworzy
 wspólną tabelę brzegową, a dopiero potem zapisuje strony. Sąsiedzi muszą mieć bit-identyczne pozycje na
-wspólnym LOD. Między różnymi LOD-ami strona zawiera prebakowany skirt w głąb skały; skirt nie jest częścią
-widocznej powierzchni przy równym LOD.
+wspólnym LOD. W pakiecie same-cell wszystkie wierzchołki topologicznego brzegu są zachowane na każdym LOD.
+Planowany RMP3 z rodzicami 64/128 m będzie dodatkowo wymagał jawnego skirtu albo spawania przejść rodzic–dziecko.
 
 ## Streaming i budżety
 
@@ -137,6 +148,24 @@ Pełny pakiet V91:
 - jeden materiał BC1 2048² z pełnymi mipami;
 - typowy kadr Rysy: 1509 żądanych stron.
 
+Pełny pakiet same-cell LOD, ukończony 2026-07-29:
+
+- 77 070 kompletnych trójek, 231 210 stron; brak dziur i błędnych nagłówków;
+- LOD0: 533 778 910 trójkątów, payload zgodny z V91;
+- LOD1: 186 824 800 trójkątów (35,0%), średni błąd 0,069 m, maksimum 0,349 m;
+- LOD2: 64 100 838 trójkątów (12,0%), średni błąd 0,263 m, maksimum 1,200 m;
+- zero niemonotonicznych błędów i zero komórek, w których LOD dalszy jest cięższy od bliższego;
+- 12 644 MiB payloadu wszystkich poziomów; runtime rezyduje tylko jeden LOD każdej komórki;
+- pełny bake działa strona-po-stronie, zużywa około 250 MiB RAM i trwa aktywnie około 8 minut na maszynie
+  testowej.
+
+Stabilny Release test Rysy:
+
+- cold i warm korzystają wyłącznie z prebake'u; 1509 żądanych stron, bez runtime simplification;
+- cztery kolejne klatki 1920 × 1000 różniły się średnio o mniej niż 0,001 RGB;
+- warm: mediana 14,36 ms GPU, 14,7 ms CPU, `cpu setup` 1,7 ms;
+- Release A/B z V91 w identycznej pozie: średnia różnica 1,94 RGB; sylweta i bliska kanciastość zachowane.
+
 Zaimplementowana redukcja bez zmiany obrazu:
 
 1. Deskryptory nie są już grupowane w każdej klatce; niezmienny indeks powstaje raz przy otwarciu katalogu.
@@ -148,8 +177,8 @@ Zaimplementowana redukcja bez zmiany obrazu:
 
 Następna kolejność:
 
-1. Hierarchiczne strony RMP3 32/64/128 m i prawdziwy screen-space LOD. To redukuje jednocześnie liczbę
-   stron, I/O, wierzchołków i draw calli w średnim oraz dalekim planie.
+1. Hierarchiczne strony RMP3 64/128 m nad wdrożonym same-cell LOD. Dopiero rodzice zmniejszą liczbę stron
+   i draw calli w średnim oraz dalekim planie; LOD0 32 m pozostaje bez zmian.
 2. RMP2/RMP3 compact vertex dla materiału światowego: 16 B zamiast 20 B przez usunięcie stałego AO i
    czterech nieczytanych bajtów. Sam V91 zmniejszyłby blok wierzchołków o około 1,04 GiB, a cały pakiet
    o około 12%.

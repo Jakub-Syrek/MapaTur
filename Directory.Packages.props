@@ -22,6 +22,8 @@
     <!-- glTF import + runtime animation for the ridden dragon (rigged/skinned model). MIT. -->
     <PackageVersion Include="SharpGLTF.Core" Version="1.0.6" />
     <PackageVersion Include="SharpGLTF.Runtime" Version="1.0.6" />
+    <!-- Offline RMP2 LOD generation; never referenced by the runtime app. -->
+    <PackageVersion Include="Alimer.Bindings.MeshOptimizer" Version="1.2.1" />
 
     <!-- Storage -->
     <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.0" />
