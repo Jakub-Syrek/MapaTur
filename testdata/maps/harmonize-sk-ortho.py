@@ -14,9 +14,16 @@ wygladzenie 3x3, aplikacja per-piksel BILINEAR miedzy srodkami cel (zero schodko
 Zrodla NIE sa nadpisywane: sk05 -> sk05-harm (WebP q90). Parametry pola -> sk05-harm/_harm_params.npz
 (uzywa ich tez merge straddlerow — spojnosc transformacji przez szew).
 
+Obsluguje OBA poziomy SK, bo krata i skok celi zaleza od rozdzielczosci:
+  --level sk05  (5 cm, krata det05, pitch 16 kafli = 409,6 m)  -> sk05-harm
+  --level sk25  (25 cm, krata det25, pitch 4 kafle = 512 m)    -> sk25-harm
+Warstwa POSREDNIA sk25 jest konieczna, bo za pierscieniem det05 (~3,2 km wokol kamery) strona SK
+spadala od razu do bazy ~1,5 m/px — det25 to dane GUGiK, czyli tylko Polska (zmierzone 2026-07-29
+przy Gierlachu: sasiedztwo 5x5 kafli det25 = 0/25 na SK, 25/25 na PL).
+
 Run:
-  python testdata/maps/harmonize-sk05.py            # caly sk05 -> sk05-harm
-  python testdata/maps/harmonize-sk05.py --limit 500 --workers 8
+  python testdata/maps/harmonize-sk-ortho.py --level sk05 --workers 10
+  python testdata/maps/harmonize-sk-ortho.py --level sk25 --workers 10
 """
 from __future__ import annotations
 
@@ -32,15 +39,19 @@ Image.MAX_IMAGE_PIXELS = None
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.normpath(os.path.join(SCRIPT_DIR, "..", ".."))
-SRC = os.path.join(REPO_ROOT, "dem", "ortho-detail", "tatry", "sk05")
-OUT = os.path.join(REPO_ROOT, "dem", "ortho-detail", "tatry", "sk05-harm")
+TATRY = os.path.join(REPO_ROOT, "dem", "ortho-detail", "tatry")
 DEM_DIR = os.path.join(REPO_ROOT, "dem")
 
 GRID_LON0, GRID_LAT0 = 19.50, 49.40
-DLON = 0.00035230061279066565
-DLAT = 0.00022996766079770033
-PITCH = 16                       # kafli na cele (det05 coverage pitch)
 TILE_PX = 512
+# krata jest funkcja rozdzielczosci: dlat = TILE_PX*res/111320, dlon skalowane cos(ref_lat)
+LEVELS = {
+    "sk05": {"dlon": 0.00035230061279066565, "dlat": 0.00022996766079770033, "pitch": 16},
+    "sk25": {"dlon": 0.0017615030639533283, "dlat": 0.0011498383039885017, "pitch": 4},
+}
+SRC = OUT = None
+DLON = DLAT = None
+PITCH = None
 
 # baza: siatka 4x2 nad 19.50-20.40 x 49.10-49.40 (generate-tatry-ortho.py / overlay-zbgis-ortho.py)
 BASE_W, BASE_S, BASE_E, BASE_N = 19.50, 49.10, 20.40, 49.40
@@ -112,10 +123,18 @@ def robust_stats(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, int]:
 
 
 def main() -> None:
+    global SRC, OUT, DLON, DLAT, PITCH
     ap = argparse.ArgumentParser()
+    ap.add_argument("--level", required=True, choices=list(LEVELS))
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--workers", type=int, default=8)
     a = ap.parse_args()
+    lv = LEVELS[a.level]
+    SRC = os.path.join(TATRY, a.level)
+    OUT = os.path.join(TATRY, f"{a.level}-harm")
+    DLON, DLAT, PITCH = lv["dlon"], lv["dlat"], lv["pitch"]
+    print(f"poziom {a.level}: {SRC} -> {OUT}, pitch {PITCH} kafli "
+          f"({PITCH * TILE_PX * (0.05 if a.level == 'sk05' else 0.25):.1f} m na cele)")
 
     tiles: list[tuple[int, int]] = []
     for d in os.listdir(SRC):

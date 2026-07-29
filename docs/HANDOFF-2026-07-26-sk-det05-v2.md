@@ -138,7 +138,7 @@ Bramki i pułapki są opisane w handoffie pilota; tu tylko różnice skali.
    tylko ~4 rzędy cel, więc większość pola parametrów w jego bounding-boksie była **interpolowana
    z sąsiadów**, a przy pełnym pokryciu jest zmierzona. Zostawienie kafli pilota dałoby patchwork
    tonalny dokładnie w pasie przygranicznym.
-   ⇒ **Skasować `sk05-harm/` i puścić od zera:** `python testdata/maps/harmonize-sk05.py --workers 10`.
+   ⇒ **Skasować `sk05-harm/` i puścić od zera:** `python testdata/maps/harmonize-sk-ortho.py --level sk05 --workers 10`.
    662 tys. kafli przy 26 kafli/s ⇒ **~7 h czuwania**. Narzędzie pomiaru driftu: `scratchpad/harm_drift.py`
    (porównuje `_harm_params.npz` z parametrami policzonymi dla pełnego zbioru).
    **Reguła na przyszłość: po KAŻDYM poszerzeniu zakresu fetchu harmonizację liczyć od nowa** — pole
