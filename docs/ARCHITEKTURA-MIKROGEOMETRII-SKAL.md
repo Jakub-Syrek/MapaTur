@@ -183,6 +183,13 @@ Planowany RMP3 z rodzicami 64/128 m będzie dodatkowo wymagał jawnego skirtu al
 - upload ma budżet czasowy na klatkę, ale gotowa strona nie wymaga żadnej produkcji danych;
 - brak lub błąd strony oznacza obecny DEM, nigdy pustą powierzchnię.
 
+Runtime rozróżnia trzy stany strony: asynchroniczny odczyt `in-flight`, gotowy payload CPU
+`ready-for-upload` oraz potwierdzoną rezydencję GPU. Zakończenie I/O nie czyni strony rysowalną:
+`ConfirmUploaded` przesuwa ją do rezydencji dopiero po udanym uploadzie GL. Łączny rozmiar zadań I/O i
+gotowych payloadów mieści się w limicie stagingu 64 MiB; osobno obowiązuje budżet rezydencji 384 MiB
+(twardo najwyżej 512 MiB). Loader żąda najpierw najgrubszego dostępnego rodzica, aby możliwie szybko
+zastąpić fallback DEM, a dopiero potem dzieci wybranego przekroju.
+
 Budżet po zmierzonym stanie ortofoto 2026-07-29:
 
 - ortofoto rezydentne: około 10,5 GiB (`base 1394 MiB + det25 352 MiB + det05 8192 MiB + det1m 576 MiB`);
