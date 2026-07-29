@@ -1,4 +1,25 @@
-# HANDOFF 2026-07-26 — SK det05 V2: rdzeń Tatr Wysokich (fetch W TOKU)
+# HANDOFF 2026-07-26 — SK det05: całe słowackie Tatry w 5 cm
+
+## ══ STAN 2026-07-29 ~22:45: WSZYSTKO WYKONANE, APKA STOI, CZEKA WERDYKT USERA ══
+
+| krok | wynik |
+|---|---|
+| fetch (pełny zakres) | 662 450 kafli, **0 błędów**, ~2,5 dnia czuwania |
+| harmonizacja (od zera, po pomiarze driftu) | 662 450 kafli, 2 719/2 719 cel; wierność vs baza ±1,4 lumy (5 rejonów, ten sam bbox) |
+| merge straddlerów | +56 (868 z pilota pominięte idempotentnie); 2 457 bez źródła SK = krawędzie kampanii HighRes W GŁĘBI PL, nienaprawialne słowackimi danymi |
+| alfa na białej nodata | 220 kafli / 5,5 ha |
+| integracja | +609 984 kafli; 1 326 kolizji → GUGiK zostaje (`integrate-sk05-into-det05.py`) |
+| det05 | **1 004 201 kafli**; coverage p16: **3 712 cel** (było 1 416) |
+| sync AppData | 610 261 plików / 18,8 GB, 0 błędów |
+| bake | 2 719 nowych pakietów, **63,2 min** (prognoza z liczby pakietów: 65) |
+| verify-full | 4 036 pakietów, **1 008 237 stron, BAD=0**, layout czysty, 0 plików poza indeksem |
+| opk det05 | **131,7 GB** (było 52,2) |
+| apka | uruchomiona (PID 10404), `[Det05] opk-read` żywe na nowych celach przy Rysach |
+
+Dane runtime łącznie ~207 GB; do instalki realnie ~155 GB (bez webp-źródeł/backupów/gpu-cache) —
+otwarte: test „czysta instalacja bez katalogu webp det05" zanim obietnica się złoży (szczegóły
+w rozmowie 07-29 i w §instalka poniżej, jeśli dopisana). Blokada zwolniona (C2C-20260729-014);
+apka DZIAŁA DLA USERA — nie jest instancją testową, Codex poinformowany, żeby jej nie zamykał.
 
 Pilot pasa przygranicznego ODEBRANY („jest ok, szew trochę razi ale z bliska") — pełny przebieg,
 liczby i rollback: [`HANDOFF-2026-07-25-sk-det05-pilot.md`](HANDOFF-2026-07-25-sk-det05-pilot.md).
