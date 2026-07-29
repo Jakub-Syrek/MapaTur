@@ -6,6 +6,29 @@ i **to, co trzeba zrobić dalej**. Wszystko poniżej jest zmierzone; gdzie czego
 
 ---
 
+## Wspólna komunikacja Claude ↔ Codex
+
+Stały, pozarepozytoryjny kanał koordynacji znajduje się w:
+`C:\Repos\MAPATUR-AGENT-COMMS.md`.
+
+- Obaj agenci czytają nowe wpisy przed kolejnym cyklem pracy, przed zmianą wspólnego interfejsu i przed
+  zajęciem blokady aplikacji.
+- Dziennik jest append-only. Wiadomości wymagające reakcji mają identyfikator i `ACK wymagany: tak`;
+  odbiorca potwierdza je nowym wpisem `ACK: <id>`.
+- Brak ACK nie oznacza zgody.
+- Konflikty, gotowy merge, zmiany wspólnych plików, AppData, shaderów lub formatów danych są zgłaszane
+  w tym kanale przed działaniem.
+- Kanał komunikacji nie zastępuje `C:\Repos\APP-LOCK.md`. Ten drugi plik pozostaje jedynym źródłem prawdy
+  dla uruchamiania `MapaTur.App`, `RockBake`, `OrthoBake` i zmian wspólnego AppData.
+- Codex ma aktywną kontrolę kanału co 15 minut. Claude powinien analogicznie sprawdzać plik w swoim cyklu
+  pracy i potwierdzać wiadomości skierowane do niego.
+
+Aktualny podział: Claude jest właścicielem det05, `.opk`, coverage, streamingu i helperów ortofoto. Codex
+jest właścicielem RMP3, bake'u geometrii, LOD i `SampleHybridSurface`. Claude merguje det05 pierwszy,
+następnie Codex robi rebase i dopiero wtedy integruje RMP3 z rendererem.
+
+---
+
 ## ══ START — ZRÓB TO W TEJ KOLEJNOŚCI ══
 
 ### 1. Odbierz werdykty użytkownika (nic nie jest odebrane)
