@@ -99,6 +99,39 @@ zaokrąglały skałę.
 Selektor wybiera węzły quadtree według błędu ekranowego z histerezą 25%. Rodzic pozostaje widoczny, dopóki
 wszystkie wymagane dzieci nie są rezydentne; przejście nigdy nie może odsłonić DEM pomiędzy stronami.
 
+## RMP3 — hybrydowy kafel zastępujący DEM
+
+RMP3 nie jest kolejną powłoką nad terenem. Jedna strona zawiera jedną widoczną powierzchnię:
+
+- poza strefą skały zachowuje bazową geometrię DEM;
+- w strefie skały bazowe trójkąty są zastąpione adaptacyjnie zagęszczoną geometrią z reliefem V91;
+- wspólny obrys ma bitowo zgodne pozycje po obu stronach, więc nie wymaga przezroczystej nakładki;
+- żadna komórka nie może jednocześnie zawierać trójkąta DEM i przykrywającego go trójkąta skały;
+- maksymalne odsunięcie od wejściowej powierzchni DEM wynosi 2,8 m.
+
+Format wierzchołka pozostaje równy 20 B, ale dostaje jawne znaczenie hybrydowe:
+
+| bajty | pole |
+|---:|---|
+| 0–5 | pozycja XYZ, UNORM16 w AABB strony |
+| 6–9 | normalna, octahedral SNORM16 × 2 |
+| 10–13 | UV ortofoto, UNORM16 × 2 |
+| 14 | AO |
+| 15 | prebakowana waga materiału skały; 0 = czyste ortofoto, 255 = skała |
+| 16–17 | wariant materiału/atlasu skały |
+| 18–19 | zarezerwowane; w wersji 1 muszą być zerowe |
+
+Maska materiału nie zużywa jednostki tekstury. Geometria RMP3 korzysta z istniejącego wyboru celi det05,
+globalnej kraty plate-carrée oraz dokładnie tych samych helperów `applyOrthoDet05Array`,
+`unpremulPunch()` i pozostałych ścieżek dekodu co teren. Nie wolno tworzyć ich kopii w shaderze RMP3.
+Opcjonalny atlas skały może użyć maksymalnie jednego samplera dopiero po zwolnieniu unit 9; każdy sampler
+musi być jawnie przypięty podczas linkowania, a test ma odrzucać pozostawienie go na domyślnym unicie 0.
+
+Każda rezydentna strona udostępnia wspólne zapytanie `SampleHybridSurface(legacyPoint, maxDistance)`.
+Zwraca ono najbliższy punkt trójkąta, interpolowaną normalną i identyfikator trójkąta, albo brak wyniku poza
+limitem reliefu. Z tego samego zapytania korzystają szlaki, trasy wspinaczkowe, chwyty, wspinacz, F8
+i etykiety; żaden z tych systemów nie może osobno odtwarzać wysokości z bazowego DEM w strefie RMP3.
+
 ## Offline bake
 
 1. Biblioteka wejściowa zawiera wyłącznie pełne skany 3D z metryczną skalą, UV i licencją pozwalającą na
@@ -134,9 +167,29 @@ Planowany RMP3 z rodzicami 64/128 m będzie dodatkowo wymagał jawnego skirtu al
 - kolejka I/O i staging działają poza wątkiem renderującym;
 - jednostką rezydencji V91 jest strona 32 m, a docelowo węzeł quadtree 32/64/128 m;
 - strona widoczna nie może być usunięta przed rezydencją poprawnego fallbacku;
-- budżet VRAM pochodzi z profilu sprzętu; punkt startowy desktop to 256 MB, co daje setki stron;
+- budżet VRAM pochodzi z profilu sprzętu; cache geometrii RMP3 zaczyna od 384 MiB i ma twardy limit 512 MiB;
 - upload ma budżet czasowy na klatkę, ale gotowa strona nie wymaga żadnej produkcji danych;
 - brak lub błąd strony oznacza obecny DEM, nigdy pustą powierzchnię.
+
+Budżet po zmierzonym stanie ortofoto 2026-07-29:
+
+- ortofoto rezydentne: około 10,5 GiB (`base 1394 MiB + det25 352 MiB + det05 8192 MiB + det1m 576 MiB`);
+- cel całej aplikacji: najwyżej 12,5 GiB, twardy sufit 14 GiB;
+- kolejka uploadu RMP3: najwyżej 64 MiB;
+- atlas skały: najwyżej 16 MiB;
+- RMP3 zastępuje rezydentną geometrię terenu, więc nie może być stałym dodatkiem do starego DEM.
+
+Pełny bake jest zablokowany do czasu pilota. Na podstawie rzeczywistego pilota trzeba przed uruchomieniem
+podać cztery wartości:
+
+1. przewidywany rozmiar finalnego pakietu: `pilotPayload / pilotArea × fullArea`;
+2. maksymalny koszt katalogu tymczasowego, zmierzony podczas pilota i skalowany tą samą metodą;
+3. miejsce wymagane przy jednoczesnym zachowaniu źródła i ostatniego poprawnego rollbacku;
+4. przewidywane wolne miejsce po zakończeniu.
+
+Nie wolno zaczynać pełnego bake'u, jeśli którejkolwiek wartości brakuje albo szacunek zostawia mniej niż
+100 GiB rezerwy po zapisaniu wyniku i rollbacku. Odrzucone pełne pakiety nie są automatycznie kasowane:
+najpierw należy podać użytkownikowi ich dokładne ścieżki i rozmiary.
 
 ## Stan V91 i plan redukcji kosztu — 2026-07-29
 
@@ -165,6 +218,28 @@ Stabilny Release test Rysy:
 - cztery kolejne klatki 1920 × 1000 różniły się średnio o mniej niż 0,001 RGB;
 - warm: mediana 14,36 ms GPU, 14,7 ms CPU, `cpu setup` 1,7 ms;
 - Release A/B z V91 w identycznej pozie: średnia różnica 1,94 RGB; sylweta i bliska kanciastość zachowane.
+
+Pierwszy geometry-only pilot RMP3, ukończony 2026-07-29:
+
+- wejście: 3 × 3 kafle z17 Rysy, te same parametry reliefu V91 (`edge 1,2 m`, relief do `2,8 m`);
+- 351 stron LOD0, 1 641 531 wierzchołków i 3 166 212 trójkątów;
+- finalny katalog 49,45 MiB; dodatkowy scratch dyskowy 0 B dzięki atomowemu rename katalogu;
+- bake i pełny odczyt kontrolny każdej strony trwały 24,3 s;
+- maska materiału jest w bajcie wierzchołka: 0 B tekstury maski i 0 dodatkowych samplerów;
+- ekstrapolacja LOD0 według zmierzonej liczby stron `77 070 / 351` daje 10,60 GiB dla całych Tatr;
+- przy 541,20 GiB wolnego miejsca zostałoby około 530,60 GiB po samym LOD0.
+
+Ten pomiar nie odblokowuje pełnego bake'u. Pilot v1 ma celowo zastępcze UV ortofoto, dopóki po merge'u
+Claude'a RMP3 nie wejdzie we wspólną ścieżkę det05. Trzeba również zmierzyć rzeczywiste strony rodziców
+64/128 m; mnożnik z RMP2 same-cell może służyć tylko jako konserwatywna kontrola, nie wynik RMP3.
+
+Inwentaryzacja dużych artefaktów przed ewentualnym sprzątaniem:
+
+- źródłowy V91 LOD0: `tatry-rock-shell-v91-full-z17-s55-edge12`, 8,293 GiB;
+- odrzucony pierwszy LOD012: `tatry-rock-shell-v91-full-lod012-z17-s55-edge12`, 12,375 GiB;
+- poprawny LOD012 v2: `tatry-rock-shell-v91-full-lod012-v2-z17-s55-edge12`, 12,441 GiB.
+
+Żaden z tych katalogów nie został usunięty.
 
 Zaimplementowana redukcja bez zmiany obrazu:
 

@@ -199,6 +199,38 @@ public sealed class ContinuousScannedRockSurfaceBuilderTests
             .OnlyContain(vertex => vertex.weight > 240);
     }
 
+    [Fact]
+    public void should_keep_non_rock_vertices_on_dem_in_hybrid_surface()
+    {
+        // Arrange
+        IReadOnlyList<RockMeshTriangle> terrain =
+        [
+            .. CreateWall(),
+            new RockMeshTriangle(
+                new Vector3(20f, 0f, 0f),
+                new Vector3(24f, 0f, 0f),
+                new Vector3(20f, 4f, 0f)),
+        ];
+
+        // Act
+        HybridTerrainMesh result = ContinuousScannedRockSurfaceBuilder.BuildHybrid(
+            terrain,
+            static (_, _) => new RockSurfaceSample(1f, 180, 7),
+            sampleAmplitudeMeters: 1f,
+            maximumReliefMeters: 2.8f,
+            maximumEdgeMeters: 20f,
+            seed: 341,
+            orthoUvForPosition: static _ => new Vector2(0.25f, 0.75f));
+
+        // Assert
+        result.Positions
+            .Select((position, index) => (position, index))
+            .Where(vertex => result.RockBlend[vertex.index] == 0)
+            .Should()
+            .OnlyContain(vertex =>
+                Vector3.Distance(vertex.position, result.LegacyPositions[vertex.index]) < 1e-6f);
+    }
+
     private static IReadOnlyList<RockMeshTriangle> CreateWall()
     {
         var a = new Vector3(0f, 0f, 0f);

@@ -26,6 +26,11 @@ if (HasFlag("--build-rock-lods"))
     return BuildRockLods();
 }
 
+if (HasFlag("--build-hybrid-pilot"))
+{
+    return BuildHybridPilot();
+}
+
 string? demArgument = GetArgument("--dem");
 string? demListArgument = GetArgument("--dem-list");
 string? baseDemPath = GetArgument("--base-dem");
@@ -732,6 +737,84 @@ int BuildRockLods()
     return 0;
 }
 
+int BuildHybridPilot()
+{
+    string? demArgument = GetArgument("--dem");
+    string? demListArgument = GetArgument("--dem-list");
+    string baseDemPath = GetArgument("--base-dem")
+        ?? throw new ArgumentException("--build-hybrid-pilot requires --base-dem.");
+    string outputRoot = GetArgument("--out")
+        ?? throw new ArgumentException("--build-hybrid-pilot requires --out.");
+    string[] demPaths = demArgument is not null
+        ? demArgument.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        : demListArgument is not null
+            ? File.ReadAllLines(demListArgument)
+                .Where(line => !string.IsNullOrWhiteSpace(line))
+                .Select(line => line.Trim())
+                .ToArray()
+            : throw new ArgumentException("--build-hybrid-pilot requires --dem or --dem-list.");
+    string[] reliefScanPaths = (GetArgument("--relief-scan") ?? string.Empty)
+        .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    string[] heightPaths = (GetArgument("--height") ?? string.Empty)
+        .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    if (reliefScanPaths.Length == 0 && heightPaths.Length == 0)
+    {
+        throw new ArgumentException("--build-hybrid-pilot requires --relief-scan or --height.");
+    }
+
+    EnsureFile(baseDemPath);
+    foreach (string path in demPaths.Concat(reliefScanPaths).Concat(heightPaths))
+    {
+        EnsureFile(path);
+    }
+
+    float featureMeters = ParseFloat(GetArgument("--feature") ?? "4.0", "--feature");
+    float sampleAmplitudeMeters = ParseFloat(GetArgument("--amplitude") ?? "1.0", "--amplitude");
+    RockHeightMap[] reliefMaps = reliefScanPaths.Length > 0
+        ? reliefScanPaths
+            .Select(path => PhotogrammetryReliefMapExtractor.Extract(
+                PhotogrammetryRockAsset.Load(path).Primitives[0],
+                width: 512,
+                height: 512))
+            .ToArray()
+        : heightPaths.Select(LoadHeightMap).ToArray();
+    var relief = new RockScanReliefSampler(reliefMaps, featureMeters, sampleAmplitudeMeters);
+    DemRaster baseDem = DemRasterReader.Read(baseDemPath);
+    var anchor = new GeoPoint(
+        (baseDem.North + baseDem.South) * 0.5,
+        (baseDem.East + baseDem.West) * 0.5);
+    var tiles = new BakedDemTile[demPaths.Length];
+    for (int i = 0; i < demPaths.Length; i++)
+    {
+        using FileStream stream = File.OpenRead(demPaths[i]);
+        tiles[i] = BakedDemTileStore.Read(stream);
+    }
+
+    IReadOnlyList<RockMeshTriangle> source = RockDemRegionAssembler.Assemble(tiles, anchor);
+    var options = new HybridTerrainPilotBakeOptions(
+        PageSizeMeters: ParseFloat(GetArgument("--page") ?? "32", "--page"),
+        MaximumEdgeMeters: ParseFloat(GetArgument("--edge") ?? "1.2", "--edge"),
+        SampleAmplitudeMeters: sampleAmplitudeMeters,
+        MaximumReliefMeters: ParseFloat(GetArgument("--maximum-relief") ?? "2.8", "--maximum-relief"),
+        Seed: ParseInt(GetArgument("--seed") ?? "20260761", "--seed"));
+    var stopwatch = Stopwatch.StartNew();
+    HybridTerrainPilotBakeResult result = HybridTerrainPilotPackageBaker.Bake(
+        source,
+        relief.Sample,
+        static _ => Vector2.Zero,
+        outputRoot,
+        options);
+    Console.WriteLine(
+        $"[rmp3-pilot] OK pages={result.PageCount:N0}, vertices={result.VertexCount:N0}, "
+        + $"triangles={result.TriangleCount:N0}, final={result.FinalPayloadBytes / (1024.0 * 1024.0):F2} MiB, "
+        + $"scratch={result.PeakTemporaryBytes / (1024.0 * 1024.0):F2} MiB, "
+        + $"covered={result.CoveredAreaSquareMeters / 1_000_000.0:F3} km2, "
+        + $"time={stopwatch.Elapsed.TotalSeconds:F1}s");
+    Console.WriteLine("[rmp3-pilot] ortho UV is intentionally placeholder-only until the shared det05 path is merged.");
+    Console.WriteLine($"[rmp3-pilot] output: {Path.GetFullPath(outputRoot)}");
+    return 0;
+}
+
 static ScannedRockPageRange? ParseOptionalPageRange(string? text)
 {
     if (string.IsNullOrWhiteSpace(text))
@@ -828,5 +911,14 @@ static void PrintUsage()
           --lod2-fraction <0..1>  target triangle fraction (default 0.12)
           --lod2-error <m>        absolute geometric error (default 1.2)
           --lod-workers <n>       worker count; 0 = half logical CPUs
+
+        Hybrid RMP3 geometry-only pilot:
+          --build-hybrid-pilot
+          --dem <z17 .bdt[;adjacent .bdt;...]>
+          --base-dem <tatry.dem>
+          --relief-scan <scan.gltf[;scan2.gltf;...]>
+          --out <new RMP3 pilot directory>
+          [--page <metres>] [--edge <metres>] [--feature <metres>]
+          [--amplitude <metres>] [--maximum-relief <metres>] [--seed <int>]
         """);
 }

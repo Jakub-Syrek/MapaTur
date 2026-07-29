@@ -46,7 +46,8 @@ public static class ContinuousScannedRockSurfaceBuilder
             sampleSurface,
             sampleAmplitudeMeters,
             maximumReliefMeters,
-            seed);
+            seed,
+            out _);
         Vector3[] normals = CalculateNormals(displaced, triangles);
         Vector2[] texCoords = CalculateContinuousTexCoords(jittered, baseNormals);
         byte[] seamWeights = CalculateSeamWeights(
@@ -66,6 +67,86 @@ public static class ContinuousScannedRockSurfaceBuilder
             indices,
             baseColorImageBytes,
             seamWeights);
+    }
+
+    /// <summary>
+    /// Builds the RMP3 form of the continuous surface. Unlike the RMP2 shell, zero-weight vertices remain
+    /// bit-identical to the source DEM and relief is blended into that same topology, so the result can replace
+    /// terrain triangles instead of being drawn over them.
+    /// </summary>
+    public static HybridTerrainMesh BuildHybrid(
+        IReadOnlyList<RockMeshTriangle> source,
+        Func<Vector3, Vector3, RockSurfaceSample> sampleSurface,
+        float sampleAmplitudeMeters,
+        float maximumReliefMeters,
+        float maximumEdgeMeters,
+        int seed,
+        Func<Vector3, Vector2> orthoUvForPosition,
+        Func<Vector3, bool>? fadeBoundaryVertex = null)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(sampleSurface);
+        ArgumentNullException.ThrowIfNull(orthoUvForPosition);
+        ValidatePositiveFinite(sampleAmplitudeMeters, nameof(sampleAmplitudeMeters));
+        ValidatePositiveFinite(maximumReliefMeters, nameof(maximumReliefMeters));
+        ValidatePositiveFinite(maximumEdgeMeters, nameof(maximumEdgeMeters));
+        if (!source.Any(triangle => triangle.SlopeDegrees >= MinimumRockSlopeDegrees))
+        {
+            throw new InvalidOperationException("A hybrid rock surface needs at least one steep DEM triangle.");
+        }
+
+        IReadOnlyList<RockMeshTriangle> refined = RockMeshSubdivider.Subdivide(source, maximumEdgeMeters);
+        BuildIndexedMesh(refined, out Vector3[] basePositions, out TriangleIndices[] triangles);
+        Vector3[] baseNormals = CalculateNormals(basePositions, triangles);
+        Vector3[] jittered = ApplyTangentJitter(basePositions, baseNormals, maximumEdgeMeters, seed);
+        Vector3[] displaced = ApplyBoundedRelief(
+            jittered,
+            baseNormals,
+            sampleSurface,
+            sampleAmplitudeMeters,
+            maximumReliefMeters,
+            seed,
+            out RockSurfaceSample[] samples);
+        byte[] rockBlend = CalculateSeamWeights(
+            basePositions,
+            baseNormals,
+            triangles,
+            BoundaryFadeMeters,
+            fadeBoundaryVertex);
+
+        var positions = new Vector3[basePositions.Length];
+        var ambientOcclusion = new byte[basePositions.Length];
+        var materialVariants = new ushort[basePositions.Length];
+        var orthoUvs = new Vector2[basePositions.Length];
+        for (int i = 0; i < positions.Length; i++)
+        {
+            float weight = rockBlend[i] / (float)byte.MaxValue;
+            Vector3 candidate = Vector3.Lerp(basePositions[i], displaced[i], weight);
+            Vector3 offset = candidate - basePositions[i];
+            float offsetLength = offset.Length();
+            positions[i] = offsetLength > maximumReliefMeters
+                ? basePositions[i] + (offset * (maximumReliefMeters / offsetLength))
+                : candidate;
+            ambientOcclusion[i] = (byte)MathF.Round(
+                byte.MaxValue + ((samples[i].AmbientOcclusion - byte.MaxValue) * weight));
+            materialVariants[i] = samples[i].MaterialVariant;
+            orthoUvs[i] = orthoUvForPosition(basePositions[i]);
+        }
+
+        Vector3[] normals = CalculateNormals(positions, triangles);
+        uint[] indices = triangles
+            .SelectMany(triangle => new[] { (uint)triangle.A, (uint)triangle.B, (uint)triangle.C })
+            .ToArray();
+        return new HybridTerrainMesh(
+            positions,
+            basePositions,
+            normals,
+            orthoUvs,
+            ambientOcclusion,
+            rockBlend,
+            materialVariants,
+            indices,
+            maximumReliefMeters);
     }
 
     private static void ValidatePositiveFinite(float value, string parameterName)
@@ -174,12 +255,15 @@ public static class ContinuousScannedRockSurfaceBuilder
         Func<Vector3, Vector3, RockSurfaceSample> sampleSurface,
         float sampleAmplitudeMeters,
         float maximumReliefMeters,
-        int seed)
+        int seed,
+        out RockSurfaceSample[] samples)
     {
         var result = new Vector3[positions.Count];
+        samples = new RockSurfaceSample[positions.Count];
         for (int i = 0; i < positions.Count; i++)
         {
             RockSurfaceSample sample = sampleSurface(positions[i], baseNormals[i]);
+            samples[i] = sample;
             if (!float.IsFinite(sample.DisplacementMeters))
             {
                 throw new InvalidOperationException("Rock displacement sampler returned a non-finite value.");
