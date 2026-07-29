@@ -34,9 +34,20 @@ Użytkownik zwolnił ~470 GB („zwolniłem ci miejsce do ściągania, jedziesz 
 footprint: `--bbox 19.80,49.10,20.30,49.21` (V2 zatrzymany po ~102 tys. kafli; fetcher jest
 resumable, więc nic nie przepadło — pobrane kafle są pomijane).
 
-Pozostało do pobrania ≈ **508 tys. kafli**; przy zmierzonym tempie **~1,8 kafla/s** (spadek z 4,6 na
-pilocie — najpewniej throttling ZBGIS przy długiej sesji, maszyna NIE spała) to **~3 doby**.
-Workers zostaje 6: przy tej wartości pilot dał 0 błędów na 52 tys. kafli, a to obca usługa publiczna.
+Pozostało do pobrania ≈ **508 tys. kafli**. Workers zostaje 6: przy tej wartości pilot dał 0 błędów
+na 52 tys. kafli, a to obca usługa publiczna.
+
+**⚠ SPROSTOWANIE 2026-07-29 — nie ma żadnego throttlingu ZBGIS.** Wcześniej trzykrotnie zapisałem
+tu i w raportach, że tempo „spada z 4,6 do 1,2–1,8 kafla/s przy długiej sesji, bo serwer przykręca".
+**To było błędne.** Użytkownik usypia komputer na noc, więc proces po prostu stoi. Dowód — histogram
+czasów zapisu kafli (próbka 80 kolumn): 22:00 → 920 kafli, 23:00 → 720, **00:00–08:59 → ZERO przez
+10 godzin**, 09:00 → 560. Prawdziwe tempo jest STAŁE i wynosi **~4,4 kafla/s**, czyli tyle co na
+pilocie (4,6). Wszystkie „spadki" to były średnie rozmyte o godziny snu.
+
+**Lekcja metodyczna:** dziennik zdarzeń Windows **NIE pokazał tego snu** — `Kernel-Power` 42/107 dały
+tylko 5-sekundowe mrugnięcie o 23:49, co utwierdziło mnie w błędnej tezie („maszyna nie spała").
+Wiarygodnym detektorem przerwy w pracy jest **histogram `LastWriteTime` plików wyjściowych**, nie log
+zasilania. Przy każdym kolejnym długim procesie liczyć ETA w GODZINACH CZUWANIA, nie w zegarowych.
 
 ### Poprzednia analiza (dla historii)
 
