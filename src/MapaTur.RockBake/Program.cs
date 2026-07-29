@@ -10,11 +10,25 @@ using MapaTur.Infrastructure.Terrain;
 
 using SkiaSharp;
 
+if (HasFlag("--analyze-rock-coverage"))
+{
+    return AnalyzeRockCoverage();
+}
+
+if (HasFlag("--build-page-index"))
+{
+    return BuildPageIndex();
+}
+
 string? demArgument = GetArgument("--dem");
+string? demListArgument = GetArgument("--dem-list");
 string? baseDemPath = GetArgument("--base-dem");
 string? heightArgument = GetArgument("--height");
 string? outputRoot = GetArgument("--out");
-if (demArgument is null || baseDemPath is null || heightArgument is null || outputRoot is null)
+if ((demArgument is null && demListArgument is null)
+    || baseDemPath is null
+    || heightArgument is null
+    || outputRoot is null)
 {
     PrintUsage();
     return 2;
@@ -24,6 +38,7 @@ float featureMeters = ParseFloat(GetArgument("--feature") ?? "4.0", "--feature")
 float amplitudeMeters = ParseFloat(GetArgument("--amplitude") ?? "0.55", "--amplitude");
 float pageMeters = ParseFloat(GetArgument("--page") ?? "16.0", "--page");
 bool continuousRmp2 = HasFlag("--continuous-rmp2");
+bool rockPrefilter = HasFlag("--rock-prefilter");
 bool neutralizeAlbedo = HasFlag("--neutralize-albedo");
 bool flatAlbedo = HasFlag("--flat-albedo");
 float maximumReliefMeters = ParseFloat(GetArgument("--maximum-relief") ?? "2.0", "--maximum-relief");
@@ -43,8 +58,12 @@ byte[] lods = (GetArgument("--lod") ?? "0,1,2")
     .ToArray();
 string[] heightPaths = heightArgument
     .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-string[] demPaths = demArgument
-    .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+string[] demPaths = demArgument is not null
+    ? demArgument.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+    : File.ReadAllLines(demListArgument!)
+        .Where(line => !string.IsNullOrWhiteSpace(line))
+        .Select(line => line.Trim())
+        .ToArray();
 
 foreach (string path in demPaths)
 {
@@ -86,13 +105,6 @@ var stopwatch = Stopwatch.StartNew();
 Console.WriteLine($"[rock-bake] DEM tiles: {demPaths.Length}");
 Console.WriteLine($"[rock-bake] scans: {heightPaths.Length}, feature={featureMeters:F2} m, amplitude={amplitudeMeters:F2} m");
 
-BakedDemTile[] tiles = new BakedDemTile[demPaths.Length];
-for (int index = 0; index < demPaths.Length; index++)
-{
-    using FileStream stream = File.OpenRead(demPaths[index]);
-    tiles[index] = BakedDemTileStore.Read(stream);
-}
-
 DemRaster baseDem = DemRasterReader.Read(baseDemPath);
 var anchor = new GeoPoint(
     (baseDem.North + baseDem.South) * 0.5,
@@ -116,9 +128,17 @@ if (continuousRmp2)
         flatAlbedo,
         reliefScanPaths,
         featureMeters,
-        tiles,
+        demPaths,
+        rockPrefilter,
         anchor,
         stopwatch);
+}
+
+BakedDemTile[] tiles = new BakedDemTile[demPaths.Length];
+for (int index = 0; index < demPaths.Length; index++)
+{
+    using FileStream stream = File.OpenRead(demPaths[index]);
+    tiles[index] = BakedDemTileStore.Read(stream);
 }
 
 IReadOnlyList<RockMeshTriangle> sourceTriangles =
@@ -228,6 +248,17 @@ static int ParseInt(string value, string name)
     return parsed;
 }
 
+static int ParseNonNegativeInt(string value, string name)
+{
+    if (!int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsed)
+        || parsed < 0)
+    {
+        throw new ArgumentException($"{name} must be a non-negative integer.");
+    }
+
+    return parsed;
+}
+
 static void EnsureFile(string path)
 {
     if (!File.Exists(path))
@@ -285,7 +316,8 @@ static int BakeContinuousRmp2(
     bool flatAlbedo,
     IReadOnlyList<string> reliefScanPaths,
     float featureMeters,
-    IReadOnlyList<BakedDemTile> tiles,
+    IReadOnlyList<string> demPaths,
+    bool rockPrefilter,
     GeoPoint anchor,
     Stopwatch stopwatch)
 {
@@ -334,7 +366,15 @@ static int BakeContinuousRmp2(
             synthesizedAlbedo[pixel + 3] = byte.MaxValue;
         }
     }
-    MapBounds regionBounds = tiles
+    var tileDescriptors = new List<(DemTileKey Key, MapBounds Bounds, string Path)>(demPaths.Count);
+    foreach (string path in demPaths)
+    {
+        using FileStream stream = File.OpenRead(path);
+        BakedDemTile tile = BakedDemTileStore.Read(stream);
+        tileDescriptors.Add((tile.Key, tile.Bounds, path));
+    }
+
+    MapBounds regionBounds = tileDescriptors
         .Select(tile => tile.Bounds)
         .Aggregate((combined, current) => combined.Union(current));
     Vector3 southWest = LocalTangentProjection.GeoToWorld(
@@ -354,48 +394,12 @@ static int BakeContinuousRmp2(
         || MathF.Abs(position.Y - southWest.Y) <= outerBoundaryToleranceMeters
         || MathF.Abs(position.Y - northEast.Y) <= outerBoundaryToleranceMeters;
 
-    var pagesByKey = new Dictionary<(byte Lod, int X, int Y), ScannedRockMeshPage>();
-    BakedDemTile[][] rowChunks = tiles
-        .GroupBy(tile => tile.TileY)
-        .OrderBy(group => group.Key)
-        .Select(group => group.OrderBy(tile => tile.TileX).ToArray())
-        .ToArray();
-    for (int chunkIndex = 0; chunkIndex < rowChunks.Length; chunkIndex++)
-    {
-        BakedDemTile[] row = rowChunks[chunkIndex];
-        Console.WriteLine(
-            $"[rock-bake] region chunk {chunkIndex + 1}/{rowChunks.Length}: "
-            + $"z{row[0].Zoom} y{row[0].TileY}, tiles={row.Length}");
-        IReadOnlyList<RockMeshTriangle> rowTriangles =
-            RockDemRegionAssembler.Assemble(row, anchor);
-        PhotogrammetryRockPrimitive surface = ContinuousScannedRockSurfaceBuilder.Build(
-            rowTriangles,
-            relief.Sample,
-            sampleAmplitudeMeters,
-            maximumReliefMeters,
-            maximumEdgeMeters,
-            synthesisSeed,
-            baseColorImageBytes: null,
-            fadeBoundaryVertex: IsOuterBoundary);
-        foreach (ScannedRockMeshPage page in ScannedRockPageBaker.Bake(
-            surface,
-            pageMeters,
-            lod: 0,
-            geometricError: maximumReliefMeters + maximumEdgeMeters,
-            materialPageId))
-        {
-            var key = (page.Lod, page.PageX, page.PageY);
-            pagesByKey[key] = pagesByKey.TryGetValue(key, out ScannedRockMeshPage? existing)
-                ? ScannedRockMeshPageCombiner.Combine(existing, page)
-                : page;
-        }
-    }
-
-    ScannedRockMeshPage[] pages = pagesByKey.Values
-        .OrderBy(page => page.Lod)
-        .ThenBy(page => page.PageX)
-        .ThenBy(page => page.PageY)
-        .ToArray();
+    Dictionary<DemTileKey, string> pathByKey = tileDescriptors
+        .ToDictionary(tile => tile.Key, tile => tile.Path);
+    IReadOnlyList<IReadOnlyList<DemTileKey>> batches =
+        RockDemTileBatchPlanner.CreateContiguousRowBatches(
+            tileDescriptors.Select(tile => tile.Key),
+            maximumTilesPerBatch: 6);
     RockMaterialPage material = RockMaterialPageBaker.Bake(
         materialPageId,
         synthesizedAlbedo,
@@ -406,31 +410,48 @@ static int BakeContinuousRmp2(
     try
     {
         Directory.CreateDirectory(temporaryRoot);
-        long vertexCount = 0;
-        long triangleCount = 0;
-        long geometryBytes = 0;
-        foreach (ScannedRockMeshPage page in pages)
+        var pageWriter = new ScannedRockIncrementalPageWriter(temporaryRoot);
+        for (int chunkIndex = 0; chunkIndex < batches.Count; chunkIndex++)
         {
-            string relative = ScannedRockMeshPageStore.RelativePathFor(page.Lod, page.PageX, page.PageY);
-            string path = Path.Combine(temporaryRoot, relative);
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            using (FileStream stream = File.Create(path))
+            IReadOnlyList<DemTileKey> batch = batches[chunkIndex];
+            var row = new BakedDemTile[batch.Count];
+            for (int tileIndex = 0; tileIndex < batch.Count; tileIndex++)
             {
-                ScannedRockMeshPageStore.Write(stream, page);
+                using FileStream stream = File.OpenRead(pathByKey[batch[tileIndex]]);
+                row[tileIndex] = BakedDemTileStore.Read(stream);
             }
 
-            using (FileStream stream = File.OpenRead(path))
+            Console.WriteLine(
+                $"[rock-bake] region chunk {chunkIndex + 1}/{batches.Count}: "
+                + $"z{row[0].Zoom} y{row[0].TileY}, tiles={row.Length}");
+            IReadOnlyList<RockMeshTriangle> rowTriangles =
+                RockDemRegionAssembler.Assemble(row, anchor);
+            if (rockPrefilter && !rowTriangles.Any(triangle => triangle.SlopeDegrees >= 45f))
             {
-                ScannedRockMeshPage verified = ScannedRockMeshPageStore.Read(stream);
-                if (verified.VertexCount != page.VertexCount || verified.IndexCount != page.IndexCount)
+                continue;
+            }
+
+            PhotogrammetryRockPrimitive surface = ContinuousScannedRockSurfaceBuilder.Build(
+                rowTriangles,
+                relief.Sample,
+                sampleAmplitudeMeters,
+                maximumReliefMeters,
+                maximumEdgeMeters,
+                synthesisSeed,
+                baseColorImageBytes: null,
+                fadeBoundaryVertex: IsOuterBoundary);
+            foreach (ScannedRockMeshPage page in ScannedRockPageBaker.Bake(
+                surface,
+                pageMeters,
+                lod: 0,
+                geometricError: maximumReliefMeters + maximumEdgeMeters,
+                materialPageId))
+            {
+                if (!rockPrefilter || ScannedRockPageCoverage.HasVisibleRock(page))
                 {
-                    throw new InvalidDataException($"RMP2 verification failed for {relative}.");
+                    pageWriter.Add(page);
                 }
             }
-
-            vertexCount += page.VertexCount;
-            triangleCount += page.IndexCount / 3;
-            geometryBytes += page.VertexData.LongLength + (page.Indices.LongLength * sizeof(ushort));
         }
 
         string materialPath = Path.Combine(temporaryRoot, $"{materialPageId}{RockMaterialPageStore.FileExtension}");
@@ -444,11 +465,12 @@ static int BakeContinuousRmp2(
             _ = RockMaterialPageStore.Read(stream);
         }
 
+        ScannedRockPageIndexStore.Write(temporaryRoot, pageWriter.Descriptors);
         var manifest = new
         {
             format = "RMP2+RTX1-continuous-dem",
-            source = tiles
-                .Select(tile => new { tile.Zoom, tile.TileX, tile.TileY })
+            source = tileDescriptors
+                .Select(tile => new { Zoom = tile.Key.Zoom, TileX = tile.Key.X, TileY = tile.Key.Y })
                 .ToArray(),
             anchor = new { anchor.Latitude, anchor.Longitude },
             pageMeters,
@@ -466,10 +488,10 @@ static int BakeContinuousRmp2(
                 material.MipCount,
                 bc1Bytes = material.Bc1Data.Length,
             },
-            pages = pages.Length,
-            vertexCount,
-            triangleCount,
-            geometryBytes,
+            pages = pageWriter.PageCount,
+            vertexCount = pageWriter.VertexCount,
+            triangleCount = pageWriter.TriangleCount,
+            geometryBytes = pageWriter.GeometryBytes,
         };
         File.WriteAllText(
             Path.Combine(temporaryRoot, "manifest.json"),
@@ -477,8 +499,9 @@ static int BakeContinuousRmp2(
         Directory.Move(temporaryRoot, outputRoot);
 
         Console.WriteLine(
-            $"[rock-bake] OK continuous RMP2: pages={pages.Length}, vertices={vertexCount:N0}, "
-            + $"triangles={triangleCount:N0}, geometry={geometryBytes / (1024.0 * 1024.0):F1} MiB, "
+            $"[rock-bake] OK continuous RMP2: pages={pageWriter.PageCount}, vertices={pageWriter.VertexCount:N0}, "
+            + $"triangles={pageWriter.TriangleCount:N0}, "
+            + $"geometry={pageWriter.GeometryBytes / (1024.0 * 1024.0):F1} MiB, "
             + $"material={material.Bc1Data.Length / (1024.0 * 1024.0):F2} MiB, "
             + $"time={stopwatch.Elapsed.TotalSeconds:F1}s");
         Console.WriteLine($"[rock-bake] output: {outputRoot}");
@@ -493,6 +516,162 @@ static int BakeContinuousRmp2(
 
         throw;
     }
+}
+
+int AnalyzeRockCoverage()
+{
+    string root = GetArgument("--dem-root")
+        ?? throw new ArgumentException("--analyze-rock-coverage requires --dem-root.");
+    string rangeText = GetArgument("--tile-range")
+        ?? throw new ArgumentException("--analyze-rock-coverage requires --tile-range xmin,ymin,xmax,ymax.");
+    string outputPath = GetArgument("--coverage-out")
+        ?? throw new ArgumentException("--analyze-rock-coverage requires --coverage-out.");
+    int zoom = ParseInt(GetArgument("--zoom") ?? "17", "--zoom");
+    int sampleStride = ParseInt(GetArgument("--coverage-stride") ?? "4", "--coverage-stride");
+    int coverageHalo = ParseNonNegativeInt(
+        GetArgument("--coverage-halo") ?? "1",
+        "--coverage-halo");
+    float minimumSlope = ParseFloat(
+        GetArgument("--rock-slope") ?? "45",
+        "--rock-slope");
+
+    int[] range = rangeText
+        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Select(value => int.Parse(value, CultureInfo.InvariantCulture))
+        .ToArray();
+    if (range.Length != 4 || range[0] > range[2] || range[1] > range[3])
+    {
+        throw new ArgumentException("--tile-range must be xmin,ymin,xmax,ymax.");
+    }
+
+    var available = new HashSet<DemTileKey>();
+    var candidates = new HashSet<DemTileKey>();
+    int total = checked((range[2] - range[0] + 1) * (range[3] - range[1] + 1));
+    int inspected = 0;
+    long validSamples = 0;
+    long rockSamples = 0;
+    var stopwatch = Stopwatch.StartNew();
+    for (int x = range[0]; x <= range[2]; x++)
+    {
+        for (int y = range[1]; y <= range[3]; y++)
+        {
+            var key = new DemTileKey(zoom, x, y);
+            string path = Path.Combine(root, BakedDemTileStore.RelativePathFor(key));
+            if (File.Exists(path))
+            {
+                available.Add(key);
+                using FileStream stream = File.OpenRead(path);
+                BakedDemTile tile = BakedDemTileStore.Read(stream);
+                RockDemTileEvidence evidence = RockDemTileClassifier.Analyze(
+                    tile,
+                    sampleStride,
+                    minimumSlope);
+                validSamples += evidence.ValidSampleCount;
+                rockSamples += evidence.RockSampleCount;
+                if (evidence.IsCandidate)
+                {
+                    candidates.Add(key);
+                }
+            }
+
+            inspected++;
+            if (inspected % 500 == 0 || inspected == total)
+            {
+                Console.WriteLine(
+                    $"[rock-coverage] {inspected:N0}/{total:N0}, available={available.Count:N0}, "
+                    + $"candidates={candidates.Count:N0}, elapsed={stopwatch.Elapsed.TotalSeconds:F1}s");
+            }
+        }
+    }
+
+    IReadOnlySet<DemTileKey> planned = RockDemCoveragePlanner.ExpandWithHalo(
+        candidates,
+        available,
+        haloTiles: coverageHalo);
+    string? outputDirectory = Path.GetDirectoryName(Path.GetFullPath(outputPath));
+    if (!string.IsNullOrEmpty(outputDirectory))
+    {
+        Directory.CreateDirectory(outputDirectory);
+    }
+
+    string[] plannedPaths = planned
+        .OrderBy(key => key.Y)
+        .ThenBy(key => key.X)
+        .Select(key => Path.Combine(root, BakedDemTileStore.RelativePathFor(key)))
+        .ToArray();
+    File.WriteAllLines(outputPath, plannedPaths);
+    var report = new
+    {
+        zoom,
+        tileRange = new
+        {
+            minimumX = range[0],
+            minimumY = range[1],
+            maximumX = range[2],
+            maximumY = range[3],
+        },
+        minimumSlope,
+        sampleStride,
+        coverageHalo,
+        total,
+        available = available.Count,
+        missing = total - available.Count,
+        candidates = candidates.Count,
+        plannedWithHalo = planned.Count,
+        validSamples,
+        rockSamples,
+        elapsedSeconds = stopwatch.Elapsed.TotalSeconds,
+    };
+    string reportPath = outputPath + ".json";
+    File.WriteAllText(
+        reportPath,
+        JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
+    Console.WriteLine(
+        $"[rock-coverage] OK candidates={candidates.Count:N0}, with halo={planned.Count:N0}, "
+        + $"list={outputPath}, report={reportPath}");
+    return 0;
+}
+
+int BuildPageIndex()
+{
+    string root = GetArgument("--page-root")
+        ?? throw new ArgumentException("--build-page-index requires --page-root.");
+    if (!Directory.Exists(root))
+    {
+        throw new DirectoryNotFoundException(root);
+    }
+
+    var pages = new List<ScannedRockPageDescriptor>();
+    var stopwatch = Stopwatch.StartNew();
+    foreach (string path in Directory.EnumerateFiles(
+        root,
+        "*" + ScannedRockMeshPageStore.FileExtension,
+        SearchOption.AllDirectories))
+    {
+        using FileStream stream = File.OpenRead(path);
+        ScannedRockMeshPageHeader header = ScannedRockMeshPageStore.ReadHeader(stream);
+        pages.Add(new ScannedRockPageDescriptor(
+            new ScannedRockPageKey(header.PageX, header.PageY, header.Lod),
+            header.WorldMin,
+            header.WorldExtent,
+            header.GeometricError,
+            header.MaterialPageId,
+            header.VertexCount,
+            header.IndexCount,
+            path));
+        if (pages.Count % 10_000 == 0)
+        {
+            Console.WriteLine(
+                $"[rock-index] headers={pages.Count:N0}, elapsed={stopwatch.Elapsed.TotalSeconds:F1}s");
+        }
+    }
+
+    ScannedRockPageIndexStore.Write(root, pages);
+    Console.WriteLine(
+        $"[rock-index] OK pages={pages.Count:N0}, "
+        + $"bytes={new FileInfo(Path.Combine(root, ScannedRockPageIndexStore.FileName)).Length:N0}, "
+        + $"time={stopwatch.Elapsed.TotalSeconds:F1}s");
+    return 0;
 }
 
 static RockAlbedoTile DecodeAlbedo(PhotogrammetryRockPrimitive primitive)
@@ -548,5 +727,18 @@ static void PrintUsage()
           --material-page <id>   RTX1 material page id (default 20)
           --neutralize-albedo    remove warm colour cast (off by default)
           --flat-albedo          diagnostic neutral slate; shape comes only from 3D relief
+
+        Coverage analysis:
+          --analyze-rock-coverage
+          --dem-root <baked cache root>
+          --tile-range <xmin,ymin,xmax,ymax>
+          --coverage-out <planned .txt>
+          --zoom <n>             DEM zoom (default 17)
+          --coverage-stride <n>  sampled DEM-cell stride (default 4)
+          --rock-slope <degrees> minimum candidate slope (default 45)
+
+        Existing RMP2 index:
+          --build-page-index
+          --page-root <RMP2 package root>
         """);
 }

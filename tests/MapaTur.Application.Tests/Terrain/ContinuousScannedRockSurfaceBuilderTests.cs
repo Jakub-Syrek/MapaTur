@@ -57,6 +57,31 @@ public sealed class ContinuousScannedRockSurfaceBuilderTests
     }
 
     [Fact]
+    public void should_cap_tangent_jitter_independently_of_the_subdivision_edge_limit()
+    {
+        // Arrange
+        IReadOnlyList<RockMeshTriangle> wall = CreateWall();
+        Vector3[] originalVertices = wall
+            .SelectMany(triangle => new[] { triangle.A, triangle.B, triangle.C })
+            .Distinct()
+            .ToArray();
+
+        // Act
+        PhotogrammetryRockPrimitive result = ContinuousScannedRockSurfaceBuilder.Build(
+            wall,
+            static (_, _) => new RockSurfaceSample(-1f, 255, 0),
+            sampleAmplitudeMeters: 1f,
+            maximumReliefMeters: 1f,
+            maximumEdgeMeters: 20f,
+            seed: 5678,
+            baseColorImageBytes: null);
+
+        // Assert
+        result.Positions.Should().OnlyContain(position =>
+            originalVertices.Min(original => Vector3.Distance(original, position)) <= 0.3f);
+    }
+
+    [Fact]
     public void should_produce_uvs_and_smooth_normals_for_every_shared_vertex()
     {
         // Arrange

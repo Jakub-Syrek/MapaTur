@@ -6,21 +6,27 @@ Pionowego ortofoto nie da się naprawić samym albedo. Mapa normalnych i paralla
 wewnątrz trójkąta, ale nie tworzą krawędzi bloków ani wiarygodnej sylwetki. Obecna siatka DEM jest ponadto
 zbyt rzadka, aby vertex displacement zbudował cechy skały widoczne z kilku–kilkudziesięciu metrów.
 
-Docelowym zasobem jest dlatego **prebake'owana siatka fotogrametryczna stromych ścian**, podzielona na małe
-strony gotowe do bezpośredniego uploadu. Nie jest to displacement DEM: baker zachowuje prawdziwe uskoki,
-przewieszki, półki, osobne bloki i głębokie szczeliny skanu. Oryginalny DEM i materiał pozostają fallbackiem
-do chwili, gdy komplet geometrii i materiału strony skały jest rezydentny.
+Próby pokrywania ściany pełnymi patchami siatek fotogrametrycznych zostały ostatecznie odrzucone. Zachowywały
+lokalną bryłę skanu, ale po zwielokrotnieniu ujawniały obrysy instancji, przecięcia, cienkie kartki i zmianę
+skali bloków. Boolean, przycinanie ownership i nieregularny seam-alpha nie usunęły tych wad bez zniszczenia
+wnętrza skanu.
 
-Pilot displacementu skanowanych heightmap został odrzucony w teście z bliska. Mimo nieokresowego samplera
-dał równoległe bruzdy i efekt odlanej/nadrukowanej powierzchni, ponieważ topologia nadal była heightfieldem.
-`RMP1` pozostaje sprawdzonym kontenerem geometrii, ale nie jest kandydatem wizualnym bez prawdziwej siatki
-fotogrametrycznej.
+Stanem produkcyjnym od V61, rozszerzonym na całe Tatry jako V91, jest dlatego **ciągła powłoka 3D z natywnej
+topologii z17 DEM**, odsunięta od podłoża o maksymalnie 2,8 m. Forma nie pochodzi z proceduralnego Voronoi ani
+z obrazu heightmapy: wieloskalowy, nieokresowy relief jest próbkowany z geometrii czterech rzeczywistych
+skanów fotogrametrycznych. Powłoka zachowuje bazową sylwetkę, uskoki i kanciastość DEM, nie tworzy osobnych
+stempli, a materiał jest projekcją światową bez regularnego kafelkowania. Oryginalny DEM pozostaje fallbackiem
+do chwili, gdy strona skały jest rezydentna.
+
+Ta decyzja jest kompromisem: powłoka nie odtworzy prawdziwej przewieszki nieobecnej w DEM, ale w testach
+bliskich zachowuje naturalniejszą formę niż powtarzane pełne skany, displacement tekstury i proceduralne
+komórki. `RMP2` pozostaje kontenerem bezpośrednio uploadowalnej geometrii.
 
 ## Zakres i bramka
 
-- nachylenie do 45°: wyłącznie DEM i ortofoto;
-- 45–60°: pas przejściowy, w którym brzeg strony skały jest spawany z DEM;
-- od 60°: pełna mikrogeometria, bez pionowego ortofoto;
+- pokrycie produkcyjne V91 wybiera kafle z17 zawierające rdzeń o nachyleniu co najmniej 55°;
+- siła reliefu wewnątrz strony nadal wynika z lokalnego nachylenia, a zewnętrzny brzeg powłoki wraca do DEM;
+- relief jest ograniczony do 2,8 m, a krawędź powłoki do 1,2 m nad geometrią bazową;
 - test produktu: kamera 5–50 m od ściany, a nie panorama;
 - kandydat odpada przy efekcie tapety, gipsowych komórkach, okresowym wzorze, pływaniu detalu, pęknięciu
   między stronami albo pogorszeniu klatki;
@@ -39,21 +45,21 @@ Nagłówek:
 | version | u16 | wersja układu wierzchołka |
 | lod | u8 | 0–2 |
 | flags | u8 | obecność AO/maski materiału/skirt |
-| pageX/pageY | i32 ×2 | globalny klucz strony 16 m |
+| pageX/pageY | i32 ×2 | globalny klucz strony; V91 używa komórek 32 m |
 | vertexCount/indexCount | u32 ×2 | liczba elementów |
 | worldMin/worldExtent | f32 ×6 | ramka kwantyzacji i cullingu |
 | geometricError | f32 | maksymalny błąd LOD w metrach |
 | vertexBytes/indexBytes | u32 ×2 | długości kolejnych bloków |
 
-Wierzchołek ma 20 bajtów:
+Wierzchołek RMP2 ma obecnie 20 bajtów:
 
 - pozycja XYZ: trzy `u16`, kwantyzowane w AABB strony;
 - normalna: octahedral `snorm16 ×2`;
 - UV atlasu skanu: `unorm16 ×2`;
-- AO: `u8`;
+- AO: `u8` (V91 zawsze 255);
 - maska przejścia DEM–skała: `u8`;
-- identyfikator strony materiału: `u16`;
-- flagi szwu/skirtu i bajt rezerwy: `u8 ×2`.
+- cztery bajty rezerwy. Identyfikator materiału jest już w nagłówku strony i renderer nie czyta tych
+  czterech bajtów jako atrybutu.
 
 Indeksy są `u16`; strona ma twardy limit 65 535 wierzchołków. Bloki wierzchołków i indeksów są wyrównane
 do 16 bajtów. Materiał jest osobnym plikiem `.rtex`: bieżąca biblioteka czterech orientacji używa atlasu
@@ -64,15 +70,25 @@ nie dzieli trójkątów, nie koduje BC ani nie tworzy mipów: wykonuje wyłączn
 
 ## Podział i LOD
 
-- globalna strona produkcyjna: 4 × 4 m w układzie sceny dla pełnodetalowych skanów; większe strony
-  przekraczają limit 65 535 wierzchołków na gęstych, wielowarstwowych fragmentach;
-- LOD0: oryginalna lub tylko lekko oczyszczona topologia skanu, używana do rozmiaru błędu > 1 px;
-- LOD1: uproszczenie z błędem obiektowym do 2 cm;
-- LOD2: uproszczenie z błędem obiektowym do 8 cm;
-- dalej: istniejący DEM i obecny materiał bez mikrogeometrii.
+V91 ma strony 32 × 32 m i tylko LOD0. Selektor oraz format rozumieją poziomy 0–2, lecz pakiet nie zawiera
+uproszczonych rodziców, więc `geometricError` nie może jeszcze zmniejszyć liczby trójkątów ani draw calli.
+To jest główny pozostały dług wydajnościowy.
 
-Runtime wybiera LOD wyłącznie przez `geometricError / metresPerPixel`, z histerezą 25%. Nadal widoczna
-strona jest chroniona przez dwie klatki selekcji, a pierścień sąsiednich stron jest prefetchem.
+Docelowa hierarchia `RMP3`:
+
+- LOD0: komórka 32 m, dokładna geometria V91 bez jakiejkolwiek zmiany close-up;
+- LOD1: rodzic 64 m, błąd bezwzględny do 0,35 m;
+- LOD2: rodzic 128 m, błąd bezwzględny do 1,2 m;
+- dalej: DEM, gdy maksymalne 2,8 m reliefu jest mniejsze od piksela.
+
+Uproszczenie ma działać offline na zespawanej geometrii rodzica, z blokadą granic, grzbietów i dużych zmian
+normalnej. Dobrym gotowym kandydatem jest `meshoptimizer`: tryb błędu absolutnego, `SimplifyLockBorder`,
+atrybutowa ochrona normalnych i selektywne `vertex_lock`. Nie wolno użyć `simplifySloppy`, zwykłego
+próbkowania co N-ty wierzchołek ani regularnej siatki, bo wcześniejsze V86–V89 mostkowały wklęsłości i
+zaokrąglały skałę.
+
+Selektor wybiera węzły quadtree według błędu ekranowego z histerezą 25%. Rodzic pozostaje widoczny, dopóki
+wszystkie wymagane dzieci nie są rezydentne; przejście nigdy nie może odsłonić DEM pomiędzy stronami.
 
 ## Offline bake
 
@@ -105,11 +121,46 @@ widocznej powierzchni przy równym LOD.
 ## Streaming i budżety
 
 - kolejka I/O i staging działają poza wątkiem renderującym;
-- jednostką rezydencji jest strona 16 m, nie cały masyw;
+- jednostką rezydencji V91 jest strona 32 m, a docelowo węzeł quadtree 32/64/128 m;
 - strona widoczna nie może być usunięta przed rezydencją poprawnego fallbacku;
 - budżet VRAM pochodzi z profilu sprzętu; punkt startowy desktop to 256 MB, co daje setki stron;
 - upload ma budżet czasowy na klatkę, ale gotowa strona nie wymaga żadnej produkcji danych;
 - brak lub błąd strony oznacza obecny DEM, nigdy pustą powierzchnię.
+
+## Stan V91 i plan redukcji kosztu — 2026-07-29
+
+Pełny pakiet V91:
+
+- 77 070 stron LOD0;
+- 278 610 721 wierzchołków i 533 778 910 trójkątów;
+- 8,177 GiB plików `.rmp2`, mediana strony 105,7 KiB, P95 203,5 KiB;
+- jeden materiał BC1 2048² z pełnymi mipami;
+- typowy kadr Rysy: 1509 żądanych stron.
+
+Zaimplementowana redukcja bez zmiany obrazu:
+
+1. Deskryptory nie są już grupowane w każdej klatce; niezmienny indeks powstaje raz przy otwarciu katalogu.
+2. Indeks ma drzewo AABB/BVH. Selektor odrzuca całe niewidoczne poddrzewa zamiast wykonywać 77 070 testów
+   frustum w każdej klatce.
+3. Test porównuje wynik BVH z brute-force i wymaga identycznego zestawu widocznych stron.
+4. Stabilny pomiar Rysy 1920 × 1000 obniżył `cpu setup` z 84–200 ms do 8–9 ms. Obraz był oceniany dopiero
+   po kolejnych klatkach o zerowej różnicy na trzech obszarach skały.
+
+Następna kolejność:
+
+1. Hierarchiczne strony RMP3 32/64/128 m i prawdziwy screen-space LOD. To redukuje jednocześnie liczbę
+   stron, I/O, wierzchołków i draw calli w średnim oraz dalekim planie.
+2. RMP2/RMP3 compact vertex dla materiału światowego: 16 B zamiast 20 B przez usunięcie stałego AO i
+   czterech nieczytanych bajtów. Sam V91 zmniejszyłby blok wierzchołków o około 1,04 GiB, a cały pakiet
+   o około 12%.
+3. Shadow i reflection używają co najmniej o jeden poziom grubszego LOD niż main pass; relief do 2,8 m
+   nie uzasadnia pełnej geometrii w dalekim shadow map. Main pass i bliski cień pozostają bez zmian.
+4. Po przejściu bramki obrazu: łączenie stron tego samego materiału w większe bufory/indirect batches,
+   aby liczba wywołań GL nie była równa liczbie widocznych stron.
+
+Nie należy zaczynać od samego zwiększenia strony do 64 m w RMP2. Analiza indeksu V91 daje wprawdzie
+24 934 grupy zamiast 77 070 (3,09× mniej), ale osiem grup przekracza limit 65 535 wierzchołków, a obecny
+klucz RMP2 nie potrafi zapisać wielu chunków jednej komórki. Hierarchia RMP3 rozwiązuje to jawnie.
 
 ## Kolejność implementacji
 

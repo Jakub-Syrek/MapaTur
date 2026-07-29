@@ -155,7 +155,7 @@ public sealed class RockScanReliefSampler
         // Keeping high-frequency scan energy out of vertex displacement prevents a large cliff from
         // turning into a uniformly repeated carpet of bright micro-facets.
         ReadOnlySpan<float> scales = [0.09f, 0.17f, 0.31f, 0.55f];
-        ReadOnlySpan<float> weights = [0.65f, 0.25f, 0.08f, 0.02f];
+        ReadOnlySpan<float> weights = [0.52f, 0.26f, 0.16f, 0.06f];
         float centered = 0f;
         float weightEnergySquared = 0f;
         for (int layer = 0; layer < scales.Length; layer++)

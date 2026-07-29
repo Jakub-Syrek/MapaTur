@@ -77,6 +77,13 @@ public sealed class ScannedRockPageCatalog
                     return new ScannedRockPageCatalog([]);
                 }
 
+                string indexPath = Path.Combine(root, ScannedRockPageIndexStore.FileName);
+                if (File.Exists(indexPath))
+                {
+                    return new ScannedRockPageCatalog(
+                        ScannedRockPageIndexStore.Read(root));
+                }
+
                 var pages = new List<ScannedRockPageDescriptor>();
                 foreach (string path in Directory.EnumerateFiles(
                     root,

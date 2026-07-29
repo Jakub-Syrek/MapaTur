@@ -19,6 +19,133 @@ public readonly record struct ScannedRockPageSelection(
     double DistanceMeters,
     double ScreenSpaceErrorPixels);
 
+public readonly record struct ScannedRockPageSelectionDiagnostics(
+    int SpatialNodeTests,
+    int PageGroupTests);
+
+/// <summary>
+/// Immutable grouping of RMP2 descriptors by spatial page. Building it once keeps the per-frame selector
+/// from regrouping and allocating over the complete mountain catalog on every camera update.
+/// </summary>
+public sealed class ScannedRockPageSelectionIndex
+{
+    private const int LeafCapacity = 16;
+
+    private readonly KeyValuePair<(int X, int Y), ScannedRockPageGroup>[] spatialEntries;
+    private readonly SpatialNode? root;
+
+    internal ScannedRockPageSelectionIndex(IReadOnlyList<ScannedRockPageDescriptor> pages)
+    {
+        ArgumentNullException.ThrowIfNull(pages);
+        Groups = pages
+            .GroupBy(page => (page.Key.PageX, page.Key.PageY))
+            .ToDictionary(group => group.Key, group => new ScannedRockPageGroup(group));
+        spatialEntries = Groups.ToArray();
+        root = spatialEntries.Length == 0
+            ? null
+            : BuildNode(0, spatialEntries.Length);
+    }
+
+    internal IReadOnlyDictionary<(int X, int Y), ScannedRockPageGroup> Groups { get; }
+
+    internal HashSet<(int X, int Y)> QueryVisible(
+        Matrix4x4 viewProjection,
+        out ScannedRockPageSelectionDiagnostics diagnostics)
+    {
+        var visible = new HashSet<(int X, int Y)>();
+        int nodeTests = 0;
+        int pageGroupTests = 0;
+        if (root is not null)
+        {
+            CollectVisible(root, viewProjection, visible, ref nodeTests, ref pageGroupTests);
+        }
+
+        diagnostics = new ScannedRockPageSelectionDiagnostics(nodeTests, pageGroupTests);
+        return visible;
+    }
+
+    private SpatialNode BuildNode(int start, int count)
+    {
+        Vector3 worldMin = new(float.PositiveInfinity);
+        Vector3 worldMax = new(float.NegativeInfinity);
+        int minimumX = int.MaxValue;
+        int maximumX = int.MinValue;
+        int minimumY = int.MaxValue;
+        int maximumY = int.MinValue;
+        for (int i = start; i < start + count; i++)
+        {
+            KeyValuePair<(int X, int Y), ScannedRockPageGroup> entry = spatialEntries[i];
+            worldMin = Vector3.Min(worldMin, entry.Value.WorldMin);
+            worldMax = Vector3.Max(worldMax, entry.Value.WorldMax);
+            minimumX = Math.Min(minimumX, entry.Key.X);
+            maximumX = Math.Max(maximumX, entry.Key.X);
+            minimumY = Math.Min(minimumY, entry.Key.Y);
+            maximumY = Math.Max(maximumY, entry.Key.Y);
+        }
+
+        if (count <= LeafCapacity)
+        {
+            return new SpatialNode(worldMin, worldMax, start, count, null, null);
+        }
+
+        bool splitX = (long)maximumX - minimumX >= (long)maximumY - minimumY;
+        Array.Sort(
+            spatialEntries,
+            start,
+            count,
+            Comparer<KeyValuePair<(int X, int Y), ScannedRockPageGroup>>.Create(
+                (left, right) => splitX
+                    ? left.Key.X.CompareTo(right.Key.X)
+                    : left.Key.Y.CompareTo(right.Key.Y)));
+        int leftCount = count / 2;
+        SpatialNode left = BuildNode(start, leftCount);
+        SpatialNode right = BuildNode(start + leftCount, count - leftCount);
+        return new SpatialNode(worldMin, worldMax, start, count, left, right);
+    }
+
+    private void CollectVisible(
+        SpatialNode node,
+        Matrix4x4 viewProjection,
+        ISet<(int X, int Y)> visible,
+        ref int nodeTests,
+        ref int pageGroupTests)
+    {
+        nodeTests++;
+        if (!FrustumCuller.IsAabbVisible(viewProjection, node.WorldMin, node.WorldMax))
+        {
+            return;
+        }
+
+        if (node.Left is not null && node.Right is not null)
+        {
+            CollectVisible(node.Left, viewProjection, visible, ref nodeTests, ref pageGroupTests);
+            CollectVisible(node.Right, viewProjection, visible, ref nodeTests, ref pageGroupTests);
+            return;
+        }
+
+        for (int i = node.Start; i < node.Start + node.Count; i++)
+        {
+            KeyValuePair<(int X, int Y), ScannedRockPageGroup> entry = spatialEntries[i];
+            pageGroupTests++;
+            if (FrustumCuller.IsAabbVisible(
+                viewProjection,
+                entry.Value.WorldMin,
+                entry.Value.WorldMax))
+            {
+                visible.Add(entry.Key);
+            }
+        }
+    }
+
+    private sealed record SpatialNode(
+        Vector3 WorldMin,
+        Vector3 WorldMax,
+        int Start,
+        int Count,
+        SpatialNode? Left,
+        SpatialNode? Right);
+}
+
 /// <summary>
 /// Chooses one RMP2 LOD for every visible page plus a neighbour prefetch ring. The decision uses the
 /// per-page geometric error projected to pixels, while the previous selection creates a symmetric
@@ -31,6 +158,31 @@ public static class ScannedRockPageSelector
         ScannedRockPageSelectionOptions options)
     {
         ArgumentNullException.ThrowIfNull(pages);
+        return SelectWithDiagnostics(pages, options).Selection;
+    }
+
+    public static (
+        IReadOnlyList<ScannedRockPageSelection> Selection,
+        ScannedRockPageSelectionDiagnostics Diagnostics) SelectWithDiagnostics(
+        IReadOnlyList<ScannedRockPageDescriptor> pages,
+        ScannedRockPageSelectionOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(pages);
+        return SelectWithDiagnostics(new ScannedRockPageSelectionIndex(pages), options);
+    }
+
+    internal static IReadOnlyList<ScannedRockPageSelection> Select(
+        ScannedRockPageSelectionIndex index,
+        ScannedRockPageSelectionOptions options) =>
+        SelectWithDiagnostics(index, options).Selection;
+
+    private static (
+        IReadOnlyList<ScannedRockPageSelection> Selection,
+        ScannedRockPageSelectionDiagnostics Diagnostics) SelectWithDiagnostics(
+        ScannedRockPageSelectionIndex index,
+        ScannedRockPageSelectionOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(index);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(options.Camera);
         if (!float.IsFinite(options.AspectRatio)
@@ -47,25 +199,18 @@ public static class ScannedRockPageSelector
             throw new ArgumentOutOfRangeException(nameof(options));
         }
 
-        if (pages.Count == 0)
+        IReadOnlyDictionary<(int X, int Y), ScannedRockPageGroup> groups = index.Groups;
+        if (groups.Count == 0)
         {
-            return [];
+            return ([], default);
         }
 
-        var groups = pages
-            .GroupBy(page => (page.Key.PageX, page.Key.PageY))
-            .ToDictionary(group => group.Key, group => new PageGroup(group));
         Matrix4x4 viewProjection = options.Camera.BuildViewProjection(options.AspectRatio);
-        var visible = new HashSet<(int X, int Y)>(
-            groups
-                .Where(pair => FrustumCuller.IsAabbVisible(
-                    viewProjection,
-                    pair.Value.WorldMin,
-                    pair.Value.WorldMax))
-                .Select(pair => pair.Key));
+        HashSet<(int X, int Y)> visible =
+            index.QueryVisible(viewProjection, out ScannedRockPageSelectionDiagnostics diagnostics);
         if (visible.Count == 0)
         {
-            return [];
+            return ([], diagnostics);
         }
 
         var wanted = new HashSet<(int X, int Y)>(visible);
@@ -91,10 +236,10 @@ public static class ScannedRockPageSelector
         var selection = new List<ScannedRockPageSelection>(wanted.Count);
         foreach ((int x, int y) in wanted)
         {
-            PageGroup group = groups[(x, y)];
+            ScannedRockPageGroup group = groups[(x, y)];
             double distance = Math.Max(0.001, DistanceToAabb(cameraPosition, group.WorldMin, group.WorldMax));
             int idealIndex = ScreenSpaceError.SelectLod(
-                group.Pages.Select(page => (double)page.GeometricError).ToArray(),
+                group.GeometricErrors,
                 distance,
                 options.Camera.FieldOfViewYRadians,
                 options.ViewportHeightPixels,
@@ -113,12 +258,13 @@ public static class ScannedRockPageSelector
                 errorPixels));
         }
 
-        return selection
+        IReadOnlyList<ScannedRockPageSelection> ordered = selection
             .OrderByDescending(item => item.IsVisible)
             .ThenBy(item => item.DistanceMeters)
             .ThenBy(item => item.Descriptor.Key.PageX)
             .ThenBy(item => item.Descriptor.Key.PageY)
             .ToArray();
+        return (ordered, diagnostics);
     }
 
     private static int ApplyHysteresis(
@@ -179,17 +325,20 @@ public static class ScannedRockPageSelector
         return Math.Sqrt((dx * dx) + (dy * dy) + (dz * dz));
     }
 
-    private sealed class PageGroup
-    {
-        public PageGroup(IEnumerable<ScannedRockPageDescriptor> pages)
-        {
-            Pages = pages.OrderBy(page => page.Key.Lod).ToArray();
-            WorldMin = Pages.Select(page => page.WorldMin).Aggregate(Vector3.Min);
-            WorldMax = Pages.Select(page => page.WorldMax).Aggregate(Vector3.Max);
-        }
+}
 
-        public IReadOnlyList<ScannedRockPageDescriptor> Pages { get; }
-        public Vector3 WorldMin { get; }
-        public Vector3 WorldMax { get; }
+internal sealed class ScannedRockPageGroup
+{
+    public ScannedRockPageGroup(IEnumerable<ScannedRockPageDescriptor> pages)
+    {
+        Pages = pages.OrderBy(page => page.Key.Lod).ToArray();
+        GeometricErrors = Pages.Select(page => (double)page.GeometricError).ToArray();
+        WorldMin = Pages.Select(page => page.WorldMin).Aggregate(Vector3.Min);
+        WorldMax = Pages.Select(page => page.WorldMax).Aggregate(Vector3.Max);
     }
+
+    public IReadOnlyList<ScannedRockPageDescriptor> Pages { get; }
+    public IReadOnlyList<double> GeometricErrors { get; }
+    public Vector3 WorldMin { get; }
+    public Vector3 WorldMax { get; }
 }

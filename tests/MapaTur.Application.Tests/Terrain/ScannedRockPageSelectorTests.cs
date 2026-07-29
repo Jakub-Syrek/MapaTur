@@ -74,6 +74,70 @@ public sealed class ScannedRockPageSelectorTests
             .BeEquivalentTo([(0, true), (1, false)]);
     }
 
+    [Fact]
+    public void should_prune_spatially_distant_groups_before_leaf_frustum_tests()
+    {
+        // Arrange
+        ScannedRockPageDescriptor[] pages = Enumerable.Range(0, 4096)
+            .Select(index => Descriptor(
+                lod: 0,
+                pageX: index,
+                pageY: 0,
+                worldMin: index == 0 ? Vector3.Zero : new Vector3(1000f + (index * 2f), 0f, 0f),
+                geometricError: 0.005f))
+            .ToArray();
+        var options = Options(CameraAtDistance(101f)) with { PrefetchPageRing = 0 };
+
+        // Act
+        ScannedRockPageSelectionDiagnostics diagnostics =
+            ScannedRockPageSelector.SelectWithDiagnostics(pages, options).Diagnostics;
+
+        // Assert
+        diagnostics.PageGroupTests.Should().BeLessThan(pages.Length / 16);
+    }
+
+    [Fact]
+    public void should_return_same_visible_groups_as_brute_force_frustum_culling()
+    {
+        // Arrange
+        ScannedRockPageDescriptor[] pages = Enumerable.Range(-24, 49)
+            .SelectMany(x => Enumerable.Range(-24, 49)
+                .Select(y => Descriptor(
+                    lod: 0,
+                    pageX: x,
+                    pageY: y,
+                    worldMin: new Vector3(x * 40f, y * 40f, ((x + y) % 7) * 15f),
+                    geometricError: 0.005f)))
+            .ToArray();
+        var camera = new Camera3D
+        {
+            Target = new Vector3(50f, -80f, 40f),
+            Distance = 480f,
+            AzimuthRadians = 0.63f,
+            PitchRadians = 0.28f,
+            FieldOfViewYRadians = MathF.PI / 3f,
+            NearPlane = 1f,
+            FarPlane = 1600f,
+        };
+        var options = Options(camera) with { PrefetchPageRing = 0 };
+        Matrix4x4 viewProjection = camera.BuildViewProjection(options.AspectRatio);
+        ScannedRockPageKey[] expected = pages
+            .Where(page => FrustumCuller.IsAabbVisible(
+                viewProjection,
+                page.WorldMin,
+                page.WorldMax))
+            .Select(page => page.Key)
+            .ToArray();
+
+        // Act
+        ScannedRockPageKey[] actual = ScannedRockPageSelector.Select(pages, options)
+            .Select(item => item.Descriptor.Key)
+            .ToArray();
+
+        // Assert
+        actual.Should().BeEquivalentTo(expected);
+    }
+
     private static ScannedRockPageSelectionOptions Options(Camera3D camera) =>
         new()
         {

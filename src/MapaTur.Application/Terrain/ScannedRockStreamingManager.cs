@@ -18,7 +18,7 @@ public sealed class ScannedRockStreamingManager : IDisposable
 {
     private const int StaleGraceUpdates = 2;
 
-    private readonly IReadOnlyList<ScannedRockPageDescriptor> descriptors;
+    private readonly ScannedRockPageSelectionIndex selectionIndex;
     private readonly Func<ScannedRockPageDescriptor, CancellationToken, Task<ScannedRockMeshPage>> loader;
     private readonly long maxResidentBytes;
     private readonly int maxConcurrentLoads;
@@ -47,7 +47,7 @@ public sealed class ScannedRockStreamingManager : IDisposable
             throw new ArgumentOutOfRangeException(nameof(maxConcurrentLoads));
         }
 
-        this.descriptors = descriptors;
+        selectionIndex = new ScannedRockPageSelectionIndex(descriptors);
         this.loader = loader;
         this.maxResidentBytes = maxResidentBytes;
         this.maxConcurrentLoads = maxConcurrentLoads;
@@ -75,7 +75,7 @@ public sealed class ScannedRockStreamingManager : IDisposable
             ? options with { PreviousSelection = previousSelection }
             : options;
         IReadOnlyList<ScannedRockPageSelection> plan =
-            ScannedRockPageSelector.Select(descriptors, stableOptions);
+            ScannedRockPageSelector.Select(selectionIndex, stableOptions);
         var desired = plan.Select(item => item.Descriptor.Key).ToHashSet();
 
         IReadOnlyList<ScannedRockMeshPage> drawable = ResolveDrawable(plan);

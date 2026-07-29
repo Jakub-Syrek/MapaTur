@@ -114,7 +114,31 @@ public sealed class RockScanReliefSamplerTests
                 - sampler.Sample(position, normal).DisplacementMeters));
 
         // Assert
-        closeDifference.Should().BeLessThan(broadDifference * 0.08f);
+        closeDifference.Should().BeLessThan(broadDifference * 0.10f);
+    }
+
+    [Fact]
+    public void should_retain_enough_local_scan_structure_for_angular_rock_faces()
+    {
+        // Arrange
+        var sampler = new RockScanReliefSampler(Scans, featureSizeMeters: 4f, amplitudeMeters: 1f);
+        var normal = Vector3.UnitX;
+        Vector3[] positions = Enumerable.Range(0, 120)
+            .Select(index => new Vector3(0f, index * 0.71f, index * -0.37f))
+            .ToArray();
+
+        // Act
+        float closeDifference = positions
+            .Average(position => MathF.Abs(
+                sampler.Sample(position + new Vector3(0f, 0.25f, 0.1f), normal).DisplacementMeters
+                - sampler.Sample(position, normal).DisplacementMeters));
+        float broadDifference = positions
+            .Average(position => MathF.Abs(
+                sampler.Sample(position + new Vector3(0f, 8f, 3f), normal).DisplacementMeters
+                - sampler.Sample(position, normal).DisplacementMeters));
+
+        // Assert
+        closeDifference.Should().BeGreaterThan(broadDifference * 0.08f);
     }
 
 }

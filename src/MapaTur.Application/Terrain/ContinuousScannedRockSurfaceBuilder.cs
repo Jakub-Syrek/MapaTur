@@ -10,6 +10,7 @@ public static class ContinuousScannedRockSurfaceBuilder
 {
     private const float MinimumRockSlopeDegrees = 45f;
     private const float MaximumTangentJitterFraction = 0.16f;
+    private const float MaximumTangentJitterMeters = 0.192f;
     private const float BoundaryFadeMeters = 3f;
 
     public static PhotogrammetryRockPrimitive Build(
@@ -120,7 +121,13 @@ public static class ContinuousScannedRockSurfaceBuilder
         float maximumEdgeMeters,
         int seed)
     {
-        float maximumJitter = maximumEdgeMeters * MaximumTangentJitterFraction;
+        // The subdivision edge is a tessellation budget, not a licence to move the terrain farther. Without an
+        // absolute cap a coarse full-area bake (e.g. 3 m edges) shifts vertices by almost half a metre per tangent
+        // axis, which can bridge narrow gullies even though the relief itself remains bounded. 0.192 m preserves
+        // the accepted V79 irregularity (1.2 m × 16%) while making coarser tessellation topologically safe.
+        float maximumJitter = MathF.Min(
+            maximumEdgeMeters * MaximumTangentJitterFraction,
+            MaximumTangentJitterMeters);
         var result = new Vector3[positions.Count];
         for (int i = 0; i < positions.Count; i++)
         {

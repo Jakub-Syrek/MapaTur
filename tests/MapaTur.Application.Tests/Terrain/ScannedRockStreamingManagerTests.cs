@@ -110,6 +110,27 @@ public sealed class ScannedRockStreamingManagerTests
         requested.Should().Equal(visible.Key);
     }
 
+    [Fact]
+    public void should_index_page_descriptors_once_for_repeated_updates()
+    {
+        // Arrange
+        var descriptors = new CountingReadOnlyList<ScannedRockPageDescriptor>(
+            [Descriptor(2)]);
+        var manager = new ScannedRockStreamingManager(
+            descriptors,
+            (_, _) => new TaskCompletionSource<ScannedRockMeshPage>().Task,
+            maxResidentBytes: 4096,
+            maxConcurrentLoads: 1);
+        int enumerationsAfterConstruction = descriptors.EnumerationCount;
+
+        // Act
+        manager.Update(Options(distance: 101f));
+        manager.Update(Options(distance: 101f));
+
+        // Assert
+        descriptors.EnumerationCount.Should().Be(enumerationsAfterConstruction);
+    }
+
     private static ScannedRockPageSelectionOptions Options(float distance) =>
         new()
         {
@@ -155,4 +176,21 @@ public sealed class ScannedRockStreamingManagerTests
             1,
             new byte[ScannedRockMeshPage.VertexStrideBytes * 3],
             [0, 1, 2]);
+
+    private sealed class CountingReadOnlyList<T>(IReadOnlyList<T> items) : IReadOnlyList<T>
+    {
+        public int EnumerationCount { get; private set; }
+
+        public int Count => items.Count;
+
+        public T this[int index] => items[index];
+
+        public IEnumerator<T> GetEnumerator()
+        {
+            EnumerationCount++;
+            return items.GetEnumerator();
+        }
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+    }
 }
