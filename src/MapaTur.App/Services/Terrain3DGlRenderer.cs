@@ -4869,7 +4869,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         double nowMs = frameClock.ElapsedMilliseconds;
         foreach (DetailCellGpu cell in det05Cells.Values)
         {
-            if (!cell.LayerReady || cell.Layer < 0 || cell.Layer >= 48)
+            // ★ TEN SAM BŁĄD, DRUGI RAZ (2026-07-30): powyższy komentarz opisuje naprawę ROZMIARU
+            // buforów z 48 na cap, ale bramka wpuszczająca cele do uploadu została z literałem 48.
+            // Skutek przy Det05HardCapCells=192: sloty 48-191 nigdy nie dostawały AABB, więc shader
+            // je pomijał (min>max = slot pusty) — 192 cele w VRAM, max 48 widocznych. Objaw zgłoszony
+            // przez usera przy Gierlachu: JEDEN kafel 5 cm, który nie przesuwa się za kamerą, resztа
+            // rozmyta; wygląda jak awaria streamingu, a log pokazuje resident 192/desired 192/queue 0.
+            // Bliźniacza ścieżka det25 (patrz `cell.Layer >= Det25ArrLayers`) robi to poprawnie przez
+            // NAZWANĄ STAŁĄ. Limity trzymać wyłącznie w stałych — literał w jednej z par ścieżek jest
+            // wzrokowo niewykrywalny (§C.11 checklisty: każdą zmianę wpinać na WSZYSTKICH ścieżkach).
+            if (!cell.LayerReady || cell.Layer < 0 || cell.Layer >= Det05HardCapCells)
             {
                 continue;
             }
