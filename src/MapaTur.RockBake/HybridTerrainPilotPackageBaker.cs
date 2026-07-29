@@ -114,6 +114,7 @@ public static class HybridTerrainPilotPackageBaker
             Directory.CreateDirectory(temporaryRoot);
             long vertexCount = 0;
             long triangleCount = 0;
+            var descriptors = new List<HybridTerrainPageDescriptor>(pages.Length);
             foreach (HybridTerrainMeshPage page in pages)
             {
                 string relative = HybridTerrainMeshPageStore.RelativePathFor(page.Lod, page.PageX, page.PageY);
@@ -133,10 +134,20 @@ public static class HybridTerrainPilotPackageBaker
                     }
                 }
 
+                descriptors.Add(new HybridTerrainPageDescriptor(
+                    new HybridTerrainPageKey(page.PageX, page.PageY, page.Lod),
+                    page.WorldMin,
+                    page.WorldExtent,
+                    page.GeometricError,
+                    page.VertexCount,
+                    page.IndexCount,
+                    path));
                 vertexCount += page.VertexCount;
                 triangleCount += page.IndexCount / 3;
             }
 
+            HybridTerrainPageHierarchyValidator.Validate(descriptors);
+            HybridTerrainPageIndexStore.Write(temporaryRoot, descriptors);
             double coveredArea = lod0.Length * options.PageSizeMeters * options.PageSizeMeters;
             var manifest = new
             {

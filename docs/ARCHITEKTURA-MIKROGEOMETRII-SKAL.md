@@ -99,6 +99,18 @@ zaokrąglały skałę.
 Selektor wybiera węzły quadtree według błędu ekranowego z histerezą 25%. Rodzic pozostaje widoczny, dopóki
 wszystkie wymagane dzieci nie są rezydentne; przejście nigdy nie może odsłonić DEM pomiędzy stronami.
 
+Pakiet RMP3 zawiera kompaktowy indeks `_pages.hidx` z kluczem hierarchii, AABB, błędem geometrycznym,
+liczbą wierzchołków i indeksów każdej strony. Runtime otwiera ten jeden indeks asynchronicznie i nie skanuje
+nagłówków dziesiątek tysięcy plików geometrii przy starcie. Publikację pakietu poprzedza walidacja całego
+łańcucha: każdy LOD0 musi mieć rodzica LOD1, każdy LOD1 rodzica LOD2, AABB rodzica musi pokrywać dziecko,
+a błąd geometryczny nie może maleć ku grubszym poziomom.
+
+`HybridTerrainResidencyPlanner` rozwiązuje idealny przekrój quadtree względem aktualnej rezydencji. Jeżeli
+choć jedna żądana strona nie jest gotowa, najbliższy rezydentny rodzic zastępuje atomowo wszystkie swoje
+dzieci; rodzic i dziecko nigdy nie trafiają razem do planu rysowania. Gdy nie ma również rodzica, plan jawnie
+zostawia dany region staremu DEM. Relacja rodzic–dziecko używa dzielenia z podłogą także dla ujemnych
+współrzędnych stron.
+
 ## RMP3 — hybrydowy kafel zastępujący DEM
 
 RMP3 nie jest kolejną powłoką nad terenem. Jedna strona zawiera jedną widoczną powierzchnię:

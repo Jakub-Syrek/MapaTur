@@ -45,6 +45,8 @@ public sealed class HybridTerrainPilotPackageBakerTests
                 })
                 .Distinct()
                 .Should().Equal((byte)0, (byte)1, (byte)2);
+            HybridTerrainPageIndexStore.Read(output)
+                .Should().HaveCount(result.PageCount);
         }
         finally
         {
