@@ -91,13 +91,18 @@ Bramki i pułapki są opisane w handoffie pilota; tu tylko różnice skali.
 
 1. **Walidacja:** `ok` ma się zgodzić z 270 806 (± nodata); `err=0`. `audit-ortho-blue-cast.py`.
    `_partial.txt` w sk05 to ŚNIEG/prześwietlenia, NIE braki — **nie wygaszać po bieli**.
-2. **Harmonizacja:** `python testdata/maps/harmonize-sk05.py --workers 8`. Skrypt przelicza pole
-   parametrów dla WSZYSTKICH cel na dysku i pomija już istniejące pliki w `sk05-harm/`
-   (`if os.path.exists(dst): return "skip"`), więc przetworzy tylko nowe. Tempo pilota: 26 kafli/s
-   ⇒ **~3 h** dla 271 tys. UWAGA: cele pilota dostaną PONOWNIE policzone parametry (więcej kafli
-   w celi = inne statystyki) — to jest OK i pożądane, ale kafle pilota w `sk05-harm` NIE zostaną
-   przeliczone (skip). Jeśli miałaby wyjść niespójność tonu na styku pilot|V2, skasować
-   `sk05-harm/` w całości i puścić od nowa (~3,5 h) — **sprawdzić to pomiarem, nie zakładać**.
+2. **Harmonizacja — ⚠ ZMIERZONE 2026-07-29: TRZEBA PRZELICZYĆ CAŁOŚĆ, nie przyrostowo.**
+   Przewidywana pułapka (resume-skip zostawiłby kafle pilota ze starymi parametrami) **potwierdziła
+   się pomiarem**: drift wyniku transformacji na 60 losowych celach wspólnych = **mediana 2,4 lumy,
+   p90 15,2, maks 38,5**; **27/60 cel powyżej 3 lumy, 12/60 powyżej 8**. Przyczyna: pas pilota miał
+   tylko ~4 rzędy cel, więc większość pola parametrów w jego bounding-boksie była **interpolowana
+   z sąsiadów**, a przy pełnym pokryciu jest zmierzona. Zostawienie kafli pilota dałoby patchwork
+   tonalny dokładnie w pasie przygranicznym.
+   ⇒ **Skasować `sk05-harm/` i puścić od zera:** `python testdata/maps/harmonize-sk05.py --workers 10`.
+   662 tys. kafli przy 26 kafli/s ⇒ **~7 h czuwania**. Narzędzie pomiaru driftu: `scratchpad/harm_drift.py`
+   (porównuje `_harm_params.npz` z parametrami policzonymi dla pełnego zbioru).
+   **Reguła na przyszłość: po KAŻDYM poszerzeniu zakresu fetchu harmonizację liczyć od nowa** — pole
+   parametrów zależy od tego, co leży na dysku, więc dokładanie kafli unieważnia poprzednie.
 3. **Merge straddlerów:** `merge-zbgis-into-partial-det05.py --write` (nowe kafle SK odblokują
    kolejne kafle częściowe det05).
 4. **Alfa na białym nodata:** `zero-alpha-white-nodata-det05.py --write`.
