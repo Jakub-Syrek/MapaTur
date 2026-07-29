@@ -71,6 +71,11 @@ LEVELS = {
     "det05": {"res_m": 0.05, "wms": WMS_HIGH, "version": "1.1.1", "crs": "EPSG:4326", "layer": "Raster", "mask": "pl", "attr": ATTR_GUGIK},
     "sk20": {"res_m": 0.20, "wms": ZBGIS_WMS, "version": "1.3.0", "crs": "CRS:84", "layer": "1", "mask": "sk", "attr": ATTR_ZBGIS},
     "sk05": {"res_m": 0.05, "wms": ZBGIS_WMS, "version": "1.3.0", "crs": "CRS:84", "layer": "1", "mask": "sk", "attr": ATTR_ZBGIS},
+    # sk25 = warstwa POSREDNIA dla strony SK, res IDENTYCZNA jak det25 (0.25 m), zeby kafle ladowaly
+    # na TEJ SAMEJ kracie i wchodzily do drzewa det25. Bez niej za pierscieniem det05 (~3.2 km wokol
+    # kamery) Slowacja spada od razu do bazy ~1.5 m/px — skok 30x, zdiagnozowane 2026-07-29 przy
+    # Gierlachu (det25 to dane GUGiK, czyli TYLKO Polska: sasiedztwo 5x5 = 0/25 na SK, 25/25 na PL).
+    "sk25": {"res_m": 0.25, "wms": ZBGIS_WMS, "version": "1.3.0", "crs": "CRS:84", "layer": "1", "mask": "sk", "attr": ATTR_ZBGIS},
 }
 
 
