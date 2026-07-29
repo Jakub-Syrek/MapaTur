@@ -154,6 +154,9 @@ Powtarzane zapytania używają niezmiennego, lokalnego BVH trójkątów. Indeks 
 bezpośrednio z 20-bajtowego payloadu strony RMP3, bez dekodowania pełnej kopii siatki do osobnych tablic;
 runtime ma budować go na workerze po I/O, nigdy na wątku renderującym. Weryfikacja porównuje wynik indeksowany
 z referencyjnym pełnym przeglądem i wymaga tego samego trójkąta, punktu oraz normalnej.
+Rejestr powierzchni publikuje stronę dopiero po ukończeniu BVH, wybiera najbliższy wynik spośród
+rezydentnych stron i usuwa indeks razem z eksmisją strony; nieukończony albo uszkodzony indeks oznacza
+fallback do dotychczasowego osadzenia na DEM, nie blokadę wątku renderującego.
 
 ## Offline bake
 
