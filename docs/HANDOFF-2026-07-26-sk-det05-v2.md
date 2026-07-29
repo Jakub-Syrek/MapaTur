@@ -142,7 +142,19 @@ Bramki i pułapki są opisane w handoffie pilota; tu tylko różnice skali.
    ⇒ **OKNO BLOKADY ~1,5–2 h** (bake + verify + sync do AppData). Dysk: opk det05 **52,2 → ~145 GB
    (+93 GB)**. Wcześniejsza deklaracja „~40 min / +84 GB" była zaniżona — przeskalowana z pilota
    na oko zamiast policzona. **Lekcja: czas operacji liczyć z LICZBY PAKIETÓW, nie z proporcji kafli.**
-9. **Werdykt usera** na DELL P2722H: Rysy od SK, Gierlach, Łomnica, przelot F7/F9, **MO bez regresji**.
+9. **Werdykt usera** na DELL P2722H. Kadry dobrane pod PEŁNY zakres (V1), nie pod pas pilota:
+   - **Rysy od strony SK** — szew PL|SK; user już go raz przyjął („razi ale z bliska"), więc to
+     kontrola regresji, nie nowa ocena;
+   - **Gierlach** (20,134°E) i **Łomnica / Skalnate pleso** (20,212°E) — teren, który przed V1
+     w ogóle nie miał 5 cm; oba z nalotu **2022, 20 cm nominalnie**;
+   - **Krywań** (19,999°E) — jedyny rejon z nowszego nalotu **2024, 15 cm**; porównać ostrość
+     z Gierlachem, bo to jedyna okazja zobaczyć różnicę roczników obok siebie;
+   - **szew kampanii 2024|2022** między 20,020 a 20,088°E — wewnętrzna granica po stronie SK;
+   - **przelot F7/F9** przez granicę — czy pas SK doostrza się tak samo jak polski;
+   - **Morskie Oko** — kontrola regresji showcase'u (kolizje rozstrzygane na korzyść GUGiK
+     właśnie po to; `never-regress-working-showcase`);
+   - **znaki wodne GKÚ** — przy V1 jest ich ~12× więcej niż na pilocie; jeśli rażą, to argument
+     za GeoTIFF-ami z opendata/MAPKA zamiast WMS przy ewentualnym odświeżeniu.
 
 ## Otwarte (bez zmian)
 
