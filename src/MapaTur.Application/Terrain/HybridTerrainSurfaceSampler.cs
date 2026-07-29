@@ -22,16 +22,42 @@ public static class HybridTerrainSurfaceSampler
         float maxDistanceMeters)
     {
         ArgumentNullException.ThrowIfNull(mesh);
-        if (!IsFinite(legacyPoint) || !float.IsFinite(maxDistanceMeters) || maxDistanceMeters < 0f)
-        {
-            throw new ArgumentOutOfRangeException(nameof(maxDistanceMeters));
-        }
+        ValidateQuery(legacyPoint, maxDistanceMeters);
+        return SampleTriangles(
+            mesh,
+            Enumerable.Range(0, mesh.TriangleCount),
+            legacyPoint,
+            maxDistanceMeters);
+    }
 
+    public static HybridTerrainSurfaceSample? SampleHybridSurface(
+        HybridTerrainSurfaceIndex index,
+        Vector3 legacyPoint,
+        float maxDistanceMeters,
+        out HybridTerrainSurfaceQueryDiagnostics diagnostics)
+    {
+        ArgumentNullException.ThrowIfNull(index);
+        ValidateQuery(legacyPoint, maxDistanceMeters);
+        float maximumDistanceSquared = maxDistanceMeters * maxDistanceMeters;
+        IReadOnlyList<int> candidates = index.Query(
+            legacyPoint,
+            maximumDistanceSquared,
+            out diagnostics);
+        return SampleIndexedTriangles(index, candidates, legacyPoint, maxDistanceMeters);
+    }
+
+    private static HybridTerrainSurfaceSample? SampleTriangles(
+        HybridTerrainMesh mesh,
+        IEnumerable<int> triangleIndices,
+        Vector3 legacyPoint,
+        float maxDistanceMeters)
+    {
         float maximumDistanceSquared = maxDistanceMeters * maxDistanceMeters;
         float closestDistanceSquared = float.PositiveInfinity;
         HybridTerrainSurfaceSample? closest = null;
-        for (int index = 0; index < mesh.Indices.Length; index += 3)
+        foreach (int triangleIndex in triangleIndices)
         {
+            int index = checked(triangleIndex * 3);
             int aIndex = checked((int)mesh.Indices[index]);
             int bIndex = checked((int)mesh.Indices[index + 1]);
             int cIndex = checked((int)mesh.Indices[index + 2]);
@@ -63,12 +89,71 @@ public static class HybridTerrainSurfaceSampler
             closest = new HybridTerrainSurfaceSample(
                 point,
                 normal,
-                index / 3,
+                triangleIndex,
                 barycentric,
                 MathF.Sqrt(distanceSquared));
         }
 
         return closest;
+    }
+
+    private static HybridTerrainSurfaceSample? SampleIndexedTriangles(
+        HybridTerrainSurfaceIndex index,
+        IEnumerable<int> triangleIndices,
+        Vector3 legacyPoint,
+        float maxDistanceMeters)
+    {
+        float maximumDistanceSquared = maxDistanceMeters * maxDistanceMeters;
+        float closestDistanceSquared = float.PositiveInfinity;
+        HybridTerrainSurfaceSample? closest = null;
+        foreach (int triangleIndex in triangleIndices)
+        {
+            int indexOffset = checked(triangleIndex * 3);
+            int aIndex = index.VertexIndexAt(indexOffset);
+            int bIndex = index.VertexIndexAt(indexOffset + 1);
+            int cIndex = index.VertexIndexAt(indexOffset + 2);
+            Vector3 a = index.PositionAt(aIndex);
+            Vector3 b = index.PositionAt(bIndex);
+            Vector3 c = index.PositionAt(cIndex);
+            if (!TryClosestPointOnTriangle(legacyPoint, a, b, c, out Vector3 point, out Vector3 barycentric))
+            {
+                continue;
+            }
+
+            float distanceSquared = Vector3.DistanceSquared(legacyPoint, point);
+            if (distanceSquared > maximumDistanceSquared || distanceSquared >= closestDistanceSquared)
+            {
+                continue;
+            }
+
+            Vector3 normal =
+                (index.NormalAt(aIndex) * barycentric.X)
+                + (index.NormalAt(bIndex) * barycentric.Y)
+                + (index.NormalAt(cIndex) * barycentric.Z);
+            if (normal.LengthSquared() <= 1e-12f)
+            {
+                normal = Vector3.Cross(b - a, c - a);
+            }
+
+            normal = normal.LengthSquared() > 1e-12f ? Vector3.Normalize(normal) : Vector3.UnitZ;
+            closestDistanceSquared = distanceSquared;
+            closest = new HybridTerrainSurfaceSample(
+                point,
+                normal,
+                triangleIndex,
+                barycentric,
+                MathF.Sqrt(distanceSquared));
+        }
+
+        return closest;
+    }
+
+    private static void ValidateQuery(Vector3 legacyPoint, float maxDistanceMeters)
+    {
+        if (!IsFinite(legacyPoint) || !float.IsFinite(maxDistanceMeters) || maxDistanceMeters < 0f)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxDistanceMeters));
+        }
     }
 
     private static bool TryClosestPointOnTriangle(

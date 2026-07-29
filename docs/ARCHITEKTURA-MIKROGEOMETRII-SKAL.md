@@ -150,6 +150,10 @@ Każda rezydentna strona udostępnia wspólne zapytanie `SampleHybridSurface(leg
 Zwraca ono najbliższy punkt trójkąta, interpolowaną normalną i identyfikator trójkąta, albo brak wyniku poza
 limitem reliefu. Z tego samego zapytania korzystają szlaki, trasy wspinaczkowe, chwyty, wspinacz, F8
 i etykiety; żaden z tych systemów nie może osobno odtwarzać wysokości z bazowego DEM w strefie RMP3.
+Powtarzane zapytania używają niezmiennego, lokalnego BVH trójkątów. Indeks czyta pozycje i normalne
+bezpośrednio z 20-bajtowego payloadu strony RMP3, bez dekodowania pełnej kopii siatki do osobnych tablic;
+runtime ma budować go na workerze po I/O, nigdy na wątku renderującym. Weryfikacja porównuje wynik indeksowany
+z referencyjnym pełnym przeglądem i wymaga tego samego trójkąta, punktu oraz normalnej.
 
 ## Offline bake
 
