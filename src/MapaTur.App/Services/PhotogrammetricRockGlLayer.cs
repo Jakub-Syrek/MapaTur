@@ -18,6 +18,7 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
 {
     private const uint GlCompressedRgbaS3tcDxt1 = 0x83F1;
     private const ushort ContinuousWorldMaterialPageId = 20;
+    private const float ContinuousWorldMaximumReliefMeters = 2.8f;
     private const int GeometryUploadsPerFrame = 2;
     private const int MaterialUploadsPerFrame = 1;
 
@@ -305,7 +306,8 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
         Vector3 skyAmbient,
         Vector3 fogColor,
         float fogDensity,
-        uint sceneDepthTexture)
+        uint sceneDepthTexture,
+        float maximumDistanceMeters)
     {
         if (drawableKeys.Count == 0)
         {
@@ -345,7 +347,13 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
         foreach (ScannedRockPageKey key in drawableKeys)
         {
             if (!gpuPages.TryGetValue(key, out GpuPage? page)
-                || !gpuMaterials.TryGetValue(page.MaterialPageId, out GpuMaterial? material))
+                || !gpuMaterials.TryGetValue(page.MaterialPageId, out GpuMaterial? material)
+                || !ScannedRockRenderPassCuller.IsVisible(
+                    mvp,
+                    cameraPosition,
+                    maximumDistanceMeters,
+                    page.WorldMin,
+                    page.WorldMin + page.WorldExtent))
             {
                 continue;
             }
@@ -421,6 +429,34 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
         }
 
         g.BindVertexArray(0);
+    }
+
+    public bool ShouldDrawShadowDetail(
+        float cascadeFarMeters,
+        float fieldOfViewYRadians,
+        int shadowMapSize,
+        float minimumReliefTexels)
+    {
+        if (drawableKeys.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (ScannedRockPageKey key in drawableKeys)
+        {
+            if (gpuPages.TryGetValue(key, out GpuPage? page)
+                && page.MaterialPageId != ContinuousWorldMaterialPageId)
+            {
+                return true;
+            }
+        }
+
+        return ScannedRockShadowDetailPolicy.ShouldRender(
+            ContinuousWorldMaximumReliefMeters,
+            cascadeFarMeters,
+            fieldOfViewYRadians,
+            shadowMapSize,
+            minimumReliefTexels);
     }
 
     public void Dispose(GL? g)

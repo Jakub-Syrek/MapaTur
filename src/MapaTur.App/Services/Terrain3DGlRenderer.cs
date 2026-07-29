@@ -6595,7 +6595,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     skyAmbient,
                     fogColor,
                     fogDensity,
-                    sceneDepthTexture: 0);
+                    sceneDepthTexture: 0,
+                    maximumDistanceMeters: ReflectionMaxDistanceMeters);
                 gl.UseProgram(program);
             }
 
@@ -6829,7 +6830,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 skyAmbient,
                 fogColor,
                 fogDensity,
-                rockSceneDepthTexture);
+                rockSceneDepthTexture,
+                maximumDistanceMeters: float.PositiveInfinity);
             if (rockSceneDepthTexture != 0)
             {
                 // RMP2 writes replacement depth after the terrain snapshot. Later soft-particle and ghost-line
@@ -8345,7 +8347,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 g.DrawElements(PrimitiveType.Triangles, (uint)entry.Value.IndexCount, DrawElementsType.UnsignedInt, (void*)0);
             }
 
-            if (PhotogrammetricRockEnabled)
+            if (PhotogrammetricRockEnabled
+                && photogrammetricRock.ShouldDrawShadowDetail(
+                    sliceFar,
+                    camera.FieldOfViewYRadians,
+                    ShadowMapSize,
+                    minimumReliefTexels: 1.25f))
             {
                 photogrammetricRock.DrawShadow(g, lightVp);
                 // The isolated layer owns a separate quantized-position shader. Restore the terrain depth

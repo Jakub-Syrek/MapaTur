@@ -162,6 +162,25 @@ Nie należy zaczynać od samego zwiększenia strony do 64 m w RMP2. Analiza inde
 24 934 grupy zamiast 77 070 (3,09× mniej), ale osiem grup przekracza limit 65 535 wierzchołków, a obecny
 klucz RMP2 nie potrafi zapisać wielu chunków jednej komórki. Hierarchia RMP3 rozwiązuje to jawnie.
 
+### Per-pass culling i cień daleki
+
+Po BVH strony rezydentne nadal były rysowane w każdym passie, nawet jeśli należały wyłącznie do pierścienia
+prefetch poza jego frustum. Main i reflection wykonują teraz osobny konserwatywny test AABB. Reflection
+respektuje ten sam limit 8 km co regularny teren.
+
+Dla materiału ciągłej powłoki V91 baker gwarantuje relief do 2,8 m. RMP2 uczestniczy w kaskadzie cienia tylko
+wtedy, gdy ten relief zajmuje co najmniej 1,25 teksela mapy cienia. Przy splitach
+771/2017/15000 m i FOV 20° oznacza to pełny cień RMP2 w dwóch bliskich kaskadach oraz makrocień DEM w trzeciej.
+Inne materiały RMP2, które nie mają tego ograniczenia reliefu, nadal trafiają do wszystkich kaskad.
+
+Stabilizowany test Rysy 1424 × 713:
+
+- przed per-pass cullingiem: 43–48 ms GPU;
+- po frustum cullingu main/reflection: zwykle 33–34 ms GPU, reflection około 0,2 ms zamiast 9–12 ms;
+- po polityce dalekiego cienia: zwykle 22–34 ms GPU;
+- A/B wobec poprzedniego stabilnego obrazu: średnia różnica całego terenu 0,0056 RGB, 0,018% pikseli
+  zmienionych o więcej niż 8 poziomów; środkowa ściana i pierwszy plan praktycznie bitowo identyczne.
+
 ## Kolejność implementacji
 
 1. Import siatki glTF, zachowanie pełnego XYZ/normalnych/UV i dopasowanie do ramy ściany.
