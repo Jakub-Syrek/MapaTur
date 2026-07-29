@@ -38,8 +38,13 @@ i nie uruchamiasz drugiej obok. Trzy zmierzone powody: bake potrzebuje ~8 GB RAM
 `.opk` w trakcie cudzej sesji może sprawić, że drugi agent wczyta plik ucięty i **zniknie mu cała
 warstwa 5 cm** — a będzie to diagnozował jako własny błąd.
 
-**Stan na teraz: ZAJĘTE przez Codeksa.** Claude NIE uruchamia apki ani bake'u do zwolnienia; kroki
-1–6 poniżej (fetch, harmonizacja, merge, alfa, integracja, coverage) są bezpieczne i nie wymagają apki.
+**Aktualny stan blokady sprawdzaj WYŁĄCZNIE w `C:\Repos\APP-LOCK.md`** — ten handoff go NIE
+przechowuje. (Zasada ogólna: statyczny dokument nie kopiuje stanu dynamicznego; kopia dezaktualizuje
+się po minutach i wprowadza w błąd następną sesję.)
+
+Kroki 1–6 poniżej (fetch, harmonizacja, merge straddlerów, alfa, integracja, coverage) **nie wymagają
+apki** i można je prowadzić niezależnie od stanu blokady. Blokady wymaga dopiero **krok 8 (bake
++ `--verify-full`, ~40 min)** oraz krok 7 (sync do AppData — zapis do wspólnego katalogu danych).
 
 ## Decyzja zakresu — ZMIENIONA 2026-07-27 na PEŁNY ZAKRES (V1)
 
