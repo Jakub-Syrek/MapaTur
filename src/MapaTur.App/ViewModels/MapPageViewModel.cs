@@ -3464,7 +3464,9 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// </summary>
     /// <param name="reframeCamera">True = reframe onto the new scene (the old demo-button behaviour);
     /// false = keep the current/restored camera (startup path — the per-DEM saved pose must survive).</param>
-    private async Task BuildLodSceneAsync(bool reframeCamera)
+    /// <param name="preloadedBaseRaster">Optional already-parsed local DEM used by unified startup so the
+    /// final LOD scene does not read the same file a second time.</param>
+    private async Task BuildLodSceneAsync(bool reframeCamera, DemRaster? preloadedBaseRaster = null)
     {
         if (regionDemLoader is null)
         {
@@ -3500,9 +3502,13 @@ public sealed partial class MapPageViewModel : ObservableObject
             // doesn't go through GUGiK at all). The 1 m detail still streams near the look-at. Falls back to the
             // online z13 window only when the local DEM isn't installed.
             string? localDemPath = autoLoader.Discover().DemPath;
-            DemRaster? baseRaster = localDemPath is not null
-                ? await Task.Run(() => DemRasterReader.Read(localDemPath)).ConfigureAwait(true)
-                : await regionDemLoader.LoadRegionAsync(LodTerrainWindow.Around(center, LodBaseHalfWidthMeters), LodBaseZoom, fillNoData: false).ConfigureAwait(true);
+            DemRaster? baseRaster = preloadedBaseRaster
+                ?? (localDemPath is not null
+                    ? await Task.Run(() => DemRasterReader.Read(localDemPath)).ConfigureAwait(true)
+                    : await regionDemLoader.LoadRegionAsync(
+                        LodTerrainWindow.Around(center, LodBaseHalfWidthMeters),
+                        LodBaseZoom,
+                        fillNoData: false).ConfigureAwait(true));
             if (baseRaster is null)
             {
                 StatusMessage = Localization.AppStrings.StatusLodNoBase;
@@ -3587,6 +3593,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             // Set the LOD base BEFORE building the detail: the detail backfills its NoData voids (GUGiK has
             // none on watercourses/the Slovak side) AND edge-matches from TerrainRaster — both need the base.
             TerrainRaster = baseRaster;
+            UpdateTrailCoverage(); // direct-LOD startup skips BuildSceneFromRasterAsync, which normally does this
 
             // Stage 2c: when baked streaming will run this scene, SKIP the one-shot runtime detail build — the
             // baked stream fills the near field on the first camera tick, so building (and uploading) a redundant
@@ -5240,6 +5247,7 @@ public sealed partial class MapPageViewModel : ObservableObject
                 discovery.TrailsDataPath ?? "(none)",
                 discovery.OrthoTexturePath ?? "(none)");
             var loaded = new List<string>(capacity: 3);
+            DemRaster? preloadedLodBase = null;
 
             if (discovery.BasemapMBTilesPaths.Count > 0)
             {
@@ -5286,9 +5294,26 @@ public sealed partial class MapPageViewModel : ObservableObject
 
             if (discovery.DemPath is { } demPath)
             {
-                await LoadDemFromPathAsync(demPath).ConfigureAwait(true);
+                if (AutoStartLodPipeline)
+                {
+                    // The unified LOD scene is the production scene. The old startup path used to read,
+                    // repair and mesh this DEM here, then BuildLodSceneAsync immediately read, repaired and
+                    // meshed the SAME file again before replacing the legacy scene. Keep one parsed raster
+                    // and hand it directly to the final LOD build below: no throw-away mesh, peak scan or
+                    // second disk read, while the manual/non-LOD loader remains unchanged.
+                    preloadedLodBase = await Task.Run(() => DemRasterReader.Read(demPath)).ConfigureAwait(true);
+                }
+                else
+                {
+                    await LoadDemFromPathAsync(demPath).ConfigureAwait(true);
+                }
+
                 loaded.Add(Path.GetFileName(demPath));
-                logger.LogInformation("Auto-loaded DEM {Path}", demPath);
+                logger.LogInformation(
+                    AutoStartLodPipeline
+                        ? "Auto-loaded DEM {Path} once for direct LOD build (legacy scene skipped)"
+                        : "Auto-loaded DEM {Path}",
+                    demPath);
 
                 // Only drape the basemap on 3D when no explicit ortho PNG was discovered — a
                 // checked-in ortho image is always higher fidelity than re-sampled XYZ tiles.
@@ -5301,7 +5326,8 @@ public sealed partial class MapPageViewModel : ObservableObject
 
                 // Re-hydrate any POIs cached from a previous session within the DEM footprint, so
                 // refuges (and their 3D night lights) reappear on launch without a fresh download.
-                if (TerrainRaster is { } demRaster)
+                DemRaster? demForBounds = preloadedLodBase ?? TerrainRaster;
+                if (demForBounds is { } demRaster)
                 {
                     await LoadCachedPoisAsync(demRaster.Bounds).ConfigureAwait(true);
 
@@ -5357,7 +5383,7 @@ public sealed partial class MapPageViewModel : ObservableObject
             // On non-Windows (mobile + Mac) ALWAYS start in 3D when DEM is present, and force-fall
             // even without DEM is avoided to spare an empty sky view. On Windows we also default
             // to 3D for the same reason.
-            if (TerrainTiles is not null)
+            if (TerrainTiles is not null || preloadedLodBase is not null)
             {
                 Is3DMode = true;
             }
@@ -5382,9 +5408,9 @@ public sealed partial class MapPageViewModel : ObservableObject
             // right after the fast legacy mesh is up, WITHOUT reframing — the per-DEM restored camera must
             // survive a normal launch. On ANY failure the legacy scene simply stays (the pre-unification
             // behaviour), so this is strictly additive.
-            if (AutoStartLodPipeline && discovery.DemPath is not null && TerrainTiles is not null)
+            if (AutoStartLodPipeline && discovery.DemPath is not null && preloadedLodBase is not null)
             {
-                await BuildLodSceneAsync(reframeCamera: false).ConfigureAwait(true);
+                await BuildLodSceneAsync(reframeCamera: false, preloadedLodBase).ConfigureAwait(true);
             }
         }
         catch (Exception ex)
