@@ -8502,7 +8502,9 @@ public partial class Terrain3DView : ContentView
             float mapT = mapMode.Blend;
             glRenderer.OrthoGlobalFade = 1f - (mapT * mapT * (3f - (2f * mapT)));
             glRenderer.MsaaEnabled = MsaaEnabled; // premium menu render-quality profile (AA on/off)
-            glRenderer.ThrottleReflection = dragonActive || walkActive; // continuous modes: reflection every 2nd frame
+            bool continuousCamera = dragonActive || walkActive || flightActive;
+            glRenderer.ThrottleReflection = continuousCamera;
+            glRenderer.ThrottleShadows = continuousCamera;
             glRenderer.SlopeMapEnabled = SlopeMapEnabled; // premium menu "Mapa nachylenia" (slope-steepness shading)
             glRenderer.RockStrength = RockMaterialEnabled ? 1f : 0f; // premium menu "Skały" (rock material on steep faces)
             glRenderer.BiomeMaterialEnabled = BiomeMaterialEnabled; // premium menu "Biomy" (elevation-zone material)

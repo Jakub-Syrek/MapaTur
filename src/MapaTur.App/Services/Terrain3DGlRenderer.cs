@@ -1969,11 +1969,20 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform mat4 uMvp;\n" +
         "uniform vec2 uViewport;\n" +
         "uniform float uHalfPx;\n" +
+        "uniform vec3 uCameraPos;\n" +
+        "uniform float uMaxDist;\n" +
         "out vec4 vColor;\n" +
         "out vec3 vWorldPos;\n" +
         "void main(){\n" +
         "  vColor = aColor;\n" +
         "  vWorldPos = aPos;\n" +
+        // The full trail network spans ~27×42 km. Fragment-stage distance discard still rasterized every
+        // far ribbon and cost ~28 ms in the F9 flight. Reject a segment before projection/rasterization when
+        // both endpoints are outside the same radius; the fragment gate remains for the soft edge and for a
+        // segment crossing into the radius.
+        "  float distA = distance(aPos, uCameraPos);\n" +
+        "  float distB = distance(aOther, uCameraPos);\n" +
+        "  if (min(distA, distB) > uMaxDist) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }\n" +
         "  vec4 clipA = uMvp * vec4(aPos, 1.0);\n" +
         "  vec4 clipB = uMvp * vec4(aOther, 1.0);\n" +
         "  if (clipA.w <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }\n" +
@@ -2198,6 +2207,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     public bool ThrottleReflection { get; set; }
 
     private bool reflectionValidLastFrame; // last frame left a valid reflection texture (reuse gate)
+
+    /// <summary>
+    /// When enabled for a continuous camera mode, cascaded shadow maps refresh every second frame.
+    /// The skipped frame reuses both the previous depth maps and their matching light matrices.
+    /// </summary>
+    public bool ThrottleShadows { get; set; }
+
+    private bool shadowValidLastFrame;
 
     // Wider-coverage P0 step 6: render the terrain + lake water in a camera-relative frame (origin = the look-at
     // target) so vertices and the view translation stay small (float precision for far/streamed scene origins).
@@ -6071,6 +6088,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             aoStrengthLoc = -1;
             bakedShadowCompLoc = -1;
             shadowsActiveThisFrame = false;
+            shadowValidLastFrame = false;
             // The planar-reflection target belonged to the dead context — drop the handles so it's rebuilt fresh.
             reflectionFbo = 0;
             reflectionColorTex = 0;
@@ -6668,7 +6686,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Alternate-frame reflection (ThrottleReflection): on odd frames reuse the previous frame's texture
         // instead of re-rendering the whole mirrored terrain. Only when the target survived at the same size
         // — a resize, context loss or a disabled frame forces a fresh render first.
-        if (ThrottleReflection && reflectionValidLastFrame && (gpuFrameCount & 1) == 1
+        if (!TemporalPassCadence.ShouldRefresh(gpuFrameCount, ThrottleReflection, reflectionValidLastFrame)
             && reflectionFbo != 0
             && reflectionTexW == Math.Max(16, vpWidth / 2) && reflectionTexH == Math.Max(16, vpHeight / 2))
         {
@@ -8354,7 +8372,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// </summary>
     private void RenderShadowMaps(GL g, Camera3D camera, Vector3 sunDirection, float aspectRatio, int vpWidth, int vpHeight)
     {
+        if (!TemporalPassCadence.ShouldRefresh(gpuFrameCount, ThrottleShadows, shadowValidLastFrame)
+            && shadowMapsAllocated)
+        {
+            shadowsActiveThisFrame = true;
+            return;
+        }
+
         shadowsActiveThisFrame = false;
+        shadowValidLastFrame = false;
         if (!shadowsEnabled || shadowDepthProgram == 0 || tileBuffers.Count == 0)
         {
             return;
@@ -8451,6 +8477,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.BindFramebuffer(FramebufferTarget.Framebuffer, (uint)prevFbo[0]);
         g.Viewport(0, 0, (uint)vpWidth, (uint)vpHeight);
         shadowsActiveThisFrame = true;
+        shadowValidLastFrame = true;
 
         if (!shadowPassLogged)
         {
