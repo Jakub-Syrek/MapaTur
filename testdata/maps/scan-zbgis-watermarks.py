@@ -38,6 +38,7 @@ TILE = 512
 # znane instancje do wyciecia szablonow: (nazwa, lat, lon, wysokosc_px, szerokosc_px)
 KNOWN = [
     ("rok2022", 49.17530, 20.08266, 40, 130),
+    ("gku_nlc", 49.174896, 20.094727, 36, 156),   # "(c) GKU, NLC" — kafel (337,195), zweryfikowany wizualnie
 ]
 THR = 0.55          # prog korelacji (znana instancja daje 0.98; teren na pasie kontrolnym < 0.35)
 MARGIN = 96         # doklejka z sasiadow, zeby glif na styku kafli nie zniknal
@@ -162,15 +163,19 @@ def scan() -> None:
                 continue
             res = residual(luma(m))
             for name, (T, _) in templates.items():
-                c = ncc(res, T)
-                cm = float(c.max())
-                if cm >= THR:
+                c0 = ncc(res, T)
+                # OBIE polaryzacje: na ciemnym tle glif jest JASNIEJSZY (residuum+), na jasnym
+                # (snieg, przeswietlony piarg) CIEMNIEJSZY (residuum-) — dodatnia sama gubi te drugie
+                for sgn, c in ((1, c0), (-1, -c0)):
+                    cm = float(c.max())
+                    if cm < THR:
+                        continue
                     yy, xx = np.unravel_index(int(np.argmax(c)), c.shape)
                     yy += T.shape[0] // 2  # 'valid' -> wsp. srodka glifu
                     xx += T.shape[1] // 2
                     lon = GRID_LON0 + (i + xx / TILE) * DLON
                     lat = GRID_LAT0 - (j + yy / TILE) * DLAT
-                    hits.append({"tpl": name, "i": i, "j": j, "x": int(xx), "y": int(yy),
+                    hits.append({"tpl": name, "sign": sgn, "i": i, "j": j, "x": int(xx), "y": int(yy),
                                  "lat": round(lat, 6), "lon": round(lon, 6), "corr": round(cm, 3)})
             done += 1
             if done % 2000 == 0:
