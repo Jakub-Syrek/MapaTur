@@ -114,8 +114,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // slice B the rest; the fragment picks the slice from its slot index (best < 8).
         "uniform mediump sampler2DArray uOrthoDet05Arr;\n" +
         "uniform mediump sampler2DArray uOrthoDet05ArrB;\n" +
-        "uniform vec4 uDet05Aabb[192];\n" + // slots = Det05HardCapCells (192 desktop BC1 = 3 tablice × 64)
-        "uniform float uDet05Alpha[192];\n" + // per-slot fade-in after promote (0→1 over ~300 ms) — no popping
+        // O(1) cell→slot lookup. 384 entries at 50% load replace 192 AABBs + 192 scalar alphas, so the
+        // fragment-uniform footprint does not grow while the hot fragment path stops scanning all 192 cells.
+        "uniform ivec4 uDet05CellHash[384];\n" + // (ci,cj,arraySlot,alphaByte), empty slot has arraySlot=-1
+        "uniform int uDet05HashSeed;\n" +
+        "uniform vec2 uDet05GridMinXmaxY;\n" + // NW origin in stable world metres
+        "uniform vec2 uDet05GridPitch;\n" +    // positive cell-origin step: east, south
+        "uniform vec2 uDet05CellSize;\n" +     // positive coverage size: east, south
         "uniform mediump sampler2DArray uOrthoDet05ArrC;\n" + // trzecia tablica (unit 7) — 3×64 = 192 cele
         "uniform int uDet05ArrLayers;\n" + // warstw NA TABLICĘ; slot→(tablica, warstwa) = (slot/L, slot%L)
         "uniform int uUseDet05Arr;\n" +
@@ -134,8 +139,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform highp sampler2D uOrthoDet1mCov;\n" +
         // det25 ARRAY (krok 4): per-fragment wybór celi jak det05 — koniec patchworku per-tile bind.
         "uniform highp sampler2DArray uOrthoDet25Arr;\n" +
-        "uniform vec4 uDet25Aabb[128];\n" +
-        "uniform float uDet25AlphaArr[128];\n" +
+        "uniform ivec4 uDet25CellHash[256];\n" + // 128 cells at 50% load; same bounded lookup as det05
+        "uniform int uDet25HashSeed;\n" +
+        "uniform vec2 uDet25GridMinXmaxY;\n" +
+        "uniform vec2 uDet25GridPitch;\n" +
+        "uniform vec2 uDet25CellSize;\n" +
         "uniform int uUseDet25Arr;\n" +
         "uniform int uUseDet1m;\n" +
         "uniform vec2 uDet1mMinXmaxY;\n" +   // (minX świata, maxY świata) — v rośnie na południe jak wiersze tekstury
@@ -339,23 +347,50 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  float grey = (dc.r + dc.g + dc.b) / 3.0;\n" +
         "  return mix(dc, vec3(grey), 0.35 * sw * lift);\n" +             // mild desat toward neutral in shadow
         "}\n" +
-        // Streamed det05 from the cell ARRAY: pick the best-centred resident cell containing this fragment
-        // (cells overlap — first-hit could sit at a cell edge mid-fade while a neighbour holds the point
-        // centrally), then sample OUTSIDE the loop so the implicit-derivative fetch stays well-defined.
+        // Hash must remain bit-identical to DetailCellSlotHash.Hash. The CPU selects a seed whose probe chain
+        // is <=12; fragment cost is therefore cap-independent (192/128 residents no longer mean 192/128 AABB
+        // tests per pixel). The nearest lattice cell is the normal one-hit path; 3×3 is only the fixed fallback
+        // when that cell is still loading but an overlapping neighbour is resident.
+        "uint detailCellHash(ivec2 c, uint seed){\n" +
+        "  uint h = uint(c.x) * 0x9E3779B1u ^ uint(c.y) * 0x85EBCA77u ^ seed * 0xC2B2AE3Du;\n" +
+        "  h ^= h >> 16; h *= 0x7FEB352Du; h ^= h >> 15; h *= 0x846CA68Bu; h ^= h >> 16;\n" +
+        "  return h;\n" +
+        "}\n" +
+        "ivec2 lookupDet05Cell(ivec2 c){\n" +
+        "  uint start = detailCellHash(c, uint(uDet05HashSeed)) % 384u;\n" +
+        "  for (int p = 0; p < 12; p++) {\n" +
+        "    ivec4 e = uDet05CellHash[int((start + uint(p)) % 384u)];\n" +
+        "    if (e.z < 0) return ivec2(-1, 0);\n" +
+        "    if (all(equal(e.xy, c))) return e.zw;\n" +
+        "  }\n" +
+        "  return ivec2(-1, 0);\n" +
+        "}\n" +
+        "vec4 det05CellBounds(ivec2 c){\n" +
+        "  vec2 nw = uDet05GridMinXmaxY + vec2(float(c.x) * uDet05GridPitch.x, -float(c.y) * uDet05GridPitch.y);\n" +
+        "  return vec4(nw.x, nw.y - uDet05CellSize.y, nw.x + uDet05CellSize.x, nw.y);\n" +
+        "}\n" +
         // Same colour law as applyOrthoDetail mode 1 (conditional tone harmonisation) — KONTRAKT-ORTO §1.
         "vec3 applyOrthoDet05Array(vec2 wxy, vec3 baseC, float blendM){\n" +
         "  if (uUseDet05Arr != 1) return baseC;\n" +
         "  vec2 wdx = dFdx(wxy), wdy = dFdy(wxy);\n" + // gradienty świata PRZED wyborem celi — patrz applyOrthoDet25Arr
-        "  int best = -1; float bestEdge = 0.0;\n" +
-        "  for (int i = 0; i < 192; i++) {\n" +
-        "    vec2 mn = uDet05Aabb[i].xy; vec2 mx = uDet05Aabb[i].zw;\n" +
-        "    if (mx.x <= mn.x) continue;\n" +
-        "    vec2 cd = min(wxy - mn, mx - wxy);\n" +
-        "    float edge = min(cd.x, cd.y);\n" +
-        "    if (edge > bestEdge) { bestEdge = edge; best = i; }\n" +
+        "  vec2 cp = vec2((wxy.x - uDet05GridMinXmaxY.x) / uDet05GridPitch.x,\n" +
+        "                 (uDet05GridMinXmaxY.y - wxy.y) / uDet05GridPitch.y);\n" +
+        "  ivec2 nearCell = max(ivec2(0), ivec2(floor(cp - 0.5 * (uDet05CellSize / uDet05GridPitch) + vec2(0.5))));\n" +
+        "  ivec2 bestHit = lookupDet05Cell(nearCell); ivec2 bestCell = nearCell;\n" +
+        "  vec4 bestBb = det05CellBounds(nearCell);\n" +
+        "  bool nearContains = bestHit.x >= 0 && wxy.x >= bestBb.x && wxy.y >= bestBb.y && wxy.x <= bestBb.z && wxy.y <= bestBb.w;\n" +
+        "  if (!nearContains) {\n" +
+        "    bestHit = ivec2(-1, 0); float bestEdge = -1e30;\n" +
+        "    for (int oy = -1; oy <= 1; oy++) { for (int ox = -1; ox <= 1; ox++) {\n" +
+        "      ivec2 cc = nearCell + ivec2(ox, oy); if (cc.x < 0 || cc.y < 0) continue;\n" +
+        "      ivec2 hit = lookupDet05Cell(cc); if (hit.x < 0) continue;\n" +
+        "      vec4 cb = det05CellBounds(cc); vec2 cd0 = min(wxy - cb.xy, cb.zw - wxy);\n" +
+        "      float edge = min(cd0.x, cd0.y); if (edge >= 0.0 && edge > bestEdge) { bestEdge = edge; bestHit = hit; bestCell = cc; bestBb = cb; }\n" +
+        "    }}\n" +
         "  }\n" +
-        "  if (best < 0) return baseC;\n" +
-        "  vec2 mn = uDet05Aabb[best].xy; vec2 mx = uDet05Aabb[best].zw;\n" +
+        "  if (bestHit.x < 0) return baseC;\n" +
+        "  int best = bestHit.x; float promoteAlpha = float(bestHit.y) / 255.0;\n" +
+        "  vec2 mn = bestBb.xy; vec2 mx = bestBb.zw;\n" +
         "  vec2 sp = mx - mn;\n" +
         "  vec2 uv = vec2((wxy.x - mn.x) / sp.x, (mx.y - wxy.y) / sp.y);\n" +
         "  vec2 ts = vec2(textureSize(uOrthoDet05Arr, 0).xy);\n" +
@@ -391,7 +426,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  vec2 cd = min(wxy - mn, mx - wxy);\n" +
         // Cele det05 są ROZŁĄCZNE — fade po odległości od AABB robiłby SIATKĘ szwów (na wspólnej krawędzi
         // min(cd)=0 ⇒ w=0 ⇒ baza przebija wzdłuż każdej granicy celi). Krycie daje alfa danych + fade promocji.
-        "  float w = dcs.a * uDet05Alpha[best];\n" +
+        "  float w = dcs.a * promoteAlpha;\n" +
         "  vec3 outc = mix(baseC, dc, w);\n" +
         "  if (uOrthoDetailDebugBounds == 1) {\n" +
         "    float edge = min(cd.x, cd.y);\n" +
@@ -406,8 +441,20 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // det1m: tier między bazą a det25. Fallback konstrukcyjny: poza siatką / cov≈0 / slice==-1 → baseC
         // (nigdy czerń). Kolor: PEŁNY dwustopniowy law jak zatwierdzone ścieżki (KONTRAKT-ORTO §1) — bez
         // niego panorama to patchwork STYLÓW warstw (werdykt usera 2026-07-24).
-        // det25 array: najbliższa ZAWIERAJĄCA cela wygrywa (nakładkowa siatka pitch-6 — wiele cel może
-        // zawierać punkt; bierzemy tę o środku najbliżej, jak per-tile CellForPoint, ale per FRAGMENT).
+        "ivec2 lookupDet25Cell(ivec2 c){\n" +
+        "  uint start = detailCellHash(c, uint(uDet25HashSeed)) % 256u;\n" +
+        "  for (int p = 0; p < 12; p++) {\n" +
+        "    ivec4 e = uDet25CellHash[int((start + uint(p)) % 256u)];\n" +
+        "    if (e.z < 0) return ivec2(-1, 0);\n" +
+        "    if (all(equal(e.xy, c))) return e.zw;\n" +
+        "  }\n" +
+        "  return ivec2(-1, 0);\n" +
+        "}\n" +
+        "vec4 det25CellBounds(ivec2 c){\n" +
+        "  vec2 nw = uDet25GridMinXmaxY + vec2(float(c.x) * uDet25GridPitch.x, -float(c.y) * uDet25GridPitch.y);\n" +
+        "  return vec4(nw.x, nw.y - uDet25CellSize.y, nw.x + uDet25CellSize.x, nw.y);\n" +
+        "}\n" +
+        // det25 array: nearest resident containing cell wins, now through the same bounded hash lookup.
         // Kolor: ten sam dwustopniowy law. Alpha = fade-in promocji (anty-pop).
         "vec3 applyOrthoDet25Arr(vec2 wxy, vec3 baseC){\n" +
         "  if (uUseDet25Arr == 0) { return baseC; }\n" +
@@ -418,15 +465,24 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // granice; liczone tu, w uniform flow) i textureGrad zamiast texture. Dane były czyste — pomiary
         // (dekod chainów, edge-step, porównanie nakładek) wykluczyły bake/assembler.
         "  vec2 wdx = dFdx(wxy), wdy = dFdy(wxy);\n" +
-        "  int best = -1; float bestD = 1e30;\n" +
-        "  for (int i = 0; i < 128; i++) {\n" +
-        "    vec4 bb = uDet25Aabb[i];\n" +
-        "    if (wxy.x < bb.x || wxy.y < bb.y || wxy.x > bb.z || wxy.y > bb.w) { continue; }\n" +
-        "    vec2 cen = 0.5 * (bb.xy + bb.zw); float d = dot(wxy - cen, wxy - cen);\n" +
-        "    if (d < bestD) { bestD = d; best = i; }\n" +
+        "  vec2 cp = vec2((wxy.x - uDet25GridMinXmaxY.x) / uDet25GridPitch.x,\n" +
+        "                 (uDet25GridMinXmaxY.y - wxy.y) / uDet25GridPitch.y);\n" +
+        "  ivec2 nearCell = max(ivec2(0), ivec2(floor(cp - 0.5 * (uDet25CellSize / uDet25GridPitch) + vec2(0.5))));\n" +
+        "  ivec2 bestHit = lookupDet25Cell(nearCell); ivec2 bestCell = nearCell;\n" +
+        "  vec4 bb = det25CellBounds(nearCell);\n" +
+        "  bool nearContains = bestHit.x >= 0 && wxy.x >= bb.x && wxy.y >= bb.y && wxy.x <= bb.z && wxy.y <= bb.w;\n" +
+        "  if (!nearContains) {\n" +
+        "    bestHit = ivec2(-1, 0); float bestD = 1e30;\n" +
+        "    for (int oy = -1; oy <= 1; oy++) { for (int ox = -1; ox <= 1; ox++) {\n" +
+        "      ivec2 cc = nearCell + ivec2(ox, oy); if (cc.x < 0 || cc.y < 0) continue;\n" +
+        "      ivec2 hit = lookupDet25Cell(cc); if (hit.x < 0) continue;\n" +
+        "      vec4 cb = det25CellBounds(cc); if (wxy.x < cb.x || wxy.y < cb.y || wxy.x > cb.z || wxy.y > cb.w) continue;\n" +
+        "      vec2 cen = 0.5 * (cb.xy + cb.zw); float d = dot(wxy - cen, wxy - cen);\n" +
+        "      if (d < bestD) { bestD = d; bestHit = hit; bestCell = cc; bb = cb; }\n" +
+        "    }}\n" +
         "  }\n" +
-        "  if (best < 0) { return baseC; }\n" +
-        "  vec4 bb = uDet25Aabb[best];\n" +
+        "  if (bestHit.x < 0) { return baseC; }\n" +
+        "  int best = bestHit.x; float promoteAlpha = float(bestHit.y) / 255.0;\n" +
         "  vec2 sp = bb.zw - bb.xy;\n" +
         "  vec2 uv = vec2((wxy.x - bb.x) / sp.x, (bb.w - wxy.y) / sp.y);\n" +
         "  vec2 gx = vec2(wdx.x / sp.x, -wdx.y / sp.y);\n" +
@@ -446,7 +502,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "      dc = vec3(clamp(corr * 3.0, 0.0, 1.0), 0.12, clamp(-corr * 3.0, 0.0, 1.0)); }\n" +
         "  }\n" +
         "  vec2 cd = min(wxy - bb.xy, bb.zw - wxy);\n" +
-        "  float wgt = clamp(min(cd.x, cd.y) / max(uDetailBlendMeters, 0.001), 0.0, 1.0) * dcs.a * uDet25AlphaArr[best];\n" +
+        "  float wgt = clamp(min(cd.x, cd.y) / max(uDetailBlendMeters, 0.001), 0.0, 1.0) * dcs.a * promoteAlpha;\n" +
         "  return mix(baseC, dc, wgt);\n" +
         "}\n" +
         "vec3 applyOrthoDet1m(vec2 wxy, vec3 baseC){\n" +
@@ -2210,8 +2266,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int det05ArrBSamplerLocation = -1;  // sampler2DArray slice B on unit 13
     private int det05ArrCSamplerLocation = -1;  // sampler2DArray slice C on unit 7 (trzecia tablica — 192 cele)
     private int det05ArrALoc = -1;              // uDet05ArrLayers — warstw NA TABLICĘ (mapping slot→(tablica, warstwa))
-    private int det05ArrAabbLocation = -1;      // vec4[16] per-LAYER world AABBs
-    private int det05ArrAlphaLocation = -1;     // float[16] per-slot promote fade-in
+    private int det05CellHashLoc = -1;
+    private int det05HashSeedLoc = -1;
+    private int det05GridOriginLoc = -1, det05GridPitchLoc = -1, det05CellSizeLoc = -1;
     private int useDet05ArrLocation = -1;
     private int detailBlendLocation = -1;
     private int detailColorModeLocation = -1;
@@ -2327,6 +2384,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // i był dla niego dobry. To był konflikt „obraz vs płynność", którego zasada 3 NIE pozwala rozstrzygać
     // agentowi. NIE OBNIŻAĆ bez werdyktu usera. Docelowo koszt znika po O(1) wyborze celi (krata→slot).
     private static readonly int Det05HardCapCells = OperatingSystem.IsWindows() ? 192 : 3;
+    private const int Det05CellHashSize = 384;   // 2× desktop cap; bounded open addressing at 50% load
+    private const int DetailCellHashMaxProbe = 12;
 
     // BC1 GPU-cell pipeline (2026-07-23, ZASADY 11/13): cells are encoded to BC1+mips OFF-THREAD (once — the
     // disk cache serves every revisit in ~15 ms) and uploaded compressed. 1/8 the bytes end-to-end: a det05
@@ -4205,27 +4264,42 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // średni dystans. Przy 32 celach det25 sięgał ~2,4 km i między nim a horyzontem została goła baza
     // („ostro blisko, ostro daleko, breja pomiędzy" — user 2026-07-25). 128 cel = ~4,9 km.
     private const int Det25ArrLayers = 128;
-    private int det25ArrSamplerLoc = -1, det25ArrAabbLoc = -1, det25ArrAlphaLoc = -1, useDet25ArrLoc = -1;
+    private const int Det25CellHashSize = 256;
+    private int det25ArrSamplerLoc = -1, det25CellHashLoc = -1, det25HashSeedLoc = -1, useDet25ArrLoc = -1;
+    private int det25GridOriginLoc = -1, det25GridPitchLoc = -1, det25CellSizeLoc = -1;
     private long det25ArrUniformsTick = -1;
 
-    // Raz na klatkę: sloty AABB+alpha warstw det25 (wzorzec BindDet05ForTile). Unit 10 przejęty po starym
-    // per-tile bindzie (ten sam typ konfliktowałby — dlatego gdy array aktywny, stary sampler2D idzie na 15).
+    private static (Vector2 Origin, Vector2 Pitch, Vector2 Size) DetailGridWorld(
+        MapaTur.Application.Terrain.OrthoDetailGrid grid,
+        TerrainMesh3D anchorMesh)
+    {
+        MapaTur.Domain.Geography.MapBounds b00 = grid.CellBounds(0, 0);
+        MapaTur.Domain.Geography.MapBounds b10 = grid.CellBounds(1, 0);
+        MapaTur.Domain.Geography.MapBounds b01 = grid.CellBounds(0, 1);
+        var nw00 = new MapaTur.Domain.Geography.GeoPoint(b00.NorthEast.Latitude, b00.SouthWest.Longitude);
+        var nw10 = new MapaTur.Domain.Geography.GeoPoint(b10.NorthEast.Latitude, b10.SouthWest.Longitude);
+        var nw01 = new MapaTur.Domain.Geography.GeoPoint(b01.NorthEast.Latitude, b01.SouthWest.Longitude);
+        Vector3 origin = anchorMesh.GeoToWorld(nw00, 0f);
+        Vector3 east = anchorMesh.GeoToWorld(nw10, 0f);
+        Vector3 south = anchorMesh.GeoToWorld(nw01, 0f);
+        Vector3 sw = anchorMesh.GeoToWorld(b00.SouthWest, 0f);
+        Vector3 ne = anchorMesh.GeoToWorld(b00.NorthEast, 0f);
+        return (
+            new Vector2(origin.X, origin.Y),
+            new Vector2(MathF.Abs(east.X - origin.X), MathF.Abs(south.Y - origin.Y)),
+            new Vector2(MathF.Abs(ne.X - sw.X), MathF.Abs(ne.Y - sw.Y)));
+    }
+
+    // Once per frame: upload the bounded cell→array-slot hash. Unit 10 is owned by the det25 array.
     private unsafe void BindDet25ArrOncePerFrame(GL gl, TerrainMesh3D anchorMesh)
     {
-        if (det25ArrayTexture == 0 || det25ArrUniformsTick == det25FrameTick)
+        if (det25ArrayTexture == 0 || det25Grid is null || det25ArrUniformsTick == det25FrameTick)
         {
             return;
         }
 
         det25ArrUniformsTick = det25FrameTick;
-        Span<float> aabb = stackalloc float[Det25ArrLayers * 4];
-        Span<float> alpha = stackalloc float[Det25ArrLayers];
-        alpha.Clear();
-        for (int i = 0; i < aabb.Length; i += 4)
-        {
-            aabb[i] = 1e9f; aabb[i + 1] = 1e9f; aabb[i + 2] = -1e9f; aabb[i + 3] = -1e9f; // pusty slot
-        }
-
+        Span<MapaTur.Application.Terrain.DetailCellSlot> resident = stackalloc MapaTur.Application.Terrain.DetailCellSlot[Det25ArrLayers];
         int ready = 0;
         double nowMs = frameClock.ElapsedMilliseconds;
         foreach (DetailCellGpu cell in det25Cells.Values)
@@ -4235,27 +4309,25 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 continue;
             }
 
-            Vector3 sw = anchorMesh.GeoToWorld(cell.Bounds.SouthWest, 0f);
-            Vector3 ne = anchorMesh.GeoToWorld(cell.Bounds.NorthEast, 0f);
-            int o = cell.Layer * 4;
-            aabb[o] = Math.Min(sw.X, ne.X);
-            aabb[o + 1] = Math.Min(sw.Y, ne.Y);
-            aabb[o + 2] = Math.Max(sw.X, ne.X);
-            aabb[o + 3] = Math.Max(sw.Y, ne.Y);
-            alpha[cell.Layer] = (float)Math.Clamp((nowMs - cell.PromoteMs) / 300.0, 0.0, 1.0);
-            ready++;
+            byte alpha = (byte)Math.Round(Math.Clamp((nowMs - cell.PromoteMs) / 300.0, 0.0, 1.0) * 255.0);
+            resident[ready++] = new(cell.Ci, cell.Cj, cell.Layer, alpha);
         }
 
         if (ready > 0)
         {
+            Span<int> hash = stackalloc int[Det25CellHashSize * 4];
+            (uint seed, _) = MapaTur.Application.Terrain.DetailCellSlotHash.Fill(
+                resident[..ready], hash, DetailCellHashMaxProbe);
+            (Vector2 origin, Vector2 pitch, Vector2 size) = DetailGridWorld(det25Grid, anchorMesh);
             gl.ActiveTexture(TextureUnit.Texture10);
             gl.BindTexture(TextureTarget.Texture2DArray, det25ArrayTexture);
             gl.ActiveTexture(TextureUnit.Texture0);
             gl.Uniform1(det25ArrSamplerLoc, 10);
-            // Licznik z ROZMIARU bufora, nie na sztywno — to był błąd bliźniaczy do det05 (sloty ≥ N
-            // nie dostawały AABB, więc podnoszenie capa było pozorne).
-            fixed (float* p = aabb) { gl.Uniform4(det25ArrAabbLoc, (uint)(aabb.Length / 4), p); }
-            fixed (float* p = alpha) { gl.Uniform1(det25ArrAlphaLoc, (uint)alpha.Length, p); }
+            fixed (int* p = hash) { gl.Uniform4(det25CellHashLoc, Det25CellHashSize, p); }
+            gl.Uniform1(det25HashSeedLoc, unchecked((int)seed));
+            gl.Uniform2(det25GridOriginLoc, origin.X, origin.Y);
+            gl.Uniform2(det25GridPitchLoc, pitch.X, pitch.Y);
+            gl.Uniform2(det25CellSizeLoc, size.X, size.Y);
             gl.Uniform1(useDet25ArrLoc, 1);
         }
         else
@@ -4853,49 +4925,27 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         det05ArrayUniformsTick = det25FrameTick;
-        // ★ BŁĄD ZNALEZIONY 2026-07-25: bufory i licznik uploadu były na sztywno 48, mimo że cap podnoszono
-        // do 96 — sloty ≥48 NIGDY nie dostawały AABB, więc cele siedziały w VRAM i BYŁY NIEWIDOCZNE.
-        // Rozmiar musi wynikać z capa, inaczej każde podniesienie capa jest pozorne.
-        int slots = Math.Max(1, Det05HardCapCells);
-        Span<float> aabb = stackalloc float[Det05HardCapCells * 4];
-        Span<float> alpha = stackalloc float[Det05HardCapCells];
-        alpha.Clear(); // stackalloc zero-init is not contractual — empty slots must read alpha 0
-        for (int i = 0; i < aabb.Length; i += 4)
-        {
-            aabb[i] = 1e9f; aabb[i + 1] = 1e9f; aabb[i + 2] = -1e9f; aabb[i + 3] = -1e9f; // min>max = empty slot
-        }
-
+        Span<MapaTur.Application.Terrain.DetailCellSlot> resident =
+            stackalloc MapaTur.Application.Terrain.DetailCellSlot[Det05HardCapCells];
         int ready = 0;
         double nowMs = frameClock.ElapsedMilliseconds;
         foreach (DetailCellGpu cell in det05Cells.Values)
         {
-            // ★ TEN SAM BŁĄD, DRUGI RAZ (2026-07-30): powyższy komentarz opisuje naprawę ROZMIARU
-            // buforów z 48 na cap, ale bramka wpuszczająca cele do uploadu została z literałem 48.
-            // Skutek przy Det05HardCapCells=192: sloty 48-191 nigdy nie dostawały AABB, więc shader
-            // je pomijał (min>max = slot pusty) — 192 cele w VRAM, max 48 widocznych. Objaw zgłoszony
-            // przez usera przy Gierlachu: JEDEN kafel 5 cm, który nie przesuwa się za kamerą, resztа
-            // rozmyta; wygląda jak awaria streamingu, a log pokazuje resident 192/desired 192/queue 0.
-            // Bliźniacza ścieżka det25 (patrz `cell.Layer >= Det25ArrLayers`) robi to poprawnie przez
-            // NAZWANĄ STAŁĄ. Limity trzymać wyłącznie w stałych — literał w jednej z par ścieżek jest
-            // wzrokowo niewykrywalny (§C.11 checklisty: każdą zmianę wpinać na WSZYSTKICH ścieżkach).
             if (!cell.LayerReady || cell.Layer < 0 || cell.Layer >= Det05HardCapCells)
             {
                 continue;
             }
 
-            Vector3 sw = anchorMesh.GeoToWorld(cell.Bounds.SouthWest, 0f);
-            Vector3 ne = anchorMesh.GeoToWorld(cell.Bounds.NorthEast, 0f);
-            int o = cell.Layer * 4;
-            aabb[o] = Math.Min(sw.X, ne.X);
-            aabb[o + 1] = Math.Min(sw.Y, ne.Y);
-            aabb[o + 2] = Math.Max(sw.X, ne.X);
-            aabb[o + 3] = Math.Max(sw.Y, ne.Y);
-            alpha[cell.Layer] = (float)Math.Clamp((nowMs - cell.PromoteMs) / 300.0, 0.0, 1.0); // 300 ms fade-in
-            ready++;
+            byte alpha = (byte)Math.Round(Math.Clamp((nowMs - cell.PromoteMs) / 300.0, 0.0, 1.0) * 255.0);
+            resident[ready++] = new(cell.Ci, cell.Cj, cell.Layer, alpha);
         }
 
         if (ready > 0)
         {
+            Span<int> hash = stackalloc int[Det05CellHashSize * 4];
+            (uint seed, _) = MapaTur.Application.Terrain.DetailCellSlotHash.Fill(
+                resident[..ready], hash, DetailCellHashMaxProbe);
+            (Vector2 origin, Vector2 pitch, Vector2 size) = DetailGridWorld(det05Grid, anchorMesh);
             gl.ActiveTexture(TextureUnit.Texture12);
             gl.BindTexture(TextureTarget.Texture2DArray, det05ArrayTexture);
             gl.ActiveTexture(TextureUnit.Texture13);
@@ -4909,16 +4959,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.Uniform1(det05ArrBSamplerLocation, 13);
             gl.Uniform1(det05ArrCSamplerLocation, 7);
             gl.Uniform1(det05ArrALoc, det05LayersA);
-            fixed (float* p = aabb)
+            fixed (int* p = hash)
             {
-                gl.Uniform4(det05ArrAabbLocation, (uint)slots, p);
+                gl.Uniform4(det05CellHashLoc, Det05CellHashSize, p);
             }
-
-            fixed (float* p = alpha)
-            {
-                gl.Uniform1(det05ArrAlphaLocation, (uint)slots, p);
-            }
-
+            gl.Uniform1(det05HashSeedLoc, unchecked((int)seed));
+            gl.Uniform2(det05GridOriginLoc, origin.X, origin.Y);
+            gl.Uniform2(det05GridPitchLoc, pitch.X, pitch.Y);
+            gl.Uniform2(det05CellSizeLoc, size.X, size.Y);
             gl.Uniform1(useDet05ArrLocation, 1);
         }
         else
@@ -5772,13 +5820,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             det05ArrSamplerLocation = -1;
             det05ArrBSamplerLocation = -1;
             det05ArrALoc = -1; det05ArrCSamplerLocation = -1;
-            det05ArrAabbLocation = -1;
-            det05ArrAlphaLocation = -1;
+            det05CellHashLoc = -1; det05HashSeedLoc = -1;
+            det05GridOriginLoc = -1; det05GridPitchLoc = -1; det05CellSizeLoc = -1;
             useDet05ArrLocation = -1;
             detailBlendLocation = -1;
             detailColorModeLocation = -1;
             det05ArrRawLocation = -1;
-            det25ArrSamplerLoc = -1; det25ArrAabbLoc = -1; det25ArrAlphaLoc = -1; useDet25ArrLoc = -1;
+            det25ArrSamplerLoc = -1; det25CellHashLoc = -1; det25HashSeedLoc = -1; useDet25ArrLoc = -1;
+            det25GridOriginLoc = -1; det25GridPitchLoc = -1; det25CellSizeLoc = -1;
             det25ArrayTexture = 0; det25ArrFreeLayers.Clear(); // kontekst padł — cele wrócą przez desired/kick
             det1mSamplerLoc = -1; det1mCovLoc = -1; useDet1mLoc = -1;
             det1mMinXyLoc = -1; det1mInvSizeLoc = -1; det1mGridDimLoc = -1; det1mSliceIdxLoc = -1;
@@ -9364,8 +9413,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         det05ArrBSamplerLocation = g.GetUniformLocation(program, "uOrthoDet05ArrB");
         det05ArrCSamplerLocation = g.GetUniformLocation(program, "uOrthoDet05ArrC");
         det05ArrALoc = g.GetUniformLocation(program, "uDet05ArrLayers");
-        det05ArrAabbLocation = g.GetUniformLocation(program, "uDet05Aabb[0]");
-        det05ArrAlphaLocation = g.GetUniformLocation(program, "uDet05Alpha[0]");
+        det05CellHashLoc = g.GetUniformLocation(program, "uDet05CellHash[0]");
+        det05HashSeedLoc = g.GetUniformLocation(program, "uDet05HashSeed");
+        det05GridOriginLoc = g.GetUniformLocation(program, "uDet05GridMinXmaxY");
+        det05GridPitchLoc = g.GetUniformLocation(program, "uDet05GridPitch");
+        det05CellSizeLoc = g.GetUniformLocation(program, "uDet05CellSize");
         useDet05ArrLocation = g.GetUniformLocation(program, "uUseDet05Arr");
         detailBlendLocation = g.GetUniformLocation(program, "uDetailBlendMeters");
         detailColorModeLocation = g.GetUniformLocation(program, "uOrthoDetailColorMode");
@@ -9373,8 +9425,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         toneDebugLoc = g.GetUniformLocation(program, "uToneDebug");
         det05ArrRawLocation = g.GetUniformLocation(program, "uOrthoDet05ArrRaw");
         det25ArrSamplerLoc = g.GetUniformLocation(program, "uOrthoDet25Arr");
-        det25ArrAabbLoc = g.GetUniformLocation(program, "uDet25Aabb[0]");
-        det25ArrAlphaLoc = g.GetUniformLocation(program, "uDet25AlphaArr[0]");
+        det25CellHashLoc = g.GetUniformLocation(program, "uDet25CellHash[0]");
+        det25HashSeedLoc = g.GetUniformLocation(program, "uDet25HashSeed");
+        det25GridOriginLoc = g.GetUniformLocation(program, "uDet25GridMinXmaxY");
+        det25GridPitchLoc = g.GetUniformLocation(program, "uDet25GridPitch");
+        det25CellSizeLoc = g.GetUniformLocation(program, "uDet25CellSize");
         useDet25ArrLoc = g.GetUniformLocation(program, "uUseDet25Arr");
         det1mSamplerLoc = g.GetUniformLocation(program, "uOrthoDet1m");
         det1mCovLoc = g.GetUniformLocation(program, "uOrthoDet1mCov");

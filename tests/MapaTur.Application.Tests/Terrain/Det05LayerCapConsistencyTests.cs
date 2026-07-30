@@ -5,11 +5,8 @@ using FluentAssertions;
 namespace MapaTur.Application.Tests.Terrain;
 
 /// <summary>
-/// Cap warstw det05 musi być SPÓJNY w trzech miejscach: stałej <c>Det05HardCapCells</c>, rozmiarze
-/// tablicy uniformów w shaderze (<c>uniform vec4 uDet05Aabb[N]</c>) oraz w bramce wpuszczającej cele
-/// do uploadu AABB. Rozejście się ich jest CICHE: cele lądują w VRAM, licznik rezydencji rośnie,
-/// log pokazuje <c>resident 192 / desired 192 / queue 0</c> — a shader ich nie widzi, bo slot bez AABB
-/// czyta się jako pusty (min &gt; max).
+/// Cap warstw det05 musi być spójny z tablicą <c>cell→slot</c>. Tablica ma load factor ≤50%, a shader
+/// wykonuje ograniczony lookup zamiast pętli po wszystkich rezydentach.
 ///
 /// TEN BŁĄD WYSTĄPIŁ DWA RAZY:
 ///  * 2026-07-25 — bufory i licznik uploadu na sztywno 48 przy capie podnoszonym do 96; „podniesienie
@@ -21,7 +18,7 @@ namespace MapaTur.Application.Tests.Terrain;
 ///    była poprawna, bo używa NAZWANEJ stałej <c>Det25ArrLayers</c>.
 ///
 /// Dlatego ten test czyta ŹRÓDŁO: pilnuje, żeby w ścieżce det05 nie było ANI JEDNEGO literału
-/// porównywanego z <c>cell.Layer</c>, i żeby tablica w shaderze miała dokładnie rozmiar capa.
+/// porównywanego z <c>cell.Layer</c>, hash mieścił cały cap oraz żeby nie wrócił liniowy skan AABB.
 /// </summary>
 public sealed class Det05LayerCapConsistencyTests
 {
@@ -59,7 +56,7 @@ public sealed class Det05LayerCapConsistencyTests
     }
 
     [Fact]
-    public void Tablica_uniformow_w_shaderze_ma_rozmiar_capa_det05()
+    public void Hash_w_shaderze_miesci_cap_i_nie_ma_liniowego_skanu_rezydentow()
     {
         string src = RendererSource();
 
@@ -67,19 +64,26 @@ public sealed class Det05LayerCapConsistencyTests
         cap.Success.Should().BeTrue("stała Det05HardCapCells musi być czytelna ze źródła");
         int windowsCap = int.Parse(cap.Groups[1].Value, CultureInfo.InvariantCulture);
 
-        Match arr = Regex.Match(src, @"uniform vec4 uDet05Aabb\[(\d+)\]");
-        arr.Success.Should().BeTrue("shader musi deklarować tablicę uDet05Aabb");
-        int shaderSlots = int.Parse(arr.Groups[1].Value, CultureInfo.InvariantCulture);
+        Match tableConst = Regex.Match(src, @"Det05CellHashSize\s*=\s*(\d+)");
+        tableConst.Success.Should().BeTrue();
+        int tableSize = int.Parse(tableConst.Groups[1].Value, CultureInfo.InvariantCulture);
+        Match shaderTable = Regex.Match(src, @"uniform ivec4 uDet05CellHash\[(\d+)\]");
+        shaderTable.Success.Should().BeTrue("shader musi deklarować hash komórka→slot");
+        int shaderSize = int.Parse(shaderTable.Groups[1].Value, CultureInfo.InvariantCulture);
 
-        shaderSlots.Should().Be(windowsCap,
-            "tablica uniformów mniejsza od capa = cele bez AABB (niewidoczne); większa = marnowane "
-            + "uniformy i pętla po pustych slotach w każdym fragmencie");
+        shaderSize.Should().Be(tableSize);
+        tableSize.Should().BeGreaterThanOrEqualTo(windowsCap * 2,
+            "load factor ≤50% utrzymuje krótki, stały probe przy pełnym capie");
+        src.Should().NotContain("uDet05Aabb");
+        src.Should().NotContain("for (int i = 0; i < 192",
+            "koszt fragmentu nie może rosnąć razem z capem rezydencji");
 
-        Match loop = Regex.Match(src, @"for \(int i = 0; i < (\d+); i\+\+\) \{\\n"" \+\s*\n\s*""\s*vec2 mn = uDet05Aabb");
-        if (loop.Success)
-        {
-            int loopBound = int.Parse(loop.Groups[1].Value, CultureInfo.InvariantCulture);
-            loopBound.Should().Be(windowsCap, "pętla wyboru celi w shaderze musi przejść CAŁĄ tablicę");
-        }
+        Match probeConst = Regex.Match(src, @"DetailCellHashMaxProbe\s*=\s*(\d+)");
+        probeConst.Success.Should().BeTrue();
+        string probe = probeConst.Groups[1].Value;
+        Regex.Matches(src, @"for \(int p = 0; p < (\d+); p\+\+\)")
+            .Select(m => m.Groups[1].Value)
+            .Should().OnlyContain(v => v == probe,
+                "CPU builder i oba lookupy shaderowe muszą mieć ten sam twardy limit probe");
     }
 }
