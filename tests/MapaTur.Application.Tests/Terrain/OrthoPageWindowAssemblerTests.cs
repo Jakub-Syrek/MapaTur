@@ -86,7 +86,7 @@ public sealed class OrthoPageWindowAssemblerTests : IDisposable
     {
         // Cela (0,0): okno kafli [0..8) == grupa (0,0) — wszystkie 64 strony z jednego pakietu.
         BuildPack(0, 0, [(0, 0), (3, 2)], tailFill: 0x77);
-        byte[] chain = new byte[GpuCellCache.ChainSize(CellPx)];
+        byte[] chain = new byte[Bc1MipChain.ByteSize(CellPx)];
 
         bool ok = OrthoPageWindowAssembler.TryAssembleDet25Window(
             dir, 0, 0, PitchTiles, CoverageTiles, GroupTiles, chain, out int pagesRead);
@@ -101,7 +101,7 @@ public sealed class OrthoPageWindowAssemblerTests : IDisposable
     public void should_fill_missing_pages_with_transparent_blocks_never_zero()
     {
         BuildPack(0, 0, [(0, 0)], tailFill: 0x77);
-        byte[] chain = new byte[GpuCellCache.ChainSize(CellPx)];
+        byte[] chain = new byte[Bc1MipChain.ByteSize(CellPx)];
 
         OrthoPageWindowAssembler.TryAssembleDet25Window(
             dir, 0, 0, PitchTiles, CoverageTiles, GroupTiles, chain, out _);
@@ -119,7 +119,7 @@ public sealed class OrthoPageWindowAssemblerTests : IDisposable
         BuildPack(0, 1, [(7, 0)], tailFill: 0x22); // kafel globalny (7,8) → okno (1,2)
         BuildPack(1, 0, [(0, 6)], tailFill: 0x33); // kafel globalny (8,6) → okno (2,0)
         BuildPack(1, 1, [(0, 0)], tailFill: 0x44); // kafel globalny (8,8) → okno (2,2)
-        byte[] chain = new byte[GpuCellCache.ChainSize(CellPx)];
+        byte[] chain = new byte[Bc1MipChain.ByteSize(CellPx)];
 
         bool ok = OrthoPageWindowAssembler.TryAssembleDet25Window(
             dir, 1, 1, PitchTiles, CoverageTiles, GroupTiles, chain, out int pagesRead);
@@ -136,7 +136,7 @@ public sealed class OrthoPageWindowAssemblerTests : IDisposable
     public void should_place_page_mip1_blocks_in_level1()
     {
         BuildPack(0, 0, [(2, 5)], tailFill: 0x77);
-        byte[] chain = new byte[GpuCellCache.ChainSize(CellPx)];
+        byte[] chain = new byte[Bc1MipChain.ByteSize(CellPx)];
 
         OrthoPageWindowAssembler.TryAssembleDet25Window(
             dir, 0, 0, PitchTiles, CoverageTiles, GroupTiles, chain, out _);
@@ -157,7 +157,7 @@ public sealed class OrthoPageWindowAssemblerTests : IDisposable
         BuildPack(0, 1, [(6, 0)], tailFill: 0x22);
         BuildPack(1, 0, [(0, 6)], tailFill: 0x33);
         BuildPack(1, 1, [(0, 0)], tailFill: 0x44);
-        byte[] chain = new byte[GpuCellCache.ChainSize(CellPx)];
+        byte[] chain = new byte[Bc1MipChain.ByteSize(CellPx)];
 
         OrthoPageWindowAssembler.TryAssembleDet25Window(
             dir, 1, 1, PitchTiles, CoverageTiles, GroupTiles, chain, out _);
@@ -195,7 +195,7 @@ public sealed class OrthoPageWindowAssemblerTests : IDisposable
     public void should_read_tail_part_matching_cell_level_not_off_by_one()
     {
         BuildPackWithLevelledTail(0, 0);
-        byte[] chain = new byte[GpuCellCache.ChainSize(CellPx)];
+        byte[] chain = new byte[Bc1MipChain.ByteSize(CellPx)];
 
         OrthoPageWindowAssembler.TryAssembleDet25Window(
             dir, 0, 0, PitchTiles, CoverageTiles, GroupTiles, chain, out _);
@@ -204,7 +204,7 @@ public sealed class OrthoPageWindowAssemblerTests : IDisposable
         chain[l2].Should().Be(0xA1);                     // poziom 2 celi (1024 px) = part 1 tail-a, NIE part 0
         int l3 = l2 + Bc1Encoder.EncodedSize(CellPx / 4, CellPx / 4);
         chain[l3].Should().Be(0xA2);                     // poziom 3 (512 px) = part 2
-        int deepest = GpuCellCache.ChainSize(CellPx) - 8;
+        int deepest = Bc1MipChain.ByteSize(CellPx) - 8;
         chain[deepest].Should().Be(0xAB);                // poziom 12 (1 px) = part 11 (0xA0+11)
     }
 
@@ -213,7 +213,7 @@ public sealed class OrthoPageWindowAssemblerTests : IDisposable
     {
         // Pakiet istnieje, ale okno celi (10,10) → kafle [60..68) → grupy 7-8 — brak plików.
         BuildPack(0, 0, [(0, 0)], tailFill: 0x77);
-        byte[] chain = new byte[GpuCellCache.ChainSize(CellPx)];
+        byte[] chain = new byte[Bc1MipChain.ByteSize(CellPx)];
 
         bool ok = OrthoPageWindowAssembler.TryAssembleDet25Window(
             dir, 10, 10, PitchTiles, CoverageTiles, GroupTiles, chain, out int pagesRead);
@@ -245,7 +245,7 @@ public sealed class OrthoPageWindowAssemblerTests : IDisposable
 
         Pack05(0, 0, 6, 0, 0xAA);
         Pack05(1, 0, 0, 0, 0xBB);
-        byte[] chain = new byte[GpuCellCache.ChainSize(Cell05Px)];
+        byte[] chain = new byte[Bc1MipChain.ByteSize(Cell05Px)];
 
         bool ok = OrthoPageWindowAssembler.TryAssembleDet25Window(
             dir, 1, 0, PitchTiles, Cov05, Grp05, chain, out int pagesRead);

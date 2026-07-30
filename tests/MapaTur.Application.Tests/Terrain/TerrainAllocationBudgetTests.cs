@@ -153,46 +153,4 @@ public sealed class TerrainAllocationBudgetTests
         u32Rents.Should().NotContain(colors, "Colors feed the Skia fallback — never pooled");
     }
 
-    [Fact]
-    public void Compose_IntoARentedBuffer_AllocatesAlmostNothing()
-    {
-        // The det25/det05 compose allocated its whole cell buffer per call (measured: 67 MB det25 / 268 MB
-        // det05 — gigabytes per traverse). With a caller-supplied destination the warm compose must be
-        // allocation-free up to bookkeeping.
-        var grid = new OrthoDetailGrid(resMeters: 0.25, coverageTiles: 2, pitchTiles: 1);
-        var tile = new byte[OrthoDetailGrid.TilePx * OrthoDetailGrid.TilePx * 4];
-        for (int p = 0; p < tile.Length; p += 4)
-        {
-            tile[p] = 120; tile[p + 1] = 110; tile[p + 2] = 100; tile[p + 3] = 255;
-        }
-
-        var composer = new OrthoDetailCellComposer(grid, (i, j) => tile, baseFill: null);
-        var dest = new byte[grid.CellPx * grid.CellPx * 4];
-
-        composer.Compose(0, 0, dest);
-        composer.Compose(0, 0, dest); // warm
-
-        long warmFloor = MinAllocOver(5, () => composer.Compose(0, 0, dest));
-
-        warmFloor.Should().BeLessThan(64_000,
-            "compose-into must not allocate the cell buffer — that is the caller's pooled array");
-    }
-
-    [Fact]
-    public void Compose_IntoADirtyRentedBuffer_StillLeavesHolesTransparent()
-    {
-        // A pooled buffer arrives DIRTY (previous cell's pixels). The assembler historically relied on
-        // new byte[] zero-init for holes/nodata (it just skips those pixels) — with pooling it must clear
-        // first, or the previous cell ghosts through every hole.
-        var grid = new OrthoDetailGrid(resMeters: 0.25, coverageTiles: 2, pitchTiles: 1);
-        var composer = new OrthoDetailCellComposer(grid, (i, j) => null, baseFill: null);
-        var dest = new byte[grid.CellPx * grid.CellPx * 4];
-        Array.Fill(dest, (byte)0xAB); // garbage from a previous cell
-
-        byte[]? cell = composer.Compose(0, 0, dest);
-
-        cell.Should().BeNull("an all-missing cell reports null exactly like the allocating overload");
-        dest.Where((b, idx) => idx % 4 == 3).Should().OnlyContain(a => a == 0,
-            "every hole's alpha must be cleared — a dirty pooled buffer must not ghost the previous cell");
-    }
 }

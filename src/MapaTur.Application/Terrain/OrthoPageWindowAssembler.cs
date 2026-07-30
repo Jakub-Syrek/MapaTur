@@ -7,7 +7,7 @@ namespace MapaTur.Application.Terrain;
 ///
 /// Układ (zgodny 1:1 z bake'iem w src/MapaTur.OrthoBake): strona = kafel 512 px, payload = BC1 mip0 (512)
 /// + mip1 (256) sekwencyjnie; tail pakietu = poziomy grupy 2048↓1 sekwencyjnie. Łańcuch celi = poziomy
-/// 4096↓1 (layout <see cref="GpuCellCache.ChainSize"/>).
+/// 4096↓1 (layout <see cref="Bc1MipChain.ByteSize"/>).
 ///
 /// Składanie: poziomy 0-1 z okien stron; poziomy 2-8 wycinane BLOKOWO z tail-i ≤4 grup (offsety okna są
 /// zawsze parzyste w kaflach — 6c mod 8 ∈ {0,2,4,6} — więc cięcie po blokach 4×4 jest całkowite do poziomu
@@ -28,7 +28,7 @@ public static class OrthoPageWindowAssembler
     /// <summary>
     /// Montuje łańcuch BC1 celi det25 (<paramref name="ci"/>,<paramref name="cj"/>) ze stron pakietów w
     /// <paramref name="packDir"/> (pliki "{gi}_{gj}.opk"). <paramref name="chainDest"/> ma pomieścić
-    /// <see cref="GpuCellCache.ChainSize"/>(coverage·512); wypełniany od zera przy każdym wywołaniu.
+    /// <see cref="Bc1MipChain.ByteSize"/>(coverage·512); wypełniany od zera przy każdym wywołaniu.
     /// Zwraca false (i nie zostawia nic kryjącego), gdy okno nie zawiera ŻADNEJ strony — baza kryje celę.
     /// </summary>
     public static bool TryAssembleDet25Window(
@@ -43,7 +43,7 @@ public static class OrthoPageWindowAssembler
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(groupTiles, 0);
 
         int cellPx = coverageTiles * TilePx;
-        int chainSize = GpuCellCache.ChainSize(cellPx);
+        int chainSize = Bc1MipChain.ByteSize(cellPx);
         ArgumentOutOfRangeException.ThrowIfLessThan(chainDest.Length, chainSize);
 
         pagesRead = 0;
