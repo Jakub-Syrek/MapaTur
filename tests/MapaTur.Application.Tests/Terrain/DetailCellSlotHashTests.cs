@@ -91,6 +91,19 @@ public sealed class DetailCellSlotHashTests
     }
 
     [Fact]
+    public void Build_PacksMinimumLodBesidePromotionAlpha()
+    {
+        MapaTur.Application.Terrain.DetailCellSlotHash table =
+            MapaTur.Application.Terrain.DetailCellSlotHash.Build(
+                [new(7, 8, 12, 200, MinimumLod: 2)],
+                tableSize: 8,
+                maxProbe: 4);
+
+        table.TryGet(7, 8, out int slot, out byte alpha, out byte minimumLod).Should().BeTrue();
+        (slot, alpha, minimumLod).Should().Be((12, (byte)200, (byte)2));
+    }
+
+    [Fact]
     public void Build_KeepsTheProbeBoundForMovingCircularAndSparseResidencySets()
     {
         var random = new Random(1701);

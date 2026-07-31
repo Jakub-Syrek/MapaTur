@@ -32,10 +32,10 @@ public sealed class OrthoPageWindowAssemblerTests : IDisposable
         try { Directory.Delete(dir, recursive: true); } catch (IOException) { }
     }
 
-    private static int TailBytes()
+    private static int TailBytes(int firstLevel = 2)
     {
         int total = 0;
-        for (int px = CellPx / 2; px >= 1; px /= 2)
+        for (int px = CellPx >> firstLevel; px >= 1; px /= 2)
         {
             total += Bc1Encoder.EncodedSize(px, px);
         }
@@ -50,7 +50,7 @@ public sealed class OrthoPageWindowAssemblerTests : IDisposable
         var pages = new List<OrthoPagePack.PageData>();
         byte[] tail = new byte[TailBytes()];
         Array.Fill(tail, tailFill);
-        pages.Add(new OrthoPagePack.PageData(OrthoPagePack.TailPageId, 1, tail, 0));
+        pages.Add(new OrthoPagePack.PageData(OrthoPagePack.TailPageId, 2, tail, 0));
         foreach ((int lx, int ly) in present)
         {
             byte[] payload = new byte[Mip0Bytes + Mip1Bytes];
@@ -170,13 +170,13 @@ public sealed class OrthoPageWindowAssemblerTests : IDisposable
     }
 
     /// <summary>Zapisuje pakiet, którego tail ma KAŻDY part (poziom) wypełniony innym bajtem: part p → 0xA0+p.
-    /// Łapie pomyłkę o jeden poziom (part 0 = 2048 px = poziom 1 CELI, wypełniany ze stron mip1 — poziom 2
-    /// celi musi czytać part 1, nie part 0).</summary>
+    /// Łapie pomyłkę o jeden poziom: kompaktowy tail zaczyna się od poziomu 2 celi, więc jego part 0
+    /// musi trafić do poziomu 2, a nie do 1 lub 3.</summary>
     private void BuildPackWithLevelledTail(int gi, int gj)
     {
         byte[] tail = new byte[TailBytes()];
         int off = 0, p = 0;
-        for (int px = CellPx / 2; px >= 1; px /= 2, p++)
+        for (int px = CellPx / 4; px >= 1; px /= 2, p++)
         {
             int bytes = Bc1Encoder.EncodedSize(px, px);
             Array.Fill(tail, (byte)(0xA0 + p), off, bytes);
@@ -186,7 +186,7 @@ public sealed class OrthoPageWindowAssemblerTests : IDisposable
         byte[] payload = new byte[Mip0Bytes + Mip1Bytes];
         OrthoPagePack.Write(Path.Combine(dir, $"{gi}_{gj}.opk"), CellPx,
         [
-            new OrthoPagePack.PageData(OrthoPagePack.TailPageId, 1, tail, 0),
+            new OrthoPagePack.PageData(OrthoPagePack.TailPageId, 2, tail, 0),
             new OrthoPagePack.PageData(0, 0, payload, 1UL),
         ]);
     }
@@ -201,11 +201,35 @@ public sealed class OrthoPageWindowAssemblerTests : IDisposable
             dir, 0, 0, PitchTiles, CoverageTiles, GroupTiles, chain, out _);
 
         (_, _, int l2) = ChainOffsets();
-        chain[l2].Should().Be(0xA1);                     // poziom 2 celi (1024 px) = part 1 tail-a, NIE part 0
+        chain[l2].Should().Be(0xA0);                     // poziom 2 celi (1024 px) = part 0 kompaktowego tail-a
         int l3 = l2 + Bc1Encoder.EncodedSize(CellPx / 4, CellPx / 4);
-        chain[l3].Should().Be(0xA2);                     // poziom 3 (512 px) = part 2
+        chain[l3].Should().Be(0xA1);                     // poziom 3 (512 px) = part 1
         int deepest = Bc1MipChain.ByteSize(CellPx) - 8;
-        chain[deepest].Should().Be(0xAB);                // poziom 12 (1 px) = part 11 (0xA0+11)
+        chain[deepest].Should().Be(0xAA);                // poziom 12 (1 px) = part 10 (0xA0+10)
+    }
+
+    [Fact]
+    public void should_skip_legacy_l1_part_when_assembling_minimum_l2()
+    {
+        int l1Bytes = Bc1Encoder.EncodedSize(CellPx / 2, CellPx / 2);
+        int compactBytes = TailBytes();
+        byte[] legacyTail = new byte[l1Bytes + compactBytes];
+        Array.Fill(legacyTail, (byte)0x11, 0, l1Bytes);
+        Array.Fill(legacyTail, (byte)0x22, l1Bytes, compactBytes);
+        OrthoPagePack.Write(
+            Path.Combine(dir, "0_0.opk"),
+            CellPx,
+            [new OrthoPagePack.PageData(OrthoPagePack.TailPageId, 1, legacyTail, 0)]);
+
+        byte[] chain = new byte[Bc1MipChain.ByteSize(CellPx)];
+        OrthoPageWindowAssembler.TryAssembleTailWindow(
+            dir, 0, 0, PitchTiles, CoverageTiles, GroupTiles, minimumLevel: 2, chain, out int tailsRead)
+            .Should().BeTrue();
+
+        (_, _, int level2Offset) = ChainOffsets();
+        tailsRead.Should().Be(1);
+        chain[level2Offset].Should().Be(0x22,
+            "czytnik migracyjny ma pominąć zduplikowany L1 starego tail-a, a nie przesunąć poziomy");
     }
 
     [Fact]
@@ -230,7 +254,7 @@ public sealed class OrthoPageWindowAssemblerTests : IDisposable
         // kafel okna (10,0). Assembler jest w pełni sparametryzowany — ten test przybija geometrię det05.
         const int Cov05 = 16, Grp05 = 16, Cell05Px = Cov05 * TilePx; // 8192
         int tailBytes = 0;
-        for (int px = Cell05Px / 2; px >= 1; px /= 2) { tailBytes += Bc1Encoder.EncodedSize(px, px); }
+        for (int px = Cell05Px / 4; px >= 1; px /= 2) { tailBytes += Bc1Encoder.EncodedSize(px, px); }
         void Pack05(int gi, int gj, int lx, int ly, byte fill)
         {
             byte[] tail = new byte[tailBytes];
@@ -238,7 +262,7 @@ public sealed class OrthoPageWindowAssemblerTests : IDisposable
             Array.Fill(payload, fill, 0, Mip0Bytes);
             OrthoPagePack.Write(Path.Combine(dir, $"{gi}_{gj}.opk"), Cell05Px,
             [
-                new OrthoPagePack.PageData(OrthoPagePack.TailPageId, 1, tail, 0),
+                new OrthoPagePack.PageData(OrthoPagePack.TailPageId, 2, tail, 0),
                 new OrthoPagePack.PageData((ushort)((lx * Grp05) + ly), 0, payload, 1UL),
             ]);
         }
@@ -255,5 +279,75 @@ public sealed class OrthoPageWindowAssemblerTests : IDisposable
         const int TileBlocks = TilePx / 4;
         chain[0].Should().Be(0xAA);                                    // kafel okna (0,0), blok (0,0)
         chain[(10 * TileBlocks) * 8].Should().Be(0xBB);               // kafel okna (10,0) w wierszu blokowym 0
+    }
+
+    [Fact]
+    public void should_assemble_tail_without_reading_tile_pages()
+    {
+        // Tail-first ma dać użyteczny poziom 2+ zanim runtime przeczyta choć jedną ciężką stronę kafla.
+        // Pakiet celowo NIE zawiera żadnych stron — pełny assembler zwróciłby false.
+        byte[] tail = new byte[TailBytes()];
+        Array.Fill(tail, (byte)0x5A, 0, Bc1Encoder.EncodedSize(CellPx / 4, CellPx / 4));
+        OrthoPagePack.Write(Path.Combine(dir, "0_0.opk"), CellPx,
+        [
+            new OrthoPagePack.PageData(OrthoPagePack.TailPageId, 2, tail, 0),
+        ]);
+        byte[] chain = new byte[Bc1MipChain.ByteSize(CellPx)];
+        Array.Fill(chain, (byte)0xCC);
+
+        bool ok = OrthoPageWindowAssembler.TryAssembleTailWindow(
+            dir, 0, 0, PitchTiles, CoverageTiles, GroupTiles, minimumLevel: 2, chain, out int tailsRead);
+
+        ok.Should().BeTrue();
+        tailsRead.Should().Be(1);
+        (_, int l1, int l2) = ChainOffsets();
+        chain[0].Should().Be(0xCC);   // poziom 0 nietknięty
+        chain[l1].Should().Be(0xCC);  // poziom 1 nietknięty
+        chain[l2].Should().Be(0x5A);  // poziom 2 gotowy bez strony kafla
+    }
+
+    [Fact]
+    public void should_assemble_tail_window_from_four_packs()
+    {
+        BuildPack(0, 0, [], tailFill: 0x11);
+        BuildPack(0, 1, [], tailFill: 0x22);
+        BuildPack(1, 0, [], tailFill: 0x33);
+        BuildPack(1, 1, [], tailFill: 0x44);
+        byte[] chain = new byte[Bc1MipChain.ByteSize(CellPx)];
+
+        bool ok = OrthoPageWindowAssembler.TryAssembleTailWindow(
+            dir, 1, 1, PitchTiles, CoverageTiles, GroupTiles, minimumLevel: 2, chain, out int tailsRead);
+
+        ok.Should().BeTrue();
+        tailsRead.Should().Be(4);
+        (_, _, int l2) = ChainOffsets();
+        const int blocks = CellPx / 4 / 4;
+        chain[l2].Should().Be(0x11);
+        chain[l2 + ((((blocks - 1) * blocks) + (blocks - 1)) * 8)].Should().Be(0x44);
+    }
+
+    [Fact]
+    public void should_assemble_fine_levels_without_reading_or_overwriting_tail()
+    {
+        byte[] payload = new byte[Mip0Bytes + Mip1Bytes];
+        Array.Fill(payload, (byte)0x31, 0, Mip0Bytes);
+        Array.Fill(payload, (byte)0x32, Mip0Bytes, Mip1Bytes);
+        OrthoPagePack.Write(Path.Combine(dir, "0_0.opk"), CellPx,
+        [
+            // Celowo brak TailPageId: drugi etap ma czytać wyłącznie strony 5/10 cm.
+            new OrthoPagePack.PageData(0, 0, payload, 1UL),
+        ]);
+        byte[] chain = new byte[Bc1MipChain.ByteSize(CellPx)];
+        Array.Fill(chain, (byte)0xCC);
+
+        bool ok = OrthoPageWindowAssembler.TryAssembleFineWindow(
+            dir, 0, 0, PitchTiles, CoverageTiles, GroupTiles, chain, out int pagesRead);
+
+        ok.Should().BeTrue();
+        pagesRead.Should().Be(1);
+        (_, int l1, int l2) = ChainOffsets();
+        chain[0].Should().Be(0x31);
+        chain[l1].Should().Be(0x32);
+        chain[l2].Should().Be(0xCC);
     }
 }

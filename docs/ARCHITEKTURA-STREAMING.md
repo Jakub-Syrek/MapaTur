@@ -438,3 +438,22 @@ kosztował zwykle 28,9–34,7 ms GPU.
   kosztem są streaming/cienie/odbicie, a nie wybór komórki orto;
 - zrzut po pełnej rezydencji nie pokazuje pustych komórek ani twardych granic nowego lookupu;
   ostateczny werdykt obrazu nadal należy do użytkownika.
+
+---
+
+## ANEKS C (2026-07-30) — kompaktowy tail L2, bez duplikatu L1
+
+Pierwszy test kroku 7 ujawnił rozjazd implementacji z §2.1: bake zapisywał tail od **L1**, mimo że
+L1 każdej celi jest już kompletnie zawarty w mip1 zwykłych stron. Dla det05 dawało to stronę tail
+~11,2 MB zamiast projektowanych ~2,8 MB. Zmierzony kandydat został odrzucony: odczyt tail-a miał
+medianę 175 ms/cela, pierwsza cela była gotowa po 0,768 s, a 192/192 dopiero po 26,062 s.
+
+Format TOC już posiada pole `level`, więc nie wymaga nowej wersji pliku:
+
+- nowy bake zapisuje `TailPageId` z `level=2` i payloadem L2↓1 px;
+- przyrostowy bake uznaje pakiet z tailem L1 za nieaktualny i przebudowuje go;
+- runtime czyta `Entry.Level`, dzięki czemu w czasie atomowej migracji akceptuje oba układy;
+- etap tail czyta/wysyła L2+, a etap fine czyta i wysyła wyłącznie L0-L1 — bez ponownego I/O/uploadu tail-a.
+
+Kryterium kroku 7 pozostaje bez zmian: pomiar wykonuje skompilowany EXE po rebake'u kompaktowych
+pakietów; stary wynik 26 s nie jest wynikiem bramki, tylko dowodem odrzucenia wadliwego layoutu.

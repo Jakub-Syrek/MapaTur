@@ -39,6 +39,23 @@ public sealed class Det05LayerCapConsistencyTests
         throw new FileNotFoundException("Nie znaleziono Terrain3DGlRenderer.cs idąc w górę od " + AppContext.BaseDirectory);
     }
 
+    private static string ViewSource()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null)
+        {
+            string candidate = Path.Combine(dir.FullName, "src", "MapaTur.App", "Views", "Terrain3DView.xaml.cs");
+            if (File.Exists(candidate))
+            {
+                return File.ReadAllText(candidate);
+            }
+
+            dir = dir.Parent;
+        }
+
+        throw new FileNotFoundException("Nie znaleziono Terrain3DView.xaml.cs idąc w górę od " + AppContext.BaseDirectory);
+    }
+
     [Fact]
     public void Bramki_na_cell_Layer_nie_moga_uzywac_literalow()
     {
@@ -85,5 +102,35 @@ public sealed class Det05LayerCapConsistencyTests
             .Select(m => m.Groups[1].Value)
             .Should().OnlyContain(v => v == probe,
                 "CPU builder i oba lookupy shaderowe muszą mieć ten sam twardy limit probe");
+    }
+
+    [Fact]
+    public void Tail_first_musi_ograniczac_sampling_do_gotowego_mipu()
+    {
+        string src = RendererSource();
+
+        src.Should().Contain("TryAssembleTailWindow(",
+            "det05 ma najpierw czytać fizycznie pierwszy tail .opk zamiast czekać na wszystkie strony 5 cm");
+        src.Should().Contain("TryAssembleFineWindow(",
+            "drugi etap ma czytać tylko strony 5/10 cm, bez ponownego I/O i uploadu gotowego tail-a");
+        src.Should().Contain("cell.MinimumLod",
+            "każda rezydentna cela musi przekazać shaderowi najdrobniejszy faktycznie wgrany mip");
+        src.Should().Contain("bestHit.y & 255",
+            "alpha promocji musi być odpakowana z dolnego bajtu metadanych hasha");
+        src.Should().Contain("bestHit.y >> 8",
+            "shader musi odpakować minimum LOD i nigdy nie próbować niegotowych mipów 0-1");
+        src.Should().Contain("max(float(minimumLod), implicitLod)",
+            "tail-ready sampling musi clampować żądany LOD do gotowego poziomu");
+    }
+
+    [Fact]
+    public void Izolowany_test_kompaktowego_taila_musi_miec_override_katalogu_opk()
+    {
+        string view = ViewSource();
+
+        view.Should().Contain("MAPATUR_DET05_OPK_DIR",
+            "test nowego layoutu danych nie może podmieniać wspólnego AppData ani produkcyjnego det05");
+        view.Should().Contain("System.IO.Path.GetFullPath(det05Override)",
+            "override ma wskazywać jawny izolowany katalog .opk");
     }
 }

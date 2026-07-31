@@ -4,7 +4,7 @@ namespace MapaTur.Application.Terrain;
 
 /// <summary>
 /// Pakiet stron `.opk` — jednostka PLIKU streamingu orto (ARCHITEKTURA-STREAMING §2.2). Plik = jedna cela;
-/// wewnątrz strony BC1: zwykłe (kafel 512 px, mipy 0-1) i jedna strona TAIL (poziomy celi 2048↓), fizycznie
+/// wewnątrz strony BC1: zwykłe (kafel 512 px, mipy 0-1) i jedna strona TAIL (poziomy celi L2↓), fizycznie
 /// PIERWSZA w payloadzie, żeby sekwencyjny odczyt nagłówek→tail dawał celę w jakości ~0,2 m bez seeków.
 /// Zapis wyłącznie w narzędziu bake (runtime NIGDY nie pisze), atomowy (tmp + File.Move). Odczyt waliduje
 /// magic/version/px/długość przy otwarciu i crc32 per strona przy odczycie — plik rozdarty, obcy lub

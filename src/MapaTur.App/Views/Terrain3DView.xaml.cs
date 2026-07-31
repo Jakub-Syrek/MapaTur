@@ -8834,7 +8834,10 @@ public partial class Terrain3DView : ContentView
             root = fallbackRoot;
         }
 
-        string det05Opk = System.IO.Path.Combine(root, "opk", "det05");
+        string? det05Override = Environment.GetEnvironmentVariable("MAPATUR_DET05_OPK_DIR");
+        string det05Opk = !string.IsNullOrWhiteSpace(det05Override)
+            ? System.IO.Path.GetFullPath(det05Override)
+            : System.IO.Path.Combine(root, "opk", "det05");
         string indexPath = System.IO.Path.Combine(det05Opk, "index.bin");
         MapaTur.Application.Terrain.OrthoPackIndex? index =
             MapaTur.Application.Terrain.OrthoPackIndex.Load(indexPath);

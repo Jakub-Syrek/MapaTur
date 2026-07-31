@@ -4,11 +4,11 @@ namespace MapaTur.Application.Terrain;
 /// One resident detail-grid cell and the GPU-array slot that owns its texture.
 /// Alpha is quantized because it is only the short promote fade (0..1 in the shader).
 /// </summary>
-public readonly record struct DetailCellSlot(int Ci, int Cj, int Slot, byte Alpha);
+public readonly record struct DetailCellSlot(int Ci, int Cj, int Slot, byte Alpha, byte MinimumLod = 0);
 
 /// <summary>
 /// A bounded open-addressed hash table uploaded directly as <c>ivec4[]</c>:
-/// <c>(ci, cj, textureSlot, alphaByte)</c>. It replaces the fragment shader's linear scan over every
+/// <c>(ci, cj, textureSlot, minimumLod&lt;&lt;8 | alphaByte)</c>. It replaces the fragment shader's linear scan over every
 /// resident cell. The table builder searches for a seed whose longest probe chain fits the fixed shader
 /// bound, so lookup cost cannot grow with the residency cap.
 /// </summary>
@@ -24,7 +24,7 @@ public sealed class DetailCellSlotHash
         Seed = seed;
     }
 
-    /// <summary>Flat <c>ivec4</c>-ready storage: ci, cj, slot, alphaByte.</summary>
+    /// <summary>Flat <c>ivec4</c>-ready storage: ci, cj, slot, minimumLod&lt;&lt;8 | alphaByte.</summary>
     public int[] PackedEntries { get; }
 
     public int Count { get; }
@@ -123,7 +123,7 @@ public sealed class DetailCellSlotHash
                     packedEntries[offset] = cell.Ci;
                     packedEntries[offset + 1] = cell.Cj;
                     packedEntries[offset + 2] = cell.Slot;
-                    packedEntries[offset + 3] = cell.Alpha;
+                    packedEntries[offset + 3] = (cell.MinimumLod << 8) | cell.Alpha;
                     longest = Math.Max(longest, probe + 1);
                     placed = true;
                     break;
@@ -148,6 +148,11 @@ public sealed class DetailCellSlotHash
 
     public bool TryGet(int ci, int cj, out int slot, out byte alpha)
     {
+        return TryGet(ci, cj, out slot, out alpha, out _);
+    }
+
+    public bool TryGet(int ci, int cj, out int slot, out byte alpha, out byte minimumLod)
+    {
         int start = (int)(Hash(ci, cj, Seed) % (uint)TableSize);
         for (int probe = 0; probe < MaxProbeUsed; probe++)
         {
@@ -161,13 +166,16 @@ public sealed class DetailCellSlotHash
             if (PackedEntries[offset] == ci && PackedEntries[offset + 1] == cj)
             {
                 slot = storedSlot;
-                alpha = (byte)PackedEntries[offset + 3];
+                int packed = PackedEntries[offset + 3];
+                alpha = (byte)(packed & 0xFF);
+                minimumLod = (byte)((packed >> 8) & 0xFF);
                 return true;
             }
         }
 
         slot = -1;
         alpha = 0;
+        minimumLod = 0;
         return false;
     }
 
