@@ -1,6 +1,6 @@
-# HANDOFF 2026-07-31 wieczór — sk25 WYKONANE data-side + bake, CZEKA WERDYKT USERA
+# HANDOFF 2026-07-31 wieczór — sk25 WYKONANE + **WERDYKT USERA: „jest ok" (ODEBRANE)**
 
-## ══ STAN: warstwa pośrednia 25 cm SK żyje w apce, user ma ją ocenić ══
+## ══ STAN: warstwa pośrednia 25 cm SK ODEBRANA przez usera 07-31 wieczór — nie cofać (zasada 19) ══
 
 **Gałąź `perf/pano-streaming` = main + `1b35bba`** (narzędzia sk25 + recepta TILE-PRODUCTION §12).
 **Apka DZIAŁA dla usera (PID 25244, build z HEAD)** — stan blokady sprawdzać WYŁĄCZNIE w `C:\Repos\APP-LOCK.md`.
