@@ -1,6 +1,6 @@
-using MapaTur.Application.Terrain;
-
 using FluentAssertions;
+
+using MapaTur.Application.Terrain;
 
 namespace MapaTur.Application.Tests.Terrain;
 

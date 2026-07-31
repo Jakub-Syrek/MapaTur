@@ -128,9 +128,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform int uOrthoDetailColorMode;\n" + // 0 = raw detail, 1 = base de-blue transform (R3 slice A/B)
         "uniform int uToneHarm;\n" +  // 1 = harmonizacja tonu (krok 2 prawa) czynna; 0 = SAMO de-blue (diagnostyka MAPATUR_ORTHO_TONE=0)
         "uniform int uToneDebug;\n" + // 1 = zamiast koloru rysuj MAPĘ korekty tonu (MAPATUR_ORTHO_TONE_DEBUG=1)
-        // H3 (2026-07-23): per-layer colour split for the deshadow preview. The STREAMED det05 cells can carry
-        // data-side-corrected (V2) tiles that must render RAW (a second shader de-blue = double correction),
-        // while det25/base/mosaic still need the mode-1 de-blue. 1 = det05 ARRAY skips the mode-1 transform.
+                                      // H3 (2026-07-23): per-layer colour split for the deshadow preview. The STREAMED det05 cells can carry
+                                      // data-side-corrected (V2) tiles that must render RAW (a second shader de-blue = double correction),
+                                      // while det25/base/mosaic still need the mode-1 de-blue. 1 = det05 ARRAY skips the mode-1 transform.
         "uniform int uOrthoDet05ArrRaw;\n" +
         // det1m (krok 3): rezydentna warstwa 1 m/px między det25 a bazą — array 4096² BC1 (unit 14) +
         // maska pokrycia R8 (unit 15, filtrowana liniowo = miękki brzeg 512 m). Dobór slice'a O(1) z

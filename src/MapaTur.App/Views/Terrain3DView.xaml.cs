@@ -2354,7 +2354,9 @@ public partial class Terrain3DView : ContentView
     // Mnich. The user screenshots the wall from the topo-photo viewpoint; the grid labels visible in that
     // shot let us transcribe route lines from the purchased topo into summit-relative offsets. Columns
     // A.. run west→east every 20 m, rows 0.. run south→north. Disable after calibration.
+#pragma warning disable IDE0044 // the only writer (the 'M' key toggle) is desktop-only (#if WINDOWS); readonly would break that build
     private bool climbCalibMarkersVisible; // OFF by default (calibration tool only); the 'M' key toggles it on when needed
+#pragma warning restore IDE0044
     // Centred on the CORRECTED Mnich needle. DENSE (5 m) so route bends can be pinned to markers, and
     // placed on the DETAIL surface ONLY (fine 1 m sampler, never the coarse base — the base is ~130 m
     // below the needle, "całkiem inne miejsce"). Rebuilt as the fine terrain streams in until coverage
@@ -2464,7 +2466,9 @@ public partial class Terrain3DView : ContentView
     private readonly bool walkThirdPerson = true;  // draw the 3D avatar + follow camera (vs the 1st-person ciupagas)
     private bool walkShootQueued;                  // F pressed → fire the crossbow on the next tick
     private int humanoidShootAnimIndex = -1;       // "1H_Ranged_Shoot" clip index (−1 = model has no ranged clip)
+#pragma warning disable IDE0044 // the only writer (the wheel-zoom handler) is desktop-only (#if WINDOWS); readonly would break that build
     private float walkCamBack = WalkCamBackMeters;  // 3rd-person boom length behind the walker (mouse wheel zooms it)
+#pragma warning restore IDE0044
     private float walkCamYawOffset;                 // free-look (RMB while climbing): camera orbit yaw off the heading
     private float walkCamPitchFree;                 // free-look extra pitch
     private bool walkRmbHeld;                        // right button held → free-look camera (heading + climb unchanged)
