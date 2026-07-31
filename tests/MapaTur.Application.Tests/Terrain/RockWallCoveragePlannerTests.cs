@@ -49,7 +49,7 @@ public sealed class RockWallCoveragePlannerTests
     }
 
     [Fact]
-    public void should_not_repeat_the_same_scan_variant_across_direct_grid_neighbours()
+    public void should_not_repeat_the_same_scan_variant_at_the_nearest_spatial_neighbour()
     {
         // Arrange
         float[] aspectRatios = [0.8f, 1.05f, 1.25f];
@@ -58,10 +58,44 @@ public sealed class RockWallCoveragePlannerTests
         IReadOnlyList<RockWallCoveragePatch> patches = RockWallCoveragePlanner.Plan(Options, aspectRatios);
 
         // Assert
-        patches.Should().OnlyContain(patch => !patches.Any(other =>
-            other.VariantIndex == patch.VariantIndex
-            && ((other.Column == patch.Column - 1 && other.Row == patch.Row)
-                || (other.Column == patch.Column && other.Row == patch.Row - 1))));
+        patches.Should().OnlyContain(patch =>
+            patches
+                .Where(other => other != patch)
+                .MinBy(other => Vector3.DistanceSquared(
+                    patch.Placement.Center,
+                    other.Placement.Center))
+                .VariantIndex != patch.VariantIndex);
+    }
+
+    [Fact]
+    public void should_not_form_a_directional_row_and_column_lattice()
+    {
+        // Arrange
+        float[] aspectRatios = [0.8f, 1.05f, 1.25f];
+        Vector3 outward = Vector3.Normalize(Options.OutwardNormal);
+        Vector3 up = Vector3.Normalize(Vector3.UnitZ - (outward * Vector3.Dot(Vector3.UnitZ, outward)));
+        Vector3 tangent = Vector3.Normalize(Vector3.Cross(up, outward));
+
+        // Act
+        IReadOnlyList<RockWallCoveragePatch> patches = RockWallCoveragePlanner.Plan(Options, aspectRatios);
+        int directionBuckets = patches
+            .Select(patch =>
+            {
+                RockWallCoveragePatch nearest = patches
+                    .Where(other => other != patch)
+                    .MinBy(other => Vector3.DistanceSquared(
+                        patch.Placement.Center,
+                        other.Placement.Center));
+                Vector3 delta = nearest.Placement.Center - patch.Placement.Center;
+                float angle = MathF.Atan2(Vector3.Dot(delta, up), Vector3.Dot(delta, tangent));
+                angle = (angle + MathF.PI) % MathF.PI;
+                return (int)MathF.Floor(angle / (MathF.PI / 12f));
+            })
+            .Distinct()
+            .Count();
+
+        // Assert
+        directionBuckets.Should().BeGreaterThanOrEqualTo(8);
     }
 
     [Fact]
@@ -89,6 +123,60 @@ public sealed class RockWallCoveragePlannerTests
         patches.Max(patch =>
                 Vector3.Dot(patch.Placement.Center - Options.Center, up) + (patch.Placement.HeightMeters * 0.5f))
             .Should().BeGreaterThanOrEqualTo(Options.HeightMeters * 0.5f);
+    }
+
+    [Fact]
+    public void should_cover_the_sampled_wall_without_holes_between_irregular_patches()
+    {
+        // Arrange
+        float[] aspectRatios = [0.8f, 1.05f, 1.25f];
+        Vector3 outward = Vector3.Normalize(Options.OutwardNormal);
+        Vector3 up = Vector3.Normalize(Vector3.UnitZ - (outward * Vector3.Dot(Vector3.UnitZ, outward)));
+        Vector3 tangent = Vector3.Normalize(Vector3.Cross(up, outward));
+
+        // Act
+        IReadOnlyList<RockWallCoveragePatch> patches = RockWallCoveragePlanner.Plan(Options, aspectRatios);
+        var uncovered = new List<Vector2>();
+        for (float v = -Options.HeightMeters * 0.5f; v <= Options.HeightMeters * 0.5f; v += 1f)
+        {
+            for (float u = -Options.WidthMeters * 0.5f; u <= Options.WidthMeters * 0.5f; u += 1f)
+            {
+                bool covered = patches.Any(patch =>
+                {
+                    Vector3 offset = patch.Placement.Center - Options.Center;
+                    float centerU = Vector3.Dot(offset, tangent);
+                    float centerV = Vector3.Dot(offset, up);
+                    float cosine = MathF.Cos(patch.Placement.RollRadians);
+                    float sine = MathF.Sin(patch.Placement.RollRadians);
+                    float deltaU = u - centerU;
+                    float deltaV = v - centerV;
+                    float localU = (deltaU * cosine) + (deltaV * sine);
+                    float localV = (-deltaU * sine) + (deltaV * cosine);
+                    return MathF.Abs(localU) <= patch.WidthMeters * 0.5f
+                        && MathF.Abs(localV) <= patch.Placement.HeightMeters * 0.5f;
+                });
+                if (!covered)
+                {
+                    uncovered.Add(new Vector2(u, v));
+                }
+            }
+        }
+
+        // Assert
+        uncovered.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void should_mix_every_available_scan_pattern_in_the_wall()
+    {
+        // Arrange
+        float[] aspectRatios = [0.8f, 1.05f, 1.25f];
+
+        // Act
+        IReadOnlyList<RockWallCoveragePatch> patches = RockWallCoveragePlanner.Plan(Options, aspectRatios);
+
+        // Assert
+        patches.Select(patch => patch.VariantIndex).Distinct().Should().HaveCount(aspectRatios.Length);
     }
 
     [Fact]

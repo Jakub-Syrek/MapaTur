@@ -53,6 +53,18 @@ float steepBlockMeters = ParsePositive(GetArgument("--steep-block") ?? "28", "--
 float steepCoverageFraction = ParsePositive(
     GetArgument("--steep-coverage") ?? "0.20",
     "--steep-coverage");
+float steepMergeGapMeters = ParsePositive(
+    GetArgument("--steep-merge-gap") ?? (steepBlockMeters * 0.35f).ToString(CultureInfo.InvariantCulture),
+    "--steep-merge-gap");
+float steepMergeAngleDegrees = ParsePositive(
+    GetArgument("--steep-merge-angle") ?? "25",
+    "--steep-merge-angle");
+float steepShellWidthMeters = ParsePositive(
+    GetArgument("--steep-shell-width") ?? "70",
+    "--steep-shell-width");
+float steepShellHeightMeters = ParsePositive(
+    GetArgument("--steep-shell-height") ?? "70",
+    "--steep-shell-height");
 int maxInstances = int.Parse(GetArgument("--max-instances") ?? "240", CultureInfo.InvariantCulture);
 if (maxInstances <= 0)
 {
@@ -140,6 +152,24 @@ if (mirrorVariants)
     Console.WriteLine(
         $"[rock-scan-bake] expanded {scanPaths.Length} complete captures into {sources.Count} "
         + "full-detail orientation variants without cropping");
+}
+
+if (coverageMode)
+{
+    var frontSources = new List<PhotogrammetryRockPrimitive>(sources.Count);
+    for (int index = 0; index < sources.Count; index++)
+    {
+        PhotogrammetryRockPrimitive original = sources[index];
+        PhotogrammetryRockPrimitive front =
+            PhotogrammetryRockFrontSurfaceExtractor.Extract(original, Vector3.UnitZ);
+        frontSources.Add(front);
+        Console.WriteLine(
+            $"[rock-scan-bake] scan front {index + 1}: "
+            + $"{front.Indices.Length / 3:N0}/{original.Indices.Length / 3:N0} triangles retained "
+            + "after back/side/hole-stitch rejection");
+    }
+
+    sources = frontSources;
 }
 
 PhotogrammetryRockPrimitive source = sources[0];
@@ -263,35 +293,39 @@ if (wallRmp1Root is not null || wallDemPath is not null)
                 MinimumWidthMeters: 10f,
                 MinimumHeightMeters: 10f,
                 BorderOverlapMeters: 4f);
-            IReadOnlyList<SteepRockRegion> regions = SteepRockRegionPlanner.Plan(
+            IReadOnlyList<SteepRockRegion> detectedBlocks = SteepRockRegionPlanner.Plan(
                 wallRaster!,
                 wallProjectionAnchor!.Value,
                 steepOptions);
-            if (regions.Count == 0)
+            if (detectedBlocks.Count == 0)
             {
                 throw new InvalidDataException("No coherent steep DEM regions passed the auto-coverage gate.");
             }
 
+            IReadOnlyList<SteepRockRegion> mergedFacets = SteepRockRegionMerger.Merge(
+                detectedBlocks,
+                steepMergeGapMeters,
+                steepMergeAngleDegrees);
+            IReadOnlyList<SteepRockRegion> regions = SteepRockFacetSplitter.Split(
+                mergedFacets,
+                steepShellWidthMeters,
+                steepShellHeightMeters,
+                coverageSeed);
             autoRegionCount = regions.Count;
-            IReadOnlyList<IReadOnlyList<RockWallCoveragePatch>> regionPatchPlans = regions
-                .Select((region, regionIndex) =>
-                    RockWallCoveragePlanner.Plan(
-                        new RockWallCoverageOptions(
-                            region.Center,
-                            region.OutwardNormal,
-                            region.WidthMeters,
-                            region.HeightMeters,
-                            heightMeters,
-                            depthMeters,
-                            coverageOverlap,
-                            unchecked(coverageSeed + (regionIndex * 104729))),
-                        aspectRatios))
+            IReadOnlyList<RockWallCoveragePatch> regionShells = RockRegionShellPlanner.Plan(
+                regions,
+                aspectRatios,
+                depthMeters,
+                coverageSeed);
+            IReadOnlyList<IReadOnlyList<RockWallCoveragePatch>> regionPatchPlans = regionShells
+                .Select(shell => (IReadOnlyList<RockWallCoveragePatch>)[shell])
                 .ToArray();
-            int plannedPatchCount = regionPatchPlans.Sum(plan => plan.Count);
+            int plannedPatchCount = regionShells.Count;
             Console.WriteLine(
-                $"[rock-scan-bake] auto-steep analysis: regions={regions.Count}, "
+                $"[rock-scan-bake] auto-steep analysis: blocks={detectedBlocks.Count}, "
+                + $"merged facets={mergedFacets.Count}, scale-bounded shells={regions.Count}, "
                 + $"slope>={steepSlopeDegrees:F1}°, block={steepBlockMeters:F1} m, "
-                + $"coverage>={steepCoverageFraction:P0}, real 3D instances={plannedPatchCount}");
+                + $"coverage>={steepCoverageFraction:P0}, one complete 3D scan per region");
             for (int index = 0; index < regions.Count; index++)
             {
                 SteepRockRegion region = regions[index];
@@ -354,7 +388,13 @@ if (wallRmp1Root is not null || wallDemPath is not null)
                     atlasBaseColorImageBytes: null,
                     meshClusterCellMeters: meshClusterCellMeters,
                     internalWarpSeed: internalWarp ? unchecked(coverageSeed + (regionIndex * 104729)) : null,
-                    maximumReliefMeters: maximumReliefMeters);
+                    maximumReliefMeters: maximumReliefMeters,
+                    clipRegion: new RockWallClipRegion(
+                        region.Center,
+                        region.OutwardNormal,
+                        region.WidthMeters,
+                        region.HeightMeters,
+                        Seed: unchecked(coverageSeed + (regionIndex * 104729))));
                 IReadOnlyList<ScannedRockMeshPage> regionPages = ScannedRockPageBaker.Bake(
                     conformedRegion,
                     pageMeters,
@@ -532,6 +572,10 @@ try
         steepSlopeDegrees = autoSteep ? steepSlopeDegrees : (float?)null,
         steepBlockMeters = autoSteep ? steepBlockMeters : (float?)null,
         steepCoverageFraction = autoSteep ? steepCoverageFraction : (float?)null,
+        steepMergeGapMeters = autoSteep ? steepMergeGapMeters : (float?)null,
+        steepMergeAngleDegrees = autoSteep ? steepMergeAngleDegrees : (float?)null,
+        steepShellWidthMeters = autoSteep ? steepShellWidthMeters : (float?)null,
+        steepShellHeightMeters = autoSteep ? steepShellHeightMeters : (float?)null,
         pageMeters,
         meshClusterCellMeters,
         wallRmp1 = wallRmp1Root is null ? null : Path.GetFileName(Path.TrimEndingDirectorySeparator(wallRmp1Root)),
@@ -840,6 +884,10 @@ static void PrintUsage()
           --steep-slope <deg>    minimum auto-covered slope (default 58)
           --steep-block <m>      local wall-facet size (default 28)
           --steep-coverage <f>   steep-cell fraction required in a facet (default 0.20)
+          --steep-merge-gap <m>  gap allowed while merging same-facing blocks (default 35% block)
+          --steep-merge-angle <d> maximum normal-angle merged into one facet (default 25)
+          --steep-shell-width <m> maximum pre-overscan shell width (default 70)
+          --steep-shell-height <m> maximum pre-overscan shell height (default 70)
           --max-instances <n>    abort auto bake before geometry above this count (default 240)
           --wall-rmp1 <root>     pilot DEM-wall samples used for conforming/welding
           --wall-dem <tile.bdt>   exact raw runtime DEM used for conforming/welding

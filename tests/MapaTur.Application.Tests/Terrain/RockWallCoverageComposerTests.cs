@@ -93,8 +93,8 @@ public sealed class RockWallCoverageComposerTests
         PhotogrammetryRockPrimitive[] variants = [CreateTriangle(), CreateTriangle(), CreateTriangle()];
         RockWallCoveragePatch[] patches =
         [
-            CreatePatch(Vector3.Zero, variant: 0) with { Column = 0 },
-            CreatePatch(Vector3.Zero, variant: 0) with { Column = 1 },
+            CreatePatch(Vector3.Zero, variant: 0) with { InstanceId = 0 },
+            CreatePatch(Vector3.Zero, variant: 0) with { InstanceId = 1 },
         ];
 
         // Act
@@ -111,6 +111,36 @@ public sealed class RockWallCoverageComposerTests
 
         // Assert
         combined.Positions[4].Should().NotBe(combined.Positions[9]);
+    }
+
+    [Fact]
+    public void should_clip_an_auto_region_before_welding_it_to_the_wall()
+    {
+        // Arrange
+        PhotogrammetryRockPrimitive[] variants = [CreateTriangle(), CreateTriangle(), CreateTriangle()];
+        RockWallCoveragePatch[] patches = [CreatePatch(Vector3.Zero, variant: 0)];
+
+        // Act
+        PhotogrammetryRockPrimitive combined = RockWallCoverageComposer.Compose(
+            variants,
+            patches,
+            CreateWall(),
+            edgeBlendFraction: 0.2f,
+            interiorClearanceMeters: 0.1f,
+            atlasColumns: 3,
+            atlasRows: 1,
+            atlasBaseColorImageBytes: null,
+            clipRegion: new RockWallClipRegion(
+                Vector3.Zero,
+                Vector3.UnitY,
+                WidthMeters: 1f,
+                HeightMeters: 2f));
+
+        // Assert
+        combined.Positions
+            .Where((_, index) => combined.Indices.Contains((uint)index))
+            .Should()
+            .OnlyContain(position => MathF.Abs(position.X) <= 0.5001f);
     }
 
     private static PhotogrammetryRockPrimitive CreateTriangle() => new(
@@ -134,8 +164,7 @@ public sealed class RockWallCoverageComposerTests
             HeightMeters: 2f,
             DepthMeters: 1f),
         variant,
-        Column: variant,
-        Row: 0,
+        InstanceId: variant,
         WidthMeters: 2f);
 
     private static RockWallSurfaceSampler CreateWall()

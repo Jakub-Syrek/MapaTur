@@ -275,6 +275,59 @@ public static class RockWallSurfaceConformer
             blendDistance);
     }
 
+    /// <summary>
+    /// Builds an inward-only, seeded irregular fade from an exclusive clip region. The zero-alpha contour
+    /// never crosses outside the region, while two non-periodic value-noise scales prevent a straight cut
+    /// from reading as a rectangular tile boundary.
+    /// </summary>
+    public static byte[] CalculateClipRegionSeamWeights(
+        PhotogrammetryRockPrimitive source,
+        RockWallClipRegion region,
+        float edgeBlendFraction)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ValidateEdgeBlend(edgeBlendFraction);
+        if (!IsFinite(region.Center)
+            || !IsFinite(region.OutwardNormal)
+            || region.OutwardNormal.LengthSquared() < 0.25f
+            || !float.IsFinite(region.WidthMeters)
+            || region.WidthMeters <= 0f
+            || !float.IsFinite(region.HeightMeters)
+            || region.HeightMeters <= 0f)
+        {
+            throw new ArgumentOutOfRangeException(nameof(region));
+        }
+
+        Vector3 outward = Vector3.Normalize(region.OutwardNormal);
+        Vector3 up = Vector3.Normalize(
+            Vector3.UnitZ - (outward * Vector3.Dot(Vector3.UnitZ, outward)));
+        Vector3 tangent = Vector3.Normalize(Vector3.Cross(up, outward));
+        float halfWidth = region.WidthMeters * 0.5f;
+        float halfHeight = region.HeightMeters * 0.5f;
+        float blendDistance = MathF.Max(
+            0.25f,
+            MathF.Min(region.WidthMeters, region.HeightMeters) * edgeBlendFraction);
+        var weights = new byte[source.Positions.Length];
+        for (int index = 0; index < weights.Length; index++)
+        {
+            Vector3 delta = source.Positions[index] - region.Center;
+            float u = Vector3.Dot(delta, tangent);
+            float v = Vector3.Dot(delta, up);
+            float edgeDistance = MathF.Min(halfWidth - MathF.Abs(u), halfHeight - MathF.Abs(v));
+            float noise = (0.64f * ValueNoise(u / 11.3f, v / 11.3f, region.Seed))
+                + (0.36f * ValueNoise(
+                    (u / 4.7f) + 17.19f,
+                    (v / 4.7f) - 31.73f,
+                    unchecked(region.Seed ^ (int)0x9e3779b9u)));
+            float irregularInset = blendDistance * (0.08f + (0.34f * noise));
+            float fadeSpan = MathF.Max(0.05f, blendDistance - irregularInset);
+            float normalized = Math.Clamp((edgeDistance - irregularInset) / fadeSpan, 0f, 1f);
+            weights[index] = (byte)MathF.Round(SmoothStep(normalized) * byte.MaxValue);
+        }
+
+        return weights;
+    }
+
     private static byte[] CalculateWorldSeamWeights(
         PhotogrammetryRockPrimitive fitted,
         Vector3 tangent,
@@ -515,6 +568,33 @@ public static class RockWallSurfaceConformer
         counts.TryGetValue(edge, out int count);
         counts[edge] = count + 1;
     }
+
+    private static float ValueNoise(float x, float y, int seed)
+    {
+        int x0 = (int)MathF.Floor(x);
+        int y0 = (int)MathF.Floor(y);
+        float tx = SmoothStep(x - x0);
+        float ty = SmoothStep(y - y0);
+        float lower = Lerp(Hash01(x0, y0, seed), Hash01(x0 + 1, y0, seed), tx);
+        float upper = Lerp(Hash01(x0, y0 + 1, seed), Hash01(x0 + 1, y0 + 1, seed), tx);
+        return Lerp(lower, upper, ty);
+    }
+
+    private static float Hash01(int x, int y, int seed)
+    {
+        uint value = unchecked((uint)seed);
+        value ^= unchecked((uint)x) * 0x9e3779b9u;
+        value ^= unchecked((uint)y) * 0x85ebca6bu;
+        value = (value ^ (value >> 16)) * 0x7feb352du;
+        value = (value ^ (value >> 15)) * 0x846ca68bu;
+        return (value ^ (value >> 16)) / (float)uint.MaxValue;
+    }
+
+    private static float Lerp(float start, float end, float amount) =>
+        start + ((end - start) * amount);
+
+    private static bool IsFinite(Vector3 value) =>
+        float.IsFinite(value.X) && float.IsFinite(value.Y) && float.IsFinite(value.Z);
 
     private static float SmoothStep(float value) => value * value * (3f - (2f * value));
 }

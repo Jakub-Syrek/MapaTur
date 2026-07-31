@@ -19,7 +19,8 @@ public static class RockWallCoverageComposer
         byte[]? atlasBaseColorImageBytes,
         float meshClusterCellMeters = 0f,
         int? internalWarpSeed = null,
-        float maximumReliefMeters = float.PositiveInfinity)
+        float maximumReliefMeters = float.PositiveInfinity,
+        RockWallClipRegion? clipRegion = null)
     {
         ArgumentNullException.ThrowIfNull(variants);
         ArgumentNullException.ThrowIfNull(patches);
@@ -38,14 +39,19 @@ public static class RockWallCoverageComposer
             throw new ArgumentOutOfRangeException(nameof(atlasColumns), "Atlas cannot hold all scan variants.");
         }
 
-        int vertexCapacity = checked(patches.Sum(patch => variants[patch.VariantIndex].Positions.Length));
-        int indexCapacity = checked(patches.Sum(patch => variants[patch.VariantIndex].Indices.Length));
+        PhotogrammetryRockPrimitive[] frontVariants = variants
+            .Select(variant => PhotogrammetryRockFrontSurfaceExtractor.Extract(
+                variant,
+                Vector3.UnitZ))
+            .ToArray();
+        int vertexCapacity = checked(patches.Sum(patch => frontVariants[patch.VariantIndex].Positions.Length));
+        int indexCapacity = checked(patches.Sum(patch => frontVariants[patch.VariantIndex].Indices.Length));
         var positions = new List<Vector3>(vertexCapacity);
         var normals = new List<Vector3>(vertexCapacity);
         var texCoords = new List<Vector2>(vertexCapacity);
         var seamWeights = new List<byte>(vertexCapacity);
         var indices = new List<uint>(indexCapacity);
-        byte[][] sourceSeamWeights = variants
+        byte[][] sourceSeamWeights = frontVariants
             .Select(variant => RockWallSurfaceConformer.CalculateSourceSeamWeights(
                 variant,
                 edgeBlendFraction))
@@ -57,23 +63,34 @@ public static class RockWallCoverageComposer
                 throw new ArgumentOutOfRangeException(nameof(patches), "Patch references a missing scan variant.");
             }
 
-            PhotogrammetryRockPrimitive variant = variants[patch.VariantIndex];
+            PhotogrammetryRockPrimitive variant = frontVariants[patch.VariantIndex];
             if (internalWarpSeed is int baseSeed)
             {
-                int patchSeed = Hash(baseSeed, patch.Column, patch.Row, patch.VariantIndex);
+                int patchSeed = Hash(baseSeed, patch.InstanceId, patch.VariantIndex);
                 variant = PhotogrammetryRockInternalWarper.Warp(variant, patchSeed);
             }
 
             PhotogrammetryRockPrimitive fitted = RockScanPatchFitter.Fit(
                 variant,
                 patch.Placement);
+            IReadOnlyList<byte> conformanceSeamWeights = sourceSeamWeights[patch.VariantIndex];
+            if (clipRegion is RockWallClipRegion assignedRegion)
+            {
+                fitted = PhotogrammetryRockRegionClipper.Clip(fitted, assignedRegion);
+                conformanceSeamWeights =
+                    RockWallSurfaceConformer.CalculateClipRegionSeamWeights(
+                        fitted,
+                        assignedRegion,
+                        edgeBlendFraction);
+            }
+
             PhotogrammetryRockPrimitive conformed = RockWallSurfaceConformer.Conform(
                 fitted,
                 patch.Placement,
                 wall,
                 edgeBlendFraction,
                 interiorClearanceMeters,
-                sourceSeamWeights[patch.VariantIndex],
+                conformanceSeamWeights,
                 maximumReliefMeters);
             if (meshClusterCellMeters > 0f)
             {
@@ -110,14 +127,13 @@ public static class RockWallCoverageComposer
             seamWeights.ToArray());
     }
 
-    private static int Hash(int seed, int column, int row, int variant)
+    private static int Hash(int seed, int instanceId, int variant)
     {
         uint value = unchecked((uint)seed);
-        value ^= unchecked((uint)column) * 0x9e3779b9u;
+        value ^= unchecked((uint)instanceId) * 0x9e3779b9u;
         value = (value ^ (value >> 16)) * 0x7feb352du;
-        value ^= unchecked((uint)row) * 0x85ebca6bu;
-        value = (value ^ (value >> 15)) * 0x846ca68bu;
         value ^= unchecked((uint)variant) * 0xc2b2ae35u;
+        value = (value ^ (value >> 15)) * 0x846ca68bu;
         return unchecked((int)(value ^ (value >> 16)));
     }
 }
