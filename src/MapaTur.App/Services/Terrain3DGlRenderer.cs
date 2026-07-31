@@ -179,6 +179,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform float uSharpen;\n" +   // unsharp-mask strength; 0 = off
         "uniform float uDebugUv;\n" +   // DIAGNOSTIC: 1 = render the raw ortho UV as colour (R=U, G=V)
         "uniform float uDebugTerrainView;\n" +   // DIAGNOSTIC: 0=final 1=albedo 2=baked-shadow mask 3=corrected albedo 4=lightSum
+        "uniform float uHybridCompact;\n" +  // same uniform as the vertex stage (float there too, else the program fails to link); >0.5 only while RMP3 pages draw
+        "uniform float uRmp3Tint;\n" +       // DIAGNOSTIC (MAPATUR_RMP3_TINT=1): magenta-tint every RMP3 pixel so shots can tell RMP3 from plain DEM
         "uniform float uRockStrength;\n" + // rock-material-on-steep blend strength; 0 = off (pure ortho)
         "uniform vec3 uFogColor;\n" +
         "uniform float uFogDensity;\n" + // per-metre exponential; 0 = no aerial perspective
@@ -1241,6 +1243,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    }\n" +
         "  }\n" +
         "  fragColor = vec4(mix(lit, uFogColor, fogAmount), 1.0);\n" +
+        // RMP3 pilot acceptance needs shots where the hybrid pages are unmistakable (a bare A/B reads as
+        // ordinary DEM). uHybridCompact is 1 only inside HybridTerrainGlLayer.DrawTerrainProgram, so this
+        // tints exactly the RMP3 pixels (also in the water-reflection pass, same program).
+        "  if (uRmp3Tint > 0.5 && uHybridCompact > 0.5) { fragColor.rgb = mix(fragColor.rgb, vec3(1.0, 0.0, 1.0), 0.4); }\n" +
         // DEBUG VIEWS (2026-07-11, user request F1–F5): isolate the baked-shadow pipeline stages so we can SEE
         // whether the cyan lives in the albedo or the lighting. 0=final, 1=albedo, 2=baked-shadow mask,
         // 3=corrected albedo, 4=lightSum. Pre-fog, pre-overlay so each stage is raw.
@@ -2292,9 +2298,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int sharpenLocation = -1;
     private int debugUvLocation = -1;
     private int debugTerrainViewLocation = -1;
+    private int rmp3TintLocation = -1;
 
     /// <summary>Baked-shadow debug view: 0=final, 1=albedo, 2=mask, 3=corrected albedo, 4=lightSum (F1–F5).</summary>
     public float DebugTerrainView { get; set; }
+
+    /// <summary>DIAGNOSTIC (RMP3 pilot acceptance): magenta-tint every RMP3 pixel. Env-gated so the
+    /// default build is a strict no-op; a shader uniform cannot leak into production shots by accident.</summary>
+    public bool Rmp3TintEnabled { get; set; } =
+        Environment.GetEnvironmentVariable("MAPATUR_RMP3_TINT") == "1";
     private int orthoMinXyLocation = -1;
     private int orthoMaxXyLocation = -1;
     private int orthoBlendLocation = -1;
@@ -3493,6 +3505,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     public bool HybridTerrainEnabled { get; set; } = true;
 
     public bool HasHybridTerrainConfiguration => hybridTerrain.IsConfigured;
+
+    /// <summary>RMP3 pages drawn in the last MAIN pass (post frustum-cull); 0 while the layer is off.</summary>
+    public int HybridPagesDrawnMain { get; private set; }
+
+    /// <summary>RMP3 pages currently drawable (GPU-resident); mirrors the layer's internal set.</summary>
+    public int HybridDrawableCount => hybridTerrain.DrawableCount;
 
     public void SetPhotogrammetricRockRoot(string? root) =>
         photogrammetricRock.Configure(
@@ -5663,6 +5681,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             sharpenLocation = -1;
             debugUvLocation = -1;
             debugTerrainViewLocation = -1;
+            rmp3TintLocation = -1;
             orthoMinXyLocation = -1;
             orthoMaxXyLocation = -1;
             orthoBlendLocation = -1;
@@ -6342,6 +6361,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform1(hybridCompactLocation, 0f);
         gl.Uniform1(debugUvLocation, 0f); // UV/clamp viz off
         gl.Uniform1(debugTerrainViewLocation, DebugTerrainView);
+        gl.Uniform1(rmp3TintLocation, Rmp3TintEnabled ? 1f : 0f); // float overload — int on a GLSL float is a silent no-op
         // Ortho coverage AABB + soft edge blend. Convert the coverage geo-bounds to world XY via the tiles'
         // anchor; beyond it the ortho UV clamps into stretched edge texels (strata bands) → the shader fades to
         // hypsometric instead. No coverage bounds (or no tiles) → blend 0 = no cull (pure ortho).
@@ -6803,7 +6823,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         lastTerrainMvpValid = true;
         if (HybridTerrainEnabled)
         {
-            hybridTerrain.DrawTerrainProgram(
+            int hybridDrawn = hybridTerrain.DrawTerrainProgram(
                 gl,
                 mvp,
                 hybridCompactLocation,
@@ -6813,6 +6833,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 useDet25Location,
                 useDet05Location,
                 isBaseSkinLocation);
+            if (hybridDrawn != HybridPagesDrawnMain)
+            {
+                // on-change, not per-frame: the count moves only when residency/frustum actually changes
+                Serilog.Log.Information(
+                    "[RockRMP3] main pass: {Drawn} drawn / {Drawable} drawable", hybridDrawn, HybridDrawableCount);
+            }
+
+            HybridPagesDrawnMain = hybridDrawn;
+        }
+        else
+        {
+            HybridPagesDrawnMain = 0;
         }
 
         foreach (KeyValuePair<TerrainMesh3D, TileBuffers> entry in tileBuffers)
@@ -9375,6 +9407,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         sharpenLocation = g.GetUniformLocation(program, "uSharpen");
         debugUvLocation = g.GetUniformLocation(program, "uDebugUv");
         debugTerrainViewLocation = g.GetUniformLocation(program, "uDebugTerrainView");
+        rmp3TintLocation = g.GetUniformLocation(program, "uRmp3Tint");
         orthoMinXyLocation = g.GetUniformLocation(program, "uOrthoMinXY");
         orthoMaxXyLocation = g.GetUniformLocation(program, "uOrthoMaxXY");
         orthoBlendLocation = g.GetUniformLocation(program, "uOrthoBlendMeters");

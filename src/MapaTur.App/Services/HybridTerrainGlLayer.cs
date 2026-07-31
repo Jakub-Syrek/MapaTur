@@ -34,6 +34,9 @@ internal sealed unsafe class HybridTerrainGlLayer
 
     public bool HasDrawablePages => drawableKeys.Count > 0;
 
+    /// <summary>GPU-resident pages eligible to draw (pre frustum-cull); feeds the renderer's RMP3 counter.</summary>
+    public int DrawableCount => drawableKeys.Count;
+
     public void Configure(string? newRoot, long newMaxResidentBytes)
     {
         string? normalized = string.IsNullOrWhiteSpace(newRoot)
