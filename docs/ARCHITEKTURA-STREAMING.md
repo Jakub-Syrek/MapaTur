@@ -405,3 +405,73 @@ z werdyktów było zasadne, tylko źle zlokalizowane.
   mip-tail składany z ≤4 tail-i pakietów (rozdzielczości się zgadzają — tail to downsample grupy).
 - **det1m**: pakiety dysjunktywne 4096 px @ 1 m/px (4096 m), fragmenty = downsample 4× grup det25;
   warstwa rezydentna na stałe NIE potrzebuje okien nakładkowych w ogóle.
+
+---
+
+## ANEKS B (2026-07-30) — wdrożony wybór komórki det05/det25 w O(1)
+
+Ten aneks zastępuje opis liniowego wyboru AABB z §1, §3.2 i kroku 4 dla aktualnego renderera.
+
+**Problem zmierzony:** po podniesieniu capa det05 do 192 shader wykonywał na każdy fragment liniowy
+skan 192 komórek det05 oraz 128 komórek det25. W nieruchomych logach sprzed zmiany sam pass terenu
+kosztował zwykle 28,9–34,7 ms GPU.
+
+**Implementacja:**
+
+- CPU buduje raz na klatkę bezalokacyjny hash `grid(ci,cj) -> (textureSlot, alphaByte)`;
+- det05 używa 384 wpisów dla maksymalnie 192 rezydentów, det25 256 wpisów dla 128;
+- open addressing ma twardy limit 12 prób oraz automatyczny dobór ziarna;
+- shader wyznacza najbliższą komórkę z regularnej kraty i robi bounded lookup; stałe 3×3 są wyłącznie
+  fallbackiem nakładających się okien pitch/coverage, nie skanem zbioru rezydentów;
+- granice komórki są odtwarzane z origin/pitch/coverage kraty, więc sampling, LOD, alpha, tone i de-blue
+  pozostały bez zmian;
+- rozmiar tablic shaderowych, cap CPU i limit prób są spięte testem kontraktowym.
+
+**Weryfikacja desktop/ANGLE/GLES3:**
+
+- 1773/1773 testów aplikacji przechodzi;
+- build `net10.0-windows10.0.19041.0/win-x64`: 0 błędów i 0 ostrzeżeń;
+- shader skompilował się w prawdziwym EXE, bez błędów GL; det05 osiągnął 192/192 resident, queue=0;
+- stabilny kadr po napełnieniu: terrain 2,83–4,58 ms GPU, sumGpu 5,70–7,83 ms;
+- deterministyczny F9 warm: terrain mediana 8,27 ms, p95 18,02 ms; cały sumGpu mediana
+  23,34 ms, p95 55,95 ms. Globalna bramka P0 lotu nadal pozostaje otwarta — kolejnym dominującym
+  kosztem są streaming/cienie/odbicie, a nie wybór komórki orto;
+- zrzut po pełnej rezydencji nie pokazuje pustych komórek ani twardych granic nowego lookupu;
+  ostateczny werdykt obrazu nadal należy do użytkownika.
+
+---
+
+## ANEKS C (2026-07-30) — kompaktowy tail L2, bez duplikatu L1
+
+Pierwszy test kroku 7 ujawnił rozjazd implementacji z §2.1: bake zapisywał tail od **L1**, mimo że
+L1 każdej celi jest już kompletnie zawarty w mip1 zwykłych stron. Dla det05 dawało to stronę tail
+~11,2 MB zamiast projektowanych ~2,8 MB. Zmierzony kandydat został odrzucony: odczyt tail-a miał
+medianę 175 ms/cela, pierwsza cela była gotowa po 0,768 s, a 192/192 dopiero po 26,062 s.
+
+Format TOC już posiada pole `level`, więc nie wymaga nowej wersji pliku:
+
+- nowy bake zapisuje `TailPageId` z `level=2` i payloadem L2↓1 px;
+- przyrostowy bake uznaje pakiet z tailem L1 za nieaktualny i przebudowuje go;
+- runtime czyta `Entry.Level`, dzięki czemu w czasie atomowej migracji akceptuje oba układy;
+- etap tail czyta/wysyła L2+, a etap fine czyta i wysyła wyłącznie L0-L1 — bez ponownego I/O/uploadu tail-a.
+
+Kryterium kroku 7 pozostaje bez zmian: pomiar wykonuje skompilowany EXE po rebake'u kompaktowych
+pakietów; stary wynik 26 s nie jest wynikiem bramki, tylko dowodem odrzucenia wadliwego layoutu.
+
+### Wynik bramki kompaktowego L2 (2026-07-31)
+
+Pełny `verify-full` po migracji potwierdził 1 008 237 stron i `BAD=0`. Jeden zimny test
+skompilowanego EXE wykazał, że format osiągnął cel I/O, ale nie cel produktu:
+
+- tail L2: odczyt min/mediana/p95/max = 22/45/72/88 ms na celę;
+- 192/192 taili na GPU: 35,2 s od zbudowania LOD (pierwszy→ostatni 34,8 s);
+- pełne L0-L1 po tailach: kolejne 22,0 s;
+- cały widok det05: około 57,6 s.
+
+Wąskim gardłem nie jest już dysk, lecz seryjna obsługa i promocja 192 slice'ów na GPU. Kandydat
+`tail-first` jest zatem **odrzucony jako domyślna ścieżka runtime**. Runtime wraca do pojedynczej
+transakcji pełnego łańcucha `.opk` na celę; kod eksperymentalny pozostaje za stałą domyślnie
+wyłączoną. Format compact L2, migrator, kompatybilny czytnik oraz narzędzia bake/verify zostają,
+ponieważ są poprawne i redukują duplikację danych. Kolejna zmiana architektury musi rozwiązać
+równoległą, budżetowaną rezydencję/upload całej panoramy; dalszy mikrotuning tego kandydata jest
+wykluczony.

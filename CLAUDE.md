@@ -9,6 +9,20 @@ warunkach; zakaz whack-a-mole (spisz niezmienniki przed zmianą); ciężkie prze
 blokuj wątku renderu; stały gate odbioru panoramy (bez 10–15 s ostrzenia, bez utraty detalu od ruchu myszy,
 bez zacięć 150–300 ms, bez rozmytej większości kadru); testy TYLKO na monitorze DELL P2722H (Iiyama = user).
 
+## ⚠ DWAJ AGENCI NA JEDNEJ MASZYNIE — BLOKADA APKI (zasada 20, obowiązkowa)
+
+Gdy równolegle pracuje więcej niż jeden agent (Claude / Codex, różne gałęzie i worktree), **przed
+uruchomieniem `MapaTur.App` albo `OrthoBake`/`RockBake` przeczytaj i zaktualizuj
+[`C:\Repos\APP-LOCK.md`](file:///C:/Repos/APP-LOCK.md)** (plik leży POZA repo, bo gałęzie są różne).
+Zajmujesz → ustaw ZAJĘTE i dopisz do dziennika. **Po teście ZAMKNIJ apkę i ustaw WOLNE.** Nigdy nie
+zamykaj cudzej instancji i nie uruchamiaj drugiej obok. Powód: bake potrzebuje ~8 GB RAM i zamkniętej
+apki (inaczej `Unable to allocate pixels`), dwie instancje to 2×8 GB VRAM na karcie 16 GB, a katalog
+danych w AppData jest WSPÓLNY — podmiana kafli/`_coverage_p16.txt`/`.opk` w cudzej sesji potrafi
+sprawić, że drugiemu agentowi zniknie cała warstwa 5 cm. Pełne brzmienie: `docs/ZASADY-MAPATUR.md` §20.
+
+Drugi wspólny plik: **`C:\Repos\MAPATUR-AGENT-COMMS.md`** — kanał wiadomości Claude ↔ Codex (append-only, `ACK: <id>`). Czytaj go **przed każdym cyklem pracy, przed zmianą wspólnego interfejsu i przed zajęciem blokady**. `APP-LOCK.md` pozostaje jedynym źródłem prawdy dla uruchamiania apki, bake'ów i operacji na wspólnym AppData.
+
+
 ## Terrain graphics — MANDATORY before baking tiles / touching the terrain pipeline
 
 Before you (re)generate or bake any DEM / ortho / z16 tiles, OR change the terrain load / repair / render

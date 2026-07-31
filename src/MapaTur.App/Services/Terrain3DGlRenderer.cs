@@ -114,8 +114,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // slice B the rest; the fragment picks the slice from its slot index (best < 8).
         "uniform mediump sampler2DArray uOrthoDet05Arr;\n" +
         "uniform mediump sampler2DArray uOrthoDet05ArrB;\n" +
-        "uniform vec4 uDet05Aabb[192];\n" + // slots = Det05HardCapCells (192 desktop BC1 = 3 tablice × 64)
-        "uniform float uDet05Alpha[192];\n" + // per-slot fade-in after promote (0→1 over ~300 ms) — no popping
+        // O(1) cell→slot lookup. 384 entries at 50% load replace 192 AABBs + 192 scalar alphas, so the
+        // fragment-uniform footprint does not grow while the hot fragment path stops scanning all 192 cells.
+        "uniform ivec4 uDet05CellHash[384];\n" + // (ci,cj,arraySlot,minLod<<8|alphaByte), empty slot has arraySlot=-1
+        "uniform int uDet05HashSeed;\n" +
+        "uniform vec2 uDet05GridMinXmaxY;\n" + // NW origin in stable world metres
+        "uniform vec2 uDet05GridPitch;\n" +    // positive cell-origin step: east, south
+        "uniform vec2 uDet05CellSize;\n" +     // positive coverage size: east, south
         "uniform mediump sampler2DArray uOrthoDet05ArrC;\n" + // trzecia tablica (unit 7) — 3×64 = 192 cele
         "uniform int uDet05ArrLayers;\n" + // warstw NA TABLICĘ; slot→(tablica, warstwa) = (slot/L, slot%L)
         "uniform int uUseDet05Arr;\n" +
@@ -134,8 +139,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform highp sampler2D uOrthoDet1mCov;\n" +
         // det25 ARRAY (krok 4): per-fragment wybór celi jak det05 — koniec patchworku per-tile bind.
         "uniform highp sampler2DArray uOrthoDet25Arr;\n" +
-        "uniform vec4 uDet25Aabb[128];\n" +
-        "uniform float uDet25AlphaArr[128];\n" +
+        "uniform ivec4 uDet25CellHash[256];\n" + // 128 cells at 50% load; same bounded lookup as det05
+        "uniform int uDet25HashSeed;\n" +
+        "uniform vec2 uDet25GridMinXmaxY;\n" +
+        "uniform vec2 uDet25GridPitch;\n" +
+        "uniform vec2 uDet25CellSize;\n" +
         "uniform int uUseDet25Arr;\n" +
         "uniform int uUseDet1m;\n" +
         "uniform vec2 uDet1mMinXmaxY;\n" +   // (minX świata, maxY świata) — v rośnie na południe jak wiersze tekstury
@@ -276,7 +284,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "}\n" +
         // ★ UN-PREMULTIPLY PUNCH-THROUGH (2026-07-25 — jasna piła + ciemna nitka na granicy pokrycia).
         // Texel przezroczysty DXT1a dekoduje się jako RGBA(0,0,0,0) (Bc1Encoder: indeks 3 = przezroczysta CZERŃ),
-        // a mipy alfa-ważone zapisują RGB=0 gdy cała czwórka jest pusta (BuildMipChain/Half: `if (sumA == 0)`).
+        // a prebakowane mipy alfa-ważone zapisują RGB=0, gdy cały blok jest pusty.
         // KAŻDE filtrowanie przy granicy pokrycia (bilinear, mip, bicubic) rozcieńcza więc kolor CZERNIĄ
         // proporcjonalnie do (1−a) — stąd (a) ciemna nitka w wyświetlanym samplu, (b) po podaniu takiego
         // sampla do prawa tonu delta<0 ⇒ `dc − delta` PODBIJA jasność ⇒ jasne pasmo (zmierzone: kolor linii
@@ -339,23 +347,50 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  float grey = (dc.r + dc.g + dc.b) / 3.0;\n" +
         "  return mix(dc, vec3(grey), 0.35 * sw * lift);\n" +             // mild desat toward neutral in shadow
         "}\n" +
-        // Streamed det05 from the cell ARRAY: pick the best-centred resident cell containing this fragment
-        // (cells overlap — first-hit could sit at a cell edge mid-fade while a neighbour holds the point
-        // centrally), then sample OUTSIDE the loop so the implicit-derivative fetch stays well-defined.
+        // Hash must remain bit-identical to DetailCellSlotHash.Hash. The CPU selects a seed whose probe chain
+        // is <=12; fragment cost is therefore cap-independent (192/128 residents no longer mean 192/128 AABB
+        // tests per pixel). The nearest lattice cell is the normal one-hit path; 3×3 is only the fixed fallback
+        // when that cell is still loading but an overlapping neighbour is resident.
+        "uint detailCellHash(ivec2 c, uint seed){\n" +
+        "  uint h = uint(c.x) * 0x9E3779B1u ^ uint(c.y) * 0x85EBCA77u ^ seed * 0xC2B2AE3Du;\n" +
+        "  h ^= h >> 16; h *= 0x7FEB352Du; h ^= h >> 15; h *= 0x846CA68Bu; h ^= h >> 16;\n" +
+        "  return h;\n" +
+        "}\n" +
+        "ivec2 lookupDet05Cell(ivec2 c){\n" +
+        "  uint start = detailCellHash(c, uint(uDet05HashSeed)) % 384u;\n" +
+        "  for (int p = 0; p < 12; p++) {\n" +
+        "    ivec4 e = uDet05CellHash[int((start + uint(p)) % 384u)];\n" +
+        "    if (e.z < 0) return ivec2(-1, 0);\n" +
+        "    if (all(equal(e.xy, c))) return e.zw;\n" +
+        "  }\n" +
+        "  return ivec2(-1, 0);\n" +
+        "}\n" +
+        "vec4 det05CellBounds(ivec2 c){\n" +
+        "  vec2 nw = uDet05GridMinXmaxY + vec2(float(c.x) * uDet05GridPitch.x, -float(c.y) * uDet05GridPitch.y);\n" +
+        "  return vec4(nw.x, nw.y - uDet05CellSize.y, nw.x + uDet05CellSize.x, nw.y);\n" +
+        "}\n" +
         // Same colour law as applyOrthoDetail mode 1 (conditional tone harmonisation) — KONTRAKT-ORTO §1.
         "vec3 applyOrthoDet05Array(vec2 wxy, vec3 baseC, float blendM){\n" +
         "  if (uUseDet05Arr != 1) return baseC;\n" +
         "  vec2 wdx = dFdx(wxy), wdy = dFdy(wxy);\n" + // gradienty świata PRZED wyborem celi — patrz applyOrthoDet25Arr
-        "  int best = -1; float bestEdge = 0.0;\n" +
-        "  for (int i = 0; i < 192; i++) {\n" +
-        "    vec2 mn = uDet05Aabb[i].xy; vec2 mx = uDet05Aabb[i].zw;\n" +
-        "    if (mx.x <= mn.x) continue;\n" +
-        "    vec2 cd = min(wxy - mn, mx - wxy);\n" +
-        "    float edge = min(cd.x, cd.y);\n" +
-        "    if (edge > bestEdge) { bestEdge = edge; best = i; }\n" +
+        "  vec2 cp = vec2((wxy.x - uDet05GridMinXmaxY.x) / uDet05GridPitch.x,\n" +
+        "                 (uDet05GridMinXmaxY.y - wxy.y) / uDet05GridPitch.y);\n" +
+        "  ivec2 nearCell = max(ivec2(0), ivec2(floor(cp - 0.5 * (uDet05CellSize / uDet05GridPitch) + vec2(0.5))));\n" +
+        "  ivec2 bestHit = lookupDet05Cell(nearCell); ivec2 bestCell = nearCell;\n" +
+        "  vec4 bestBb = det05CellBounds(nearCell);\n" +
+        "  bool nearContains = bestHit.x >= 0 && wxy.x >= bestBb.x && wxy.y >= bestBb.y && wxy.x <= bestBb.z && wxy.y <= bestBb.w;\n" +
+        "  if (!nearContains) {\n" +
+        "    bestHit = ivec2(-1, 0); float bestEdge = -1e30;\n" +
+        "    for (int oy = -1; oy <= 1; oy++) { for (int ox = -1; ox <= 1; ox++) {\n" +
+        "      ivec2 cc = nearCell + ivec2(ox, oy); if (cc.x < 0 || cc.y < 0) continue;\n" +
+        "      ivec2 hit = lookupDet05Cell(cc); if (hit.x < 0) continue;\n" +
+        "      vec4 cb = det05CellBounds(cc); vec2 cd0 = min(wxy - cb.xy, cb.zw - wxy);\n" +
+        "      float edge = min(cd0.x, cd0.y); if (edge >= 0.0 && edge > bestEdge) { bestEdge = edge; bestHit = hit; bestCell = cc; bestBb = cb; }\n" +
+        "    }}\n" +
         "  }\n" +
-        "  if (best < 0) return baseC;\n" +
-        "  vec2 mn = uDet05Aabb[best].xy; vec2 mx = uDet05Aabb[best].zw;\n" +
+        "  if (bestHit.x < 0) return baseC;\n" +
+        "  int best = bestHit.x; int minimumLod = bestHit.y >> 8; float promoteAlpha = float(bestHit.y & 255) / 255.0;\n" +
+        "  vec2 mn = bestBb.xy; vec2 mx = bestBb.zw;\n" +
         "  vec2 sp = mx - mn;\n" +
         "  vec2 uv = vec2((wxy.x - mn.x) / sp.x, (mx.y - wxy.y) / sp.y);\n" +
         "  vec2 ts = vec2(textureSize(uOrthoDet05Arr, 0).xy);\n" +
@@ -366,18 +401,24 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  float lz = float(best - (ai * uDet05ArrLayers));\n" +
         "  vec2 gx = vec2(wdx.x / sp.x, -wdx.y / sp.y);\n" +
         "  vec2 gy = vec2(wdy.x / sp.x, -wdy.y / sp.y);\n" +
-        "  vec4 dcs = ai == 0 ? textureGrad(uOrthoDet05Arr, vec3(uv, lz), gx, gy)\n" +
-        "           : (ai == 1 ? textureGrad(uOrthoDet05ArrB, vec3(uv, lz), gx, gy)\n" +
-        "                      : textureGrad(uOrthoDet05ArrC, vec3(uv, lz), gx, gy));\n" +
+        "  float implicitLod = max(0.0, log2(max(length(gx * ts), length(gy * ts))));\n" +
+        "  float sampleLod = max(float(minimumLod), implicitLod);\n" +
+        "  vec4 dcs = minimumLod == 0\n" +
+        "    ? (ai == 0 ? textureGrad(uOrthoDet05Arr, vec3(uv, lz), gx, gy)\n" +
+        "       : (ai == 1 ? textureGrad(uOrthoDet05ArrB, vec3(uv, lz), gx, gy)\n" +
+        "                  : textureGrad(uOrthoDet05ArrC, vec3(uv, lz), gx, gy)))\n" +
+        "    : (ai == 0 ? textureLod(uOrthoDet05Arr, vec3(uv, lz), sampleLod)\n" +
+        "       : (ai == 1 ? textureLod(uOrthoDet05ArrB, vec3(uv, lz), sampleLod)\n" +
+        "                  : textureLod(uOrthoDet05ArrC, vec3(uv, lz), sampleLod)));\n" +
         "  vec3 dc = unpremulPunch(dcs);\n" + // czerń przezroczystych texeli NIE może rozcieńczać koloru przy granicy pokrycia
         "  vec2 fp = (abs(gx) + abs(gy)) * ts;\n" + // fwidth z gradów świata (fwidth(uv) na linii przełączenia cel = śmieci)
 
-        "  if (max(fp.x, fp.y) < 1.0) { dc = unpremulPunch(ai == 0 ? texBicubicArr(uOrthoDet05Arr, uv, lz, ts)\n" +
+        "  if (minimumLod == 0 && max(fp.x, fp.y) < 1.0) { dc = unpremulPunch(ai == 0 ? texBicubicArr(uOrthoDet05Arr, uv, lz, ts)\n" +
         "                                        : (ai == 1 ? texBicubicArr(uOrthoDet05ArrB, uv, lz, ts)\n" +
         "                                                   : texBicubicArr(uOrthoDet05ArrC, uv, lz, ts))); }\n" +
         "  if (uOrthoDetailColorMode == 1 && uOrthoDet05ArrRaw == 0) {\n" + // H3: V2-baked cells render RAW while det25/base keep de-blue
         "    dc = deblueShadow(dc);\n" +                                   // (1) HARD RULE: absolute blue-cast removal
-        "    float toneLod = max(0.0, log2(max(ts.x / (mx.x - mn.x), ts.y / (mx.y - mn.y)))) + 3.0;\n" + // ~8 m/texel: mikrocienie skał to nie szew ekspozycji (kontrast! 07-24)
+        "    float toneLod = max(float(minimumLod), max(0.0, log2(max(ts.x / (mx.x - mn.x), ts.y / (mx.y - mn.y)))) + 3.0);\n" + // ~8 m/texel: mikrocienie skał to nie szew ekspozycji (kontrast! 07-24)
         "    vec4 tRaw = ai == 0 ? textureLod(uOrthoDet05Arr, vec3(uv, lz), toneLod)\n" +
         "              : (ai == 1 ? textureLod(uOrthoDet05ArrB, vec3(uv, lz), toneLod)\n" +
         "                         : textureLod(uOrthoDet05ArrC, vec3(uv, lz), toneLod));\n" +
@@ -391,7 +432,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  vec2 cd = min(wxy - mn, mx - wxy);\n" +
         // Cele det05 są ROZŁĄCZNE — fade po odległości od AABB robiłby SIATKĘ szwów (na wspólnej krawędzi
         // min(cd)=0 ⇒ w=0 ⇒ baza przebija wzdłuż każdej granicy celi). Krycie daje alfa danych + fade promocji.
-        "  float w = dcs.a * uDet05Alpha[best];\n" +
+        "  float w = dcs.a * promoteAlpha;\n" +
         "  vec3 outc = mix(baseC, dc, w);\n" +
         "  if (uOrthoDetailDebugBounds == 1) {\n" +
         "    float edge = min(cd.x, cd.y);\n" +
@@ -406,8 +447,20 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // det1m: tier między bazą a det25. Fallback konstrukcyjny: poza siatką / cov≈0 / slice==-1 → baseC
         // (nigdy czerń). Kolor: PEŁNY dwustopniowy law jak zatwierdzone ścieżki (KONTRAKT-ORTO §1) — bez
         // niego panorama to patchwork STYLÓW warstw (werdykt usera 2026-07-24).
-        // det25 array: najbliższa ZAWIERAJĄCA cela wygrywa (nakładkowa siatka pitch-6 — wiele cel może
-        // zawierać punkt; bierzemy tę o środku najbliżej, jak per-tile CellForPoint, ale per FRAGMENT).
+        "ivec2 lookupDet25Cell(ivec2 c){\n" +
+        "  uint start = detailCellHash(c, uint(uDet25HashSeed)) % 256u;\n" +
+        "  for (int p = 0; p < 12; p++) {\n" +
+        "    ivec4 e = uDet25CellHash[int((start + uint(p)) % 256u)];\n" +
+        "    if (e.z < 0) return ivec2(-1, 0);\n" +
+        "    if (all(equal(e.xy, c))) return e.zw;\n" +
+        "  }\n" +
+        "  return ivec2(-1, 0);\n" +
+        "}\n" +
+        "vec4 det25CellBounds(ivec2 c){\n" +
+        "  vec2 nw = uDet25GridMinXmaxY + vec2(float(c.x) * uDet25GridPitch.x, -float(c.y) * uDet25GridPitch.y);\n" +
+        "  return vec4(nw.x, nw.y - uDet25CellSize.y, nw.x + uDet25CellSize.x, nw.y);\n" +
+        "}\n" +
+        // det25 array: nearest resident containing cell wins, now through the same bounded hash lookup.
         // Kolor: ten sam dwustopniowy law. Alpha = fade-in promocji (anty-pop).
         "vec3 applyOrthoDet25Arr(vec2 wxy, vec3 baseC){\n" +
         "  if (uUseDet25Arr == 0) { return baseC; }\n" +
@@ -418,15 +471,24 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // granice; liczone tu, w uniform flow) i textureGrad zamiast texture. Dane były czyste — pomiary
         // (dekod chainów, edge-step, porównanie nakładek) wykluczyły bake/assembler.
         "  vec2 wdx = dFdx(wxy), wdy = dFdy(wxy);\n" +
-        "  int best = -1; float bestD = 1e30;\n" +
-        "  for (int i = 0; i < 128; i++) {\n" +
-        "    vec4 bb = uDet25Aabb[i];\n" +
-        "    if (wxy.x < bb.x || wxy.y < bb.y || wxy.x > bb.z || wxy.y > bb.w) { continue; }\n" +
-        "    vec2 cen = 0.5 * (bb.xy + bb.zw); float d = dot(wxy - cen, wxy - cen);\n" +
-        "    if (d < bestD) { bestD = d; best = i; }\n" +
+        "  vec2 cp = vec2((wxy.x - uDet25GridMinXmaxY.x) / uDet25GridPitch.x,\n" +
+        "                 (uDet25GridMinXmaxY.y - wxy.y) / uDet25GridPitch.y);\n" +
+        "  ivec2 nearCell = max(ivec2(0), ivec2(floor(cp - 0.5 * (uDet25CellSize / uDet25GridPitch) + vec2(0.5))));\n" +
+        "  ivec2 bestHit = lookupDet25Cell(nearCell); ivec2 bestCell = nearCell;\n" +
+        "  vec4 bb = det25CellBounds(nearCell);\n" +
+        "  bool nearContains = bestHit.x >= 0 && wxy.x >= bb.x && wxy.y >= bb.y && wxy.x <= bb.z && wxy.y <= bb.w;\n" +
+        "  if (!nearContains) {\n" +
+        "    bestHit = ivec2(-1, 0); float bestD = 1e30;\n" +
+        "    for (int oy = -1; oy <= 1; oy++) { for (int ox = -1; ox <= 1; ox++) {\n" +
+        "      ivec2 cc = nearCell + ivec2(ox, oy); if (cc.x < 0 || cc.y < 0) continue;\n" +
+        "      ivec2 hit = lookupDet25Cell(cc); if (hit.x < 0) continue;\n" +
+        "      vec4 cb = det25CellBounds(cc); if (wxy.x < cb.x || wxy.y < cb.y || wxy.x > cb.z || wxy.y > cb.w) continue;\n" +
+        "      vec2 cen = 0.5 * (cb.xy + cb.zw); float d = dot(wxy - cen, wxy - cen);\n" +
+        "      if (d < bestD) { bestD = d; bestHit = hit; bestCell = cc; bb = cb; }\n" +
+        "    }}\n" +
         "  }\n" +
-        "  if (best < 0) { return baseC; }\n" +
-        "  vec4 bb = uDet25Aabb[best];\n" +
+        "  if (bestHit.x < 0) { return baseC; }\n" +
+        "  int best = bestHit.x; float promoteAlpha = float(bestHit.y & 255) / 255.0;\n" +
         "  vec2 sp = bb.zw - bb.xy;\n" +
         "  vec2 uv = vec2((wxy.x - bb.x) / sp.x, (bb.w - wxy.y) / sp.y);\n" +
         "  vec2 gx = vec2(wdx.x / sp.x, -wdx.y / sp.y);\n" +
@@ -446,7 +508,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "      dc = vec3(clamp(corr * 3.0, 0.0, 1.0), 0.12, clamp(-corr * 3.0, 0.0, 1.0)); }\n" +
         "  }\n" +
         "  vec2 cd = min(wxy - bb.xy, bb.zw - wxy);\n" +
-        "  float wgt = clamp(min(cd.x, cd.y) / max(uDetailBlendMeters, 0.001), 0.0, 1.0) * dcs.a * uDet25AlphaArr[best];\n" +
+        "  float wgt = clamp(min(cd.x, cd.y) / max(uDetailBlendMeters, 0.001), 0.0, 1.0) * dcs.a * promoteAlpha;\n" +
         "  return mix(baseC, dc, wgt);\n" +
         "}\n" +
         "vec3 applyOrthoDet1m(vec2 wxy, vec3 baseC){\n" +
@@ -1913,11 +1975,20 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform mat4 uMvp;\n" +
         "uniform vec2 uViewport;\n" +
         "uniform float uHalfPx;\n" +
+        "uniform vec3 uCameraPos;\n" +
+        "uniform float uMaxDist;\n" +
         "out vec4 vColor;\n" +
         "out vec3 vWorldPos;\n" +
         "void main(){\n" +
         "  vColor = aColor;\n" +
         "  vWorldPos = aPos;\n" +
+        // The full trail network spans ~27×42 km. Fragment-stage distance discard still rasterized every
+        // far ribbon and cost ~28 ms in the F9 flight. Reject a segment before projection/rasterization when
+        // both endpoints are outside the same radius; the fragment gate remains for the soft edge and for a
+        // segment crossing into the radius.
+        "  float distA = distance(aPos, uCameraPos);\n" +
+        "  float distB = distance(aOther, uCameraPos);\n" +
+        "  if (min(distA, distB) > uMaxDist) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }\n" +
         "  vec4 clipA = uMvp * vec4(aPos, 1.0);\n" +
         "  vec4 clipB = uMvp * vec4(aOther, 1.0);\n" +
         "  if (clipA.w <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }\n" +
@@ -2143,6 +2214,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
     private bool reflectionValidLastFrame; // last frame left a valid reflection texture (reuse gate)
 
+    /// <summary>
+    /// When enabled for a continuous camera mode, cascaded shadow maps refresh every second frame.
+    /// The skipped frame reuses both the previous depth maps and their matching light matrices.
+    /// </summary>
+    public bool ThrottleShadows { get; set; }
+
+    private bool shadowValidLastFrame;
+
     // Wider-coverage P0 step 6: render the terrain + lake water in a camera-relative frame (origin = the look-at
     // target) so vertices and the view translation stay small (float precision for far/streamed scene origins).
     // mvpRender = Translate(R)·mvp with uModelOffset = -R cancel EXACTLY (the on-screen image is identical), while
@@ -2210,8 +2289,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int det05ArrBSamplerLocation = -1;  // sampler2DArray slice B on unit 13
     private int det05ArrCSamplerLocation = -1;  // sampler2DArray slice C on unit 7 (trzecia tablica — 192 cele)
     private int det05ArrALoc = -1;              // uDet05ArrLayers — warstw NA TABLICĘ (mapping slot→(tablica, warstwa))
-    private int det05ArrAabbLocation = -1;      // vec4[16] per-LAYER world AABBs
-    private int det05ArrAlphaLocation = -1;     // float[16] per-slot promote fade-in
+    private int det05CellHashLoc = -1;
+    private int det05HashSeedLoc = -1;
+    private int det05GridOriginLoc = -1, det05GridPitchLoc = -1, det05CellSizeLoc = -1;
     private int useDet05ArrLocation = -1;
     private int detailBlendLocation = -1;
     private int detailColorModeLocation = -1;
@@ -2252,17 +2332,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// <summary>Diagnostics: outline the detail cell AABB edges (magenta) so cell boundaries are visible.</summary>
     public bool OrthoDetailDebugBounds { get; set; }
 
-    // ── Hi-res ortho detail STREAMING (R2, docs/PLAN-ortho-massif-streaming.md) ─────────────────────────────
-    // det25 (25 cm) CELLS composed off the paint thread (OrthoDetailCellComposer over the on-disk tile pyramid),
-    // strip-uploaded on the GL thread and bound PER-DRAW to unit 10 — the nearest resident cell to each terrain
-    // tile's centre (OrthoDetailGrid.CellForPoint, whose CellContains invariant means a z17-sized tile never
-    // straddles a cell boundary). This REPLACES the single static det25 mosaic (unit 10) with N streamed cells
-    // over the whole massif, finest-wins under the static 5 cm det05 Morskie-Oko showcase (unit 11, untouched).
-    // Threading + strip-upload mirror the proven base-ortho path (StreamOrthoTextures/DrainOrthoUploads).
+    // ── Hi-res ortho detail STREAMING (ARCHITEKTURA-STREAMING, produkcja .opk-only) ─────────────────────────
+    // det25/det05 read GPU-ready BC1+mip chains from prebaked .opk packages off the paint thread, then use the
+    // existing bounded strip-upload on GL. Runtime never decodes WebP, composes RGBA cells, encodes BC1 or writes
+    // a cache. Missing/corrupt packs degrade to the lower resident tier; they never start image production.
     private MapaTur.Application.Terrain.OrthoDetailGrid? det25Grid;
     private MapaTur.Application.Terrain.OrthoDetailResidencyPolicy? det25Policy;
-    private MapaTur.Application.Terrain.IOrthoDetailComposer? det25Composer;
-    private MapaTur.Application.Terrain.OrthoTileDecodeCache? det25TileCache; // for [Mem] diagnostics (hit rate, decode ms)
     private readonly Dictionary<int, DetailCellGpu> det25Cells = new();
     private readonly List<int> det25UploadQueue = new();
     private long det25FrameTick;
@@ -2276,11 +2351,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private double det25EyeLat, det25EyeLon;     // diagnostics: camera focus this frame
     private int det25FocusCi, det25FocusCj;      // diagnostics: focus cell (which the ring centres on)
     private MapaTur.Domain.Geography.GeoPoint? det25FocusOverride; // MAPATUR_DET25_FOCUS=lat,lon — force the ring focus (perf measurement over a known-covered spot regardless of camera)
-    private int det25ComposeInFlight;           // off-thread composes currently running (bounded to avoid CPU saturation)
-    // 2026-07-23: 2 → 4. The "2" guarded the 89 MB compose-buffer ALLOCATION rate (heap balloon) — stale since
-    // the buffers went pooled (MeshBufferPool). 4 halves the user-visible fill time ("trzeba stać 10–15 s"):
-    // a det05 cell is ~256 WebP decodes ≈ 3–5 s, a det25 cell ~64 ≈ 1.3 s, and the decode wall is CPU-parallel.
-    private const int Det25MaxConcurrentComposes = 4;
+    private int det25ReadInFlight;
+    private const int DetailMaxConcurrentReads = 4;
     // Desktop caps raised 2026-07-20 ("pół Mnicha rozmyte — nie starcza puli"): a 64 GB / discrete-GPU
     // desktop can hold far more detail than the old one-size caps; phones keep the conservative values.
     // TIER REBALANCE (2026-07-23, user: "po co mi hi res na 10% ekranu skoro wszędzie indziej mam rozmytą
@@ -2301,13 +2373,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // the static mosaic is not loaded and streamed det05 owns unit 11 (finest-wins over det25).
     private bool det05StreamOn;
     private MapaTur.Application.Terrain.OrthoDetailGrid? det05Grid;
-    private MapaTur.Application.Terrain.IOrthoDetailComposer? det05Composer;
-    private MapaTur.Application.Terrain.OrthoTileDecodeCache? det05TileCache;
     private MapaTur.Application.Terrain.TwoLevelDetailResidencyPolicy? twoLevelPolicy;
     private readonly Dictionary<int, DetailCellGpu> det05Cells = new();
     private readonly List<int> det05UploadQueue = new();
     private long det05ResidentBytes;
-    private int det05ComposeInFlight;
+    private int det05ReadInFlight;
     private int det05LastDesired;
     private const int Det05CoverageTiles = 16;  // 8192² cell (409.6 m @ 0.05 m) — 128 m margin, seam-safe for z17
     // Desktop: 12 × ≈357 MB ≈ 4.3 GB of cells — split across TWO array textures (see
@@ -2327,6 +2397,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // i był dla niego dobry. To był konflikt „obraz vs płynność", którego zasada 3 NIE pozwala rozstrzygać
     // agentowi. NIE OBNIŻAĆ bez werdyktu usera. Docelowo koszt znika po O(1) wyborze celi (krata→slot).
     private static readonly int Det05HardCapCells = OperatingSystem.IsWindows() ? 192 : 3;
+    private const int Det05CellHashSize = 384;   // 2× desktop cap; bounded open addressing at 50% load
+    private const int DetailCellHashMaxProbe = 12;
+    private const byte Det05TailFirstMinimumLod = 2; // 5 cm × 2² = 20 cm: fast first-visible stage
+    // c8102e9 runtime gate (2026-07-31): compact L2 tail naprawił I/O (22-88 ms/celę), ale seryjne
+    // promowanie 192 slice'ów trwało 35,2 s, a fine stage kolejne 22,0 s. Format i narzędzia offline
+    // zostają, natomiast aktywny runtime wraca do pojedynczego pełnego odczytu + promocji na celę.
+    private static readonly bool Det05TailFirstRuntimeEnabled = false;
 
     // BC1 GPU-cell pipeline (2026-07-23, ZASADY 11/13): cells are encoded to BC1+mips OFF-THREAD (once — the
     // disk cache serves every revisit in ~15 ms) and uploaded compressed. 1/8 the bytes end-to-end: a det05
@@ -2339,17 +2416,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private bool det05Bc1On;
     private bool s3tcProbed;
 
-    /// <summary>Directory of the det05 GPU-cell cache (BC1 chains). Null/empty = no disk cache (encode-only).</summary>
-    public string? Det05GpuCacheDir { get; set; }
-
-    /// <summary>Directory of the det25 GPU-cell cache (BC1 chains) — same contract as det05's.</summary>
-    public string? Det25GpuCacheDir { get; set; }
-
-    /// <summary>Katalog pakietów `.opk` det25 (krok 6 architektury: strony GPU-ready zamiast compose).
-    /// Null / brak `index.bin` = dotychczasowa ścieżka compose (fallback; log przy probie).</summary>
+    /// <summary>Katalog produkcyjnych pakietów `.opk` det25. Brak/nieczytelny indeks wyłącza tę
+    /// warstwę i odsłania det1m/bazę; runtime nigdy nie komponuje zastępczych cel z WebP.</summary>
     public string? Det25OpkDir { get; set; }
 
-    /// <summary>Katalog pakietów `.opk` det05 — ten sam kontrakt co <see cref="Det25OpkDir"/>.</summary>
+    /// <summary>Katalog produkcyjnych pakietów `.opk` det05 — ten sam kontrakt co
+    /// <see cref="Det25OpkDir"/>.</summary>
     public string? Det05OpkDir { get; set; }
 
     private MapaTur.Application.Terrain.OrthoPackIndex? det25OpkIndex;
@@ -2367,7 +2439,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 det05OpkIndex = MapaTur.Application.Terrain.OrthoPackIndex.Load(
                     System.IO.Path.Combine(Det05OpkDir, "index.bin"));
                 Log.Information("[Det05] .opk page streaming {State} ({Dir}: {Cells} grup)",
-                    det05OpkIndex is null ? "OFF — index.bin nieczytelny/brak, zostaje compose" : "ON",
+                    det05OpkIndex is null ? "OFF — index.bin nieczytelny/brak, fallback do niższego LOD" : "ON",
                     Det05OpkDir, det05OpkIndex?.Cells.Count ?? 0);
             }
         }
@@ -2387,7 +2459,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 det25OpkIndex = MapaTur.Application.Terrain.OrthoPackIndex.Load(
                     System.IO.Path.Combine(Det25OpkDir, "index.bin"));
                 Log.Information("[Det25] .opk page streaming {State} ({Dir}: {Cells} grup)",
-                    det25OpkIndex is null ? "OFF — index.bin nieczytelny/brak, zostaje compose" : "ON",
+                    det25OpkIndex is null ? "OFF — index.bin nieczytelny/brak, fallback do det1m/bazy" : "ON",
                     Det25OpkDir, det25OpkIndex?.Cells.Count ?? 0);
             }
         }
@@ -2401,29 +2473,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     {
         if (det25OpkIndex is null || det25Grid is null)
         {
-            return true;
+            return false;
         }
 
-        int ti0 = ci * det25Grid.PitchTiles, tj0 = cj * det25Grid.PitchTiles;
-        for (int ti = ti0; ti < ti0 + det25Grid.CoverageTiles; ti++)
-        {
-            for (int tj = tj0; tj < tj0 + det25Grid.CoverageTiles; tj++)
-            {
-                if (det25OpkIndex.IsTileCovered(ti, tj))
-                {
-                    return true;
-                }
-            }
-        }
-
-        return false;
+        return det25OpkIndex.WindowHasCoverage(
+            ci, cj, det25Grid.PitchTiles, det25Grid.CoverageTiles);
     }
 
     /// <summary>True, gdy streaming detalu orto nie ma nic w locie (kolejki uploadu i compose puste) —
     /// bramka „scena dobudowana" dla startu demo F9/benchu (start w trakcie dociągania ścierwi film
     /// i zakłamuje pomiar zarywania).</summary>
     public bool DetailStreamingIdle =>
-        det25ComposeInFlight == 0 && det05ComposeInFlight == 0
+        det25ReadInFlight == 0 && det05ReadInFlight == 0
         && det25UploadQueue.Count == 0 && det05UploadQueue.Count == 0;
 
     /// <summary>Postęp cachowania detalu: ile cel jest już rezydentnych z tylu ŻĄDANYCH, per warstwa
@@ -2457,9 +2518,6 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
     }
 
-    private string? Det25CachePath(int ci, int cj)
-        => string.IsNullOrEmpty(Det25GpuCacheDir) ? null : System.IO.Path.Combine(Det25GpuCacheDir, $"{ci}_{cj}.mtgc");
-
     private void ProbeS3tc(GL gl)
     {
         if (s3tcProbed)
@@ -2475,9 +2533,6 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         Log.Information("[Det05] BC1 pipeline {State} (s3tc {Probe})", det05Bc1On ? "ON" : "OFF — RGBA fallback",
             det05Bc1On ? "present" : "absent");
     }
-
-    private string? Det05CachePath(int ci, int cj)
-        => string.IsNullOrEmpty(Det05GpuCacheDir) ? null : System.IO.Path.Combine(Det05GpuCacheDir, $"{ci}_{cj}.mtgc");
 
     /// <summary>Layers per det05 array texture — keeps every single GPU resource ≈2.86 GB, safely under
     /// the 32-bit (~4.29 GB) per-resource ceiling. Must match the shader's slice constant (best &lt; 8).</summary>
@@ -2518,17 +2573,21 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         public uint StagingTexture;          // allocated empty, filled row-by-row; 0 = no upload in progress
         public int Layer = -1;               // det05 ARRAY path: assigned array layer (-1 = none)
         public bool LayerReady;              // det05 ARRAY path: layer fully uploaded — safe to reference in the AABB list
+        public byte MinimumLod;               // 2 after tail-first promote, 0 after the 5/10 cm pages arrive
+        public bool FullLoadFinished;         // full read succeeded or failed; prevents retry loops after tail-ready
+        public byte ReadMinimumLod;           // stage currently owned by Compose
+        public byte PendingMinimumLod;        // stage currently owned by PendingBc1/upload queue
+        public double ReadRequestedMs;        // request→GPU-ready latency for the current tail/fine stage
         public double PromoteMs;             // det05 ARRAY path: frame-clock ms of the promote (drives the fade-in)
         public int UploadedRows;
         public int UploadLevel;              // det05 ARRAY path: mip level currently strip-uploading (0 = base)
         public byte[]? Pending;              // composed buffer awaiting strip-upload
         public byte[]? PendingMips;          // det05 ARRAY path: worker-built mip chain (levels 1..N, packed)
-        public byte[]? PendingBc1;           // BC1 path: full compressed chain (L0..1×1, GpuCellCache layout)
-        public byte[]? Rented;               // pooled cell buffer lent to the in-flight compose (owner: this cell until returned)
-        public byte[]? RentedMips;           // pooled mip-chain buffer (owner: this cell until returned)
+        public byte[]? PendingBc1;           // full GPU-ready BC1 chain (L0..1×1)
+        public byte[]? Rented;               // legacy upload buffer; never populated by production .opk streaming
+        public byte[]? RentedMips;           // legacy upload buffer; never populated by production .opk streaming
         public byte[]? RentedBc1;            // pooled BC1-chain buffer (owner: this cell until returned)
-        public bool FromCache;               // BC1 path: chain came from the disk cache (skip the re-write)
-        public bool FromOpk;                 // krok 6: chain zmontowany ze stron .opk (log/telemetria bramki "0 compose")
+        public bool FromOpk;
         public long ResidentBytesLedger;     // what this cell added to det05ResidentBytes at promote (path-dependent)
         public Task<byte[]?>? Compose;       // off-thread composition in flight
         public long DesiredTick;             // last frame the cell was desired (LRU eviction key)
@@ -3567,19 +3626,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.ActiveTexture(TextureUnit.Texture0);
     }
 
-    /// <summary>Enables per-draw det25 (25 cm) cell streaming: the composer decodes the on-disk tile pyramid off
-    /// the paint thread, the policy picks the resident ring, and each terrain tile binds its nearest resident cell
-    /// to unit 10. Call once after the ortho detail data dir is known; the static det25 mosaic must NOT be loaded.</summary>
+    /// <summary>Enables per-draw det25 streaming from prebaked `.opk` packages.</summary>
     public void SetOrthoDetailStreaming(
         MapaTur.Application.Terrain.OrthoDetailGrid grid,
-        MapaTur.Application.Terrain.OrthoDetailResidencyPolicy policy,
-        MapaTur.Application.Terrain.IOrthoDetailComposer composer,
-        MapaTur.Application.Terrain.OrthoTileDecodeCache? tileCache = null)
+        MapaTur.Application.Terrain.OrthoDetailResidencyPolicy policy)
     {
         det25Grid = grid;
         det25Policy = policy;
-        det25Composer = composer;
-        det25TileCache = tileCache;
 
         string? focusEnv = Environment.GetEnvironmentVariable("MAPATUR_DET25_FOCUS");
         if (focusEnv is not null)
@@ -3616,8 +3669,6 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// this is on the static 5 cm mosaic is not loaded and streamed det05 owns unit 11.</summary>
     public void SetOrthoDetail05Streaming(
         MapaTur.Application.Terrain.OrthoDetailGrid grid,
-        MapaTur.Application.Terrain.IOrthoDetailComposer composer,
-        MapaTur.Application.Terrain.OrthoTileDecodeCache tileCache,
         Func<int, int, bool> coverage)
     {
         if (det25Grid is null || det25Policy is null)
@@ -3627,14 +3678,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         det05Grid = grid;
-        det05Composer = composer;
-        det05TileCache = tileCache;
 
         // BC1 chain (jedyna produkcyjna ścieżka det05-stream — desktop ANGLE zawsze ma s3tc): cela 8192²
         // to ~45 MB, nie 357 MB RGBA. Stara arytmetyka dusiła near-cap i CAŁY zasięg 5 cm do „kałuży".
         // (RGBA-fallback miałby zaniżony ledger — akceptowane: nie występuje na wspieranym desktopie.)
-        long det05CellBytes = MapaTur.Application.Terrain.GpuCellCache.ChainSize(grid.CellPx);
-        long det25CellBytes = MapaTur.Application.Terrain.GpuCellCache.ChainSize(det25Grid.CellPx);
+        long det05CellBytes = MapaTur.Application.Terrain.Bc1MipChain.ByteSize(grid.CellPx);
+        long det25CellBytes = MapaTur.Application.Terrain.Bc1MipChain.ByteSize(det25Grid.CellPx);
         var fine = new MapaTur.Application.Terrain.DetailLevelSpec(
             grid,
             new MapaTur.Application.Terrain.OrthoDetailResidencyPolicy(grid, Det05RingRadiusMeters, Det25FastMotionSpeedMps, prefetchLeadMeters: 120),
@@ -3652,7 +3701,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // path (bounded off-thread compose, non-blocking harvest, LRU evict) on the det05 collections + unit 11.
     private void StreamDet05(GL gl, IReadOnlyList<int> desired)
     {
-        if (det05Grid is null || det05Composer is null)
+        if (det05Grid is null || !det05Bc1On || !Det05OpkReady())
         {
             return;
         }
@@ -3681,101 +3730,66 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             }
         }
 
-        foreach (int key in desired)
+        if (!Det05TailFirstRuntimeEnabled)
         {
-            if (det05ComposeInFlight >= Det25MaxConcurrentComposes)
+            // Product fallback after the rejected compact-tail gate: one complete cell transaction. The
+            // worker still reads ready GPU pages only (.opk); it merely assembles L2+tail and L0/L1 into
+            // one chain before the existing bounded upload promotes the layer.
+            foreach (int key in desired)
             {
-                break;
-            }
-
-            if (det05Cells.TryGetValue(key, out DetailCellGpu? cell)
-                && cell.Compose is null && !cell.Empty
-                && !cell.LayerReady && cell.Pending is null && cell.PendingBc1 is null)
-            {
-                // PendingBc1 w guardzie (2026-07-24): bez niego cela BC1 w trakcie strip-uploadu była
-                // RE-KICKOWANA (drugi odczyt .opk ~45 MB, drugi promote, ledger [Mem] liczony 2×).
-                int ci = cell.Ci, cj = cell.Cj;
-                MapaTur.Application.Terrain.IOrthoDetailComposer composer = det05Composer;
-                DetailCellGpu capture = cell;
-                det05ComposeInFlight++;
-                int cellPx = det05Grid.CellPx;
-                if (det05Bc1On)
+                if (det05ReadInFlight >= DetailMaxConcurrentReads)
                 {
-                    // BC1 pipeline (2026-07-23, ZASADY 11/13): the task returns the FULL compressed chain.
-                    // Disk-cache HIT = a ~15 ms read replaces the whole decode+compose+encode storm; MISS =
-                    // compose → worker mips → worker BC1 encode → atomic cache write, so the NEXT visit hits.
-                    string? cachePath = Det05CachePath(ci, cj);
-                    byte[] rentedBc1 = MapaTur.Application.Terrain.MeshBufferPool.Shared.RentBytes(
-                        MapaTur.Application.Terrain.GpuCellCache.ChainSize(cellPx));
-                    cell.RentedBc1 = rentedBc1;
-                    if (Det05OpkReady())
-                    {
-                        // Krok 6 dla det05: cela ze stron .opk (zero WebP/BC1/mipów na runtime), jak det25.
-                        string opkDir = Det05OpkDir!;
-                        int pitch = det05Grid.PitchTiles, coverage = det05Grid.CoverageTiles;
-                        int groupTiles = det05OpkIndex!.TilesPerCell;
-                        cell.Compose = Task.Run(() =>
-                        {
-                            var swc = System.Diagnostics.Stopwatch.StartNew();
-                            bool ok = MapaTur.Application.Terrain.OrthoPageWindowAssembler.TryAssembleDet25Window(
-                                opkDir, ci, cj, pitch, coverage, groupTiles, rentedBc1, out _);
-                            capture.ComposeMs = swc.Elapsed.TotalMilliseconds;
-                            capture.FromCache = ok;
-                            capture.FromOpk = ok;
-                            return ok ? rentedBc1 : null;
-                        });
-                    }
-                    else if (cachePath is not null && System.IO.File.Exists(cachePath))
-                    {
-                        cell.Compose = Task.Run(() =>
-                        {
-                            var swc = System.Diagnostics.Stopwatch.StartNew();
-                            bool ok = MapaTur.Application.Terrain.GpuCellCache.TryRead(cachePath, cellPx, rentedBc1, out _);
-                            capture.ComposeMs = swc.Elapsed.TotalMilliseconds;
-                            capture.FromCache = ok;
-                            // A rejected file (torn/stale) falls through to the full path NEXT desire tick:
-                            // returning null marks Empty=false? No — null means EMPTY. Delete + full compose here.
-                            if (ok)
-                            {
-                                return rentedBc1;
-                            }
+                    break;
+                }
 
-                            try { System.IO.File.Delete(cachePath); } catch (System.IO.IOException) { }
-                            return ComposeEncodeCacheCell(composer, ci, cj, cellPx, rentedBc1, cachePath, capture);
-                        });
-                    }
-                    else
+                if (det05Cells.TryGetValue(key, out DetailCellGpu? cell)
+                    && !cell.Empty && !cell.LayerReady
+                    && cell.Compose is null && cell.Pending is null && cell.PendingBc1 is null)
+                {
+                    KickDet05Read(cell, minimumLod: 0);
+                }
+            }
+        }
+        else
+        {
+            // Experimental Stage A: tail first. Kept behind a default-off gate so the compact layout
+            // remains directly testable without making the rejected 57 s panorama path the product default.
+            bool allDesiredTailsReady = true;
+            foreach (int key in desired)
+            {
+                if (det05ReadInFlight >= DetailMaxConcurrentReads)
+                {
+                    allDesiredTailsReady = false;
+                    continue;
+                }
+
+                if (det05Cells.TryGetValue(key, out DetailCellGpu? cell)
+                    && !cell.Empty && !cell.LayerReady)
+                {
+                    allDesiredTailsReady = false;
+                    if (cell.Compose is null && cell.Pending is null && cell.PendingBc1 is null)
                     {
-                        cell.Compose = Task.Run(() =>
-                        {
-                            var swc = System.Diagnostics.Stopwatch.StartNew();
-                            byte[]? outChain = ComposeEncodeCacheCell(composer, ci, cj, cellPx, rentedBc1, cachePath, capture);
-                            capture.ComposeMs = swc.Elapsed.TotalMilliseconds;
-                            return outChain;
-                        });
+                        KickDet05Read(cell, Det05TailFirstMinimumLod);
                     }
                 }
-                else
-                {
-                    // RGBA fallback (no s3tc): pooled compose destination + worker mip chain, as before.
-                    byte[] rented = MapaTur.Application.Terrain.MeshBufferPool.Shared.RentBytes(
-                        cellPx * cellPx * 4);
-                    byte[] rentedMips = MapaTur.Application.Terrain.MeshBufferPool.Shared.RentBytes(
-                        (cellPx * cellPx * 4 / 3) + 64);
-                    cell.Rented = rented;
-                    cell.RentedMips = rentedMips;
-                    cell.Compose = Task.Run(() =>
-                    {
-                        var swc = System.Diagnostics.Stopwatch.StartNew();
-                        byte[]? buf = composer.Compose(ci, cj, rented);
-                        if (buf is not null)
-                        {
-                            BuildMipChain(buf, cellPx, rentedMips);
-                        }
+            }
 
-                        capture.ComposeMs = swc.Elapsed.TotalMilliseconds;
-                        return buf;
-                    });
+            // Experimental Stage B: once the desired set is tail-ready, fill exact 5/10 cm pages.
+            if (allDesiredTailsReady)
+            {
+                foreach (int key in desired)
+                {
+                    if (det05ReadInFlight >= DetailMaxConcurrentReads)
+                    {
+                        break;
+                    }
+
+                    if (det05Cells.TryGetValue(key, out DetailCellGpu? cell)
+                        && cell.LayerReady && !cell.FullLoadFinished && !cell.Empty
+                        && cell.Compose is null && cell.Pending is null && cell.PendingBc1 is null)
+                    {
+                        KickDet05Read(cell, minimumLod: 0);
+                    }
                 }
             }
         }
@@ -3785,17 +3799,28 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             if (cell.Compose is { IsCompleted: true } done)
             {
                 cell.Compose = null;
-                det05ComposeInFlight = Math.Max(0, det05ComposeInFlight - 1);
+                det05ReadInFlight = Math.Max(0, det05ReadInFlight - 1);
                 byte[]? buf = done.IsCompletedSuccessfully ? done.Result : null;
                 if (buf is null)
                 {
-                    cell.Empty = true;
+                    if (cell.LayerReady && cell.ReadMinimumLod == 0)
+                    {
+                        cell.FullLoadFinished = true; // keep the valid tail; do not retry a corrupt/missing fine page forever
+                    }
+                    else
+                    {
+                        cell.Empty = true;
+                    }
+
                     ReleaseCellBuffer(cell); // the pooled destination goes straight back — nothing to upload
                 }
                 else if (det05Bc1On)
                 {
                     // BC1 path: the task's payload IS the compressed chain (== RentedBc1); nothing else to keep.
                     cell.PendingBc1 = buf;
+                    cell.PendingMinimumLod = cell.ReadMinimumLod;
+                    cell.UploadLevel = cell.PendingMinimumLod;
+                    cell.UploadedRows = 0;
                     if (!det05UploadQueue.Contains(cell.Key))
                     {
                         det05UploadQueue.Add(cell.Key);
@@ -3884,6 +3909,52 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         DrainDet05Uploads(gl);
     }
 
+    private void KickDet05Read(DetailCellGpu cell, byte minimumLod)
+    {
+        if (det05Grid is null)
+        {
+            return;
+        }
+
+        int ci = cell.Ci, cj = cell.Cj;
+        DetailCellGpu capture = cell;
+        det05ReadInFlight++;
+        int cellPx = det05Grid.CellPx;
+        byte[] rentedBc1 = MapaTur.Application.Terrain.MeshBufferPool.Shared.RentBytes(
+            MapaTur.Application.Terrain.Bc1MipChain.ByteSize(cellPx));
+        cell.RentedBc1 = rentedBc1;
+        cell.ReadMinimumLod = minimumLod;
+        cell.ReadRequestedMs = frameClock.ElapsedMilliseconds;
+        string opkDir = Det05OpkDir!;
+        int pitch = det05Grid.PitchTiles, coverage = det05Grid.CoverageTiles;
+        int groupTiles = det05OpkIndex!.TilesPerCell;
+        bool tailAlreadyReady = cell.LayerReady;
+        cell.Compose = Task.Run(() =>
+        {
+            var swc = System.Diagnostics.Stopwatch.StartNew();
+            bool ok;
+            if (minimumLod > 0)
+            {
+                ok = MapaTur.Application.Terrain.OrthoPageWindowAssembler.TryAssembleTailWindow(
+                    opkDir, ci, cj, pitch, coverage, groupTiles, minimumLod, rentedBc1, out _);
+            }
+            else if (tailAlreadyReady)
+            {
+                ok = MapaTur.Application.Terrain.OrthoPageWindowAssembler.TryAssembleFineWindow(
+                    opkDir, ci, cj, pitch, coverage, groupTiles, rentedBc1, out _);
+            }
+            else
+            {
+                ok = MapaTur.Application.Terrain.OrthoPageWindowAssembler.TryAssembleDet25Window(
+                    opkDir, ci, cj, pitch, coverage, groupTiles, rentedBc1, out _);
+            }
+
+            capture.ComposeMs = swc.Elapsed.TotalMilliseconds;
+            capture.FromOpk = ok;
+            return ok ? rentedBc1 : null;
+        });
+    }
+
     private void DisposeDet05Cell(GL gl, DetailCellGpu cell)
     {
         // Capture liveness BEFORE the safety-net nulls Compose: a live task is still WRITING into the pooled
@@ -3892,7 +3963,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         bool composeAlive = cell.Compose is not null;
         if (composeAlive)
         {
-            det05ComposeInFlight = Math.Max(0, det05ComposeInFlight - 1); // release slot on mid-compose eviction (see DisposeDet25Cell)
+            det05ReadInFlight = Math.Max(0, det05ReadInFlight - 1);
             cell.Compose = null;
         }
 
@@ -3989,7 +4060,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             "[Det05] cell ARRAYS allocated: {Px}px, {N} warstw/tablicę × {Arrays} tablice = {Alloc} cel ({GB:F1} GB with mips, {Fmt}), glGetError clean — per-fragment cell pick",
             px, layersA, allocated / Math.Max(1, layersA), allocated,
             allocated * (det05Bc1On
-                ? (double)MapaTur.Application.Terrain.GpuCellCache.ChainSize(px)
+                ? (double)MapaTur.Application.Terrain.Bc1MipChain.ByteSize(px)
                 : OrthoVramBudget.CellResidentBytes(px, px)) / (1024.0 * 1024.0 * 1024.0),
             det05Bc1On ? "BC1" : "RGBA");
     }
@@ -4033,168 +4104,6 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         return tex;
     }
 
-    // Worker-side mip chain for a det05 cell (H1, 2026-07-23): packed levels 1..N (down to 1×1), each a 2×2
-    // box average of the previous, written into ONE pooled buffer (level 1 at offset 0, level k right after
-    // k−1). Replaces GL GenerateMipmap for the det05 arrays: under ANGLE/D3D11 that call regenerates mips for
-    // the WHOLE 12-layer array (a multi-GB GPU chew) on every single-cell promote and lands at swap as the
-    // measured 150–300 ms frame gaps. Level 1 (the 64 MB one) is row-parallel; the tail is trivial.
-    private static unsafe void BuildMipChain(byte[] level0, int px, byte[] dest)
-    {
-        fixed (byte* src0 = level0)
-        fixed (byte* dst0 = dest)
-        {
-            byte* src = src0;
-            byte* dst = dst0;
-            int sPx = px;
-            while (sPx > 1)
-            {
-                int dPx = sPx >> 1;
-                byte* s = src, d = dst;
-                int srcPx = sPx;
-                void DownRow(int y)
-                {
-                    byte* r0 = s + ((long)(2 * y) * srcPx * 4);
-                    byte* r1 = r0 + ((long)srcPx * 4);
-                    byte* dRow = d + ((long)y * dPx * 4);
-                    for (int x = 0; x < dPx; x++)
-                    {
-                        int o = x * 8, oD = x * 4;
-                        // ALFA-WAŻONE (czarne trójkąty przy szwie orto, 2026-07-23): kolor tylko z KRYJĄCYCH
-                        // texeli, alfa uśredniana osobno — inaczej głębokie mipy dostają czarną obwódkę,
-                        // która przy binarnym progu DXT1a wychodzi kryjąca.
-                        int a0 = r0[o + 3], a1 = r0[o + 7], a2 = r1[o + 3], a3 = r1[o + 7];
-                        int sumA = a0 + a1 + a2 + a3;
-                        if (sumA == 0)
-                        {
-                            dRow[oD + 0] = 0; dRow[oD + 1] = 0; dRow[oD + 2] = 0; dRow[oD + 3] = 0;
-                        }
-                        else
-                        {
-                            dRow[oD + 0] = (byte)(((r0[o + 0] * a0) + (r0[o + 4] * a1) + (r1[o + 0] * a2) + (r1[o + 4] * a3) + (sumA >> 1)) / sumA);
-                            dRow[oD + 1] = (byte)(((r0[o + 1] * a0) + (r0[o + 5] * a1) + (r1[o + 1] * a2) + (r1[o + 5] * a3) + (sumA >> 1)) / sumA);
-                            dRow[oD + 2] = (byte)(((r0[o + 2] * a0) + (r0[o + 6] * a1) + (r1[o + 2] * a2) + (r1[o + 6] * a3) + (sumA >> 1)) / sumA);
-                            dRow[oD + 3] = (byte)((sumA + 2) >> 2);
-                        }
-                    }
-                }
-
-                // SEQUENTIAL on purpose (2026-07-23 lesson): a Parallel.For here saturated every core on each
-                // promote, preempting the GL thread AND the mesh-build workers — measured as clumped
-                // pendingUploads bursts (91 × ~190 ms warm gaps at cap 16). One background core for ~0.7 s per
-                // cell is invisible; a full-box stampede is not.
-                for (int y = 0; y < dPx; y++) { DownRow(y); }
-
-                src = dst;
-                dst += (long)dPx * dPx * 4;
-                sPx = dPx;
-            }
-        }
-    }
-
-    // BC1 full path, runs ON THE WORKER: compose RGBA → box-filter mips → encode the whole chain → atomic
-    // cache write (next visit = ~15 ms read). All scratch buffers are task-local and pooled; the destination
-    // chain is the cell's RentedBc1 (owned by the cell through the upload). Null = composer says empty.
-    private byte[]? ComposeEncodeCacheCell(
-        MapaTur.Application.Terrain.IOrthoDetailComposer composer,
-        int ci, int cj, int cellPx, byte[] destChain, string? cachePath, DetailCellGpu capture)
-    {
-        MapaTur.Application.Terrain.MeshBufferPool pool = MapaTur.Application.Terrain.MeshBufferPool.Shared;
-        byte[] rgba = pool.RentBytes(cellPx * cellPx * 4);
-        byte[] mips = pool.RentBytes((cellPx * cellPx * 4 / 3) + 64);
-        byte[]? composed = null;
-        try
-        {
-            composed = composer.Compose(ci, cj, rgba);
-            if (composed is null)
-            {
-                return null;
-            }
-
-            BuildMipChain(composed, cellPx, mips);
-            EncodeBc1Chain(composed, mips, cellPx, destChain);
-            capture.FromCache = false;
-            if (cachePath is not null)
-            {
-                try
-                {
-                    MapaTur.Application.Terrain.GpuCellCache.Write(cachePath, cellPx, destChain);
-                }
-                catch (Exception ex) when (ex is System.IO.IOException or UnauthorizedAccessException)
-                {
-                    Log.Warning(ex, "[Det05] GPU-cache write failed for ({Ci},{Cj}) — cell stays uncached", ci, cj);
-                }
-            }
-
-            return destChain;
-        }
-        finally
-        {
-            pool.Return(rgba);
-            if (composed is not null && !ReferenceEquals(composed, rgba))
-            {
-                pool.Return(composed); // composer handed back its own pooled buffer — consumed by the encode
-            }
-
-            pool.Return(mips);
-        }
-    }
-
-    // Encodes the full BC1 chain (level 0 from the composed RGBA, levels 1.. from the packed worker mips).
-    private static void EncodeBc1Chain(byte[] rgba, byte[] mips, int px, byte[] dest)
-    {
-        int destOff = 0;
-        int mipOff = 0;
-        bool first = true;
-        for (int lPx = px; lPx >= 1; lPx >>= 1)
-        {
-            if (first)
-            {
-                EncodeLevelBanded(rgba, 0, lPx, dest, destOff);
-            }
-            else
-            {
-                EncodeLevelBanded(mips, mipOff, lPx, dest, destOff);
-                mipOff += lPx * lPx * 4;
-            }
-
-            destOff += MapaTur.Application.Terrain.Bc1Encoder.EncodedSize(lPx, lPx);
-            first = false;
-        }
-    }
-
-    // Band-parallel BC1 encode of one square level. Bounded parallelism (MaxDOP 3) on the big levels — the
-    // full-box Parallel.For stampede measurably preempted the GL thread + mesh workers (2026-07-23 lesson);
-    // the tail levels are cheaper than the scheduling would be. Bands align to 4-px block rows by construction.
-    private static void EncodeLevelBanded(byte[] src, int srcOffset, int lPx, byte[] dest, int destOffset)
-    {
-        if (lPx < 1024)
-        {
-            MapaTur.Application.Terrain.Bc1Encoder.Encode(
-                new ReadOnlySpan<byte>(src, srcOffset, lPx * lPx * 4), lPx, lPx, dest.AsSpan(destOffset));
-            return;
-        }
-
-        int blockRows = (lPx + 3) / 4;
-        const int Bands = 6;
-        int rowsPerBand = (blockRows + Bands - 1) / Bands;
-        System.Threading.Tasks.Parallel.For(0, Bands,
-            new System.Threading.Tasks.ParallelOptions { MaxDegreeOfParallelism = 3 }, band =>
-            {
-                int r0 = band * rowsPerBand;
-                int r1 = Math.Min(blockRows, r0 + rowsPerBand);
-                if (r0 >= r1)
-                {
-                    return;
-                }
-
-                int y0 = r0 * 4;
-                int h = Math.Min(lPx - y0, (r1 - r0) * 4);
-                MapaTur.Application.Terrain.Bc1Encoder.Encode(
-                    new ReadOnlySpan<byte>(src, srcOffset + (y0 * lPx * 4), h * lPx * 4), lPx, h,
-                    dest.AsSpan(destOffset + (r0 * (lPx / 4) * 8)));
-            });
-    }
-
     // ── det25 ARRAY path (krok 4): per-tile bind → texture array + per-fragment wybór (wzorzec det05).
     // Per-tile bind pokazywał JEDNĄ celę na kafel terenu (patchwork na dużych/odległych kaflach). BC1 czyni
     // array tanim: 32 × 4096² z mipami ≈ 342 MB w JEDNEJ teksturze. Aktywne tylko na ścieżce BC1 (desktop);
@@ -4205,27 +4114,42 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // średni dystans. Przy 32 celach det25 sięgał ~2,4 km i między nim a horyzontem została goła baza
     // („ostro blisko, ostro daleko, breja pomiędzy" — user 2026-07-25). 128 cel = ~4,9 km.
     private const int Det25ArrLayers = 128;
-    private int det25ArrSamplerLoc = -1, det25ArrAabbLoc = -1, det25ArrAlphaLoc = -1, useDet25ArrLoc = -1;
+    private const int Det25CellHashSize = 256;
+    private int det25ArrSamplerLoc = -1, det25CellHashLoc = -1, det25HashSeedLoc = -1, useDet25ArrLoc = -1;
+    private int det25GridOriginLoc = -1, det25GridPitchLoc = -1, det25CellSizeLoc = -1;
     private long det25ArrUniformsTick = -1;
 
-    // Raz na klatkę: sloty AABB+alpha warstw det25 (wzorzec BindDet05ForTile). Unit 10 przejęty po starym
-    // per-tile bindzie (ten sam typ konfliktowałby — dlatego gdy array aktywny, stary sampler2D idzie na 15).
+    private static (Vector2 Origin, Vector2 Pitch, Vector2 Size) DetailGridWorld(
+        MapaTur.Application.Terrain.OrthoDetailGrid grid,
+        TerrainMesh3D anchorMesh)
+    {
+        MapaTur.Domain.Geography.MapBounds b00 = grid.CellBounds(0, 0);
+        MapaTur.Domain.Geography.MapBounds b10 = grid.CellBounds(1, 0);
+        MapaTur.Domain.Geography.MapBounds b01 = grid.CellBounds(0, 1);
+        var nw00 = new MapaTur.Domain.Geography.GeoPoint(b00.NorthEast.Latitude, b00.SouthWest.Longitude);
+        var nw10 = new MapaTur.Domain.Geography.GeoPoint(b10.NorthEast.Latitude, b10.SouthWest.Longitude);
+        var nw01 = new MapaTur.Domain.Geography.GeoPoint(b01.NorthEast.Latitude, b01.SouthWest.Longitude);
+        Vector3 origin = anchorMesh.GeoToWorld(nw00, 0f);
+        Vector3 east = anchorMesh.GeoToWorld(nw10, 0f);
+        Vector3 south = anchorMesh.GeoToWorld(nw01, 0f);
+        Vector3 sw = anchorMesh.GeoToWorld(b00.SouthWest, 0f);
+        Vector3 ne = anchorMesh.GeoToWorld(b00.NorthEast, 0f);
+        return (
+            new Vector2(origin.X, origin.Y),
+            new Vector2(MathF.Abs(east.X - origin.X), MathF.Abs(south.Y - origin.Y)),
+            new Vector2(MathF.Abs(ne.X - sw.X), MathF.Abs(ne.Y - sw.Y)));
+    }
+
+    // Once per frame: upload the bounded cell→array-slot hash. Unit 10 is owned by the det25 array.
     private unsafe void BindDet25ArrOncePerFrame(GL gl, TerrainMesh3D anchorMesh)
     {
-        if (det25ArrayTexture == 0 || det25ArrUniformsTick == det25FrameTick)
+        if (det25ArrayTexture == 0 || det25Grid is null || det25ArrUniformsTick == det25FrameTick)
         {
             return;
         }
 
         det25ArrUniformsTick = det25FrameTick;
-        Span<float> aabb = stackalloc float[Det25ArrLayers * 4];
-        Span<float> alpha = stackalloc float[Det25ArrLayers];
-        alpha.Clear();
-        for (int i = 0; i < aabb.Length; i += 4)
-        {
-            aabb[i] = 1e9f; aabb[i + 1] = 1e9f; aabb[i + 2] = -1e9f; aabb[i + 3] = -1e9f; // pusty slot
-        }
-
+        Span<MapaTur.Application.Terrain.DetailCellSlot> resident = stackalloc MapaTur.Application.Terrain.DetailCellSlot[Det25ArrLayers];
         int ready = 0;
         double nowMs = frameClock.ElapsedMilliseconds;
         foreach (DetailCellGpu cell in det25Cells.Values)
@@ -4235,27 +4159,25 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 continue;
             }
 
-            Vector3 sw = anchorMesh.GeoToWorld(cell.Bounds.SouthWest, 0f);
-            Vector3 ne = anchorMesh.GeoToWorld(cell.Bounds.NorthEast, 0f);
-            int o = cell.Layer * 4;
-            aabb[o] = Math.Min(sw.X, ne.X);
-            aabb[o + 1] = Math.Min(sw.Y, ne.Y);
-            aabb[o + 2] = Math.Max(sw.X, ne.X);
-            aabb[o + 3] = Math.Max(sw.Y, ne.Y);
-            alpha[cell.Layer] = (float)Math.Clamp((nowMs - cell.PromoteMs) / 300.0, 0.0, 1.0);
-            ready++;
+            byte alpha = (byte)Math.Round(Math.Clamp((nowMs - cell.PromoteMs) / 300.0, 0.0, 1.0) * 255.0);
+            resident[ready++] = new(cell.Ci, cell.Cj, cell.Layer, alpha, cell.MinimumLod);
         }
 
         if (ready > 0)
         {
+            Span<int> hash = stackalloc int[Det25CellHashSize * 4];
+            (uint seed, _) = MapaTur.Application.Terrain.DetailCellSlotHash.Fill(
+                resident[..ready], hash, DetailCellHashMaxProbe);
+            (Vector2 origin, Vector2 pitch, Vector2 size) = DetailGridWorld(det25Grid, anchorMesh);
             gl.ActiveTexture(TextureUnit.Texture10);
             gl.BindTexture(TextureTarget.Texture2DArray, det25ArrayTexture);
             gl.ActiveTexture(TextureUnit.Texture0);
             gl.Uniform1(det25ArrSamplerLoc, 10);
-            // Licznik z ROZMIARU bufora, nie na sztywno — to był błąd bliźniaczy do det05 (sloty ≥ N
-            // nie dostawały AABB, więc podnoszenie capa było pozorne).
-            fixed (float* p = aabb) { gl.Uniform4(det25ArrAabbLoc, (uint)(aabb.Length / 4), p); }
-            fixed (float* p = alpha) { gl.Uniform1(det25ArrAlphaLoc, (uint)alpha.Length, p); }
+            fixed (int* p = hash) { gl.Uniform4(det25CellHashLoc, Det25CellHashSize, p); }
+            gl.Uniform1(det25HashSeedLoc, unchecked((int)seed));
+            gl.Uniform2(det25GridOriginLoc, origin.X, origin.Y);
+            gl.Uniform2(det25GridPitchLoc, pitch.X, pitch.Y);
+            gl.Uniform2(det25CellSizeLoc, size.X, size.Y);
             gl.Uniform1(useDet25ArrLoc, 1);
         }
         else
@@ -4297,7 +4219,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         Log.Information("[Det25Arr] array {L}×4096² BC1+mipy = {MB} MB VRAM — per-fragment wybór celi",
-            Det25ArrLayers, (long)Det25ArrLayers * MapaTur.Application.Terrain.GpuCellCache.ChainSize(4096) / (1024 * 1024));
+            Det25ArrLayers, (long)Det25ArrLayers * MapaTur.Application.Terrain.Bc1MipChain.ByteSize(4096) / (1024 * 1024));
     }
 
     // ── det1m RESIDENT TIER (krok 3, ARCHITEKTURA-STREAMING §3 + ANEKS A) ────────────────────────────
@@ -4349,7 +4271,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         var slices = new List<(int, int, byte[], ulong)>(idx.Cells.Count);
-        int chainSize = MapaTur.Application.Terrain.GpuCellCache.ChainSize(4096);
+        int chainSize = MapaTur.Application.Terrain.Bc1MipChain.ByteSize(4096);
         int level0 = MapaTur.Application.Terrain.Bc1Encoder.EncodedSize(4096, 4096);
         foreach (OrthoPackIndex.CellEntry c in idx.Cells)
         {
@@ -4448,7 +4370,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.GetInteger(GLEnum.MaxTextureSize, maxTex);
             gl.GetInteger((GLEnum)0x88FF, maxLayers); // GL_MAX_ARRAY_TEXTURE_LAYERS
             int layers = det1mLoaded.Slices.Count;
-            long vram = (long)layers * MapaTur.Application.Terrain.GpuCellCache.ChainSize(4096);
+            long vram = (long)layers * MapaTur.Application.Terrain.Bc1MipChain.ByteSize(4096);
             if (maxTex[0] < 4096 || maxLayers[0] < layers)
             {
                 Log.Warning("[Det1m] limit GPU (maxTex={T}, maxLayers={L}) < wymagane (4096, {N}) — warstwa wyłączona",
@@ -4654,7 +4576,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
                 cell.Layer = layer;
                 cell.UploadedRows = 0;
-                cell.UploadLevel = 0;
+                cell.UploadLevel = cell.PendingMinimumLod;
             }
 
             // Global layer → (tablica, warstwa lokalna): TA SAMA arytmetyka co w shaderze (slot/L, slot%L).
@@ -4683,7 +4605,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             EnsureUploadPbos(gl, (nuint)OrthoUploadBytesPerChunk);
             byte[]? mips = cell.PendingMips;
             int totalLevels = bc1 is not null || mips is not null ? Math.ILogB(w) + 1 : 1;
-            while (cell.UploadLevel < totalLevels)
+            int uploadEndLevel = cell.LayerReady && cell.PendingMinimumLod == 0
+                ? Det05TailFirstMinimumLod
+                : totalLevels;
+            while (cell.UploadLevel < uploadEndLevel)
             {
                 int lv = cell.UploadLevel;
                 int lPx = Math.Max(1, w >> lv);
@@ -4770,10 +4695,21 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 }
             }
 
-            if (cell.UploadLevel >= totalLevels)
+            if (cell.UploadLevel >= uploadEndLevel)
             {
+                bool firstPromotion = !cell.LayerReady;
                 cell.LayerReady = true;
-                cell.PromoteMs = frameClock.ElapsedMilliseconds;
+                cell.MinimumLod = cell.PendingMinimumLod;
+                if (cell.MinimumLod == 0)
+                {
+                    cell.FullLoadFinished = true;
+                }
+
+                if (firstPromotion)
+                {
+                    cell.PromoteMs = frameClock.ElapsedMilliseconds;
+                }
+
                 if (bc1 is null && mips is null)
                 {
                     // no chain → slice-wide fallback below (per TABLICA, nie per cela)
@@ -4783,16 +4719,23 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 // Per-cell resident-bytes ledger: BC1 cells cost 1/8 of RGBA — record what THIS cell added so
                 // dispose subtracts the same number regardless of which path uploaded it.
                 long residentBytes = bc1 is not null
-                    ? MapaTur.Application.Terrain.GpuCellCache.ChainSize(w)
+                    ? MapaTur.Application.Terrain.Bc1MipChain.ByteSize(w)
                     : OrthoVramBudget.CellResidentBytes(w, h);
-                cell.ResidentBytesLedger = residentBytes;
-                det05ResidentBytes += residentBytes;
+                if (firstPromotion)
+                {
+                    cell.ResidentBytesLedger = residentBytes;
+                    det05ResidentBytes += residentBytes;
+                }
+
+                byte completedMinimumLod = cell.MinimumLod;
+                double readyMs = frameClock.ElapsedMilliseconds - cell.ReadRequestedMs;
                 ReleaseCellBuffer(cell); // the final upload has copied — recycle the pooled buffers
                 det05UploadQueue.RemoveAt(0);
                 Log.Information(
-                    "[Det05] cell ({Ci},{Cj}) {Src} {C:F0}ms | layer {Layer} ({Slice}) resident ({Levels} levels, {Fmt})",
-                    cell.Ci, cell.Cj, cell.FromOpk ? "opk-read" : cell.FromCache ? "compose [CACHE-HIT]" : "compose",
-                    cell.ComposeMs, cell.Layer, ai == 0 ? "A" : ai == 1 ? "B" : "C", totalLevels, bc1 is not null ? "BC1" : "RGBA");
+                    "[OrthoLat] det05 cell ({Ci},{Cj}) {Stage} {Ready:F0}ms request-to-GPU ({Read:F0}ms read) | layer {Layer} ({Slice}) resident ({Levels} levels, {Fmt})",
+                    cell.Ci, cell.Cj, completedMinimumLod == 0 ? "full-ready" : "tail-ready",
+                    readyMs, cell.ComposeMs, cell.Layer, ai == 0 ? "A" : ai == 1 ? "B" : "C",
+                    uploadEndLevel - completedMinimumLod, bc1 is not null ? "BC1" : "RGBA");
             }
 
             if (frameClock.ElapsedMilliseconds - start >= OrthoUploadBudgetMsPerFrame)
@@ -4853,40 +4796,27 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         det05ArrayUniformsTick = det25FrameTick;
-        // ★ BŁĄD ZNALEZIONY 2026-07-25: bufory i licznik uploadu były na sztywno 48, mimo że cap podnoszono
-        // do 96 — sloty ≥48 NIGDY nie dostawały AABB, więc cele siedziały w VRAM i BYŁY NIEWIDOCZNE.
-        // Rozmiar musi wynikać z capa, inaczej każde podniesienie capa jest pozorne.
-        int slots = Math.Max(1, Det05HardCapCells);
-        Span<float> aabb = stackalloc float[Det05HardCapCells * 4];
-        Span<float> alpha = stackalloc float[Det05HardCapCells];
-        alpha.Clear(); // stackalloc zero-init is not contractual — empty slots must read alpha 0
-        for (int i = 0; i < aabb.Length; i += 4)
-        {
-            aabb[i] = 1e9f; aabb[i + 1] = 1e9f; aabb[i + 2] = -1e9f; aabb[i + 3] = -1e9f; // min>max = empty slot
-        }
-
+        Span<MapaTur.Application.Terrain.DetailCellSlot> resident =
+            stackalloc MapaTur.Application.Terrain.DetailCellSlot[Det05HardCapCells];
         int ready = 0;
         double nowMs = frameClock.ElapsedMilliseconds;
         foreach (DetailCellGpu cell in det05Cells.Values)
         {
-            if (!cell.LayerReady || cell.Layer < 0 || cell.Layer >= 48)
+            if (!cell.LayerReady || cell.Layer < 0 || cell.Layer >= Det05HardCapCells)
             {
                 continue;
             }
 
-            Vector3 sw = anchorMesh.GeoToWorld(cell.Bounds.SouthWest, 0f);
-            Vector3 ne = anchorMesh.GeoToWorld(cell.Bounds.NorthEast, 0f);
-            int o = cell.Layer * 4;
-            aabb[o] = Math.Min(sw.X, ne.X);
-            aabb[o + 1] = Math.Min(sw.Y, ne.Y);
-            aabb[o + 2] = Math.Max(sw.X, ne.X);
-            aabb[o + 3] = Math.Max(sw.Y, ne.Y);
-            alpha[cell.Layer] = (float)Math.Clamp((nowMs - cell.PromoteMs) / 300.0, 0.0, 1.0); // 300 ms fade-in
-            ready++;
+            byte alpha = (byte)Math.Round(Math.Clamp((nowMs - cell.PromoteMs) / 300.0, 0.0, 1.0) * 255.0);
+            resident[ready++] = new(cell.Ci, cell.Cj, cell.Layer, alpha, cell.MinimumLod);
         }
 
         if (ready > 0)
         {
+            Span<int> hash = stackalloc int[Det05CellHashSize * 4];
+            (uint seed, _) = MapaTur.Application.Terrain.DetailCellSlotHash.Fill(
+                resident[..ready], hash, DetailCellHashMaxProbe);
+            (Vector2 origin, Vector2 pitch, Vector2 size) = DetailGridWorld(det05Grid, anchorMesh);
             gl.ActiveTexture(TextureUnit.Texture12);
             gl.BindTexture(TextureTarget.Texture2DArray, det05ArrayTexture);
             gl.ActiveTexture(TextureUnit.Texture13);
@@ -4900,16 +4830,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.Uniform1(det05ArrBSamplerLocation, 13);
             gl.Uniform1(det05ArrCSamplerLocation, 7);
             gl.Uniform1(det05ArrALoc, det05LayersA);
-            fixed (float* p = aabb)
+            fixed (int* p = hash)
             {
-                gl.Uniform4(det05ArrAabbLocation, (uint)slots, p);
+                gl.Uniform4(det05CellHashLoc, Det05CellHashSize, p);
             }
-
-            fixed (float* p = alpha)
-            {
-                gl.Uniform1(det05ArrAlphaLocation, (uint)slots, p);
-            }
-
+            gl.Uniform1(det05HashSeedLoc, unchecked((int)seed));
+            gl.Uniform2(det05GridOriginLoc, origin.X, origin.Y);
+            gl.Uniform2(det05GridPitchLoc, pitch.X, pitch.Y);
+            gl.Uniform2(det05CellSizeLoc, size.X, size.Y);
             gl.Uniform1(useDet05ArrLocation, 1);
         }
         else
@@ -4930,19 +4858,23 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private Vector3 detailFocusSmoothed;
     private bool detailFocusValid;
 
-    // Per frame: pick the desired det25 cell ring around the camera focus, kick composes for new cells off-thread,
+    // Per frame: pick the desired det25 cell ring, kick bounded `.opk` reads off-thread,
     // harvest completed ones, evict LRU past the shared budget, and strip-upload a bounded slice. No GL binds here
     // (those are per-draw in BindDet25ForTile) — this just keeps the resident set + GPU textures current.
     private void StreamOrthoDetail(GL gl, IReadOnlyList<TerrainMesh3D> tiles, Vector3 cameraPosition, Vector3 cameraTarget)
     {
-        if (!OrthoDetailEnabled || det25Grid is null || det25Policy is null || det25Composer is null || tiles.Count == 0)
+        if (!OrthoDetailEnabled || det25Grid is null || det25Policy is null || tiles.Count == 0)
         {
             return;
         }
 
         det25FrameTick++;
-        ProbeS3tc(gl); // BC1 capability must be known BEFORE any compose kick (kick picks the payload format)
+        ProbeS3tc(gl);
         PumpDet1m(gl); // rezydentny tier 1 m: kick ładowania, alokacja po limitach GPU, budżetowany upload
+        if (!det05Bc1On || !Det25OpkReady())
+        {
+            return;
+        }
 
         // ROTATION-INVARIANT residency (2026-07-23, ZASADA 9 — user: "drgnięcie myszką wyładowuje kafle",
         // reported three times): the ring used to chase the LOOK point (camera + view ray ≤800 m), so an orbit
@@ -5013,9 +4945,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         // BC1 (jedyna produkcyjna ścieżka desktop) kosztuje ChainSize ≈ 1/8 RGBA — near-cap liczony ze
         // STAREJ arytmetyki RGBA dusił zasięg detalu przy pustym VRAM („zasięg 5 cm śmiesznie mały").
-        long cellBytes = det05Bc1On
-            ? MapaTur.Application.Terrain.GpuCellCache.ChainSize(det25Grid.CellPx)
-            : OrthoVramBudget.CellResidentBytes(det25Grid.CellPx, det25Grid.CellPx);
+        long cellBytes = MapaTur.Application.Terrain.Bc1MipChain.ByteSize(det25Grid.CellPx);
         IReadOnlyList<int> desired;
         IReadOnlyList<int> fineDesired = Array.Empty<int>();
         int nearCap;
@@ -5034,7 +4964,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             var residentCoarse = new HashSet<int>();
             foreach (DetailCellGpu c in det25Cells.Values)
             {
-                if (c.Texture != 0) { residentCoarse.Add(c.Key); }
+                if (c.Texture != 0 || c.LayerReady) { residentCoarse.Add(c.Key); }
             }
 
             MapaTur.Application.Terrain.TwoLevelDesired plan = twoLevelPolicy.Plan(
@@ -5080,13 +5010,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             }
         }
 
-        // Kick off-thread composes for WAITING desired cells, nearest-first (desired is ranked), bounded by the
-        // concurrency cap. Measured: 14 parallel 570 ms decodes saturated the CPU and starved the paint thread —
-        // 4 at a time keeps cores free for the render, caps the transient compose-buffer heap, and lets the ring
-        // fill progressively (a slot frees → the next-nearest cell starts).
+        // Kick bounded off-thread `.opk` reads for waiting cells, nearest-first.
         foreach (int key in desired)
         {
-            if (det25ComposeInFlight >= Det25MaxConcurrentComposes)
+            if (det25ReadInFlight >= DetailMaxConcurrentReads)
             {
                 break;
             }
@@ -5097,80 +5024,24 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 && !cell.LayerReady && cell.PendingBc1 is null) // array path (krok 4): warstwa gotowa/w drodze ≠ re-kick
             {
                 int ci = cell.Ci, cj = cell.Cj;
-                MapaTur.Application.Terrain.IOrthoDetailComposer composer = det25Composer;
                 DetailCellGpu capture = cell;
-                det25ComposeInFlight++;
+                det25ReadInFlight++;
                 int cellPx25 = det25Grid.CellPx;
-                if (det05Bc1On)
+                byte[] rentedBc1 = MapaTur.Application.Terrain.MeshBufferPool.Shared.RentBytes(
+                    MapaTur.Application.Terrain.Bc1MipChain.ByteSize(cellPx25));
+                cell.RentedBc1 = rentedBc1;
+                string opkDir = Det25OpkDir!;
+                int pitch = det25Grid.PitchTiles, coverage = det25Grid.CoverageTiles;
+                int groupTiles = det25OpkIndex!.TilesPerCell;
+                cell.Compose = Task.Run(() =>
                 {
-                    // BC1 pipeline for det25 too (2026-07-23): the midground tier is 28 cells after the tier
-                    // rebalance — with the disk cache a revisit fills the whole panorama in tens of ms.
-                    string? cachePath = Det25CachePath(ci, cj);
-                    byte[] rentedBc1 = MapaTur.Application.Terrain.MeshBufferPool.Shared.RentBytes(
-                        MapaTur.Application.Terrain.GpuCellCache.ChainSize(cellPx25));
-                    cell.RentedBc1 = rentedBc1;
-                    if (Det25OpkReady())
-                    {
-                        // Krok 6 (PumpPageReads): cela montowana WYŁĄCZNIE ze stron .opk — zero dekodu WebP,
-                        // zero enkodu BC1, zero mipów na runtime; czyste I/O + memcpy na wątku puli.
-                        // .opk JEST cache'm GPU-ready, więc mtgc nie jest ani czytany, ani pisany.
-                        string opkDir = Det25OpkDir!;
-                        int pitch = det25Grid.PitchTiles, coverage = det25Grid.CoverageTiles;
-                        int groupTiles = det25OpkIndex!.TilesPerCell;
-                        cell.Compose = Task.Run(() =>
-                        {
-                            var swc = System.Diagnostics.Stopwatch.StartNew();
-                            bool ok = MapaTur.Application.Terrain.OrthoPageWindowAssembler.TryAssembleDet25Window(
-                                opkDir, ci, cj, pitch, coverage, groupTiles, rentedBc1, out _);
-                            capture.ComposeMs = swc.Elapsed.TotalMilliseconds;
-                            capture.FromCache = ok; // pomija zapis mtgc (strony są źródłem prawdy)
-                            capture.FromOpk = ok;
-                            return ok ? rentedBc1 : null;
-                        });
-                    }
-                    else if (cachePath is not null && System.IO.File.Exists(cachePath))
-                    {
-                        cell.Compose = Task.Run(() =>
-                        {
-                            var swc = System.Diagnostics.Stopwatch.StartNew();
-                            bool ok = MapaTur.Application.Terrain.GpuCellCache.TryRead(cachePath, cellPx25, rentedBc1, out _);
-                            capture.ComposeMs = swc.Elapsed.TotalMilliseconds;
-                            capture.FromCache = ok;
-                            if (ok)
-                            {
-                                return rentedBc1;
-                            }
-
-                            try { System.IO.File.Delete(cachePath); } catch (System.IO.IOException) { }
-                            return ComposeEncodeCacheCell(composer, ci, cj, cellPx25, rentedBc1, cachePath, capture);
-                        });
-                    }
-                    else
-                    {
-                        cell.Compose = Task.Run(() =>
-                        {
-                            var swc = System.Diagnostics.Stopwatch.StartNew();
-                            byte[]? outChain = ComposeEncodeCacheCell(composer, ci, cj, cellPx25, rentedBc1, cachePath, capture);
-                            capture.ComposeMs = swc.Elapsed.TotalMilliseconds;
-                            return outChain;
-                        });
-                    }
-                }
-                else
-                {
-                    // Pooled compose destination (the 64 MiB cell buffer allocated per compose was gigabytes of
-                    // LOH churn per traverse). Ownership: the cell, tracked via Rented until ReleaseCellBuffer.
-                    byte[] rented = MapaTur.Application.Terrain.MeshBufferPool.Shared.RentBytes(
-                        cellPx25 * cellPx25 * 4);
-                    cell.Rented = rented;
-                    cell.Compose = Task.Run(() =>
-                    {
-                        var swc = System.Diagnostics.Stopwatch.StartNew();
-                        byte[]? buf = composer.Compose(ci, cj, rented);
-                        capture.ComposeMs = swc.Elapsed.TotalMilliseconds; // diagnostic; benign cross-thread write
-                        return buf;
-                    });
-                }
+                    var swc = System.Diagnostics.Stopwatch.StartNew();
+                    bool ok = MapaTur.Application.Terrain.OrthoPageWindowAssembler.TryAssembleDet25Window(
+                        opkDir, ci, cj, pitch, coverage, groupTiles, rentedBc1, out _);
+                    capture.ComposeMs = swc.Elapsed.TotalMilliseconds;
+                    capture.FromOpk = ok;
+                    return ok ? rentedBc1 : null;
+                });
             }
         }
 
@@ -5180,7 +5051,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             if (cell.Compose is { IsCompleted: true } done)
             {
                 cell.Compose = null;
-                det25ComposeInFlight = Math.Max(0, det25ComposeInFlight - 1);
+                det25ReadInFlight = Math.Max(0, det25ReadInFlight - 1);
                 byte[]? buf = done.IsCompletedSuccessfully ? done.Result : null;
                 if (buf is null)
                 {
@@ -5282,7 +5153,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             // Evicting a cell mid-compose: release its concurrency slot (the running task's result is discarded),
             // else the in-flight counter LEAKS up to the cap and the streamer stops kicking — the ring stalls
             // half-filled and the near field drops back to the coarse base (the "why is 25 cm blurry" bug).
-            det25ComposeInFlight = Math.Max(0, det25ComposeInFlight - 1);
+            det25ReadInFlight = Math.Max(0, det25ReadInFlight - 1);
             cell.Compose = null;
         }
 
@@ -5491,13 +5362,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 // per-cell tekstur, mipy z chaina, ledger = rozmiar chaina.
                 cell.LayerReady = true;
                 cell.PromoteMs = frameClock.ElapsedMilliseconds;
-                long rb = MapaTur.Application.Terrain.GpuCellCache.ChainSize(w);
+                long rb = MapaTur.Application.Terrain.Bc1MipChain.ByteSize(w);
                 cell.ResidentBytesLedger = rb;
                 det25ResidentBytes += rb;
                 ReleaseCellBuffer(cell);
                 det25UploadQueue.RemoveAt(0);
                 Log.Information("[Det25] cell ({Ci},{Cj}) {Src} {C:F0}ms | ARR layer {Layer} resident (BC1)",
-                    cell.Ci, cell.Cj, cell.FromOpk ? "opk-read" : cell.FromCache ? "compose [CACHE-HIT]" : "compose",
+                    cell.Ci, cell.Cj, "opk-read",
                     cell.ComposeMs, cell.Layer);
             }
             else if (complete)
@@ -5521,14 +5392,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 cell.Texture = cell.StagingTexture;
                 cell.StagingTexture = 0;
                 long residentBytes = bc1 is not null
-                    ? MapaTur.Application.Terrain.GpuCellCache.ChainSize(w)
+                    ? MapaTur.Application.Terrain.Bc1MipChain.ByteSize(w)
                     : OrthoVramBudget.CellResidentBytes(w, h);
                 cell.ResidentBytesLedger = residentBytes;
                 det25ResidentBytes += residentBytes;
                 ReleaseCellBuffer(cell); // the final upload has copied — recycle the pooled buffer
                 det25UploadQueue.RemoveAt(0);
-                Log.Information("[Det25] cell ({Ci},{Cj}) compose {C:F0}ms{Cache} | upload {U:F1}ms | mipmap {M:F1}ms | {Px}px ({Fmt})",
-                    cell.Ci, cell.Cj, cell.ComposeMs, cell.FromCache ? " [CACHE-HIT]" : string.Empty,
+                Log.Information("[Det25] cell ({Ci},{Cj}) opk-read {C:F0}ms{Cache} | upload {U:F1}ms | mipmap {M:F1}ms | {Px}px ({Fmt})",
+                    cell.Ci, cell.Cj, cell.ComposeMs, string.Empty,
                     cell.UploadMs, cell.MipmapMs, w, bc1 is not null ? "BC1" : "RGBA");
             }
 
@@ -5763,13 +5634,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             det05ArrSamplerLocation = -1;
             det05ArrBSamplerLocation = -1;
             det05ArrALoc = -1; det05ArrCSamplerLocation = -1;
-            det05ArrAabbLocation = -1;
-            det05ArrAlphaLocation = -1;
+            det05CellHashLoc = -1; det05HashSeedLoc = -1;
+            det05GridOriginLoc = -1; det05GridPitchLoc = -1; det05CellSizeLoc = -1;
             useDet05ArrLocation = -1;
             detailBlendLocation = -1;
             detailColorModeLocation = -1;
             det05ArrRawLocation = -1;
-            det25ArrSamplerLoc = -1; det25ArrAabbLoc = -1; det25ArrAlphaLoc = -1; useDet25ArrLoc = -1;
+            det25ArrSamplerLoc = -1; det25CellHashLoc = -1; det25HashSeedLoc = -1; useDet25ArrLoc = -1;
+            det25GridOriginLoc = -1; det25GridPitchLoc = -1; det25CellSizeLoc = -1;
             det25ArrayTexture = 0; det25ArrFreeLayers.Clear(); // kontekst padł — cele wrócą przez desired/kick
             det1mSamplerLoc = -1; det1mCovLoc = -1; useDet1mLoc = -1;
             det1mMinXyLoc = -1; det1mInvSizeLoc = -1; det1mGridDimLoc = -1; det1mSliceIdxLoc = -1;
@@ -6013,6 +5885,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             aoStrengthLoc = -1;
             bakedShadowCompLoc = -1;
             shadowsActiveThisFrame = false;
+            shadowValidLastFrame = false;
             // The planar-reflection target belonged to the dead context — drop the handles so it's rebuilt fresh.
             reflectionFbo = 0;
             reflectionColorTex = 0;
@@ -6610,7 +6483,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Alternate-frame reflection (ThrottleReflection): on odd frames reuse the previous frame's texture
         // instead of re-rendering the whole mirrored terrain. Only when the target survived at the same size
         // — a resize, context loss or a disabled frame forces a fresh render first.
-        if (ThrottleReflection && reflectionValidLastFrame && (gpuFrameCount & 1) == 1
+        if (!TemporalPassCadence.ShouldRefresh(gpuFrameCount, ThrottleReflection, reflectionValidLastFrame)
             && reflectionFbo != 0
             && reflectionTexW == Math.Max(16, vpWidth / 2) && reflectionTexH == Math.Max(16, vpHeight / 2))
         {
@@ -8296,7 +8169,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// </summary>
     private void RenderShadowMaps(GL g, Camera3D camera, Vector3 sunDirection, float aspectRatio, int vpWidth, int vpHeight)
     {
+        if (!TemporalPassCadence.ShouldRefresh(gpuFrameCount, ThrottleShadows, shadowValidLastFrame)
+            && shadowMapsAllocated)
+        {
+            shadowsActiveThisFrame = true;
+            return;
+        }
+
         shadowsActiveThisFrame = false;
+        shadowValidLastFrame = false;
         if (!shadowsEnabled || shadowDepthProgram == 0 || tileBuffers.Count == 0)
         {
             return;
@@ -8393,6 +8274,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.BindFramebuffer(FramebufferTarget.Framebuffer, (uint)prevFbo[0]);
         g.Viewport(0, 0, (uint)vpWidth, (uint)vpHeight);
         shadowsActiveThisFrame = true;
+        shadowValidLastFrame = true;
 
         if (!shadowPassLogged)
         {
@@ -8844,29 +8726,19 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         if (det25Grid is not null)
         {
-            int resident = 0, staging = 0, composing = 0, empty = 0;
+            int resident = 0, staging = 0, reading = 0, empty = 0;
             foreach (DetailCellGpu c in det25Cells.Values)
             {
-                if (c.Texture != 0) { resident++; }
-                else if (c.StagingTexture != 0 || c.Pending is not null) { staging++; }
-                else if (c.Compose is not null) { composing++; }
+                if (c.Texture != 0 || c.LayerReady) { resident++; }
+                else if (c.StagingTexture != 0 || c.Pending is not null || c.PendingBc1 is not null) { staging++; }
+                else if (c.Compose is not null) { reading++; }
                 else if (c.Empty) { empty++; }
             }
 
             Log.Information(
-                "[Mem] det25 {Cells} cells ~{Mb:F0}MB (resident {Res} staging {Stg} composing {Cmp} empty {Emp}) | desired {Des} | queue {Q} inflight {Inf} | eye {Lat:F4},{Lon:F4} cell ({Ci},{Cj})",
-                det25Cells.Count, det25ResidentBytes / Mb, resident, staging, composing, empty, det25LastDesired, det25UploadQueue.Count, det25ComposeInFlight,
+                "[Mem] det25 {Cells} cells ~{Mb:F0}MB (resident {Res} staging {Stg} reading {Read} empty {Emp}) | desired {Des} | queue {Q} inflight {Inf} | eye {Lat:F4},{Lon:F4} cell ({Ci},{Cj})",
+                det25Cells.Count, det25ResidentBytes / Mb, resident, staging, reading, empty, det25LastDesired, det25UploadQueue.Count, det25ReadInFlight,
                 det25EyeLat, det25EyeLon, det25FocusCi, det25FocusCj);
-
-            if (det25TileCache is { } tc)
-            {
-                long dm = tc.Misses;
-                Log.Information(
-                    "[Mem] det25 tilecache {Tiles} tiles ~{Mb:F0}MB | hit {Hit} miss {Miss} ({Rate:P0}) | decode avg {Dec:F1}ms/tile ({Tot:F0}ms total)",
-                    tc.Count, tc.ResidentBytes / Mb, tc.Hits, tc.Misses,
-                    (tc.Hits + tc.Misses) > 0 ? (double)tc.Hits / (tc.Hits + tc.Misses) : 0.0,
-                    dm > 0 ? tc.DecodeMillis / dm : 0.0, tc.DecodeMillis);
-            }
 
             if (det05StreamOn)
             {
@@ -8878,7 +8750,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     else if (c.Compose is not null || c.Pending is not null) { c05++; }
                 }
 
-                Log.Information("[Mem] det05 {Cells} cells ~{Mb:F0}MB (resident {Res} composing {Cmp} empty {Emp}) | desired {Des} | queue {Q}",
+                Log.Information("[Mem] det05 {Cells} cells ~{Mb:F0}MB (resident {Res} reading {Read} empty {Emp}) | desired {Des} | queue {Q}",
                     det05Cells.Count, det05ResidentBytes / Mb, r05, c05, e05, det05LastDesired, det05UploadQueue.Count);
             }
         }
@@ -9355,8 +9227,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         det05ArrBSamplerLocation = g.GetUniformLocation(program, "uOrthoDet05ArrB");
         det05ArrCSamplerLocation = g.GetUniformLocation(program, "uOrthoDet05ArrC");
         det05ArrALoc = g.GetUniformLocation(program, "uDet05ArrLayers");
-        det05ArrAabbLocation = g.GetUniformLocation(program, "uDet05Aabb[0]");
-        det05ArrAlphaLocation = g.GetUniformLocation(program, "uDet05Alpha[0]");
+        det05CellHashLoc = g.GetUniformLocation(program, "uDet05CellHash[0]");
+        det05HashSeedLoc = g.GetUniformLocation(program, "uDet05HashSeed");
+        det05GridOriginLoc = g.GetUniformLocation(program, "uDet05GridMinXmaxY");
+        det05GridPitchLoc = g.GetUniformLocation(program, "uDet05GridPitch");
+        det05CellSizeLoc = g.GetUniformLocation(program, "uDet05CellSize");
         useDet05ArrLocation = g.GetUniformLocation(program, "uUseDet05Arr");
         detailBlendLocation = g.GetUniformLocation(program, "uDetailBlendMeters");
         detailColorModeLocation = g.GetUniformLocation(program, "uOrthoDetailColorMode");
@@ -9364,8 +9239,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         toneDebugLoc = g.GetUniformLocation(program, "uToneDebug");
         det05ArrRawLocation = g.GetUniformLocation(program, "uOrthoDet05ArrRaw");
         det25ArrSamplerLoc = g.GetUniformLocation(program, "uOrthoDet25Arr");
-        det25ArrAabbLoc = g.GetUniformLocation(program, "uDet25Aabb[0]");
-        det25ArrAlphaLoc = g.GetUniformLocation(program, "uDet25AlphaArr[0]");
+        det25CellHashLoc = g.GetUniformLocation(program, "uDet25CellHash[0]");
+        det25HashSeedLoc = g.GetUniformLocation(program, "uDet25HashSeed");
+        det25GridOriginLoc = g.GetUniformLocation(program, "uDet25GridMinXmaxY");
+        det25GridPitchLoc = g.GetUniformLocation(program, "uDet25GridPitch");
+        det25CellSizeLoc = g.GetUniformLocation(program, "uDet25CellSize");
         useDet25ArrLoc = g.GetUniformLocation(program, "uUseDet25Arr");
         det1mSamplerLoc = g.GetUniformLocation(program, "uOrthoDet1m");
         det1mCovLoc = g.GetUniformLocation(program, "uOrthoDet1mCov");

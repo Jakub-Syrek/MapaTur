@@ -30,6 +30,84 @@ int parallelism = int.TryParse(GetArg("--parallel"), out int p) ? p : Math.Max(2
 // runtime ~GB/s niezależnie od poziomu). --no-zstd = strony raw (zstdBytes=0), format ten sam.
 int zstdLevel = args.Contains("--no-zstd") ? 0 : 9;
 
+// ── Szybka migracja tail L1↓ → L2↓ bez ponownego WebP→BC1 ───────────────────────────────────────────
+// Pełny tryb zachowuje wszystkie strony; --tail-only tworzy mały, izolowany zestaw do pomiaru Stage A.
+// --cell-bbox=minCi,minCj,maxCi,maxCj ogranicza test do bieżącego kadru bez dotykania AppData.
+string? compactSource = GetArg("--compact-tail-from");
+if (compactSource is not null)
+{
+    bool tailOnly = args.Contains("--tail-only");
+    int expectedCellPx = int.TryParse(GetArg("--cell-px"), out int parsedCellPx)
+        ? parsedCellPx
+        : 8192;
+    (int MinCi, int MinCj, int MaxCi, int MaxCj)? bbox = null;
+    string? bboxArg = GetArg("--cell-bbox");
+    if (bboxArg is not null)
+    {
+        int[] values = bboxArg.Split(',').Select(int.Parse).ToArray();
+        if (values.Length != 4 || values[0] > values[2] || values[1] > values[3])
+        {
+            throw new ArgumentException("--cell-bbox wymaga minCi,minCj,maxCi,maxCj");
+        }
+
+        bbox = (values[0], values[1], values[2], values[3]);
+    }
+
+    Directory.CreateDirectory(outDir);
+    string sourceIndex = Path.Combine(compactSource, "index.bin");
+    string destinationIndex = Path.Combine(outDir, "index.bin");
+    File.Copy(sourceIndex, destinationIndex, overwrite: true);
+
+    string[] sourcePacks = Directory.EnumerateFiles(compactSource, "*.opk")
+        .Where(path =>
+        {
+            if (bbox is null)
+            {
+                return true;
+            }
+
+            string[] parts = Path.GetFileNameWithoutExtension(path).Split('_');
+            return parts.Length == 2
+                && int.TryParse(parts[0], out int ci)
+                && int.TryParse(parts[1], out int cj)
+                && ci >= bbox.Value.MinCi && ci <= bbox.Value.MaxCi
+                && cj >= bbox.Value.MinCj && cj <= bbox.Value.MaxCj;
+        })
+        .ToArray();
+
+    var migrateSw = Stopwatch.StartNew();
+    long migrated = 0;
+    long failed = 0;
+    Parallel.ForEach(
+        sourcePacks,
+        new ParallelOptions { MaxDegreeOfParallelism = parallelism },
+        sourcePath =>
+        {
+            string destinationPath = Path.Combine(outDir, Path.GetFileName(sourcePath));
+            if (OrthoCompactTailMigrator.TryMigrate(
+                sourcePath,
+                destinationPath,
+                expectedCellPx,
+                tailOnly,
+                zstdLevel))
+            {
+                Interlocked.Increment(ref migrated);
+            }
+            else
+            {
+                Interlocked.Increment(ref failed);
+            }
+        });
+
+    long sourceBytes = sourcePacks.Sum(path => new FileInfo(path).Length);
+    long outputBytes = Directory.EnumerateFiles(outDir, "*.opk").Sum(path => new FileInfo(path).Length);
+    Console.WriteLine(
+        $"[compact-tail] mode={(tailOnly ? "tail-only" : "full")} packs={migrated}/{sourcePacks.Length} "
+        + $"failed={failed} source={sourceBytes / 1048576.0:F1} MiB output={outputBytes / 1048576.0:F1} MiB "
+        + $"time={migrateSw.Elapsed.TotalSeconds:F1}s");
+    return failed == 0 && migrated == sourcePacks.Length ? 0 : 1;
+}
+
 // ── Tryb --verify-full: PEŁNA walidacja warstwy (bez bake'u) ─────────────────────────────────────────
 // CRC KAŻDEJ strony, offsety/długości (rozłączne, w granicach pliku, payload za TOC), unikalność pageId
 // w pakiecie i kluczy (gi,gj) w indeksie, bijekcja indeks ↔ pliki .opk na dysku.
@@ -64,7 +142,14 @@ if (args.Contains("--verify-full"))
             long len = e.ZstdBytes > 0 ? e.ZstdBytes : e.RawBytes;
             if (e.Offset < 32 || e.Offset + len > fileLen || e.RawBytes <= 0) { layoutBad++; }
             regions.Add((e.Offset, e.Offset + len));
-            if (pack.TryReadPage(e.PageId, out _)) { pagesOk++; } else { pagesBad++; }
+            if (pack.TryReadPage(e.PageId, out _)) { pagesOk++; }
+            else
+            {
+                pagesBad++;
+                // Bez nazwy pakietu licznik BAD jest nienaprawialny: nie wiadomo, co przebić.
+                // (2026-07-31: 68 BAD stron po bake'ach przerywanych killem — trzeba było zgadywać.)
+                Console.Error.WriteLine($"[verify-full] BAD strona {e.PageId} w {c.Ci}_{c.Cj}.opk");
+            }
         }
 
         regions.Sort();
@@ -198,7 +283,11 @@ Parallel.ForEach(groups, new ParallelOptions { MaxDegreeOfParallelism = parallel
                 t => tiles[t].SrcHash);
             var have = existing.Entries.Where(e => e.PageId != OrthoPagePack.TailPageId)
                 .ToDictionary(e => e.PageId, e => e.SrcHash);
-            if (want.Count == have.Count && want.All(w => have.TryGetValue(w.Key, out ulong h) && h == w.Value))
+            bool compactTail = existing.Entries.Any(e =>
+                e.PageId == OrthoPagePack.TailPageId && e.Level == 2);
+            if (compactTail
+                && want.Count == have.Count
+                && want.All(w => have.TryGetValue(w.Key, out ulong h) && h == w.Value))
             {
                 Interlocked.Increment(ref skipped);
                 Interlocked.Add(ref pageCountTotal, existing.PageCount);
@@ -266,10 +355,11 @@ Parallel.ForEach(groups, new ParallelOptions { MaxDegreeOfParallelism = parallel
         return;
     }
 
-    // Tail: kompozyt grupy 2048↓ ... 1 (poziomy celi 1..N) — jeden bufor sekwencyjny.
+    // Kompaktowy tail: poziom celi 2↓ ... 1 px. Poziom 1 jest już obecny w zwykłych stronach
+    // (mip1 każdego kafla), więc nie wolno go duplikować — dla det05 byłoby to zbędne 8 MiB/pakiet.
     var tailParts = new List<byte[]>();
-    byte[] level = Half(groupRgba, GroupPx); // 2048
-    int px = GroupPx / 2;
+    byte[] level = Half(Half(groupRgba, GroupPx), GroupPx / 2);
+    int px = GroupPx / 4;
     while (px >= 1)
     {
         tailParts.Add(EncodeBc1(level, px));
@@ -281,7 +371,7 @@ Parallel.ForEach(groups, new ParallelOptions { MaxDegreeOfParallelism = parallel
     byte[] tail = new byte[tailParts.Sum(t => t.Length)];
     int off = 0;
     foreach (byte[] t in tailParts) { System.Buffer.BlockCopy(t, 0, tail, off, t.Length); off += t.Length; }
-    pages.Insert(0, new OrthoPagePack.PageData(OrthoPagePack.TailPageId, 1, tail, 0));
+    pages.Insert(0, new OrthoPagePack.PageData(OrthoPagePack.TailPageId, 2, tail, 0));
 
     OrthoPagePack.Write(packPath, GroupPx, pages, zstdLevel);
     Interlocked.Add(ref pageCountTotal, pages.Count);
@@ -363,8 +453,8 @@ if (det1mOut is not null)
         }
 
         var tailParts = new List<byte[]>();
-        byte[] level = Half(rgba, PackPx);
-        int px = PackPx / 2;
+        byte[] level = Half(Half(rgba, PackPx), PackPx / 2);
+        int px = PackPx / 4;
         while (px >= 1)
         {
             tailParts.Add(EncodeBc1(level, px));
@@ -376,7 +466,7 @@ if (det1mOut is not null)
         byte[] tail = new byte[tailParts.Sum(t => t.Length)];
         int off = 0;
         foreach (byte[] t in tailParts) { System.Buffer.BlockCopy(t, 0, tail, off, t.Length); off += t.Length; }
-        pages.Insert(0, new OrthoPagePack.PageData(OrthoPagePack.TailPageId, 1, tail, 0));
+        pages.Insert(0, new OrthoPagePack.PageData(OrthoPagePack.TailPageId, 2, tail, 0));
 
         string packPath = Path.Combine(det1mOut, $"{pi}_{pj}.opk");
         OrthoPagePack.Write(packPath, PackPx, pages, zstdLevel);

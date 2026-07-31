@@ -80,4 +80,34 @@ public sealed class OrthoPackIndexTests : IDisposable
         e.PageCount.Should().Be(257);
         e.FileBytes.Should().Be(45_000_000);
     }
+
+    [Fact]
+    public void WindowHasCoverage_ReturnsTrueWhenAnyIndexedTileIntersectsRuntimeWindow()
+    {
+        OrthoPackIndex.Write(
+            IndexPath,
+            16,
+            new[] { Cell(1, 1, 2, 100) },
+            new (int, int)[] { (20, 32), (40, 50) });
+        OrthoPackIndex idx = OrthoPackIndex.Load(IndexPath)!;
+
+        bool covered = idx.WindowHasCoverage(ci: 1, cj: 2, pitchTiles: 16, coverageTiles: 16);
+
+        covered.Should().BeTrue();
+    }
+
+    [Fact]
+    public void WindowHasCoverage_ReturnsFalseWhenIndexedTilesAreOutsideRuntimeWindow()
+    {
+        OrthoPackIndex.Write(
+            IndexPath,
+            16,
+            new[] { Cell(1, 1, 2, 100) },
+            new (int, int)[] { (15, 31), (32, 48) });
+        OrthoPackIndex idx = OrthoPackIndex.Load(IndexPath)!;
+
+        bool covered = idx.WindowHasCoverage(ci: 1, cj: 2, pitchTiles: 16, coverageTiles: 16);
+
+        covered.Should().BeFalse();
+    }
 }

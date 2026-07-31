@@ -206,4 +206,62 @@ public sealed class OrthoPagePackTests : IDisposable
         pack.Entries.Single().SrcHash.Should().Be(0xABCD1234u + 7,
             "przyrostowy bake porównuje hash źródła per strona (ARCHITEKTURA §8)");
     }
+
+    [Fact]
+    public void CompactTailMigration_RemovesDuplicatedL1_AndPreservesFinePages()
+    {
+        int l1Bytes = Bc1Encoder.EncodedSize(4096, 4096);
+        int l2Bytes = Bc1Encoder.EncodedSize(2048, 2048);
+        byte[] legacyTail = new byte[l1Bytes + l2Bytes + 8];
+        Array.Fill(legacyTail, (byte)0x11, 0, l1Bytes);
+        Array.Fill(legacyTail, (byte)0x22, l1Bytes, legacyTail.Length - l1Bytes);
+        var fine = Page(17, 0, 1024, 0x33);
+        OrthoPagePack.Write(
+            PackPath,
+            cellPx: 8192,
+            [
+                new OrthoPagePack.PageData(OrthoPagePack.TailPageId, 1, legacyTail, 0xCAFE),
+                fine,
+            ]);
+
+        string migratedPath = Path.Combine(dir, "migrated.opk");
+        OrthoCompactTailMigrator.TryMigrate(PackPath, migratedPath, 8192, tailOnly: false)
+            .Should().BeTrue();
+
+        using OrthoPagePack migrated = OrthoPagePack.Open(migratedPath, 8192)!;
+        OrthoPagePack.Entry tail = migrated.Entries.Single(e => e.PageId == OrthoPagePack.TailPageId);
+        tail.Level.Should().Be(2);
+        tail.RawBytes.Should().Be(legacyTail.Length - l1Bytes);
+        tail.SrcHash.Should().Be(0xCAFE);
+        migrated.TryReadPage(OrthoPagePack.TailPageId, out byte[] gotTail).Should().BeTrue();
+        gotTail.Should().AllBeEquivalentTo((byte)0x22);
+        migrated.TryReadPage(17, out byte[] gotFine).Should().BeTrue();
+        gotFine.Should().AllBeEquivalentTo((byte)0x33);
+        migrated.Entries.Single(e => e.PageId == 17).SrcHash.Should().Be(fine.SrcHash);
+    }
+
+    [Fact]
+    public void CompactTailMigration_TailOnly_WritesOneSmallL2Page()
+    {
+        int l1Bytes = Bc1Encoder.EncodedSize(4096, 4096);
+        byte[] legacyTail = new byte[l1Bytes + 4096];
+        new Random(42).NextBytes(legacyTail);
+        OrthoPagePack.Write(
+            PackPath,
+            8192,
+            [
+                new OrthoPagePack.PageData(OrthoPagePack.TailPageId, 1, legacyTail, 7),
+                Page(4, 0, 1024, 0x44),
+            ]);
+
+        string migratedPath = Path.Combine(dir, "tail-only.opk");
+        OrthoCompactTailMigrator.TryMigrate(PackPath, migratedPath, 8192, tailOnly: true)
+            .Should().BeTrue();
+
+        using OrthoPagePack migrated = OrthoPagePack.Open(migratedPath, 8192)!;
+        migrated.PageCount.Should().Be(1);
+        migrated.Entries.Single().Level.Should().Be(2);
+        migrated.Entries.Single().RawBytes.Should().Be(4096);
+        migrated.TryReadPage(4, out _).Should().BeFalse();
+    }
 }

@@ -30,3 +30,16 @@ bez wyraźnej zgody użytkownika (ustanowione 2026-07-23).
 18. Nie kończ komunikatu kolejną obietnicą „następny fix już rozwiąże problem". Raportuj: co zmierzono, co rzeczywiście działa w aplikacji, co odrzucono i jakie ograniczenia nadal widać.
 19. **Konflikt wytycznych rozstrzyga WYŁĄCZNIE użytkownik — zawsze pytaj.** Gdy dwie zasady, dwa kryteria albo zasada i pomiar wskazują przeciwne decyzje (klasyczny przypadek: zasada 1 — obraz kontra płynność), agentowi NIE WOLNO wybrać strony samodzielnie ani „na podstawie liczby". Zatrzymaj się, przedstaw obie opcje z konkretnym kosztem każdej i poczekaj na decyzję. Dotyczy to również **cofania stanu, który użytkownik już widział i zaakceptował** — takiego stanu nie wolno wycofać na podstawie własnego pomiaru agenta; jeżeli pomiar mówi coś niepokojącego, pokazujesz pomiar i pytasz, a stan zostaje do czasu odpowiedzi.
     Przykład, który tę zasadę ustanowił (2026-07-25): agent zbudował det05 z 96 celami, użytkownik latał na tym nad Morskim Okiem i miał detal w całym kadrze — po czym agent SAM cofnął to do 48 cel, uzasadniając „terrain 18,7 ms, 32 FPS, łamie płynność". Użytkownik odkrył regresję dzień później. Po przywróceniu 96 zmierzono `terrain 0,55 ms / sumGpu 4,78 ms` i werdykt brzmiał „jest dużo lepiej" — czyli agent nie tylko przekroczył swoje uprawnienia, ale zrobił to na podstawie pomiaru, który się nie odtworzył.
+20. **Dwaj agenci na jednej maszynie = jawna blokada apki przez wspólny plik.** Gdy nad MapaTur pracuje
+    równolegle więcej niż jeden agent (np. Claude na jednej gałęzi i Codex na drugiej, w osobnych
+    worktree'ach), obowiązuje protokół z **`C:\Repos\APP-LOCK.md`** — plik leży POZA repozytoriami,
+    bo gałęzie i katalogi robocze są różne. Zasady: przed uruchomieniem apki albo bake'u przeczytaj
+    STATUS; zajmując — ustaw ZAJĘTE (kto/od/cel) i dopisz wiersz do dziennika; **po teście ZAMKNIJ
+    apkę i ustaw WOLNE**; nigdy nie zamykaj cudzej instancji; nie uruchamiaj drugiej instancji obok.
+    Powód jest mierzalny, nie kosmetyczny: (a) `OrthoBake --layer det05` potrzebuje ~8 GB RAM
+    i zamkniętej apki — przy działającej pada na `Unable to allocate pixels for the bitmap`
+    (zdarzyło się 2026-07-26); (b) dwie instancje to 2×8 GB tablic det05 na karcie 16 GB, co wygląda
+    identycznie jak „detal się nie odświeża"; (c) katalog danych w AppData jest WSPÓLNY — podmiana
+    kafli, `_coverage_p16.txt` albo pakietów `.opk` w trakcie cudzej sesji może sprawić, że drugi
+    agent wczyta plik ucięty i **cała warstwa 5 cm mu zniknie**, a on będzie to diagnozował jako
+    własny błąd. Ustanowione przez użytkownika 2026-07-27.

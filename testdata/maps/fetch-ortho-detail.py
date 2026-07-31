@@ -61,13 +61,21 @@ REGIONS = {  # west, south, east, north
 # so it can fetch in PARALLEL with the GUGiK levels without sharing a rate limit. WMS 1.3.0 + CRS:84 keeps the
 # BBOX lon,lat (EPSG:4326 under 1.3.0 would swap the axes).
 ZBGIS_WMS = "https://zbgisws.skgeodesy.sk/zbgis_ortofoto_wms/service.svc/get"
+ATTR_GUGIK = "Dane GUGiK / geoportal.gov.pl (PZGIK, dane otwarte)"
+ATTR_ZBGIS = "Ortofotomozaika SR (c) GKU Bratislava, NLC Zvolen / UGKK SR, CC BY 4.0"
 
 # mask "pl" = fetch only where the GUGiK footprint has data (skip the Slovak side); "sk" = the inverse (fetch
 # the Slovak side + border straddlers, skip fully-Polish tiles GUGiK already owns).
 LEVELS = {
-    "det25": {"res_m": 0.25, "wms": WMS_STD, "version": "1.1.1", "crs": "EPSG:4326", "layer": "Raster", "mask": "pl"},
-    "det05": {"res_m": 0.05, "wms": WMS_HIGH, "version": "1.1.1", "crs": "EPSG:4326", "layer": "Raster", "mask": "pl"},
-    "sk20": {"res_m": 0.20, "wms": ZBGIS_WMS, "version": "1.3.0", "crs": "CRS:84", "layer": "1", "mask": "sk"},
+    "det25": {"res_m": 0.25, "wms": WMS_STD, "version": "1.1.1", "crs": "EPSG:4326", "layer": "Raster", "mask": "pl", "attr": ATTR_GUGIK},
+    "det05": {"res_m": 0.05, "wms": WMS_HIGH, "version": "1.1.1", "crs": "EPSG:4326", "layer": "Raster", "mask": "pl", "attr": ATTR_GUGIK},
+    "sk20": {"res_m": 0.20, "wms": ZBGIS_WMS, "version": "1.3.0", "crs": "CRS:84", "layer": "1", "mask": "sk", "attr": ATTR_ZBGIS},
+    "sk05": {"res_m": 0.05, "wms": ZBGIS_WMS, "version": "1.3.0", "crs": "CRS:84", "layer": "1", "mask": "sk", "attr": ATTR_ZBGIS},
+    # sk25 = warstwa POSREDNIA dla strony SK, res IDENTYCZNA jak det25 (0.25 m), zeby kafle ladowaly
+    # na TEJ SAMEJ kracie i wchodzily do drzewa det25. Bez niej za pierscieniem det05 (~3.2 km wokol
+    # kamery) Slowacja spada od razu do bazy ~1.5 m/px — skok 30x, zdiagnozowane 2026-07-29 przy
+    # Gierlachu (det25 to dane GUGiK, czyli TYLKO Polska: sasiedztwo 5x5 = 0/25 na SK, 25/25 na PL).
+    "sk25": {"res_m": 0.25, "wms": ZBGIS_WMS, "version": "1.3.0", "crs": "CRS:84", "layer": "1", "mask": "sk", "attr": ATTR_ZBGIS},
 }
 
 
@@ -117,6 +125,17 @@ def fetch_mask(bbox):
     raise RuntimeError(f"coverage mask failed: {last}")
 
 
+def mask_border_lat(mask, mbbox):
+    """Per mask column: latitude of the SOUTH edge of the PL data footprint (~the state border).
+    NaN where the column has no PL data at all."""
+    w, s, e, n = mbbox
+    H, W = mask.shape
+    last_row = H - 1 - mask[::-1, :].argmax(axis=0)
+    lat = n - (last_row + 0.5) * (n - s) / H
+    lat[~mask.any(axis=0)] = np.nan
+    return lat
+
+
 def mask_fraction(mask, mbbox, tb):
     w, s, e, n = mbbox
     H, W = mask.shape
@@ -162,6 +181,10 @@ def main():
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--min-coverage", type=float, default=0.02)
+    ap.add_argument("--strip-km", type=float, default=0.0,
+                    help="mask sk only: fetch just a strip this many km south of the PL data edge (state border)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="classify tiles against the mask and report counts; no tile fetches")
     a = ap.parse_args()
 
     bbox = REGIONS[a.region] if a.region else tuple(float(x) for x in a.bbox.split(","))
@@ -179,6 +202,8 @@ def main():
           f"= {total} tiles (res {lv['res_m']} m)")
 
     mask, mbbox = fetch_mask(bbox)
+    border_lat = mask_border_lat(mask, mbbox) if a.strip_km > 0 else None
+    strip_deg = a.strip_km * 1000.0 / M_PER_DEG_LAT
     tiles = [(i, j) for j in range(j0, j1) for i in range(i0, i1)]
     if a.limit:
         tiles = tiles[:a.limit]
@@ -199,6 +224,14 @@ def main():
             return ("sk_side", ij, None)              # PL level: no GUGiK data (Slovak side)
         if lv["mask"] == "sk" and frac > (1.0 - a.min_coverage):
             return ("sk_side", ij, None)              # SK level: fully Polish tile, GUGiK owns it
+        if border_lat is not None:
+            c0 = max(0, int((tb[0] - mbbox[0]) / (mbbox[2] - mbbox[0]) * mask.shape[1]))
+            c1 = min(mask.shape[1], int((tb[2] - mbbox[0]) / (mbbox[2] - mbbox[0]) * mask.shape[1]) + 1)
+            b = float(np.nanmedian(border_lat[c0:c1])) if c1 > c0 else float("nan")
+            if not math.isnan(b) and tb[3] < b - strip_deg:
+                return ("far", ij, None)              # strip mode: too far south of the border
+        if a.dry_run:
+            return ("would", ij, None)
         try:
             im = fetch_tile(lv, tb)
         except Exception as ex:
@@ -210,7 +243,7 @@ def main():
         im.save(p, "WEBP", quality=90, method=5)
         return ("ok", ij, nod)
 
-    ok = skipn = sk_side = nodata = err = partial = 0
+    ok = skipn = sk_side = nodata = err = partial = far = would = 0
     errors = []
     new_skip = []
     t0 = time.time()
@@ -227,6 +260,10 @@ def main():
                 skipn += 1
             elif st == "sk_side":
                 sk_side += 1
+            elif st == "far":
+                far += 1
+            elif st == "would":
+                would += 1
             elif st in ("nodata", "nodata_cached"):
                 nodata += 1
                 if st == "nodata":
@@ -237,8 +274,9 @@ def main():
             if k % 500 == 0 or k == len(tiles):
                 rate = k / max(1e-6, time.time() - t0)
                 eta = (len(tiles) - k) / max(1e-6, rate) / 3600
-                print(f"  {k}/{len(tiles)} ok={ok} exist={skipn} sk={sk_side} nodata={nodata} "
-                      f"err={err} partial={partial} | {rate:.1f} tiles/s ETA {eta:.1f} h", flush=True)
+                print(f"  {k}/{len(tiles)} ok={ok} exist={skipn} sk={sk_side} far={far} would={would} "
+                      f"nodata={nodata} err={err} partial={partial} | {rate:.1f} tiles/s ETA {eta:.1f} h",
+                      flush=True)
 
     if new_skip:
         with open(skiplist_path, "a", encoding="utf-8") as fh:
@@ -252,14 +290,14 @@ def main():
         "res_m": lv["res_m"], "tile_px": TILE_PX,
         "grid_lon0": GRID_LON0, "grid_lat0": GRID_LAT0, "grid_ref_lat": GRID_REF_LAT,
         "dlon": dlon, "dlat": dlat, "region": a.region or a.bbox, "bbox_wsen": list(bbox),
-        "source": lv["wms"], "attribution": "Dane GUGiK / geoportal.gov.pl (PZGIK, dane otwarte)",
+        "source": lv["wms"], "attribution": lv.get("attr", ATTR_GUGIK),
     }
     mpath = os.path.join(out_dir, "manifest.json")
     prev = json.load(open(mpath, encoding="utf-8")) if os.path.exists(mpath) else {}
     prev.update(manifest)
     json.dump(prev, open(mpath, "w", encoding="utf-8"), indent=2)
-    print(f"[{a.area}/{a.level}] DONE ok={ok} exist={skipn} sk_side={sk_side} nodata={nodata} "
-          f"err={err} partial={partial} in {(time.time()-t0)/3600:.2f} h -> {out_dir}")
+    print(f"[{a.area}/{a.level}] DONE ok={ok} exist={skipn} sk_side={sk_side} far={far} would={would} "
+          f"nodata={nodata} err={err} partial={partial} in {(time.time()-t0)/3600:.2f} h -> {out_dir}")
     if errors:
         print("first errors:", errors[:5])
 

@@ -49,6 +49,32 @@ public sealed class OrthoPackIndex
     /// <summary>Czy kafel źródłowy (ti,tj) istniał w bake'u (bitmapa pokrycia — shaderowy coverage-gate).</summary>
     public bool IsTileCovered(int ti, int tj) => tileSet.Contains(Key(ti, tj));
 
+    /// <summary>
+    /// Czy nakładkowe okno runtime'owej celi zawiera choć jeden kafel obecny w prebake'u.
+    /// To jest jedyne źródło coverage produkcyjnego streamera: bez skanu drzewa WebP i bez
+    /// osobnego pliku <c>_coverage*.txt</c>, który mógł się rozjechać z aktywnym pakietem.
+    /// </summary>
+    public bool WindowHasCoverage(int ci, int cj, int pitchTiles, int coverageTiles)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(pitchTiles, 0);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(coverageTiles, 0);
+
+        int ti0 = ci * pitchTiles;
+        int tj0 = cj * pitchTiles;
+        for (int ti = ti0; ti < ti0 + coverageTiles; ti++)
+        {
+            for (int tj = tj0; tj < tj0 + coverageTiles; tj++)
+            {
+                if (IsTileCovered(ti, tj))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>Atomowy zapis indeksu warstwy.</summary>
     public static void Write(
         string path, int tilesPerCell, IReadOnlyList<CellEntry> cells, IReadOnlyList<(int Ti, int Tj)> coveredTiles)
