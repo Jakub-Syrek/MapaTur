@@ -74,32 +74,22 @@ public static class HybridTerrainPilotPackageBaker
             geometricError: 0f)
             .Where(HasVisibleRock)
             .ToArray();
-        HybridTerrainMeshPage[] lod1 = HybridTerrainPageBaker.Bake(
+        HybridTerrainMeshPage[] lod1 = HybridTerrainPageBaker.BakeSimplified(
                 surface,
                 options.PageSizeMeters * 2f,
-                lod: 0,
-                geometricError: 0f)
-            .Where(HasVisibleRock)
-            .Select(page => HybridTerrainPageLodBuilder.Build(
-                page,
                 lod: 1,
                 options.Lod1TargetTriangleFraction,
                 options.Lod1MaximumErrorMeters,
-                simplifier))
+                simplifier)
             .Where(HasVisibleRock)
             .ToArray();
-        HybridTerrainMeshPage[] lod2 = HybridTerrainPageBaker.Bake(
+        HybridTerrainMeshPage[] lod2 = HybridTerrainPageBaker.BakeSimplified(
                 surface,
                 options.PageSizeMeters * 4f,
-                lod: 0,
-                geometricError: 0f)
-            .Where(HasVisibleRock)
-            .Select(page => HybridTerrainPageLodBuilder.Build(
-                page,
                 lod: 2,
                 options.Lod2TargetTriangleFraction,
                 options.Lod2MaximumErrorMeters,
-                simplifier))
+                simplifier)
             .Where(HasVisibleRock)
             .ToArray();
         HybridTerrainMeshPage[] pages = [.. lod0, .. lod1, .. lod2];

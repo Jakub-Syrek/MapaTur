@@ -87,6 +87,33 @@ public sealed class HybridTerrainPageBakerTests
         page.GeometricError.Should().BeGreaterThan(0f);
     }
 
+    [Fact]
+    public void should_simplify_dense_parent_before_ushort_page_packing()
+    {
+        // Arrange
+        const int vertexCount = 65_538;
+        Vector3[] positions = Enumerable.Range(0, vertexCount)
+            .Select(index => new Vector3(index % 128, (index / 128) % 128, index / 16_384f))
+            .ToArray();
+        uint[] indices = Enumerable.Range(0, vertexCount).Select(index => (uint)index).ToArray();
+        HybridTerrainMesh mesh = Create(
+            positions,
+            Enumerable.Repeat(byte.MaxValue, vertexCount).ToArray(),
+            indices);
+
+        // Act
+        HybridTerrainMeshPage page = HybridTerrainPageBaker.BakeSimplified(
+            mesh,
+            pageSizeMeters: 128f,
+            lod: 2,
+            targetTriangleFraction: 0.12f,
+            maximumGeometricErrorMeters: 1.2f,
+            new FirstTriangleSimplifier()).Single();
+
+        // Assert
+        page.VertexCount.Should().Be(3);
+    }
+
     private static HybridTerrainMesh Create(
         Vector3[] positions,
         byte[] rockBlend,
@@ -100,4 +127,14 @@ public sealed class HybridTerrainPageBakerTests
             rockBlend,
             materialVariants: Enumerable.Repeat((ushort)3, positions.Length).ToArray(),
             indices);
+
+    private sealed class FirstTriangleSimplifier : IScannedRockIndexSimplifier
+    {
+        public ScannedRockIndexSimplification Simplify(
+            ReadOnlySpan<uint> indices,
+            ReadOnlySpan<float> positions,
+            int vertexCount,
+            ScannedRockSimplificationRequest request) =>
+            new(indices[..3].ToArray(), GeometricErrorMeters: 0.1f);
+    }
 }

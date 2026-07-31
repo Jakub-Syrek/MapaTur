@@ -27,6 +27,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // Kept in its own renderer so the photogrammetric path adds only narrow integration points here. This
     // materially reduces merge conflicts with the parallel ortho-streaming work in this already-large class.
     private readonly PhotogrammetricRockGlLayer photogrammetricRock = new();
+    private readonly HybridTerrainGlLayer hybridTerrain = new();
 
     // Terrain vertex shader: carries the UNSHADED base colour, world-space normal, UV and world-space
     // position to the fragment stage. Position is needed so the fragment can compute an exponential-fog
@@ -39,6 +40,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "layout(location=3) in vec2 aTex;\n" +
         "layout(location=4) in float aDetail;\n" + // per-vertex mid-freq relief amplitude (m RMS); 0 = none
         "uniform mat4 uMvp;\n" +
+        "uniform float uHybridCompact;\n" +
+        "uniform vec3 uHybridPageMin;\n" +
+        "uniform vec3 uHybridPageExtent;\n" +
         // Wider-coverage TWO-FRAME scheme (so a future re-anchor never disturbs procedural effects):
         //   uModelOffset  → RENDER frame (small, near the camera): drives gl_Position + vWorldPos, which feed the
         //                   VIEW-DEPENDENT terms (view direction, camera distance, fog). Re-anchor moves this.
@@ -55,7 +59,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "out vec3 vWorldPos;\n" +
         "out vec3 vStableWorldPos;\n" +
         "out float vDetail;\n" +
-        "void main(){ vColor = aColor; vNormal = aNormal; vTex = aTex; vDetail = aDetail; vec3 worldPos = aPos + uModelOffset; vWorldPos = worldPos; vStableWorldPos = aPos + uStableOffset; gl_Position = uMvp * vec4(worldPos, 1.0); }\n";
+        "out float vHybridRock;\n" +
+        "vec3 octDecode(vec2 e){ vec3 v=vec3(e.x,e.y,1.0-abs(e.x)-abs(e.y)); if(v.z<0.0){ vec2 s=vec2(e.x>=0.0?1.0:-1.0,e.y>=0.0?1.0:-1.0); v.xy=(1.0-abs(v.yx))*s; } return normalize(v); }\n" +
+        "void main(){\n" +
+        "  bool hybrid=uHybridCompact>0.5;\n" +
+        "  vec3 sourcePos=hybrid ? uHybridPageMin+(aPos*uHybridPageExtent) : aPos;\n" +
+        "  vColor=hybrid ? vec4(vec3(0.46)*(0.82+0.18*aColor.r),1.0) : aColor;\n" +
+        "  vNormal=hybrid ? octDecode(aNormal.xy) : aNormal; vTex=aTex;\n" +
+        "  vDetail=hybrid ? 0.0 : aDetail; vHybridRock=hybrid ? aColor.g : 1.0;\n" +
+        "  vec3 worldPos=sourcePos+uModelOffset; vWorldPos=worldPos;\n" +
+        "  vStableWorldPos=sourcePos+uStableOffset; gl_Position=uMvp*vec4(worldPos,1.0);\n" +
+        "}\n";
 
     // Per-pixel Lambert lighting + exponential-fog aerial perspective. shade = ambient + (1-ambient) *
     // max(0, dot(N, L)). When an ortho image is bound (uUseOrtho=1) the surface colour is sampled from it
@@ -72,6 +86,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "in vec3 vWorldPos;\n" +          // RENDER frame — view-dependent terms only (view dir, camera distance, fog)
         "in vec3 vStableWorldPos;\n" +    // STABLE/global frame — all procedural sampling (noise/ripple/rock/cloud/water shape)
         "in float vDetail;\n" +           // per-vertex mid-freq relief amplitude (m RMS) discarded by the coarse LOD; 0 = none
+        "in float vHybridRock;\n" +
         "uniform vec3 uLightDir;\n" +
         "uniform vec3 uSnowSun;\n" + // sun used for the SNOW-line sun-melt; pinned during a film so the cover holds while lighting sweeps
         "uniform float uAmbient;\n" +
@@ -745,7 +760,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // smeared. The old 40→65° band also swallowed 40–60° slopes that have crisp, real rock texture in
         // the imagery (Orla Perć read worse WITH the material than with plain ortho — user 2026-07-02);
         // the Slovak big north faces are 65°+ so they keep their granite rescue.
-        "  float rockW = (uSlopeMode < 0.5) ? smoothstep(45.0, 60.0, rockSlopeDeg) * uRockStrength : 0.0;\n" +
+        "  float rockW = (uSlopeMode < 0.5) ? smoothstep(45.0, 60.0, rockSlopeDeg) * uRockStrength * vHybridRock : 0.0;\n" +
         // NESTED granite (v7, 2026-07-03, matched to user reference photos — Orla Perć chimney close-up +
         // Granaty wall): real Tatra rock is MULTI-SCALE and follows the FALL LINE, not any single motif.
         // Two nested Voronoi layers on the triplanar plane:
@@ -2177,6 +2192,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
     private uint program;
     private int mvpLocation = -1;
+    private int hybridCompactLocation = -1;
+    private int hybridPageMinLocation = -1;
+    private int hybridPageExtentLocation = -1;
     private int modelOffsetLocation = -1;
     private int stableOffsetLocation = -1;
     private int debugPolyLocation = -1;
@@ -3468,10 +3486,23 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// <summary>Enables prebaked RMP2 geometry when a catalog is present; missing/not-ready pages stay DEM.</summary>
     public bool PhotogrammetricRockEnabled { get; set; } = true;
 
+    /// <summary>
+    /// Enables unified RMP3 replacement geometry. Turning it off is a hard switch: streaming is stopped and
+    /// its GPU pages are released on the next frame; the ordinary DEM remains the complete fallback.
+    /// </summary>
+    public bool HybridTerrainEnabled { get; set; } = true;
+
+    public bool HasHybridTerrainConfiguration => hybridTerrain.IsConfigured;
+
     public void SetPhotogrammetricRockRoot(string? root) =>
         photogrammetricRock.Configure(
             root,
             Math.Clamp(OrthoVramBudgetBytes / 32, 128L << 20, 512L << 20));
+
+    public void SetHybridTerrainRoot(string? root) =>
+        hybridTerrain.Configure(
+            root,
+            Math.Clamp(OrthoVramBudgetBytes / 24, 384L << 20, 512L << 20));
 
     /// <summary>
     /// When <c>true</c>, the terrain base albedo is painted by elevation-zone biomes (meadow/hala, scree/piargi,
@@ -6022,14 +6053,22 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             StreamOrthoTextures(gl, mvp, tiles, camera.Position);
         }
 
-        // RMP2 residency runs before every geometry pass: it only harvests completed worker I/O and uploads
-        // at most two pages, so the render thread never opens a file or produces mesh/material data.
+        // RMP3 is the unified replacement path. It owns no material textures and uploads at most two compact
+        // pages per frame. When configured it supersedes the older RMP2 overlay, avoiding double geometry.
+        hybridTerrain.PrepareFrame(
+            gl,
+            camera,
+            vpWidth,
+            vpHeight,
+            HybridTerrainEnabled);
+
+        // RMP2 remains a rollback path only. It must not run alongside configured RMP3.
         photogrammetricRock.PrepareFrame(
             gl,
             camera,
             vpWidth,
             vpHeight,
-            PhotogrammetricRockEnabled);
+            PhotogrammetricRockEnabled && !hybridTerrain.IsConfigured);
 
         // Cascaded Shadow Maps depth pass (Krok 5): render terrain depth from the sun's POV into the cascade
         // shadow maps before the sky/terrain passes. Self-contained — restores the bound FBO + viewport.
@@ -6300,6 +6339,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // for procedural sampling (vStableWorldPos). Set once here; not changed by any pass.
         gl.Uniform3(modelOffsetLocation, 0f, 0f, 0f);
         gl.Uniform3(stableOffsetLocation, 0f, 0f, 0f);
+        gl.Uniform1(hybridCompactLocation, 0f);
         gl.Uniform1(debugUvLocation, 0f); // UV/clamp viz off
         gl.Uniform1(debugTerrainViewLocation, DebugTerrainView);
         // Ortho coverage AABB + soft edge blend. Convert the coverage geo-bounds to world XY via the tiles'
@@ -6538,6 +6578,20 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.ActiveTexture(TextureUnit.Texture0);
             gl.Uniform1(orthoSamplerLocation, 0);
             uint reflBound = 0;
+            if (HybridTerrainEnabled)
+            {
+                hybridTerrain.DrawTerrainProgram(
+                    gl,
+                    reflMvp,
+                    hybridCompactLocation,
+                    hybridPageMinLocation,
+                    hybridPageExtentLocation,
+                    useOrthoLocation,
+                    useDet25Location,
+                    useDet05Location,
+                    isBaseSkinLocation);
+            }
+
             foreach (KeyValuePair<TerrainMesh3D, TileBuffers> entry in tileBuffers)
             {
                 // H5 (2026-07-23): the mirror used to draw EVERY resident tile — the whole-Tatra base ring,
@@ -6747,6 +6801,20 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // evict cells that are still ON SCREEN (see CellVisibleLastFrame).
         lastTerrainMvp = mvp;
         lastTerrainMvpValid = true;
+        if (HybridTerrainEnabled)
+        {
+            hybridTerrain.DrawTerrainProgram(
+                gl,
+                mvp,
+                hybridCompactLocation,
+                hybridPageMinLocation,
+                hybridPageExtentLocation,
+                useOrthoLocation,
+                useDet25Location,
+                useDet05Location,
+                isBaseSkinLocation);
+        }
+
         foreach (KeyValuePair<TerrainMesh3D, TileBuffers> entry in tileBuffers)
         {
             // H7 (2026-07-23): frustum-cull the MAIN terrain draws. The resident set is the whole streamed
@@ -9273,6 +9341,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.DetachShader(program, vs);
         g.DetachShader(program, fs);
         mvpLocation = g.GetUniformLocation(program, "uMvp");
+        hybridCompactLocation = g.GetUniformLocation(program, "uHybridCompact");
+        hybridPageMinLocation = g.GetUniformLocation(program, "uHybridPageMin");
+        hybridPageExtentLocation = g.GetUniformLocation(program, "uHybridPageExtent");
         modelOffsetLocation = g.GetUniformLocation(program, "uModelOffset");
         stableOffsetLocation = g.GetUniformLocation(program, "uStableOffset");
         debugPolyLocation = g.GetUniformLocation(program, "uDebugPoly");
@@ -13981,10 +14052,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         if (gl is null)
         {
             photogrammetricRock.Dispose(null);
+            hybridTerrain.Dispose(null);
             return;
         }
 
         photogrammetricRock.Dispose(gl);
+        hybridTerrain.Dispose(gl);
         ReleaseTiles(gl);
         DeleteLine(gl, ref trailLines);
         DeleteLine(gl, ref trailLinesBlack);

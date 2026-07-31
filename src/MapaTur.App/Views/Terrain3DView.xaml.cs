@@ -8506,6 +8506,8 @@ public partial class Terrain3DView : ContentView
         try
         {
             glRenderer ??= new Services.Terrain3DGlRenderer();
+            glRenderer.SetHybridTerrainRoot(ResolveHybridTerrainRoot());
+            glRenderer.HybridTerrainEnabled = RockMaterialEnabled;
             glRenderer.SetPhotogrammetricRockRoot(ResolvePhotogrammetricRockRoot());
             glRenderer.PhotogrammetricRockEnabled = RockMaterialEnabled;
             glRenderer.OrthoEnabled = ShowOrtho; // premium menu "Ortofoto" toggle (textures stay resident)
@@ -8693,6 +8695,17 @@ public partial class Terrain3DView : ContentView
                 "dem",
                 "rock-photogrammetry",
                 "tatry");
+    }
+
+    private static string ResolveHybridTerrainRoot()
+    {
+        string? developmentOverride = Environment.GetEnvironmentVariable("MAPATUR_ROCK_RMP3_ROOT");
+        return !string.IsNullOrWhiteSpace(developmentOverride)
+            ? developmentOverride
+            : System.IO.Path.Combine(
+                Microsoft.Maui.Storage.FileSystem.AppDataDirectory,
+                "dem",
+                "rock-hybrid-rmp3");
     }
 
     // Decodes the ortho tiles to tightly-packed top-row-first RGBA8 (row 0 = north, matching the mesh UVs)
