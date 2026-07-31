@@ -38,9 +38,10 @@ odwracalne bez ponownego fetchu).
 1. **Sprzątanie ~15,4 GB** — `opk/det25-prerim`+`det1m-prerim` (8,4 GB) i `gpu-cache` (6,8 GB)
    czekają na „kasuj" usera od 07-25. Do tego dochodzą nowe kandydatury po dzisiejszym dniu:
    `sk25-harm-prewm`, `det25-premerge`, stare backupy — policzyć i zaproponować listą.
-2. **Instalka** — runtime ~185 GB; realny pakiet ~132 GB, jeśli test „czysta instalacja bez katalogu
-   webp det05" przejdzie (runtime jest już `.opk`-only — sprawdzić, czy setup nie gate'uje się na
-   istnieniu katalogu kafli).
+2. **Instalka — WSTRZYMANA decyzją usera 07-31: „z instalką czekamy na proceduralne skały od
+   Codeksa"** (RMP3 wejdzie do pakietu). Gdy Codex domknie: test „czysta instalacja bez katalogu
+   webp det05" (runtime jest już `.opk`-only — sprawdzić, czy setup nie gate'uje się na istnieniu
+   katalogu kafli); ~132 GB zamiast 185 GB + paczka RMP3.
 3. **Východ-2025 (15 cm)** — sprawdzać REST-em (TILE-PRODUCTION §11 krok 0); po publikacji rdzeń
    (Rysy/Gierlach/Łomnica, dziś 2022/20 cm) odświeżyć jednym przebiegiem pipeline'u (sk05 i sk25!).
 4. **Szew PL|SK z bliska** — deshadow strony POLSKIEJ (R4); materiał w pamięci epiki
