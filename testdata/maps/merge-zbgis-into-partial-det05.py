@@ -1,25 +1,29 @@
-"""Merge pikseli ZBGIS (sk05-harm) w CZESCIOWE kafle det05 (straddlery granicy / krawedzi kampanii).
+"""Merge pikseli ZBGIS (sk-harm) w CZESCIOWE kafle detalu GUGiK (straddlery granicy / krawedzi kampanii).
 
-Problem: det05 (GUGiK HighRes) ma 3381 kafli czesciowych (_partial.txt) z wypelnieniem tam, gdzie
-GUGiK konczy dane. Resume-skip fetchera nigdy ich nie uzupelni. ZBGIS siega za granice PL (nakladka),
-wiec sk05-harm (juz zharmonizowany do tonu bazy) moze je wypelnic w calosci.
+Problem: warstwa GUGiK ma kafle czesciowe z wypelnieniem tam, gdzie GUGiK konczy dane.
+Resume-skip fetchera nigdy ich nie uzupelni. ZBGIS siega za granice PL (nakladka), wiec
+zharmonizowany sk-harm moze je wypelnic w calosci.
+
+Poziomy (--level):
+  sk05: det05 (GUGiK HighRes, fill BIALY) <- sk05-harm; kandydaci z det05/_partial.txt (3381)
+  sk25: det25 (GUGiK Standard, fill CZARNY §9.1) <- sk25-harm; kandydaci = det25/_partial.txt
+        ∪ WSZYSTKIE kolizje det25∩sk25-harm (177 straddlerow granicy — bez merge'u strona SK
+        tych kafli ma po bake'u alfa=0 z ZeroAlphaOnNodataRim = pas ~128 m bez warstwy 25 cm)
 
 Ustalenia pomiarowe (2026-07-26):
-  * fill GUGiK HighRes = BIALY (nie czarny jak det25/Standard §9.1); przez stratny WebP zostaje
-    rabek near-white -> zalew od jadra bieli (min>=252) przez min>=240, 8-spojny;
+  * fill GUGiK HighRes = BIALY; przez stratny WebP zostaje rabek near-white -> zalew od jadra
+    bieli (min>=252) przez min>=240, 8-spojny;
+  * symetrycznie czarny fill (jadro dokladne 0, zalew luma<=16, krawedz) — glowna sciezka det25;
   * TYLKO komponenty dotykajace KRAWEDZI kafla (fill zawsze wychodzi poza kafel; snieg = bloby
     wewnetrzne i ma zostac — lekcja detektorow sniegu z epiki deshadow);
-  * symetrycznie czarny fill (jadro dokladne 0, zalew luma<=16, krawedz) — na wypadek kafli
-    z czarnym wypelnieniem;
   * piksele GUGiK poza maska fillu zostaja BIT-W-BIT (kopiowanie tylko maski).
 
-Zrodlo pikseli SK: sk05-harm/<i>/<j>.webp (pilot fetchuje straddlery, maska "sk" 2-98%).
-Brak kafla sk05-harm (krawedzie kampanii gleboko w PL poza nakladka) -> skip.
-Backup oryginalu: det05-premerge/<i>/<j>.webp (rollback = przywrocenie plikow z backupu).
+Brak kafla sk-harm (krawedzie kampanii gleboko w PL poza nakladka) -> skip.
+Backup oryginalu: <det>-premerge/<i>/<j>.webp (rollback = przywrocenie plikow z backupu).
 
 Run:
-  python testdata/maps/merge-zbgis-into-partial-det05.py --dry-run   # tylko statystyki maski
-  python testdata/maps/merge-zbgis-into-partial-det05.py --write
+  python testdata/maps/merge-zbgis-into-partial-det05.py --level sk25 --dry-run
+  python testdata/maps/merge-zbgis-into-partial-det05.py --level sk25 --write
 """
 from __future__ import annotations
 
@@ -32,9 +36,12 @@ from scipy import ndimage
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.normpath(os.path.join(SCRIPT_DIR, "..", ".."))
-DET05 = os.path.join(REPO_ROOT, "dem", "ortho-detail", "tatry", "det05")
-SKH = os.path.join(REPO_ROOT, "dem", "ortho-detail", "tatry", "sk05-harm")
-BACKUP = os.path.join(REPO_ROOT, "dem", "ortho-detail", "tatry", "det05-premerge")
+TATRY = os.path.join(REPO_ROOT, "dem", "ortho-detail", "tatry")
+LEVELS = {
+    "sk05": {"det": "det05", "skh": "sk05-harm", "backup": "det05-premerge", "collisions": False},
+    "sk25": {"det": "det25", "skh": "sk25-harm", "backup": "det25-premerge", "collisions": True},
+}
+DET = SKH = BACKUP = None
 
 
 def fill_mask(a: np.ndarray) -> np.ndarray:
@@ -59,17 +66,33 @@ def fill_mask(a: np.ndarray) -> np.ndarray:
 
 
 def main() -> None:
+    global DET, SKH, BACKUP
     ap = argparse.ArgumentParser()
+    ap.add_argument("--level", default="sk05", choices=list(LEVELS))
     ap.add_argument("--write", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
     if not (a.write or a.dry_run):
         print(__doc__)
         return
+    lv = LEVELS[a.level]
+    DET = os.path.join(TATRY, lv["det"])
+    SKH = os.path.join(TATRY, lv["skh"])
+    BACKUP = os.path.join(TATRY, lv["backup"])
+    print(f"poziom {a.level}: {DET} <- {SKH}, backup {BACKUP}")
 
-    entries = [l.split()[0] for l in open(os.path.join(DET05, "_partial.txt")) if l.strip()]
+    entries = [l.split()[0] for l in open(os.path.join(DET, "_partial.txt")) if l.strip()]
+    if lv["collisions"]:
+        # straddlery granicy: kazdy kafel obecny w OBU drzewach jest kandydatem (fill_mask
+        # z bezpiecznikiem <0.5% i tak pomija kafle bez wypelnienia)
+        for d in os.listdir(DET):
+            dp = os.path.join(DET, d)
+            if d.isdigit() and os.path.isdir(dp):
+                for f in os.listdir(dp):
+                    if f.endswith(".webp") and os.path.exists(os.path.join(SKH, d, f)):
+                        entries.append(f"{d}/{f[:-5]}")
     entries = sorted(set(entries))
-    print(f"straddlerow det05: {len(entries)}")
+    print(f"kandydatow ({lv['det']}): {len(entries)}")
     no_sk = merged = nomask = 0
     fracs = []
     merged_keys = []
@@ -79,7 +102,7 @@ def main() -> None:
         if not os.path.exists(p_sk):
             no_sk += 1
             continue
-        p_d = os.path.join(DET05, i, f"{j}.webp")
+        p_d = os.path.join(DET, i, f"{j}.webp")
         d = np.asarray(Image.open(p_d).convert("RGB"))
         m = fill_mask(d)
         if m.mean() < 0.005:
@@ -102,12 +125,12 @@ def main() -> None:
             # Konwencja z bake'u deshadow (WebP lossless dla kafli pochodnych).
             Image.fromarray(out).save(p_d, "WEBP", lossless=True, quality=100, method=4)
     fr = np.array(fracs) if fracs else np.zeros(1)
-    print(f"zmergowane: {merged} | bez kafla sk05-harm: {no_sk} | maska <0.5%: {nomask}")
+    print(f"zmergowane: {merged} | bez kafla {os.path.basename(SKH)}: {no_sk} | maska <0.5%: {nomask}")
     print(f"udzial fillu w zmergowanych: mediana {np.median(fr)*100:.1f}% p90 {np.percentile(fr,90)*100:.1f}% max {fr.max()*100:.1f}%")
     if a.write and merged_keys:
-        with open(os.path.join(DET05, "_sk-merged.txt"), "w", encoding="utf-8") as fh:
+        with open(os.path.join(DET, "_sk-merged.txt"), "w", encoding="utf-8") as fh:
             fh.write("\n".join(merged_keys) + "\n")
-        print(f"lista -> {os.path.join(DET05, '_sk-merged.txt')}; backup -> {BACKUP}")
+        print(f"lista -> {os.path.join(DET, '_sk-merged.txt')}; backup -> {BACKUP}")
 
 
 if __name__ == "__main__":

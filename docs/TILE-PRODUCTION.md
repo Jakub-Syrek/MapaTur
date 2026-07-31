@@ -789,3 +789,67 @@ audyt CAŁEJ listy `_partial.txt` (360) — exact-255 max 1,5% powierzchni = prz
 w sk05 to ŚNIEG/prześwietlenia (fałszywe pozytywy heurystyki min>244), NIE braki — **niczego nie wygaszać
 po bieli**. **SUROWE kafle sk05 NIE wchodzą do bake'u** — najpierw harmonizacja (zasada §3: każda warstwa
 orto dostaje korektę zanim user ją zobaczy); kolejność i bramki: HANDOFF-2026-07-25-sk-det05-pilot.md.
+
+## §12. sk25 — warstwa POŚREDNIA 25 cm strony SK w drzewie det25 (2026-07-31, WYKONANE data-side)
+
+Motywacja zmierzona 07-29 przy Gierlachu: za pierścieniem det05 (~3,2 km) strona SK spadała do bazy
+~1,5 m/px, bo det25=GUGiK=tylko PL (sąsiedztwo 5×5 = 0/25 kafli na SK). sk25 = ta sama krata i res co
+det25 (0,25 m — komentarz w fetcherze), więc wchodzi wprost do drzewa `det25`; **pokrycie w runtime
+bierze się z `index.bin` pakietów `.opk` po bake'u — `_coverage_p16.txt` NIE jest już czytany nigdzie**
+(runtime `.opk`-only od 09dfd22; odpowiednika dla det25 nigdy nie było).
+
+Krok po kroku (wszystko OFFLINE, bez blokady; stan po = 65 691 kafli det25):
+
+```
+# 0. fetch (wykonany wcześniej): 26 017 kafli, bbox 19.80,49.10,20.30,49.21 (jak sk05)
+# 1. sanity fetchu — PEŁNY DEKOD-SKAN (nagłówek RIFF to za mało):
+#    07-31: 48 kafli CAŁYCH ZEROWYCH (pas j=217, ślad twardego przerwania zapisu; NTFS zaalokował
+#    rozmiar, dane nie doleciały). Usunięte + refetch bboxem pasa + dekod-weryfikacja 48/48.
+#    UWAGA: refetch łatki NADPISUJE manifest.json regionem łatki — przywrócić pełny region ręcznie.
+python testdata/maps/harmonize-sk-ortho.py --level sk25 --workers 10        # 2. ~15 min, q90 (jak sk05)
+python testdata/maps/verify-harm-tone.py --level sk25                        # 3. smoke-test tonu
+python testdata/maps/repair-zbgis-watermarks.py --level sk25 --pilot ... # 4a. kalibracja na podglądzie
+python testdata/maps/repair-zbgis-watermarks.py --level sk25 --write         # 4b. znaki wodne
+python testdata/maps/repair-missed-sk05-from-sk25.py --write   # 4c. znaki @5cm PRZEOCZONE przez skan 5cm
+#    + re-copy kafli z _wm-fixed-from25.txt do det05 (tylko klucze z _sk-pilot-added.txt!)
+#    + PONOWNY przebieg 4b (wstawka bierze wtedy czyste źródło 5 cm)
+python testdata/maps/merge-zbgis-into-partial-det05.py --level sk25 --write  # 5. straddlery granicy
+python testdata/maps/integrate-sk05-into-det05.py --level sk25 --write       # 6. kafle do det25
+# 7. (blokada) sync AppData + OrthoBake --layer det25 --src <AppData>/det25 --out <AppData>/opk/det25
+#    --det1m-out <AppData>/opk/det1m  → det1m dla SK powstaje automatycznie z grup det25
+```
+
+Liczby wykonania 07-31: harmonizacja 26 017/26 017 (pole parametrów 1729/1729 cel p4, aplikacja
+32 kafle/s); znaki wodne **1 497 pozycji katalogu rozliczone w 4 przebiegach** (1390+415+73+69 napraw;
+duplikaty katalogu ze skanu pasmowego = 164 pary <50 m — drugi wpis słusznie „nieodnaleziony" po
+naprawie bliźniaka); **73 znaki @5 cm przeoczone przez skan 5 cm naprawione u źródła** (290 kafli
+sk05-harm, 284 re-copy do det05, 2 kolizje GUGiK nietknięte); merge straddlerów 177/177 (fill mediana
+51% kafla, p90 90%); integracja 25 840 nowych (177 kolizji → GUGiK/merged zostaje). verify-post:
+NCC≥0.65 = 0, ≥0.55 = 17 (obejrzane — fałszywki terenowe i ślady napraw, zero czytelnych napisów).
+
+**Lekcje sk25 (nie powtarzać diagnoz):**
+- **Wypełnienie znaków @25 cm ≠ @5 cm:** median-fill po masce kreskowej (metoda sk05) przy 25 cm
+  ZLEWA litery 8-10 px w blok → plama. Właściwe: **wstawka prawdziwej tekstury z sk05-harm**
+  (kraty zarejestrowane DOKŁADNIE: dlon25=5·dlon05, wspólna kotwica; box-downsample 5×5;
+  TYLKO mean-match na pierścieniu — std-stretch wzmacnia szum gładszego downsamplu w „brudną" plamę).
+- **Argmax NCC musi być OKIENKOWY** (±60 px wokół pozycji katalogowej): mozaika 3×3 @25 cm = 384 m
+  potrafi objąć znak SĄSIADA (siatka stempli ~500-700 m) — globalny max mazał cudzy znak, zostawiał
+  własny, a pary sąsiadów zapętlały się między przebiegami. Przy sk05 mozaika 154×77 m — geometrycznie
+  bezpieczna, dlatego tam 1903/1903 za pierwszym podejściem.
+- **Katalog @25 cm to czulszy detektor dla warstwy 5 cm na lasach** — skan 5 cm (próg NCC 0.55)
+  przeoczył 73 instancje na szumiącym tle; wyszły dopiero, gdy wstawka sk25 „kopiowała znak z 5 cm"
+  (sygnatura: max|diff| wstawki ≈ 1 luma). Symetryczny wniosek na przyszłe poziomy piramidy.
+- **Metryka tonu: średnia-z-pasma na CENZUROWANYM rozkładzie kłamie** (+26 lumy tam, gdzie per-piksel
+  mediana −8; cień tuż pod progiem 25 wypada z pasma po jednej stronie). Werdykty tonu MIĘDZY
+  poziomami: wyłącznie per-piksel z rejestracją przestrzenną + zrzut A/B (verify-harm-tone.py
+  ma to w docstringu).
+- `_partial.txt` sk25 (14 kafli, nodata 2-6%) = **dachy uzdrowisk i korty** (fałszywe pozytywy
+  heurystyki min>244 na jasnej zabudowie) — NIE wygaszać alfą, to legalna treść (analogia do §11).
+- Naprawa pojedynczej instancji `rok2022` (szablon zaśmiecony piargiem → maska-blok → median-fill
+  zdegenerował 32×10 m; weszło do det05/.opk 07-30) = `repair-r22-instance-sk05.py`: restore z prewm
+  + maska = residuum ∩ kształt-cyfr-z-szablonu (kolumny 49+ — lewa część szablonu to szum piargu)
+  ∩ ciemne tło (glif jasnoszary widoczny TYLKO na ciemnym); cela det05 (103,61) do przepieczenia.
+
+Rollbacki: `sk25/` surowe nietknięte · harmonizacja: rerun ~15 min · znaki: `sk25-harm-prewm/` +
+`_wm-fixed.txt`; @5cm: `sk05-harm-prewm/` + `_wm-fixed-from25.txt` · merge: `det25-premerge/` +
+`_sk-merged.txt` · integracja: `det25/_sk-pilot-added.txt` (usunięcie plików z listy = stan sprzed).
