@@ -142,7 +142,14 @@ if (args.Contains("--verify-full"))
             long len = e.ZstdBytes > 0 ? e.ZstdBytes : e.RawBytes;
             if (e.Offset < 32 || e.Offset + len > fileLen || e.RawBytes <= 0) { layoutBad++; }
             regions.Add((e.Offset, e.Offset + len));
-            if (pack.TryReadPage(e.PageId, out _)) { pagesOk++; } else { pagesBad++; }
+            if (pack.TryReadPage(e.PageId, out _)) { pagesOk++; }
+            else
+            {
+                pagesBad++;
+                // Bez nazwy pakietu licznik BAD jest nienaprawialny: nie wiadomo, co przebić.
+                // (2026-07-31: 68 BAD stron po bake'ach przerywanych killem — trzeba było zgadywać.)
+                Console.Error.WriteLine($"[verify-full] BAD strona {e.PageId} w {c.Ci}_{c.Cj}.opk");
+            }
         }
 
         regions.Sort();

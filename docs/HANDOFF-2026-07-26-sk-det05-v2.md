@@ -186,3 +186,36 @@ Bramki i pułapki są opisane w handoffie pilota; tu tylko różnice skali.
 - **Sprzątanie 15,4 GB:** `opk/det25-prerim` + `det1m-prerim` (8,6 GB), `gpu-cache` (6,8 GB) —
   czeka na zgodę usera. Przy V2 zapas dyskowy jest wystarczający i bez tego.
 - Kosmetyka: log bake'u pisze „det25 GOTOWE" niezależnie od `--layer`.
+
+## ══ ZNAKI WODNE GKÚ — USUNIĘTE Z WARSTWY 5 CM (2026-07-30/31) ══
+
+Werdykt usera 07-30 (zrzut spod Dzikiej Turni): znaki rażą. Wybrał inpaint zamiast zmiany źródła.
+
+**Fakty zmierzone:** stemple są GEO-STAŁE i nakładane PER POZIOM piramidy źródła (poziom 5 cm:
+1 903 instancje, poziom 25 cm: 1 497 — OSOBNE siatki; „© GKÚ, NLC" co ~750 m + rzadkie stemple
+roczne). Nie ma czystej referencji (REST = te same dane), offset-trick nie działa (geo-stałość).
+
+**Detekcja:** filtr dopasowany (prawdziwa zero-mean NCC, box-sumy przez kumulanty, garda na płaskie
+okna, obie polaryzacje — na jasnym tle glif jest CIEMNIEJSZY). Kalibracja: pozytyw 1,000, kontrola
+n=399 max 0,285, zero nad progiem. Skan 5 cm pasmowy przez downsample (`scan-sk05-watermarks.py`).
+ODRZUCONE (nie wracać): maska kolorowa (17,3% terenu — znak dziedziczy kolor podłoża), skan bazy
+przeskalowanym szablonem (degeneracja gardy → fałszywe 1,00 w cieniu), próg 0,5 przy małym szablonie
+(łapie śnieg).
+
+**Naprawa (`repair-zbgis-watermarks.py`):** maska z KSZTAŁTU szablonu (tylko kreski |T|>8, dylatacja 7),
+median-fill, zapis lossless, backup `sk05-harm-prewm/`, lista `_wm-fixed.txt`. Pilot 36 instancji →
+tekst znika W CAŁOŚCI; koszt = lekkie wygładzenie w śladzie kresek. ODRZUCONE: unmix alfa
+(per instancja niedentyfikowalny — współliniowość; globalnie r=0,44, mieszanie zapewne nieliniowe).
+Wynik: **1 903/1 903 naprawione, 6 534 kafle**, 6 534→det05 (7 kolizji → GUGiK zostaje), sync, bake.
+
+**⚠ LEKCJA: przerwany bake = rozerwany pakiet, którego przyrostowość NIE wykrywa.** Trzy przerwania
+(Stop-Process + 2 pady sesji) → `108_66.opk` z kompletnym TOC i śmieciowym ogonem; srcHash uznawał
+go za zdrowy. verify-full znalazł 68 BAD stron, wszystkie w nim; kasacja + rebake (1 min) → **BAD=0
+na 1 008 237 stronach**. Od teraz: verify-full OBOWIĄZKOWY po każdej serii przerwań; wypisuje chore
+pakiety po imieniu (Program.cs). Nie zabijać bake'ów Force'em bez potrzeby.
+
+Rozmiar opk 131,7→109,1 GB: wszystkie pakiety przebudowane w tych biegach; miękkie kafle ZBGIS
+kompresują się lepiej; liczba stron identyczna co do sztuki, verify zielony.
+
+**CZEKA: werdykt usera** (ściana spod Świstowego + losowe zbliżenia SK). Stemple 25 cm naprawić
+tą samą ścieżką przy integracji warstwy pośredniej sk25.
