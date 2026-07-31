@@ -133,4 +133,15 @@ public sealed class Det05LayerCapConsistencyTests
         view.Should().Contain("System.IO.Path.GetFullPath(det05Override)",
             "override ma wskazywać jawny izolowany katalog .opk");
     }
+
+    [Fact]
+    public void Odrzucony_tail_first_runtime_musi_byc_domyslnie_wylaczony()
+    {
+        string src = RendererSource();
+
+        src.Should().Contain("private static readonly bool Det05TailFirstRuntimeEnabled = false",
+            "zmierzony kandydat c8102e9 ładował panoramę 35,2 s + 22,0 s i nie może pozostać aktywną ścieżką");
+        src.Should().Contain("if (!Det05TailFirstRuntimeEnabled)",
+            "domyślny runtime ma wrócić do jednego pełnego odczytu .opk na celę");
+    }
 }

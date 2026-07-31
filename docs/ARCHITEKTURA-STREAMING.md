@@ -457,3 +457,21 @@ Format TOC już posiada pole `level`, więc nie wymaga nowej wersji pliku:
 
 Kryterium kroku 7 pozostaje bez zmian: pomiar wykonuje skompilowany EXE po rebake'u kompaktowych
 pakietów; stary wynik 26 s nie jest wynikiem bramki, tylko dowodem odrzucenia wadliwego layoutu.
+
+### Wynik bramki kompaktowego L2 (2026-07-31)
+
+Pełny `verify-full` po migracji potwierdził 1 008 237 stron i `BAD=0`. Jeden zimny test
+skompilowanego EXE wykazał, że format osiągnął cel I/O, ale nie cel produktu:
+
+- tail L2: odczyt min/mediana/p95/max = 22/45/72/88 ms na celę;
+- 192/192 taili na GPU: 35,2 s od zbudowania LOD (pierwszy→ostatni 34,8 s);
+- pełne L0-L1 po tailach: kolejne 22,0 s;
+- cały widok det05: około 57,6 s.
+
+Wąskim gardłem nie jest już dysk, lecz seryjna obsługa i promocja 192 slice'ów na GPU. Kandydat
+`tail-first` jest zatem **odrzucony jako domyślna ścieżka runtime**. Runtime wraca do pojedynczej
+transakcji pełnego łańcucha `.opk` na celę; kod eksperymentalny pozostaje za stałą domyślnie
+wyłączoną. Format compact L2, migrator, kompatybilny czytnik oraz narzędzia bake/verify zostają,
+ponieważ są poprawne i redukują duplikację danych. Kolejna zmiana architektury musi rozwiązać
+równoległą, budżetowaną rezydencję/upload całej panoramy; dalszy mikrotuning tego kandydata jest
+wykluczony.

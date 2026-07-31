@@ -2400,6 +2400,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private const int Det05CellHashSize = 384;   // 2× desktop cap; bounded open addressing at 50% load
     private const int DetailCellHashMaxProbe = 12;
     private const byte Det05TailFirstMinimumLod = 2; // 5 cm × 2² = 20 cm: fast first-visible stage
+    // c8102e9 runtime gate (2026-07-31): compact L2 tail naprawił I/O (22-88 ms/celę), ale seryjne
+    // promowanie 192 slice'ów trwało 35,2 s, a fine stage kolejne 22,0 s. Format i narzędzia offline
+    // zostają, natomiast aktywny runtime wraca do pojedynczego pełnego odczytu + promocji na celę.
+    private static readonly bool Det05TailFirstRuntimeEnabled = false;
 
     // BC1 GPU-cell pipeline (2026-07-23, ZASADY 11/13): cells are encoded to BC1+mips OFF-THREAD (once — the
     // disk cache serves every revisit in ~15 ms) and uploaded compressed. 1/8 the bytes end-to-end: a det05
@@ -3726,32 +3730,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             }
         }
 
-        // Stage A: tail first. No full 45 MB page-chain read starts until every currently desired cell either
-        // has its 20 cm tail on GPU or is known empty. This prevents the first four nearby cells from monopolising
-        // I/O while the rest of the panorama still falls through to 1 m/25 cm.
-        bool allDesiredTailsReady = true;
-        foreach (int key in desired)
+        if (!Det05TailFirstRuntimeEnabled)
         {
-            if (det05ReadInFlight >= DetailMaxConcurrentReads)
-            {
-                allDesiredTailsReady = false;
-                continue;
-            }
-
-            if (det05Cells.TryGetValue(key, out DetailCellGpu? cell)
-                && !cell.Empty && !cell.LayerReady)
-            {
-                allDesiredTailsReady = false;
-                if (cell.Compose is null && cell.Pending is null && cell.PendingBc1 is null)
-                {
-                    KickDet05Read(cell, Det05TailFirstMinimumLod);
-                }
-            }
-        }
-
-        // Stage B: once the whole desired set is at least tail-ready, spend spare I/O on the 5/10 cm pages.
-        if (allDesiredTailsReady)
-        {
+            // Product fallback after the rejected compact-tail gate: one complete cell transaction. The
+            // worker still reads ready GPU pages only (.opk); it merely assembles L2+tail and L0/L1 into
+            // one chain before the existing bounded upload promotes the layer.
             foreach (int key in desired)
             {
                 if (det05ReadInFlight >= DetailMaxConcurrentReads)
@@ -3760,10 +3743,53 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 }
 
                 if (det05Cells.TryGetValue(key, out DetailCellGpu? cell)
-                    && cell.LayerReady && !cell.FullLoadFinished && !cell.Empty
+                    && !cell.Empty && !cell.LayerReady
                     && cell.Compose is null && cell.Pending is null && cell.PendingBc1 is null)
                 {
                     KickDet05Read(cell, minimumLod: 0);
+                }
+            }
+        }
+        else
+        {
+            // Experimental Stage A: tail first. Kept behind a default-off gate so the compact layout
+            // remains directly testable without making the rejected 57 s panorama path the product default.
+            bool allDesiredTailsReady = true;
+            foreach (int key in desired)
+            {
+                if (det05ReadInFlight >= DetailMaxConcurrentReads)
+                {
+                    allDesiredTailsReady = false;
+                    continue;
+                }
+
+                if (det05Cells.TryGetValue(key, out DetailCellGpu? cell)
+                    && !cell.Empty && !cell.LayerReady)
+                {
+                    allDesiredTailsReady = false;
+                    if (cell.Compose is null && cell.Pending is null && cell.PendingBc1 is null)
+                    {
+                        KickDet05Read(cell, Det05TailFirstMinimumLod);
+                    }
+                }
+            }
+
+            // Experimental Stage B: once the desired set is tail-ready, fill exact 5/10 cm pages.
+            if (allDesiredTailsReady)
+            {
+                foreach (int key in desired)
+                {
+                    if (det05ReadInFlight >= DetailMaxConcurrentReads)
+                    {
+                        break;
+                    }
+
+                    if (det05Cells.TryGetValue(key, out DetailCellGpu? cell)
+                        && cell.LayerReady && !cell.FullLoadFinished && !cell.Empty
+                        && cell.Compose is null && cell.Pending is null && cell.PendingBc1 is null)
+                    {
+                        KickDet05Read(cell, minimumLod: 0);
+                    }
                 }
             }
         }
@@ -3902,14 +3928,27 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         string opkDir = Det05OpkDir!;
         int pitch = det05Grid.PitchTiles, coverage = det05Grid.CoverageTiles;
         int groupTiles = det05OpkIndex!.TilesPerCell;
+        bool tailAlreadyReady = cell.LayerReady;
         cell.Compose = Task.Run(() =>
         {
             var swc = System.Diagnostics.Stopwatch.StartNew();
-            bool ok = minimumLod > 0
-                ? MapaTur.Application.Terrain.OrthoPageWindowAssembler.TryAssembleTailWindow(
-                    opkDir, ci, cj, pitch, coverage, groupTiles, minimumLod, rentedBc1, out _)
-                : MapaTur.Application.Terrain.OrthoPageWindowAssembler.TryAssembleFineWindow(
+            bool ok;
+            if (minimumLod > 0)
+            {
+                ok = MapaTur.Application.Terrain.OrthoPageWindowAssembler.TryAssembleTailWindow(
+                    opkDir, ci, cj, pitch, coverage, groupTiles, minimumLod, rentedBc1, out _);
+            }
+            else if (tailAlreadyReady)
+            {
+                ok = MapaTur.Application.Terrain.OrthoPageWindowAssembler.TryAssembleFineWindow(
                     opkDir, ci, cj, pitch, coverage, groupTiles, rentedBc1, out _);
+            }
+            else
+            {
+                ok = MapaTur.Application.Terrain.OrthoPageWindowAssembler.TryAssembleDet25Window(
+                    opkDir, ci, cj, pitch, coverage, groupTiles, rentedBc1, out _);
+            }
+
             capture.ComposeMs = swc.Elapsed.TotalMilliseconds;
             capture.FromOpk = ok;
             return ok ? rentedBc1 : null;
