@@ -217,5 +217,5 @@ pakiety po imieniu (Program.cs). Nie zabijać bake'ów Force'em bez potrzeby.
 Rozmiar opk 131,7→109,1 GB: wszystkie pakiety przebudowane w tych biegach; miękkie kafle ZBGIS
 kompresują się lepiej; liczba stron identyczna co do sztuki, verify zielony.
 
-**CZEKA: werdykt usera** (ściana spod Świstowego + losowe zbliżenia SK). Stemple 25 cm naprawić
-tą samą ścieżką przy integracji warstwy pośredniej sk25.
+**WERDYKT USERA 2026-07-31: „jest ok, znaki zniknęły" — STAN ODEBRANY, nie cofać (zasada 19).**
+Stemple 25 cm naprawić tą samą ścieżką przy integracji warstwy pośredniej sk25.
