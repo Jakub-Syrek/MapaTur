@@ -3170,7 +3170,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private readonly float[] cascadeSplitFar = new float[ShadowCascadeCount];
     private bool shadowMapsAllocated;
     private bool shadowUnsupported;
-    private readonly bool shadowsEnabled = true; // re-enabled after the unit-0 sampler-collision fix; device perf test
+    // re-enabled after the unit-0 sampler-collision fix; device perf test. MAPATUR_KILL_SHADOW=1 is the
+    // emergency valve (2026-08-01: a static camera never throttles the cadence, so the FULL cascade set
+    // re-renders every frame — ~110 ms/frame in the western forest scene made route planning unusable).
+    private readonly bool shadowsEnabled =
+        Environment.GetEnvironmentVariable("MAPATUR_KILL_SHADOW") != "1";
     private uint shadowDepthProgram;
     private int shadowLightVpLoc = -1;
     private int shadowBaseCoverLoc = -1;
