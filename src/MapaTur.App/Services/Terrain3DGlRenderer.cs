@@ -2221,6 +2221,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     public bool ThrottleShadows { get; set; }
 
     private bool shadowValidLastFrame;
+    // Scene signature of the last REAL shadow render. A static camera never trips the cadence throttle,
+    // so without this the full cascade set re-rendered EVERY frame (~110 ms in the western forest scene,
+    // 2026-08-02 route-planner freeze). Reuse keeps shadowsActiveThisFrame=true, so the colour pipeline
+    // (deshadow/baked-shadow correction) stays fully alive — unlike MAPATUR_KILL_SHADOW, which greyed it.
+    private Vector3 lastShadowCamPos;
+    private Vector3 lastShadowCamTarget;
+    private Vector3 lastShadowSunDir;
+    private int lastShadowTileCount = -1;
 
     // Wider-coverage P0 step 6: render the terrain + lake water in a camera-relative frame (origin = the look-at
     // target) so vertices and the view translation stay small (float precision for far/streamed scene origins).
@@ -8173,7 +8181,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// </summary>
     private void RenderShadowMaps(GL g, Camera3D camera, Vector3 sunDirection, float aspectRatio, int vpWidth, int vpHeight)
     {
-        if (!TemporalPassCadence.ShouldRefresh(gpuFrameCount, ThrottleShadows, shadowValidLastFrame)
+        // Static scene → reuse the existing maps outright. Thresholds: 0.5 m camera epsilon (squared
+        // compare), sun cone ~0.11° (cos > 0.999998; the simulated sun moves 0.25°/min, so a real
+        // re-render happens roughly every half minute), and any tile-set change forces a refresh so
+        // freshly streamed terrain still casts shadows.
+        Vector3 sunNow = sunDirection.LengthSquared() > 1e-8f ? Vector3.Normalize(sunDirection) : Vector3.Zero;
+        bool sceneUnchanged = shadowValidLastFrame
+            && Vector3.DistanceSquared(camera.Position, lastShadowCamPos) < 0.25f
+            && Vector3.DistanceSquared(camera.Target, lastShadowCamTarget) < 0.25f
+            && Vector3.Dot(sunNow, lastShadowSunDir) > 0.999998f
+            && tileBuffers.Count == lastShadowTileCount;
+        if ((sceneUnchanged
+             || !TemporalPassCadence.ShouldRefresh(gpuFrameCount, ThrottleShadows, shadowValidLastFrame))
             && shadowMapsAllocated)
         {
             shadowsActiveThisFrame = true;
@@ -8279,6 +8298,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.Viewport(0, 0, (uint)vpWidth, (uint)vpHeight);
         shadowsActiveThisFrame = true;
         shadowValidLastFrame = true;
+        lastShadowCamPos = camera.Position;
+        lastShadowCamTarget = camera.Target;
+        lastShadowSunDir = sun;
+        lastShadowTileCount = tileBuffers.Count;
 
         if (!shadowPassLogged)
         {
