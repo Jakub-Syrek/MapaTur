@@ -23,6 +23,27 @@ sprawić, że drugiemu agentowi zniknie cała warstwa 5 cm. Pełne brzmienie: `d
 Drugi wspólny plik: **`C:\Repos\MAPATUR-AGENT-COMMS.md`** — kanał wiadomości Claude ↔ Codex (append-only, `ACK: <id>`). Czytaj go **przed każdym cyklem pracy, przed zmianą wspólnego interfejsu i przed zajęciem blokady**. `APP-LOCK.md` pozostaje jedynym źródłem prawdy dla uruchamiania apki, bake'ów i operacji na wspólnym AppData.
 
 
+## ŚWIATŁO / CIEŃ / KOLOR = JEDEN SYSTEM — protokół inżynierski (2026-08-02, na żądanie usera; MANDATORY)
+
+W tym rendererze tor koloru (deshadow/baked-shadow correction) jest sprzężony z passem cieni —
+zmierzono 08-02: wyłączenie cieni odbarwiło CAŁĄ scenę do „cementu". Dlatego KAŻDA zmiana w cieniach,
+świetle, tonie lub kolorze podlega temu protokołowi, w każdej sesji, bez wyjątków:
+
+1. **Pomiar przed/po na MINIMUM DWÓCH scenach**: wschód (Rysy/MO — skały) ORAZ zachód
+   (Chochołowska ~49.21,19.75 — lasy). Koszt i wygląd są scenozależne (zmierzone: shadow 5–9 ms
+   wschód vs 110 ms zachód na tym samym buildzie).
+2. **Werdykt = liczby, nie wrażenie**: `[PassTimes]` (shadow/sumGpu ms) + kolor z autoshota
+   (`MAPATUR_SHOT_DIR`+`MAPATUR_AUTOSHOT_SEC`; mean RGB + saturacja próbek). Bez liczb przed/po
+   zmiana jest NIEZROBIONA.
+3. **Inwariant rozdzielności**: kolor sceny NIE MA PRAWA zależeć od tego, czy pass cieni się
+   wykonał w tej klatce. Dziś zależy (`shadowsActiveThisFrame` bramkuje korekcję barwną) — każda
+   zmiana w tym obszarze ma ten inwariant przybliżać, nigdy oddalać. Reuse map (sygnatura sceny)
+   jest OK; zerowanie strength/gałęzi koloru NIE jest.
+4. **Po każdej zmianie DANYCH warstw orto: wizualny sweep WIELU rejonów** (wschód+zachód+granica
+   +doliny) — CRC/verify-full/ton-próbki NIE zastępują oczu (lekcja 08-01: „odebrane" na wschodzie
+   nie objęło zachodu).
+5. Werdykty usera i regresje zapisywać OD RAZU (memory + handoff), z cytatem i liczbami.
+
 ## Terrain graphics — MANDATORY before baking tiles / touching the terrain pipeline
 
 Before you (re)generate or bake any DEM / ortho / z16 tiles, OR change the terrain load / repair / render
