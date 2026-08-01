@@ -8,7 +8,9 @@ odbioru) i sekcję ŚWIATŁO/CIEŃ/KOLOR w CLAUDE.md. Obowiązują nowe reguły:
 ## Stan ostry (zweryfikowany ~3:30)
 
 - **Apka NIE DZIAŁA** (żaden proces). User nie wybrał wersji do uruchomienia: build z fixem
-  reuse cieni (HEAD main `d48d958`) vs wczorajszy `4ecb89f`. NIE uruchamiać bez jego decyzji.
+  reuse cieni (main `d48d958`) vs wczorajszy `4ecb89f`. NIE uruchamiać bez jego decyzji.
+  **`bin\` jest w NIEPEWNEJ rewizji** (w nocy było przełączanie HEAD) — przed startem OBOWIĄZKOWO
+  rebuild z wybranej rewizji + weryfikacja daty dll (pułapka stale-exe).
 - Worktree: **main** = `d48d958` (LOKALNY, niepushnięty, bramki format+testy NIEZROBIONE).
   `2bc3e88` = zawór `MAPATUR_KILL_SHADOW` — **ODBARWIA scenę (sprzężenie kolor↔cień), nie używać**.
 - Przy buildzie z `d48d958` user zgłosił **menu 1 FPS** — przyczyna NIEUSTALONA (punkt
