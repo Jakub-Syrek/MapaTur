@@ -758,8 +758,12 @@ Po regresji „czarnych dziur" (BC1-RGB gubił alfę bramkującą pokrycie) form
 
 ## §0-B. ZASADY NADRZĘDNE DLA KAŻDEJ RECEPTY (user, 2026-08-02 — nie zginąć między sesjami)
 
-**(1) CEL ZAKRESU: CAŁE TATRY W 5 cm.** Nie pas, nie rejon showcase — całość, PL i SK, Zachodnie
-i Wysokie. Każda recepta poniżej MUSI podać swój bbox ORAZ różnicę względem tego celu. Tak właśnie
+**(1) CEL ZAKRESU: CAŁE TATRY W 5 cm = REGION `C` = `19.50,49.10,20.40,49.40`.** To jest zasięg
+NASZEJ MAPY (ten sam, który widnieje w każdym zrzucie jako `49.100,19.500,49.400,20.400` i w
+`MAPATUR_BAKE_BOUNDS`), zdefiniowany w `fetch-ortho-detail.py` jako `REGIONS["C"]`. Każda warstwa
+orto ma pokrywać dokładnie ten obszar — nie wymyślamy własnych bboxów ani „pasów".
+Komendy: `--region C --level det05` (PL/GUGiK) i `--region C --level sk05` (SK/ZBGIS, **bez**
+`--strip-km`). Każda recepta poniżej MUSI podać swój bbox ORAZ różnicę względem regionu C. Tak właśnie
 powstała dzisiejsza dziura: §11 i §12 miały zachodnią krawędź 19.80, więc Tatry Zachodnie
 (Rohacze, Osobita, Chochołowska) nigdy nie zostały pobrane — ani z GUGiK, ani z ZBGIS —
 a `det05/manifest.json` mówił `bbox_wsen [19.80, 49.17, 20.10, 49.30]` i nikt tego nie porównał
