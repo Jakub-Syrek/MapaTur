@@ -563,6 +563,7 @@ public partial class Terrain3DView : ContentView
         {
             double fps = 1000.0 / dt;
             smoothedFps = smoothedFps <= 0 ? fps : (smoothedFps * 0.9) + (fps * 0.1);
+            MapaTur.App.Services.HarnessDiag.RenderFps = smoothedFps;
         }
         if (++debugStatCounter >= 12)
         {

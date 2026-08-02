@@ -54,6 +54,13 @@ public partial class MapPage : ContentPage
         viewModel.TeleportRequested += OnTeleportRequested;
         viewModel.FollowRequested += OnFollowRequested;
         viewModel.RouteFilmRequested += OnRouteFilmRequested;
+
+        // Test-harness (08-02): stan apki sprawdzalny programistycznie (%TEMP%\mapatur-status.json)
+        // + MAPATUR_UI_SCRIPT steruje sekcjami menu TĄ SAMĄ komendą co chipy paska — bez myszki.
+        HarnessDiag.AttachUi(
+            Dispatcher,
+            section => viewModel.SelectSectionCommand.Execute(section.ToString(CultureInfo.InvariantCulture)),
+            () => viewModel.ActiveSection);
     }
 
     // Keeps the 3D camera and the 2D map framed on the same place + zoom as the user

@@ -23,6 +23,7 @@ using MapaTur.Infrastructure.Trails;
 using MapaTur.Infrastructure.Trails.Overpass;
 
 using Microsoft.Extensions.Logging;
+using Microsoft.Maui.LifecycleEvents;
 
 using Serilog;
 using Serilog.Events;
@@ -56,6 +57,21 @@ public static class MauiProgram
                 fonts.AddFont("OpenSans-Regular.ttf", "OpenSansRegular");
                 fonts.AddFont("OpenSans-Semibold.ttf", "OpenSansSemibold");
             });
+
+#if WINDOWS
+        // Test-harness: MAPATUR_MAXIMIZE=1 startuje okno zmaksymalizowane, żeby sesja testowa
+        // nie wymagała żadnego dotykania okna (por. HarnessDiag / MAPATUR_UI_SCRIPT).
+        if (Environment.GetEnvironmentVariable("MAPATUR_MAXIMIZE") == "1")
+        {
+            builder.ConfigureLifecycleEvents(events => events.AddWindows(windows => windows.OnWindowCreated(native =>
+            {
+                nint hwnd = WinRT.Interop.WindowNative.GetWindowHandle(native);
+                Microsoft.UI.WindowId windowId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(hwnd);
+                var appWindow = Microsoft.UI.Windowing.AppWindow.GetFromWindowId(windowId);
+                (appWindow.Presenter as Microsoft.UI.Windowing.OverlappedPresenter)?.Maximize();
+            })));
+        }
+#endif
 
         RegisterServices(builder.Services);
 
@@ -100,6 +116,7 @@ public static class MauiProgram
                 retainedFileCountLimit: 7,
                 flushToDiskInterval: TimeSpan.FromMilliseconds(250),
                 shared: true)
+            .WriteTo.Sink(new HarnessDiagSink())
             .CreateLogger();
 
         Log.Information("Logger initialised. Log directory: {LogDirectory}", logDirectory);
