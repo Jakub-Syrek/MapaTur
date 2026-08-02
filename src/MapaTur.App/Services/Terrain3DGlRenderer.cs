@@ -3176,6 +3176,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private readonly uint[] shadowDepthTex = new uint[ShadowCascadeCount];
     private readonly Matrix4x4[] cascadeLightVp = new Matrix4x4[ShadowCascadeCount];
     private readonly float[] cascadeSplitFar = new float[ShadowCascadeCount];
+
+    // Per-cascade refresh bookkeeping (see CascadeRefreshPolicy): the camera pose / sun direction each
+    // cascade's map was last rendered for, so a cascade re-renders only once its OWN texels would move.
+    private readonly Vector3[] cascadeLastCamPos = new Vector3[ShadowCascadeCount];
+    private readonly Vector3[] cascadeLastSunDir = new Vector3[ShadowCascadeCount];
+    private readonly bool[] cascadeRendered = new bool[ShadowCascadeCount];
+    private readonly long[] cascadeLastRenderMs = new long[ShadowCascadeCount];
+    private int shadowCascadeDrawAccum;
+    private int shadowCascadeFrames;
+    private long lastShadowStatsLogMs;
     private bool shadowMapsAllocated;
     private bool shadowUnsupported;
     // re-enabled after the unit-0 sampler-collision fix; device perf test. MAPATUR_KILL_SHADOW=1 is the
@@ -5901,6 +5911,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             aoStrengthLoc = -1;
             bakedShadowCompLoc = -1;
             shadowsActiveThisFrame = false;
+            Array.Clear(cascadeRendered); // dead-context maps are gone — every cascade must re-render
             shadowValidLastFrame = false;
             // The planar-reflection target belonged to the dead context — drop the handles so it's rebuilt fresh.
             reflectionFbo = 0;
@@ -8222,6 +8233,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         shadowsActiveThisFrame = false;
+        bool hadValidMaps = shadowValidLastFrame && shadowMapsAllocated;
         shadowValidLastFrame = false;
         if (!shadowsEnabled || shadowDepthProgram == 0 || tileBuffers.Count == 0)
         {
@@ -8268,14 +8280,39 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             g.Uniform1(shadowBaseCoverOnLoc, 0f);
         }
 
+        // Freshly streamed terrain must cast shadows at once, whatever the camera did; a tile-count change
+        // is the same signal the whole-pass reuse test above uses.
+        bool sceneChanged = tileBuffers.Count != lastShadowTileCount || !hadValidMaps;
+        int cascadesDrawn = 0;
+        long nowShadowTick = Environment.TickCount64;
+
         Span<float> lm = stackalloc float[16];
         float sliceNear = near;
         for (int c = 0; c < ShadowCascadeCount; c++)
         {
             float sliceFar = splits[c];
+            cascadeSplitFar[c] = sliceFar;
+
+            // Per-cascade refresh (2026-08-02): a cascade whose map cannot change by even a texel must not
+            // pay for a re-render. The distant cascade draws nearly every tile and is the bulk of the pass —
+            // at 15 km / 2048 px one texel is 7.3 m, so metre-scale camera drift changes nothing in it.
+            float moved = Vector3.Distance(camera.Position, cascadeLastCamPos[c]);
+            float sunDot = Vector3.Dot(sun, cascadeLastSunDir[c]);
+            long sinceRenderMs = nowShadowTick - cascadeLastRenderMs[c];
+            if (!CascadeRefreshPolicy.ShouldRefresh(
+                    moved, sliceFar, ShadowMapSize, sunDot, sceneChanged, cascadeRendered[c], c, sinceRenderMs))
+            {
+                sliceNear = sliceFar; // keep cascadeLightVp[c] — its map is still valid and stays bound
+                continue;
+            }
+
             Matrix4x4 lightVp = CascadeLightMatrix.Build(camera, aspectRatio, sliceNear, sliceFar, sun, depthPadding: 2000f);
             cascadeLightVp[c] = lightVp;
-            cascadeSplitFar[c] = sliceFar;
+            cascadeRendered[c] = true;
+            cascadeLastCamPos[c] = camera.Position;
+            cascadeLastSunDir[c] = sun;
+            cascadeLastRenderMs[c] = nowShadowTick;
+            cascadesDrawn++;
 
             g.BindFramebuffer(FramebufferTarget.Framebuffer, shadowFbos[c]);
             g.Viewport(0, 0, (uint)ShadowMapSize, (uint)ShadowMapSize);
@@ -8330,6 +8367,20 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             Log.Information("[GL3D] shadow pass: {Cascades} cascades {Size}px, far {FarM}m, splits {S0}/{S1}/{S2}",
                 ShadowCascadeCount, ShadowMapSize, far, cascadeSplitFar[0], cascadeSplitFar[1], cascadeSplitFar[2]);
             shadowPassLogged = true;
+        }
+
+        // Throttled proof that the per-cascade policy actually skips work: how many of the 3 cascades this
+        // frame paid for. Before the policy this was always 3 while the camera moved at all.
+        shadowCascadeDrawAccum += cascadesDrawn;
+        shadowCascadeFrames++;
+        long nowShadowLog = Environment.TickCount64;
+        if (nowShadowLog - lastShadowStatsLogMs >= MemLogIntervalMs)
+        {
+            lastShadowStatsLogMs = nowShadowLog;
+            Log.Information("[GL3D] [Shadow] kaskady/klatkę {Avg:F2} (z {Count} klatek renderujących cienie)",
+                shadowCascadeDrawAccum / (double)Math.Max(1, shadowCascadeFrames), shadowCascadeFrames);
+            shadowCascadeDrawAccum = 0;
+            shadowCascadeFrames = 0;
         }
     }
 
