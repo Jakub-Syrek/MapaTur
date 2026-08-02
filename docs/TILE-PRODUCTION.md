@@ -756,6 +756,41 @@ Po regresji „czarnych dziur" (BC1-RGB gubił alfę bramkującą pokrycie) form
   verify-full: 344 489/344 489 CRC OK, layout/klucze/bijekcja czyste (7,3 min)
 - Razem: pełny prebake Tatr (det05+det25+det1m) = **~75,5 GB / ~72 min** jednorazowo, przyrostowość po srcHash
 
+## §0-A. KROK 0 PRZED KAŻDYM FETCHEM PL: ODCZYTAJ ROCZNIK Z WFS SKOROWIDZE (2026-08-02)
+
+Rocznika NIE da się odczytać z WMS (`ORTO/WMS/HighResolution` ma jedną warstwę `Raster`, a
+GetFeatureInfo zwraca same RGB piksela). Skorowidze WFS działają **bez klucza**:
+
+```
+# lista roczników (typy gugik:SkorowidzOrtofomapy1957 … 2026)
+https://mapy.geoportal.gov.pl/wss/service/PZGIK/ORTO/WFS/Skorowidze?SERVICE=WFS&REQUEST=GetCapabilities
+# arkusze danego rocznika nad Tatrami
+https://mapy.geoportal.gov.pl/wss/service/PZGIK/ORTO/WFS/Skorowidze?service=WFS&version=2.0.0&request=GetFeature&typeNames=gugik:SkorowidzOrtofomapy2021&bbox=49.14,19.60,49.32,20.15,urn:ogc:def:crs:EPSG::4326&srsName=urn:ogc:def:crs:EPSG::4326
+```
+Pola: `akt_data` = **data nalotu**, `piksel` = GSD, `nr_zglosz` = kampania, `url_do_pobrania` =
+GeoTIFF z opendata (jedyny sposób poproszenia o KONKRETNY rocznik — WMS zawsze da aktualny).
+**PUŁAPKA:** feature ma DWA `gml:timePosition` — `akt_data` (nalot) i `dt_pzgik` (przyjęcie do
+zasobu). Naiwny parser bierze ostatni i myli listopad z wrześniem, co wywraca ocenę cienia.
+Snapshot skorowidza leży też w repo: `testdata/maps/gugik-ortho-campaigns.json` (2312 arkuszy).
+
+**TRZY KAMPANIE 5 cm NAD TATRAMI PL (zmierzone 2026-08-02, WFS + snapshot, zgodne):**
+
+| kampania | arkuszy | zasięg | daty nalotu |
+|---|---|---|---|
+| `GI-FOTO.6201.13.2021` | 72 | lat 49.167–49.333, lon 19.75–20.156 — **CAŁE polskie Tatry** | 2021-09-09 |
+| `GI-FOTO.6201.11.2023` | 29 | lat 49.208–49.354, lon 19.875–20.0625 — tylko **blok centralny** | 2023-05-28, 2023-09-06 |
+| `GK-FOTO.6201.14.2025` | 29 | ten sam blok centralny | 2025-08-08/10/12 |
+
+- **Zachód PL (Chochołowska, Wołowiec, Kominiarski, Ornak, Czerwone Wierchy) = 2021-09-09**, czyli
+  DOKŁADNIE ten sam nalot co Morskie Oko / Rysy / Mnich, które już mamy ⇒ dociągnięcie zachodu jest
+  tonalnie darmowe (żadnego szwu wschód↔zachód).
+- Na zachód od **19.75** w pasie Tatr GUGiK nie ma NICZEGO w żadnej rozdzielczości — to już
+  **Słowacja** (Wołowiec 19.7517 → Rakoń 19.7443 → Grześ ~19.72). Pas 19.50–19.75 ⇒ wyłącznie ZBGIS.
+- **CIEŃ (próbki WMS 512×512, frakcja pikseli lum<40 / cast B−R):** 2021 = 46–68 % ciemnych,
+  cast +19…+25 (wrzesień, słońce ~40°); **2025 na Kasprowym = 1,2 % ciemnych, cast −0,4**
+  (sierpień, słońce ~55°). Nasze obecne det05 to w całości wrzesień 2021 — stąd wypalone cienie
+  w danych. Nalot 2025 jest przy okazji **darmową referencją oświetlenia dla deshadow (R4)**.
+
 ## §0-B. ZASADY NADRZĘDNE DLA KAŻDEJ RECEPTY (user, 2026-08-02 — nie zginąć między sesjami)
 
 **(1) CEL ZAKRESU: CAŁE TATRY W 5 cm = REGION `C` = `19.50,49.10,20.40,49.40`.** To jest zasięg
