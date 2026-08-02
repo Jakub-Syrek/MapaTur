@@ -18,6 +18,21 @@ Wszystko poniżej ZMIERZONE 2026-07-25 (workflow 5 sond + 2 sondy nakładki; skr
 - **Rocznik nad Tatrami jest DWUDZIELNY:** rdzeń masywu (Rysy, Gerlach, Łomnica) = nalot
   **2022-08-26** (2. cykl, region východ, nominal **20 cm**); rejon Krywania (na zach. od ~20.0°E) =
   **2024-08-01** (3. cykl, stred, nominal **15 cm**).
+- **ZBGIS MA OSOBNE SERWISY PER CYKL** (zmierzone 2026-08-02): `Ortofoto` (aktualna mozaika GKÚ),
+  `Ortofoto_2cyklus` (2020-2022), `Ortofoto_1cyklus` (2017-2019), `Ortofoto_hres`. Rocznik da się
+  więc WYBRAĆ, a nie tylko odczytać. Daty per punkt (`DATUM`, ms epoch):
+
+  | punkt | `Ortofoto` | `Ortofoto_2cyklus` |
+  |---|---|---|
+  | Rysy — rdzeń, JUŻ POBRANY | 2022-08-26 | 2022-08-26 |
+  | Krywań / Rohacze / Baraniec | 2024-07-31 | 2021-09-09 |
+
+  **WYBÓR DLA TATR ZACHODNICH: `Ortofoto` (aktualna).** Zgadza się z pobranym rdzeniem co do dnia,
+  a na zachodzie daje lipiec 2024 (słońce ~59°) zamiast września 2021 (~46°) — czyli **mniej cienia**
+  — przy nominale 15 cm zamiast 20 cm. Szew 2022/2024 wewnątrz mozaiki jest już zharmonizowany przez
+  GKÚ; mieszając cykle sami tworzylibyśmy szew, którego dziś nie ma.
+- **ZASADA:** rocznik sprawdzać REST-em i wybierać ŚWIADOMIE przed każdym fetchem — zgodny
+  z pobranym + najmniej cienia. Nie odpalać fetchu „bo trzeba dociągnąć".
 - **Východ-2025 (15 cm) jest JUŻ SFOTOGRAFOWANY**, publikacja wg GKÚ „w lecie 2026" — może być lada
   moment. **Przed dużym fetchem sprawdzić REST-em, czy mozaika rdzenia nie przeskoczyła na 2025.**
 - Licencja: **CC BY 4.0**, atrybucja GKÚ Bratislava + NLC Zvolen (ÚGKK SR). UWAGA: manifest fetchera
