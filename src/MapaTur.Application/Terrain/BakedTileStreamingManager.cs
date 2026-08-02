@@ -300,10 +300,20 @@ public sealed class BakedTileStreamingManager
     /// <param name="viewportHeightPixels">Viewport height in pixels for the screen-space-error projection.</param>
     /// <returns>The resident drawable set and the load/evict deltas.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="camera"/> is null.</exception>
-    public async Task<BakedStreamingUpdate> UpdateAsync(Camera3D camera, float aspectRatio, double viewportHeightPixels)
+    public Task<BakedStreamingUpdate> UpdateAsync(Camera3D camera, float aspectRatio, double viewportHeightPixels)
     {
         ArgumentNullException.ThrowIfNull(camera);
 
+        // Whole update off the caller's thread (2026-08-02). Only the load+mesh step used to be, and only when
+        // there was something to load — so every other round (quadtree select over all roots, residency plan,
+        // eviction, building the drawable list over up to 2400 residents) ran inline on the UI thread, which
+        // also owns rendering. After a teleport those rounds fire back-to-back via the self-kick.
+        // Safe: callers already serialise updates (one in flight at a time — see the class remarks).
+        return Task.Run(() => UpdateCoreAsync(camera, aspectRatio, viewportHeightPixels));
+    }
+
+    private async Task<BakedStreamingUpdate> UpdateCoreAsync(Camera3D camera, float aspectRatio, double viewportHeightPixels)
+    {
         float groundElevation = camera.Target.Z; // the look-at height is a good ground proxy for distance/frustum
 
         // Fast-motion gate: while the eye covers big ground between updates (dragon flight), the virtual
@@ -496,10 +506,22 @@ public sealed class BakedTileStreamingManager
     // builder is pure — and building them sequentially made one 8-tile update take ~1 s, so a 448-tile refocus
     // was ~a minute of visible "loaded=8 evicted=8" churn. A fixed result slot per index keeps the output
     // order identical to the sequential version (deterministic residency bookkeeping downstream).
+    // Leave two cores to the UI/render thread. Without this the build took every core (Parallel.For defaults to
+    // all of them) and the frame-gap watchdog's own comment named the symptom: "gen2 +0 + rising heap = the
+    // off-thread build starving the UI thread of CPU" — measured as multi-second gaps after a teleport.
+    private static readonly ParallelOptions BuildParallelOptions = new()
+    {
+        MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount - 2),
+    };
+
+    // A 12 ms wall-clock budget per build round was TRIED here (2026-08-02) and measured NO BETTER: cutting a
+    // round mid-batch leaves the same tiles in the next round's ToLoad, so the self-kick spins more rounds,
+    // each re-running the quadtree select + residency plan over the whole resident set. Do not reintroduce
+    // without a measurement over several runs (this scenario's run-to-run spread is ~2×).
     private List<(DemTileKey Key, IReadOnlyList<TerrainMesh3D> Meshes, bool HoleFree)> BuildTiles(IReadOnlyList<DemTileKey> toLoad)
     {
         var slots = new (DemTileKey Key, IReadOnlyList<TerrainMesh3D> Meshes, bool HoleFree)?[toLoad.Count];
-        Parallel.For(0, toLoad.Count, i =>
+        Parallel.For(0, toLoad.Count, BuildParallelOptions, i =>
         {
             DemTileKey key = toLoad[i];
             BakedDemTile? tile = this.loadTile(key);
