@@ -5925,11 +5925,108 @@ public partial class Terrain3DView : ContentView
     private static readonly int HarnessAutoshotSec =
         int.TryParse(Environment.GetEnvironmentVariable("MAPATUR_AUTOSHOT_SEC"), out int s) ? s : 0;
     internal static readonly string HarnessPosePath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "mapatur-pose.txt");
+    // MAPATUR_ORBIT="startSec:durationSec:degPerSec" — powolny obrót kamery wokół celu, czyli RUCH sceny
+    // (przebudowa kafli + re-render kaskad cieni) BEZ uruchamiania demo F9. Dodane 08-02: pomiary menu na
+    // statycznej scenie były bezwartościowe — user klika WŁAŚNIE gdy rusza kamerą planując trasę.
+    private static readonly string? HarnessOrbit = Environment.GetEnvironmentVariable("MAPATUR_ORBIT");
+    private double harnessOrbitLastMs;
+
+    // MAPATUR_JUMPS="startSec:intervalSec:lat,lon|lat,lon|…" — skacze kamerą po DALEKICH lokalizacjach tą samą
+    // ścieżką co teleport z wyszukiwarki miejsc. Wskazówka usera (08-02): „użyj lokalizacji by się przemieścić
+    // daleko, wtedy się dociągają kafle i wtedy testuj menu, a nie kręcąc się w miejscu bo nic tak nie
+    // replikujesz" — masowy streaming po skoku to realny scenariusz, w którym menu przestaje odpowiadać.
+    private static readonly string? HarnessJumps = Environment.GetEnvironmentVariable("MAPATUR_JUMPS");
+    private int harnessJumpIndex;
+
     private bool harnessChromeApplied;
     private bool harnessPoseApplied;
     private double harnessLastShotMs;
     private double harnessLastPoseMs;
     private volatile bool harnessShotRequested;
+
+    // Orbits the camera at a fixed angular rate inside its time window, driven by real elapsed time so the
+    // sweep is identical whatever the frame rate (a 10 FPS build must not orbit slower than a 60 FPS one).
+    private void ServiceHarnessOrbit(double nowMs)
+    {
+        if (HarnessOrbit is null)
+        {
+            return;
+        }
+
+        string[] parts = HarnessOrbit.Split(':');
+        var ci = System.Globalization.CultureInfo.InvariantCulture;
+        if (parts.Length != 3
+            || !double.TryParse(parts[0], System.Globalization.NumberStyles.Float, ci, out double startSec)
+            || !double.TryParse(parts[1], System.Globalization.NumberStyles.Float, ci, out double durationSec)
+            || !double.TryParse(parts[2], System.Globalization.NumberStyles.Float, ci, out double degPerSec))
+        {
+            return;
+        }
+
+        double uptimeSec = Environment.TickCount64 / 1000.0 - (harnessProcessStartMs / 1000.0);
+        if (uptimeSec < startSec || uptimeSec > startSec + durationSec)
+        {
+            harnessOrbitLastMs = nowMs;
+            return;
+        }
+
+        double dtSec = harnessOrbitLastMs <= 0 ? 0 : (nowMs - harnessOrbitLastMs) / 1000.0;
+        harnessOrbitLastMs = nowMs;
+        if (dtSec is <= 0 or > 2.0)
+        {
+            return; // first tick / a stall so long that a jump would teleport the camera
+        }
+
+        Camera.AzimuthRadians += (float)(degPerSec * dtSec * Math.PI / 180.0);
+        Canvas.InvalidateSurface();
+    }
+
+    private static readonly double harnessProcessStartMs = Environment.TickCount64;
+
+    // Fires the scripted long-distance jumps: each one lands the camera in a region whose tiles, ortho cells
+    // and detail packs are all cold, so the frames that follow are the heavy streaming frames the user hits.
+    private void ServiceHarnessJumps()
+    {
+        if (HarnessJumps is null || WorldFrame is null)
+        {
+            return;
+        }
+
+        string[] parts = HarnessJumps.Split(':');
+        var ci = System.Globalization.CultureInfo.InvariantCulture;
+        if (parts.Length != 3
+            || !double.TryParse(parts[0], System.Globalization.NumberStyles.Float, ci, out double startSec)
+            || !double.TryParse(parts[1], System.Globalization.NumberStyles.Float, ci, out double intervalSec))
+        {
+            return;
+        }
+
+        string[] targets = parts[2].Split('|', StringSplitOptions.RemoveEmptyEntries);
+        if (harnessJumpIndex >= targets.Length)
+        {
+            return;
+        }
+
+        double uptimeSec = (Environment.TickCount64 - harnessProcessStartMs) / 1000.0;
+        if (uptimeSec < startSec + (harnessJumpIndex * intervalSec))
+        {
+            return;
+        }
+
+        string[] ll = targets[harnessJumpIndex].Split(',');
+        harnessJumpIndex++;
+        if (ll.Length != 2
+            || !double.TryParse(ll[0], System.Globalization.NumberStyles.Float, ci, out double lat)
+            || !double.TryParse(ll[1], System.Globalization.NumberStyles.Float, ci, out double lon))
+        {
+            return;
+        }
+
+        Serilog.Log.Information("[Harness] skok {Index}/{Total} → {Lat:F4},{Lon:F4} (t={T:F1}s)",
+            harnessJumpIndex, targets.Length, lat, lon, uptimeSec);
+        TeleportTo(new Domain.Routing.RouteWaypoint(
+            "harness", new Domain.Geography.GeoPoint(lat, lon), Domain.Routing.WaypointKind.Peak));
+    }
 
     private bool TryApplyEnvPose()
     {
@@ -5969,6 +6066,8 @@ public partial class Terrain3DView : ContentView
         }
 
         double nowMs = Environment.TickCount64; // recordClock tyka tylko przy nagrywaniu — tu potrzebny zawsze
+        ServiceHarnessOrbit(nowMs);
+        ServiceHarnessJumps();
         if (nowMs - harnessLastPoseMs >= 2000)
         {
             harnessLastPoseMs = nowMs;

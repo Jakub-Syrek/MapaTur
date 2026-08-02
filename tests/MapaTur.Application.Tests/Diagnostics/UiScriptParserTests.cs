@@ -58,6 +58,38 @@ public class UiScriptParserTests
     }
 
     [Fact]
+    public void should_expand_stress_spec_into_alternating_steps()
+    {
+        var steps = UiScriptParser.ParseStress("60:4:300");
+
+        Assert.Equal(4, steps.Count);
+        Assert.Equal(60.0, steps[0].AtSeconds);
+        Assert.Equal(60.3, steps[1].AtSeconds, 3);
+        Assert.Equal(60.6, steps[2].AtSeconds, 3);
+        Assert.Equal(60.9, steps[3].AtSeconds, 3);
+    }
+
+    [Fact]
+    public void should_alternate_open_and_close_in_stress_spec()
+    {
+        var steps = UiScriptParser.ParseStress("10:6:250");
+
+        Assert.Equal("1,0,2,0,3,0", string.Join(',', steps.Select(s => s.Section)));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("60:4")]
+    [InlineData("60:0:300")]
+    [InlineData("60:4:0")]
+    [InlineData("x:4:300")]
+    public void should_return_empty_for_invalid_stress_spec(string? spec)
+    {
+        Assert.Empty(UiScriptParser.ParseStress(spec));
+    }
+
+    [Fact]
     public void should_keep_valid_entries_when_mixed_with_invalid()
     {
         var steps = UiScriptParser.Parse("garbage,20:6,99:9");

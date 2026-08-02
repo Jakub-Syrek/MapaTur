@@ -43,4 +43,43 @@ public static class UiScriptParser
         steps.Sort((a, b) => a.AtSeconds.CompareTo(b.AtSeconds));
         return steps;
     }
+
+    /// <summary>
+    /// Expands <c>MAPATUR_UI_STRESS="startSec:count:intervalMs"</c> into a rapid open/close burst
+    /// (1,0,2,0,3,0,…). The user's report is "po kilku kliknięciach przestaje odpowiadać" — a slow,
+    /// well-spaced script never reproduced it, so the harness has to click FAST and many times.
+    /// </summary>
+    public static IReadOnlyList<UiScriptStep> ParseStress(string? spec)
+    {
+        if (string.IsNullOrWhiteSpace(spec))
+        {
+            return [];
+        }
+
+        string[] parts = spec.Split(':');
+        var ci = CultureInfo.InvariantCulture;
+        if (parts.Length != 3
+            || !double.TryParse(parts[0], NumberStyles.Float, ci, out double startSec)
+            || !int.TryParse(parts[1], NumberStyles.Integer, ci, out int count)
+            || !int.TryParse(parts[2], NumberStyles.Integer, ci, out int intervalMs)
+            || startSec < 0 || count <= 0 || intervalMs <= 0)
+        {
+            return [];
+        }
+
+        var steps = new List<UiScriptStep>(count);
+        int nextSection = 1;
+        for (int i = 0; i < count; i++)
+        {
+            int section = i % 2 == 0 ? nextSection : 0;
+            if (i % 2 == 1)
+            {
+                nextSection = nextSection % MaxSection + 1;
+            }
+
+            steps.Add(new UiScriptStep(startSec + (i * intervalMs / 1000.0), section));
+        }
+
+        return steps;
+    }
 }

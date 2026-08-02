@@ -16,9 +16,15 @@ internal static class GlTrack
     private static long vaoAlive;
     private static long fboAlive;
     private static long rboAlive;
+    private static long vboBytes;
 
     internal static long TexAlive => Interlocked.Read(ref texAlive);
     internal static long BufAlive => Interlocked.Read(ref bufAlive);
+
+    /// <summary>Bytes of GL buffer storage the renderer believes it has allocated (tile VBO/EBO classes).</summary>
+    internal static long VboBytes => Interlocked.Read(ref vboBytes);
+
+    internal static void AddVboBytes(long delta) => Interlocked.Add(ref vboBytes, delta);
     internal static long VaoAlive => Interlocked.Read(ref vaoAlive);
     internal static long FboAlive => Interlocked.Read(ref fboAlive);
     internal static long RboAlive => Interlocked.Read(ref rboAlive);

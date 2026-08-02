@@ -63,10 +63,16 @@ public static class HarnessDiag
         }
 
         scriptSteps = UiScriptParser.Parse(Environment.GetEnvironmentVariable("MAPATUR_UI_SCRIPT"));
+        if (scriptSteps.Count == 0)
+        {
+            scriptSteps = UiScriptParser.ParseStress(Environment.GetEnvironmentVariable("MAPATUR_UI_STRESS"));
+        }
+
         if (scriptSteps.Count > 0)
         {
-            Serilog.Log.Information("[UiScript] {Count} kroków: {Script}", scriptSteps.Count,
-                Environment.GetEnvironmentVariable("MAPATUR_UI_SCRIPT"));
+            Serilog.Log.Information("[UiScript] {Count} kroków ({Src})", scriptSteps.Count,
+                Environment.GetEnvironmentVariable("MAPATUR_UI_SCRIPT")
+                ?? Environment.GetEnvironmentVariable("MAPATUR_UI_STRESS"));
         }
 
         IDispatcherTimer beat = dispatcher.CreateTimer();
@@ -106,8 +112,27 @@ public static class HarnessDiag
         while (scriptIndex < scriptSteps.Count && uptimeSec >= scriptSteps[scriptIndex].AtSeconds)
         {
             UiScriptStep step = scriptSteps[scriptIndex++];
-            Serilog.Log.Information("[UiScript] sekcja {Section} @ t={T:F1}s (plan {At}s)", step.Section, uptimeSec, step.AtSeconds);
+            long t0 = Environment.TickCount64;
             selectSection?.Invoke(step.Section);
+            int landed = readActiveSection?.Invoke() ?? -1;
+            long applyMs = Environment.TickCount64 - t0;
+
+            // Two distinct failure modes must stay distinguishable: the command not LANDING (state machine
+            // / gesture path broken) vs landing but the UI thread stalling (rendering starves the dispatcher).
+            if (landed != step.Section)
+            {
+                Serilog.Log.Warning("[UiScript] sekcja NIE ustawiona: chciano {Want}, jest {Got} (t={T:F1}s)",
+                    step.Section, landed, uptimeSec);
+            }
+            else if (applyMs > UiLagLogThresholdMs)
+            {
+                Serilog.Log.Warning("[UiScript] sekcja {Section} ustawiona, ale zajęło {Ms}ms (t={T:F1}s)",
+                    step.Section, applyMs, uptimeSec);
+            }
+            else
+            {
+                Serilog.Log.Information("[UiScript] sekcja {Section} @ t={T:F1}s ({Ms}ms)", step.Section, uptimeSec, applyMs);
+            }
         }
     }
 
@@ -130,6 +155,7 @@ public static class HarnessDiag
                 gcGen2 = GC.CollectionCount(2),
                 glTex = GlTrack.TexAlive,
                 glBuf = GlTrack.BufAlive,
+                glVboMB = GlTrack.VboBytes / (1024 * 1024),
                 glVao = GlTrack.VaoAlive,
                 glFbo = GlTrack.FboAlive,
                 glRbo = GlTrack.RboAlive,
