@@ -3885,9 +3885,30 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             }
         }
 
-        int over = Math.Max(
-            det05Cells.Count - Math.Max(0, Det05HardCapCells),
-            starved - det05FreeLayers.Count);
+        // ★ ODDANIE PAMIĘCI PO OPUSZCZONYM REJONIE (2026-08-02, user: „jak to jest możliwe że Rohacze nie mają
+        // 5cm foto a zacina jak skurwysyn"). Zmierzone nad Rohaczami: widok żądał 0-34 cel, a pula trzymała
+        // 176-192 (~7,5 GB z karty 16 GB) — bo eksmisja ruszała WYŁĄCZNIE przy przekroczeniu capa albo głodzeniu,
+        // a nad rejonem bez detalu OBA są zerowe. Cela nieżądana od dawna jest teraz oddawana bez presji:
+        // pojemność bez zmian, obraz bez zmian (cela poza `desired` z definicji nie jest rysowana).
+        int stale = 0;
+        foreach (DetailCellGpu c in det05Cells.Values)
+        {
+            if (!desiredSet.Contains(c.Key)
+                && c.Compose is null
+                && DetailCellRetentionPolicy.IsStale(det25FrameTick - c.DesiredTick))
+            {
+                stale++;
+            }
+        }
+
+        int over = DetailCellRetentionPolicy.EvictionCount(
+            det05Cells.Count, Det05HardCapCells, starved, det05FreeLayers.Count, stale);
+        if (stale > 0)
+        {
+            Log.Information("[Det05] oddaję {Stale} cel nieżądanych od >{Ticks} klatek (rezydent {Res}, żądane {Des})",
+                stale, DetailCellRetentionPolicy.StaleAfterTicks, det05Cells.Count, desired.Count);
+        }
+
         while (over > 0)
         {
             // ANTI-CHURN (ZASADA 9): prefer an OFF-SCREEN victim; a cell the camera still sees is evicted only
