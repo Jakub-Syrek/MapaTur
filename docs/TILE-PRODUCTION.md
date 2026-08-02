@@ -756,6 +756,23 @@ Po regresji „czarnych dziur" (BC1-RGB gubił alfę bramkującą pokrycie) form
   verify-full: 344 489/344 489 CRC OK, layout/klucze/bijekcja czyste (7,3 min)
 - Razem: pełny prebake Tatr (det05+det25+det1m) = **~75,5 GB / ~72 min** jednorazowo, przyrostowość po srcHash
 
+## §0-B. ZASADY NADRZĘDNE DLA KAŻDEJ RECEPTY (user, 2026-08-02 — nie zginąć między sesjami)
+
+**(1) CEL ZAKRESU: CAŁE TATRY W 5 cm.** Nie pas, nie rejon showcase — całość, PL i SK, Zachodnie
+i Wysokie. Każda recepta poniżej MUSI podać swój bbox ORAZ różnicę względem tego celu. Tak właśnie
+powstała dzisiejsza dziura: §11 i §12 miały zachodnią krawędź 19.80, więc Tatry Zachodnie
+(Rohacze, Osobita, Chochołowska) nigdy nie zostały pobrane — ani z GUGiK, ani z ZBGIS —
+a `det05/manifest.json` mówił `bbox_wsen [19.80, 49.17, 20.10, 49.30]` i nikt tego nie porównał
+z celem. Stan pokrycia 5 cm zmierzony 08-02: kolumny kafli 851..2270 → **lon 19.7998..20.3001**.
+
+**(2) WARSTWY ZGRUBNE DERYWUJEMY Z DETALU — NIGDY NIE POBIERAMY OSOBNO.** Dla obszaru, dla którego
+ciągniemy 5 cm, warstwa 25 cm i baza powstają przez downsample TEGO SAMEGO materiału. Osobny pobór
+to inny nalot, inna data, inne światło i inny tor kolorystyczny serwera — czyli różnice tonu na
+progu LOD i szwy na granicy pierścieni. Cała późniejsza „harmonizacja tonu" leczy objaw, którego
+przy derywacji nie ma. Wyjątek tylko tam, gdzie 5 cm u dostawcy NIE ISTNIEJE — i wtedy odnotować
+świadomie, z ryzykiem szwu. (User: „jak ciągniesz detal to zrób z niego inne warstwy bo będą
+różnice tonu i koloru. ile razy mam to powtórzyć".)
+
 ## §11. SK det05 — pilot V3: fetch pasa przygranicznego z ZBGIS (2026-07-25, W TOKU)
 
 Rozpoznanie i pełny plan: [`PLAN-sk-det05-zbgis.md`](PLAN-sk-det05-zbgis.md); kolejność dalszych kroków:
