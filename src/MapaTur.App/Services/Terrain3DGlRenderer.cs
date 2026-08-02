@@ -3313,6 +3313,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // scratch buffers are held as fields and reused across rebuilds (reallocated only on a dimension change).
     private const float TrailMaskWindowQuantMeters = 500f; // snap window min/size to this grid so it rebuilds rarely
     private uint trailMaskTex;
+    private int trailMaskTexW; // allocated immutable-storage size; respecifying TexImage2D every window jump
+    private int trailMaskTexH; // left ~1 GB/flight of ghosted driver copies (measured 08-02, F9 bench)
     private bool trailMaskValid;
 
     /// <summary>Surface-ownership mask from the VM (see <see cref="MapaTur.Application.Terrain.BaseCoverageMaskBuilder"/>):
@@ -3369,6 +3371,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
     // Parallel single-channel water distance field (unit 6) — drives the wet tint + specular glint.
     private uint waterMaskTex;
+    private int waterMaskTexW;
+    private int waterMaskTexH;
     private bool waterMaskValid;
     private long lastMaskSkipLogTick;
 
@@ -3545,7 +3549,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // out-of-AABB samples clamp instead of wrap, anisotropy). One-time on load — the mosaics are static.
     private unsafe uint UploadDetailMosaic(GL g, byte[] rgba, int w, int h, float aniso)
     {
-        uint tex = g.GenTexture();
+        uint tex = GlTrack.GenTexture(g);
         g.BindTexture(TextureTarget.Texture2D, tex);
         fixed (byte* p = rgba)
         {
@@ -3580,13 +3584,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         if (pendingDet25Rgba is { } r25 && pendingDet25W > 0 && pendingDet25H > 0)
         {
-            if (orthoDet25Texture != 0) { g.DeleteTexture(orthoDet25Texture); }
+            if (orthoDet25Texture != 0) { GlTrack.DeleteTexture(g, orthoDet25Texture); }
             orthoDet25Texture = UploadDetailMosaic(g, r25, pendingDet25W, pendingDet25H, aniso);
             det25GeoSet = true;
         }
         if (pendingDet05Rgba is { } r05 && pendingDet05W > 0 && pendingDet05H > 0)
         {
-            if (orthoDet05Texture != 0) { g.DeleteTexture(orthoDet05Texture); }
+            if (orthoDet05Texture != 0) { GlTrack.DeleteTexture(g, orthoDet05Texture); }
             orthoDet05Texture = UploadDetailMosaic(g, r05, pendingDet05W, pendingDet05H, aniso);
             det05GeoSet = true;
         }
@@ -4082,7 +4086,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private uint AllocateDet05Slice(GL gl, int px, int layers, string name)
     {
         uint levels = (uint)(Math.ILogB(px) + 1);
-        uint tex = gl.GenTexture();
+        uint tex = GlTrack.GenTexture(gl);
         gl.BindTexture(TextureTarget.Texture2DArray, tex);
         // BC1 storage when the extension is present (1/8 VRAM; uploads are CompressedTexSubImage3D of the
         // worker-encoded chain). RGBA8 otherwise — every downstream path branches on det05Bc1On.
@@ -4093,7 +4097,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         if (error != GLEnum.NoError)
         {
             gl.BindTexture(TextureTarget.Texture2DArray, 0);
-            gl.DeleteTexture(tex);
+            GlTrack.DeleteTexture(gl, tex);
             Log.Warning(
                 "[Det05] slice {Name} TexStorage3D({Px}px × {Layers}) FAILED: GL 0x{Err:X} — degrading (no crash, coarser tiers carry the view)",
                 name, px, layers, (int)error);
@@ -4206,7 +4210,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         while (gl.GetError() != GLEnum.NoError) { }
-        det25ArrayTexture = gl.GenTexture();
+        det25ArrayTexture = GlTrack.GenTexture(gl);
         gl.BindTexture(TextureTarget.Texture2DArray, det25ArrayTexture);
         gl.TexStorage3D(TextureTarget.Texture2DArray, 13,
             (SizedInternalFormat)GlCompressedRgbS3tcDxt1, 4096, 4096, Det25ArrLayers);
@@ -4214,7 +4218,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         if (err != GLEnum.NoError)
         {
             Log.Warning("[Det25Arr] TexStorage3D odmówił (GL 0x{E:X}) — zostaje per-tile bind", (int)err);
-            gl.DeleteTexture(det25ArrayTexture);
+            GlTrack.DeleteTexture(gl, det25ArrayTexture);
             det25ArrayTexture = 0;
             return;
         }
@@ -4392,7 +4396,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             }
 
             while (gl.GetError() != GLEnum.NoError) { }
-            det1mArrayTexture = gl.GenTexture();
+            det1mArrayTexture = GlTrack.GenTexture(gl);
             gl.BindTexture(TextureTarget.Texture2DArray, det1mArrayTexture);
             gl.TexStorage3D(TextureTarget.Texture2DArray, 13,
                 (SizedInternalFormat)GlCompressedRgbS3tcDxt1, 4096, 4096, (uint)layers);
@@ -4400,7 +4404,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             if (err != GLEnum.NoError)
             {
                 Log.Warning("[Det1m] TexStorage3D odmówił (GL 0x{E:X}) — warstwa wyłączona, baza pokrywa", (int)err);
-                gl.DeleteTexture(det1mArrayTexture); det1mArrayTexture = 0;
+                GlTrack.DeleteTexture(gl, det1mArrayTexture); det1mArrayTexture = 0;
                 det1mLoaded = null; Det1mPackDir = null;
                 return;
             }
@@ -4429,7 +4433,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 }
             }
 
-            det1mCovTexture = gl.GenTexture();
+            det1mCovTexture = GlTrack.GenTexture(gl);
             gl.BindTexture(TextureTarget.Texture2D, det1mCovTexture);
             fixed (byte* cp = covPix)
             {
@@ -4505,8 +4509,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         for (int i = 0; i < uploadPbo.Length; i++)
         {
-            if (uploadPbo[i] != 0) { gl.DeleteBuffer(uploadPbo[i]); }
-            uploadPbo[i] = gl.GenBuffer();
+            if (uploadPbo[i] != 0) { GlTrack.DeleteBuffer(gl, uploadPbo[i]); }
+            uploadPbo[i] = GlTrack.GenBuffer(gl);
             gl.BindBuffer(BufferTargetARB.PixelUnpackBuffer, uploadPbo[i]);
             gl.BufferData(BufferTargetARB.PixelUnpackBuffer, size, null, BufferUsageARB.StreamDraw);
         }
@@ -5171,7 +5175,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         if (cell.Texture != 0)
         {
-            gl.DeleteTexture(cell.Texture);
+            GlTrack.DeleteTexture(gl, cell.Texture);
             // Subtract exactly what the promote added (BC1 chain vs RGBA differ 8× — see the ledger field).
             det25ResidentBytes -= cell.ResidentBytesLedger != 0
                 ? cell.ResidentBytesLedger
@@ -5196,7 +5200,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         if (cell.StagingTexture != 0)
         {
-            gl.DeleteTexture(cell.StagingTexture);
+            GlTrack.DeleteTexture(gl, cell.StagingTexture);
             cell.StagingTexture = 0;
         }
 
@@ -5268,7 +5272,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             }
             else if (cell.StagingTexture == 0)
             {
-                cell.StagingTexture = gl.GenTexture();
+                cell.StagingTexture = GlTrack.GenTexture(gl);
                 cell.UploadedRows = 0;
                 cell.UploadLevel = 0;
                 gl.BindTexture(TextureTarget.Texture2D, cell.StagingTexture);
@@ -7263,7 +7267,25 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         gpuFrameCount++;
+
+        // Diagnoza osadu sterownika (2026-08-02): commit D3D rósł ~2,5 GB/lot przy STAŁYCH licznikach
+        // GlTrack — podejrzenie: odroczona destrukcja/ghosting ANGLE nigdy nie domykane w locie.
+        // MAPATUR_GL_FINISH_SEC=n wymusza gl.Finish() co n sekund — jeśli krzywa pamięci się płaszczy,
+        // winowajcą jest niedomykana kolejka sterownika, a nie kod aplikacji.
+        if (GlFinishEverySec > 0)
+        {
+            long nowTick = Environment.TickCount64;
+            if (nowTick - lastForcedFinishMs >= GlFinishEverySec * 1000L)
+            {
+                lastForcedFinishMs = nowTick;
+                g.Finish();
+            }
+        }
     }
+
+    private static readonly int GlFinishEverySec =
+        int.TryParse(Environment.GetEnvironmentVariable("MAPATUR_GL_FINISH_SEC"), out int s) ? s : 0;
+    private long lastForcedFinishMs;
 
     // Begin a pass's GPU timer (into this frame's ring slot). Only ONE GL_TIME_ELAPSED query may be active at a
     // time, so GpuBegin/GpuEnd must bracket SEQUENTIAL, non-nesting passes — which every pass below is.
@@ -7382,15 +7404,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         if (reflectionFbo != 0)
         {
-            g.DeleteFramebuffer(reflectionFbo);
-            g.DeleteTexture(reflectionColorTex);
-            g.DeleteRenderbuffer(reflectionDepthRb);
+            GlTrack.DeleteFramebuffer(g, reflectionFbo);
+            GlTrack.DeleteTexture(g, reflectionColorTex);
+            GlTrack.DeleteRenderbuffer(g, reflectionDepthRb);
             reflectionFbo = 0;
             reflectionColorTex = 0;
             reflectionDepthRb = 0;
         }
 
-        reflectionColorTex = g.GenTexture();
+        reflectionColorTex = GlTrack.GenTexture(g);
         g.BindTexture(TextureTarget.Texture2D, reflectionColorTex);
         unsafe
         {
@@ -7402,12 +7424,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
         g.BindTexture(TextureTarget.Texture2D, 0);
 
-        reflectionDepthRb = g.GenRenderbuffer();
+        reflectionDepthRb = GlTrack.GenRenderbuffer(g);
         g.BindRenderbuffer(RenderbufferTarget.Renderbuffer, reflectionDepthRb);
         g.RenderbufferStorage(RenderbufferTarget.Renderbuffer, InternalFormat.DepthComponent16, (uint)w, (uint)h);
         g.BindRenderbuffer(RenderbufferTarget.Renderbuffer, 0);
 
-        reflectionFbo = g.GenFramebuffer();
+        reflectionFbo = GlTrack.GenFramebuffer(g);
         g.BindFramebuffer(FramebufferTarget.Framebuffer, reflectionFbo);
         g.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, reflectionColorTex, 0);
         g.FramebufferRenderbuffer(FramebufferTarget.Framebuffer, FramebufferAttachment.DepthAttachment, RenderbufferTarget.Renderbuffer, reflectionDepthRb);
@@ -7416,9 +7438,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         if (status != GLEnum.FramebufferComplete)
         {
             Log.Information("[GL3D] reflection framebuffer incomplete ({Status}) — planar reflection disabled", status);
-            g.DeleteFramebuffer(reflectionFbo);
-            g.DeleteTexture(reflectionColorTex);
-            g.DeleteRenderbuffer(reflectionDepthRb);
+            GlTrack.DeleteFramebuffer(g, reflectionFbo);
+            GlTrack.DeleteTexture(g, reflectionColorTex);
+            GlTrack.DeleteRenderbuffer(g, reflectionDepthRb);
             reflectionFbo = 0;
             reflectionColorTex = 0;
             reflectionDepthRb = 0;
@@ -7473,11 +7495,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         // (Re)allocate for the new size. Deleting 0 is a no-op so this also handles first-time creation.
-        g.DeleteFramebuffer(presentFbo);
-        g.DeleteTexture(presentColorTex);
-        g.DeleteRenderbuffer(presentDepthRb);
+        GlTrack.DeleteFramebuffer(g, presentFbo);
+        GlTrack.DeleteTexture(g, presentColorTex);
+        GlTrack.DeleteRenderbuffer(g, presentDepthRb);
 
-        presentColorTex = g.GenTexture();
+        presentColorTex = GlTrack.GenTexture(g);
         g.BindTexture(TextureTarget.Texture2D, presentColorTex);
         g.TexImage2D(
             TextureTarget.Texture2D, 0, (int)(hdr ? InternalFormat.Rgba16f : InternalFormat.Rgba8),
@@ -7491,12 +7513,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         // Depth RB only used by the non-MSAA path (when we draw straight into presentFbo). Allocating it
         // unconditionally keeps the FBO shape stable and is cheap on modern mobile GPUs.
-        presentDepthRb = g.GenRenderbuffer();
+        presentDepthRb = GlTrack.GenRenderbuffer(g);
         g.BindRenderbuffer(RenderbufferTarget.Renderbuffer, presentDepthRb);
         g.RenderbufferStorage(RenderbufferTarget.Renderbuffer, InternalFormat.DepthComponent24, (uint)width, (uint)height);
         g.BindRenderbuffer(RenderbufferTarget.Renderbuffer, 0);
 
-        presentFbo = g.GenFramebuffer();
+        presentFbo = GlTrack.GenFramebuffer(g);
         g.BindFramebuffer(FramebufferTarget.Framebuffer, presentFbo);
         g.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, presentColorTex, 0);
         g.FramebufferRenderbuffer(FramebufferTarget.Framebuffer, FramebufferAttachment.DepthAttachment, RenderbufferTarget.Renderbuffer, presentDepthRb);
@@ -7505,9 +7527,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
         if (status != GLEnum.FramebufferComplete)
         {
-            g.DeleteFramebuffer(presentFbo);
-            g.DeleteTexture(presentColorTex);
-            g.DeleteRenderbuffer(presentDepthRb);
+            GlTrack.DeleteFramebuffer(g, presentFbo);
+            GlTrack.DeleteTexture(g, presentColorTex);
+            GlTrack.DeleteRenderbuffer(g, presentDepthRb);
             presentFbo = 0;
             presentColorTex = 0;
             presentDepthRb = 0;
@@ -7549,7 +7571,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         if (this.baseCoverTex == 0)
         {
-            this.baseCoverTex = gl.GenTexture();
+            this.baseCoverTex = GlTrack.GenTexture(gl);
         }
 
         gl.ActiveTexture(TextureUnit.Texture8);
@@ -7624,10 +7646,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             return true;
         }
 
-        g.DeleteFramebuffer(ghostDepthFbo);
-        g.DeleteTexture(ghostDepthTex);
+        GlTrack.DeleteFramebuffer(g, ghostDepthFbo);
+        GlTrack.DeleteTexture(g, ghostDepthTex);
 
-        ghostDepthTex = g.GenTexture();
+        ghostDepthTex = GlTrack.GenTexture(g);
         g.BindTexture(TextureTarget.Texture2D, ghostDepthTex);
         g.TexImage2D(
             TextureTarget.Texture2D, 0, (int)InternalFormat.DepthComponent24,
@@ -7640,7 +7662,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
         g.BindTexture(TextureTarget.Texture2D, 0);
 
-        ghostDepthFbo = g.GenFramebuffer();
+        ghostDepthFbo = GlTrack.GenFramebuffer(g);
         g.BindFramebuffer(FramebufferTarget.Framebuffer, ghostDepthFbo);
         g.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.DepthAttachment, TextureTarget.Texture2D, ghostDepthTex, 0);
         // Depth-only FBO: tell GL there is deliberately no colour output (some drivers flag incompleteness
@@ -7653,8 +7675,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         if (status != GLEnum.FramebufferComplete)
         {
             Log.Information("[GL3D] ghost-depth framebuffer incomplete ({Status}) — x-ray rock-thickness gate disabled this session", status);
-            g.DeleteFramebuffer(ghostDepthFbo);
-            g.DeleteTexture(ghostDepthTex);
+            GlTrack.DeleteFramebuffer(g, ghostDepthFbo);
+            GlTrack.DeleteTexture(g, ghostDepthTex);
             ghostDepthFbo = 0;
             ghostDepthTex = 0;
             ghostDepthUnsupported = true;
@@ -7684,10 +7706,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             return true;
         }
 
-        g.DeleteFramebuffer(postFbo);
-        g.DeleteTexture(postColorTex);
+        GlTrack.DeleteFramebuffer(g, postFbo);
+        GlTrack.DeleteTexture(g, postColorTex);
 
-        postColorTex = g.GenTexture();
+        postColorTex = GlTrack.GenTexture(g);
         g.BindTexture(TextureTarget.Texture2D, postColorTex);
         g.TexImage2D(
             TextureTarget.Texture2D, 0, (int)InternalFormat.Rgba8,
@@ -7699,7 +7721,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
         g.BindTexture(TextureTarget.Texture2D, 0);
 
-        postFbo = g.GenFramebuffer();
+        postFbo = GlTrack.GenFramebuffer(g);
         g.BindFramebuffer(FramebufferTarget.Framebuffer, postFbo);
         g.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, postColorTex, 0);
 
@@ -7708,8 +7730,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         if (status != GLEnum.FramebufferComplete)
         {
             Log.Information("[GL3D] post framebuffer incomplete ({Status}) — post-process disabled this session", status);
-            g.DeleteFramebuffer(postFbo);
-            g.DeleteTexture(postColorTex);
+            GlTrack.DeleteFramebuffer(g, postFbo);
+            GlTrack.DeleteTexture(g, postColorTex);
             postFbo = 0;
             postColorTex = 0;
             postUnsupported = true;
@@ -7746,7 +7768,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// </summary>
     private static uint MakeColorTexture(GL g, int w, int h, bool hdr = false)
     {
-        uint tex = g.GenTexture();
+        uint tex = GlTrack.GenTexture(g);
         g.BindTexture(TextureTarget.Texture2D, tex);
         g.TexImage2D(
             TextureTarget.Texture2D, 0, (int)(hdr ? InternalFormat.R11fG11fB10f : InternalFormat.Rgba8),
@@ -7775,9 +7797,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             return true;
         }
 
-        g.DeleteFramebuffer(hazeMaskFbo);
-        g.DeleteTexture(hazeMaskTex);
-        hazeMaskTex = g.GenTexture();
+        GlTrack.DeleteFramebuffer(g, hazeMaskFbo);
+        GlTrack.DeleteTexture(g, hazeMaskTex);
+        hazeMaskTex = GlTrack.GenTexture(g);
         g.BindTexture(TextureTarget.Texture2D, hazeMaskTex);
         g.TexImage2D(
             TextureTarget.Texture2D, 0, (int)(hdr ? InternalFormat.R16f : InternalFormat.R8),
@@ -7792,8 +7814,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         if (maskStatus != GLEnum.FramebufferComplete)
         {
             Log.Information("[GL3D] haze mask framebuffer incomplete ({Status}) — heat haze off this session", maskStatus);
-            g.DeleteFramebuffer(hazeMaskFbo);
-            g.DeleteTexture(hazeMaskTex);
+            GlTrack.DeleteFramebuffer(g, hazeMaskFbo);
+            GlTrack.DeleteTexture(g, hazeMaskTex);
             hazeMaskFbo = hazeMaskTex = 0;
             hazeUnsupported = true;
             return false;
@@ -7819,9 +7841,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             return true;
         }
 
-        g.DeleteFramebuffer(hazeColorFbo);
-        g.DeleteTexture(hazeColorTex);
-        hazeColorTex = g.GenTexture();
+        GlTrack.DeleteFramebuffer(g, hazeColorFbo);
+        GlTrack.DeleteTexture(g, hazeColorTex);
+        hazeColorTex = GlTrack.GenTexture(g);
         g.BindTexture(TextureTarget.Texture2D, hazeColorTex);
         g.TexImage2D(
             TextureTarget.Texture2D, 0, (int)(hdr ? InternalFormat.Rgba16f : InternalFormat.Rgba8),
@@ -7836,8 +7858,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         if (colStatus != GLEnum.FramebufferComplete)
         {
             Log.Information("[GL3D] haze colour framebuffer incomplete ({Status}) — heat haze off this session", colStatus);
-            g.DeleteFramebuffer(hazeColorFbo);
-            g.DeleteTexture(hazeColorTex);
+            GlTrack.DeleteFramebuffer(g, hazeColorFbo);
+            GlTrack.DeleteTexture(g, hazeColorTex);
             hazeColorFbo = hazeColorTex = 0;
             hazeUnsupported = true;
             return false;
@@ -7852,7 +7874,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// <summary>Creates a colour-only FBO wrapping <paramref name="colorTex"/> and returns its completeness status.</summary>
     private static uint MakeColorFbo(GL g, uint colorTex, out GLEnum status)
     {
-        uint fbo = g.GenFramebuffer();
+        uint fbo = GlTrack.GenFramebuffer(g);
         g.BindFramebuffer(FramebufferTarget.Framebuffer, fbo);
         g.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, colorTex, 0);
         status = g.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
@@ -7899,14 +7921,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             return true;
         }
 
-        g.DeleteFramebuffer(bloomBrightFbo);
-        g.DeleteTexture(bloomBrightTex);
-        g.DeleteFramebuffer(bloomFboA);
-        g.DeleteTexture(bloomTexA);
-        g.DeleteFramebuffer(bloomFboB);
-        g.DeleteTexture(bloomTexB);
-        g.DeleteFramebuffer(godrayFbo);
-        g.DeleteTexture(godrayTex);
+        GlTrack.DeleteFramebuffer(g, bloomBrightFbo);
+        GlTrack.DeleteTexture(g, bloomBrightTex);
+        GlTrack.DeleteFramebuffer(g, bloomFboA);
+        GlTrack.DeleteTexture(g, bloomTexA);
+        GlTrack.DeleteFramebuffer(g, bloomFboB);
+        GlTrack.DeleteTexture(g, bloomTexB);
+        GlTrack.DeleteFramebuffer(g, godrayFbo);
+        GlTrack.DeleteTexture(g, godrayTex);
 
         bloomBrightTex = MakeColorTexture(g, bw, bh, hdr);
         bloomBrightFbo = MakeColorFbo(g, bloomBrightTex, out GLEnum statusBright);
@@ -7921,14 +7943,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         if (statusBright != GLEnum.FramebufferComplete || statusA != GLEnum.FramebufferComplete
             || statusB != GLEnum.FramebufferComplete || statusGod != GLEnum.FramebufferComplete)
         {
-            g.DeleteFramebuffer(bloomBrightFbo);
-            g.DeleteTexture(bloomBrightTex);
-            g.DeleteFramebuffer(bloomFboA);
-            g.DeleteTexture(bloomTexA);
-            g.DeleteFramebuffer(bloomFboB);
-            g.DeleteTexture(bloomTexB);
-            g.DeleteFramebuffer(godrayFbo);
-            g.DeleteTexture(godrayTex);
+            GlTrack.DeleteFramebuffer(g, bloomBrightFbo);
+            GlTrack.DeleteTexture(g, bloomBrightTex);
+            GlTrack.DeleteFramebuffer(g, bloomFboA);
+            GlTrack.DeleteTexture(g, bloomTexA);
+            GlTrack.DeleteFramebuffer(g, bloomFboB);
+            GlTrack.DeleteTexture(g, bloomTexB);
+            GlTrack.DeleteFramebuffer(g, godrayFbo);
+            GlTrack.DeleteTexture(g, godrayTex);
             bloomBrightFbo = bloomBrightTex = bloomFboA = bloomTexA = bloomFboB = bloomTexB = godrayFbo = godrayTex = 0;
             if (hdr)
             {
@@ -8132,7 +8154,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         for (int i = 0; i < ShadowCascadeCount; i++)
         {
-            uint tex = g.GenTexture();
+            uint tex = GlTrack.GenTexture(g);
             g.BindTexture(TextureTarget.Texture2D, tex);
             g.TexImage2D(
                 TextureTarget.Texture2D, 0, (int)InternalFormat.DepthComponent24,
@@ -8145,7 +8167,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureCompareFunc, (int)GLEnum.Lequal);
             g.BindTexture(TextureTarget.Texture2D, 0);
 
-            uint fbo = g.GenFramebuffer();
+            uint fbo = GlTrack.GenFramebuffer(g);
             g.BindFramebuffer(FramebufferTarget.Framebuffer, fbo);
             g.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.DepthAttachment, TextureTarget.Texture2D, tex, 0);
             GLEnum status = g.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
@@ -8153,12 +8175,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             if (status != GLEnum.FramebufferComplete)
             {
                 Log.Information("[GL3D] shadow framebuffer incomplete ({Status}) cascade {C} — shadows off this session", status, i);
-                g.DeleteTexture(tex);
-                g.DeleteFramebuffer(fbo);
+                GlTrack.DeleteTexture(g, tex);
+                GlTrack.DeleteFramebuffer(g, fbo);
                 for (int j = 0; j < i; j++)
                 {
-                    g.DeleteFramebuffer(shadowFbos[j]);
-                    g.DeleteTexture(shadowDepthTex[j]);
+                    GlTrack.DeleteFramebuffer(g, shadowFbos[j]);
+                    GlTrack.DeleteTexture(g, shadowDepthTex[j]);
                     shadowFbos[j] = 0;
                     shadowDepthTex[j] = 0;
                 }
@@ -8344,19 +8366,19 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         // (Re)allocate for the new size. Deleting 0 is a no-op, so this also handles first-time creation.
-        g.DeleteFramebuffer(msaaFbo);
-        g.DeleteRenderbuffer(msaaColorRb);
-        g.DeleteRenderbuffer(msaaDepthRb);
+        GlTrack.DeleteFramebuffer(g, msaaFbo);
+        GlTrack.DeleteRenderbuffer(g, msaaColorRb);
+        GlTrack.DeleteRenderbuffer(g, msaaDepthRb);
 
-        msaaColorRb = g.GenRenderbuffer();
+        msaaColorRb = GlTrack.GenRenderbuffer(g);
         g.BindRenderbuffer(RenderbufferTarget.Renderbuffer, msaaColorRb);
         g.RenderbufferStorageMultisample(RenderbufferTarget.Renderbuffer, (uint)msaaSamples, hdr ? InternalFormat.Rgba16f : InternalFormat.Rgba8, (uint)width, (uint)height);
 
-        msaaDepthRb = g.GenRenderbuffer();
+        msaaDepthRb = GlTrack.GenRenderbuffer(g);
         g.BindRenderbuffer(RenderbufferTarget.Renderbuffer, msaaDepthRb);
         g.RenderbufferStorageMultisample(RenderbufferTarget.Renderbuffer, (uint)msaaSamples, InternalFormat.DepthComponent24, (uint)width, (uint)height);
 
-        msaaFbo = g.GenFramebuffer();
+        msaaFbo = GlTrack.GenFramebuffer(g);
         g.BindFramebuffer(FramebufferTarget.Framebuffer, msaaFbo);
         g.FramebufferRenderbuffer(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, RenderbufferTarget.Renderbuffer, msaaColorRb);
         g.FramebufferRenderbuffer(FramebufferTarget.Framebuffer, FramebufferAttachment.DepthAttachment, RenderbufferTarget.Renderbuffer, msaaDepthRb);
@@ -8365,9 +8387,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.BindRenderbuffer(RenderbufferTarget.Renderbuffer, 0);
         if (status != GLEnum.FramebufferComplete)
         {
-            g.DeleteFramebuffer(msaaFbo);
-            g.DeleteRenderbuffer(msaaColorRb);
-            g.DeleteRenderbuffer(msaaDepthRb);
+            GlTrack.DeleteFramebuffer(g, msaaFbo);
+            GlTrack.DeleteRenderbuffer(g, msaaColorRb);
+            GlTrack.DeleteRenderbuffer(g, msaaDepthRb);
             msaaFbo = 0;
             msaaColorRb = 0;
             msaaDepthRb = 0;
@@ -8404,7 +8426,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             if (old.Texture != 0)
             {
-                g.DeleteTexture(old.Texture);
+                GlTrack.DeleteTexture(g, old.Texture);
                 old.Texture = 0;
             }
 
@@ -8516,7 +8538,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             t.UploadedCapPx = desiredCap;
             if (t.Texture != 0)
             {
-                g.DeleteTexture(t.Texture);
+                GlTrack.DeleteTexture(g, t.Texture);
                 t.Texture = 0;
             }
 
@@ -8536,7 +8558,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             OrthoTile tile = orthoTiles[idx];
             if (tile.Texture != 0)
             {
-                g.DeleteTexture(tile.Texture);
+                GlTrack.DeleteTexture(g, tile.Texture);
                 tile.Texture = 0;
             }
 
@@ -8576,7 +8598,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     {
         if (tile.StagingTexture != 0)
         {
-            g.DeleteTexture(tile.StagingTexture);
+            GlTrack.DeleteTexture(g, tile.StagingTexture);
             tile.StagingTexture = 0;
         }
 
@@ -8634,7 +8656,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             if (tile.StagingTexture == 0)
             {
                 // Allocate the full-size texture EMPTY (no bulk transfer) — the strips fill it below.
-                tile.StagingTexture = g.GenTexture();
+                tile.StagingTexture = GlTrack.GenTexture(g);
                 tile.UploadedRows = 0;
                 g.BindTexture(TextureTarget.Texture2D, tile.StagingTexture);
                 g.TexImage2D(
@@ -8910,8 +8932,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         if (debugPolyVao == 0)
         {
-            debugPolyVao = g.GenVertexArray();
-            debugPolyVbo = g.GenBuffer();
+            debugPolyVao = GlTrack.GenVertexArray(g);
+            debugPolyVbo = GlTrack.GenBuffer(g);
             g.BindVertexArray(debugPolyVao);
             g.BindBuffer(BufferTargetARB.ArrayBuffer, debugPolyVbo);
             int sb = stride * sizeof(float);
@@ -9411,9 +9433,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Fullscreen triangle: 3 vertices, each xy in clip space, covering NDC [-1,1]^2 with one extra
         // vertex outside the rect so the rasteriser fills the full screen without re-clipping a quad.
         Span<float> tri = stackalloc float[6] { -1f, -1f, 3f, -1f, -1f, 3f };
-        skyVao = g.GenVertexArray();
+        skyVao = GlTrack.GenVertexArray(g);
         g.BindVertexArray(skyVao);
-        skyVbo = g.GenBuffer();
+        skyVbo = GlTrack.GenBuffer(g);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, skyVbo);
         g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(tri.Length * sizeof(float)), tri, BufferUsageARB.StaticDraw);
         g.EnableVertexAttribArray(0);
@@ -9442,9 +9464,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         starViewProjLocation = g.GetUniformLocation(starProgram, "uViewProj");
         starNightFactorLocation = g.GetUniformLocation(starProgram, "uNightFactor");
         starStarsOnLocation = g.GetUniformLocation(starProgram, "uStarsOn");
-        starVao = g.GenVertexArray();
+        starVao = GlTrack.GenVertexArray(g);
         g.BindVertexArray(starVao);
-        starVbo = g.GenBuffer();
+        starVbo = GlTrack.GenBuffer(g);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, starVbo);
         g.EnableVertexAttribArray(0);
         g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 4 * sizeof(float), (void*)0);
@@ -9610,14 +9632,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
         cloudIndexCount = cloudIndices.Length;
 
-        cloudVao = g.GenVertexArray();
+        cloudVao = GlTrack.GenVertexArray(g);
         g.BindVertexArray(cloudVao);
-        cloudVbo = g.GenBuffer();
+        cloudVbo = GlTrack.GenBuffer(g);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, cloudVbo);
         g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(cloudVerts.Length * sizeof(float)), cloudVerts, BufferUsageARB.StaticDraw);
         g.EnableVertexAttribArray(0);
         g.VertexAttribPointer(0, 2, VertexAttribPointerType.Float, false, 2 * sizeof(float), (void*)0);
-        cloudIbo = g.GenBuffer();
+        cloudIbo = GlTrack.GenBuffer(g);
         g.BindBuffer(BufferTargetARB.ElementArrayBuffer, cloudIbo);
         g.BufferData<uint>(BufferTargetARB.ElementArrayBuffer, (nuint)(cloudIndices.Length * sizeof(uint)), cloudIndices, BufferUsageARB.StaticDraw);
         g.BindVertexArray(0);
@@ -9843,11 +9865,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         dragonFireColorLoc = g.GetUniformLocation(dragonProgram, "uFireColor[0]");
         dragonFireInvR2Loc = g.GetUniformLocation(dragonProgram, "uFireInvR2[0]");
 
-        dragonVao = g.GenVertexArray();
-        dragonPosVbo = g.GenBuffer();
-        dragonNrmVbo = g.GenBuffer();
-        dragonUvVbo = g.GenBuffer();
-        dragonEbo = g.GenBuffer();
+        dragonVao = GlTrack.GenVertexArray(g);
+        dragonPosVbo = GlTrack.GenBuffer(g);
+        dragonNrmVbo = GlTrack.GenBuffer(g);
+        dragonUvVbo = GlTrack.GenBuffer(g);
+        dragonEbo = GlTrack.GenBuffer(g);
         g.BindVertexArray(dragonVao);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, dragonPosVbo);
         g.EnableVertexAttribArray(0);
@@ -9873,7 +9895,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Model changed (variant switch): drop the previous texture before deciding the new path.
         if (dragonTexture != 0)
         {
-            g.DeleteTexture(dragonTexture);
+            GlTrack.DeleteTexture(g, dragonTexture);
             dragonTexture = 0;
         }
 
@@ -9897,7 +9919,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 return false;
             }
 
-            dragonTexture = g.GenTexture();
+            dragonTexture = GlTrack.GenTexture(g);
             g.ActiveTexture(TextureUnit.Texture9);
             g.BindTexture(TextureTarget.Texture2D, dragonTexture);
             unsafe
@@ -10312,8 +10334,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         fireLightsInvR2Loc = g.GetUniformLocation(fireProgram, "uFireInvR2[0]");
         fireCamPosLoc = g.GetUniformLocation(fireProgram, "uCamPos");
 
-        fireVao = g.GenVertexArray();
-        fireVbo = g.GenBuffer();
+        fireVao = GlTrack.GenVertexArray(g);
+        fireVbo = GlTrack.GenBuffer(g);
         g.BindVertexArray(fireVao);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, fireVbo);
         const int stride = 12 * sizeof(float); // center3 + corner2 + radius + intensity + seed + kind + vel3
@@ -10625,8 +10647,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         markerRightLoc = g.GetUniformLocation(markerProgram, "uRight");
         markerUpLoc = g.GetUniformLocation(markerProgram, "uUp");
 
-        markerVao = g.GenVertexArray();
-        markerVbo = g.GenBuffer();
+        markerVao = GlTrack.GenVertexArray(g);
+        markerVbo = GlTrack.GenBuffer(g);
         g.BindVertexArray(markerVao);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, markerVbo);
         const int stride = 9 * sizeof(float); // center3 + corner2 + radius + color3
@@ -10799,8 +10821,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         climbImprintZScaleLoc = g.GetUniformLocation(climbImprintProgram, "uZScale");
         climbImprintSunLoc = g.GetUniformLocation(climbImprintProgram, "uSunDir");
 
-        climbImprintVao = g.GenVertexArray();
-        climbImprintVbo = g.GenBuffer();
+        climbImprintVao = GlTrack.GenVertexArray(g);
+        climbImprintVbo = GlTrack.GenBuffer(g);
         g.BindVertexArray(climbImprintVao);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, climbImprintVbo);
         const int stride = 9 * sizeof(float); // pos3 + normal3 + tint3
@@ -10962,8 +10984,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gearRingRightLoc = g.GetUniformLocation(gearRingProgram, "uRight");
         gearRingUpLoc = g.GetUniformLocation(gearRingProgram, "uUp");
 
-        gearRibbonVao = g.GenVertexArray();
-        gearRibbonVbo = g.GenBuffer();
+        gearRibbonVao = GlTrack.GenVertexArray(g);
+        gearRibbonVbo = GlTrack.GenBuffer(g);
         g.BindVertexArray(gearRibbonVao);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, gearRibbonVbo);
         const int ribbonStride = 12 * sizeof(float); // pos3 + offset3 + u + along + color3 + smooth
@@ -10980,8 +11002,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.EnableVertexAttribArray(5);
         g.VertexAttribPointer(5, 1, VertexAttribPointerType.Float, false, ribbonStride, (void*)(11 * sizeof(float)));
 
-        gearRingVao = g.GenVertexArray();
-        gearRingVbo = g.GenBuffer();
+        gearRingVao = GlTrack.GenVertexArray(g);
+        gearRingVbo = GlTrack.GenBuffer(g);
         g.BindVertexArray(gearRingVao);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, gearRingVbo);
         const int ringStride = 12 * sizeof(float); // center3 + corner2 + radius + inner + aspect + color3 + pad
@@ -11436,7 +11458,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             using SkiaSharp.SKBitmap? rgba = bitmap?.Copy(SkiaSharp.SKColorType.Rgba8888);
             if (rgba is not null)
             {
-                tex = g.GenTexture();
+                tex = GlTrack.GenTexture(g);
                 g.ActiveTexture(TextureUnit.Texture9);
                 g.BindTexture(TextureTarget.Texture2D, tex);
                 g.TexImage2D(
@@ -11557,30 +11579,30 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         uint[] indices = tile.Indices;
 
         var buffers = new TileBuffers { IndexCount = indices.Length };
-        buffers.Vao = g.GenVertexArray();
+        buffers.Vao = GlTrack.GenVertexArray(g);
         g.BindVertexArray(buffers.Vao);
 
-        buffers.PositionVbo = g.GenBuffer();
+        buffers.PositionVbo = GlTrack.GenBuffer(g);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.PositionVbo);
         g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(positions.Length * sizeof(float)), positions, BufferUsageARB.StaticDraw);
         g.EnableVertexAttribArray(0);
         g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
 
-        buffers.ColorVbo = g.GenBuffer();
+        buffers.ColorVbo = GlTrack.GenBuffer(g);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.ColorVbo);
         g.BufferData<byte>(BufferTargetARB.ArrayBuffer, (nuint)(vertexCount * 4), colorsRented.AsSpan(0, vertexCount * 4), BufferUsageARB.StaticDraw);
         g.EnableVertexAttribArray(1);
         g.VertexAttribPointer(1, 4, VertexAttribPointerType.UnsignedByte, true, 4, (void*)0);
         MapaTur.Application.Terrain.MeshBufferPool.Shared.Return(colorsRented); // BufferData copied — pool it back
 
-        buffers.NormalVbo = g.GenBuffer();
+        buffers.NormalVbo = GlTrack.GenBuffer(g);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.NormalVbo);
         g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(normalsSpan.Length * sizeof(float)), normalsSpan, BufferUsageARB.StaticDraw);
         g.EnableVertexAttribArray(2);
         g.VertexAttribPointer(2, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
 
         float[] texCoords = tile.TexCoords;
-        buffers.TexVbo = g.GenBuffer();
+        buffers.TexVbo = GlTrack.GenBuffer(g);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.TexVbo);
         g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(texCoords.Length * sizeof(float)), texCoords, BufferUsageARB.StaticDraw);
         g.EnableVertexAttribArray(3);
@@ -11589,13 +11611,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Per-vertex mid-frequency detail amplitude (m RMS): one float at attribute location 4, baked into the
         // VAO so the main terrain draw carries it with no per-tile bind. 0 on the finest/live tiles (no-op shading).
         float[] detail = tile.Detail;
-        buffers.DetailVbo = g.GenBuffer();
+        buffers.DetailVbo = GlTrack.GenBuffer(g);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.DetailVbo);
         g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(detail.Length * sizeof(float)), detail, BufferUsageARB.StaticDraw);
         g.EnableVertexAttribArray(4);
         g.VertexAttribPointer(4, 1, VertexAttribPointerType.Float, false, sizeof(float), (void*)0);
 
-        buffers.Ebo = g.GenBuffer();
+        buffers.Ebo = GlTrack.GenBuffer(g);
         g.BindBuffer(BufferTargetARB.ElementArrayBuffer, buffers.Ebo);
         g.BufferData<uint>(BufferTargetARB.ElementArrayBuffer, (nuint)(indices.Length * sizeof(uint)), indices, BufferUsageARB.StaticDraw);
 
@@ -11626,13 +11648,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
     private static void ReleaseTileBuffers(GL g, TileBuffers b)
     {
-        g.DeleteBuffer(b.PositionVbo);
-        g.DeleteBuffer(b.ColorVbo);
-        g.DeleteBuffer(b.NormalVbo);
-        g.DeleteBuffer(b.TexVbo);
-        g.DeleteBuffer(b.DetailVbo);
-        g.DeleteBuffer(b.Ebo);
-        g.DeleteVertexArray(b.Vao);
+        GlTrack.DeleteBuffer(g, b.PositionVbo);
+        GlTrack.DeleteBuffer(g, b.ColorVbo);
+        GlTrack.DeleteBuffer(g, b.NormalVbo);
+        GlTrack.DeleteBuffer(g, b.TexVbo);
+        GlTrack.DeleteBuffer(g, b.DetailVbo);
+        GlTrack.DeleteBuffer(g, b.Ebo);
+        GlTrack.DeleteVertexArray(g, b.Vao);
     }
 
     // Incremental tile residency. The base tiles are REUSED across detail reloads (same TerrainMesh3D refs;
@@ -12017,20 +12039,19 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             keyMinX, keyMinY, keySizeX, keySizeY, keyMinX, keyMinY, keySizeX, keySizeY);
     }
 
-    // GL-thread half of a landed build: two TexImage2D uploads + window uniforms state. Cheap (~10 ms at 4096²).
+    // GL-thread half of a landed build: two TexSubImage2D uploads + window uniforms state. Cheap (~10 ms at 4096²).
+    // Immutable TexStorage2D allocated once per size (2026-08-02): respecifying TexImage2D on every 500 m window
+    // jump made ANGLE/D3D11 ghost the old storage (~107 MB per rebuild × ~37 rebuilds/flight) faster than the
+    // driver reclaimed it — measured as ~+1 GB of unbooked native ws per F9 flight, killing the app near 30 GB.
     private void UploadTrailMask(GL g, TrailMaskBuildResult built)
     {
         TrailMask mask = built.Mask!;
-        if (trailMaskTex == 0)
-        {
-            trailMaskTex = g.GenTexture();
-        }
-
         g.ActiveTexture(TextureUnit.Texture5);
-        g.BindTexture(TextureTarget.Texture2D, trailMaskTex);
-        g.TexImage2D<byte>(
-            TextureTarget.Texture2D, 0, (int)InternalFormat.Rgba8,
-            (uint)mask.Width, (uint)mask.Height, 0,
+        EnsureImmutableMaskStorage(g, ref trailMaskTex, ref trailMaskTexW, ref trailMaskTexH,
+            mask.Width, mask.Height, SizedInternalFormat.Rgba8);
+        g.TexSubImage2D<byte>(
+            TextureTarget.Texture2D, 0, 0, 0,
+            (uint)mask.Width, (uint)mask.Height,
             PixelFormat.Rgba, PixelType.UnsignedByte, mask.Rgba);
         // Mipmapped MIN filter: the 8.5 km window is heavily minified at its far edge; sampling the raw
         // level there made the reconstructed distance jump per pixel (fwidth explosion → fat fuzzy ribbons).
@@ -12046,17 +12067,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         waterMaskValid = false;
         if (mask.Water is { } waterField)
         {
-            if (waterMaskTex == 0)
-            {
-                waterMaskTex = g.GenTexture();
-            }
-
             g.ActiveTexture(TextureUnit.Texture6);
-            g.BindTexture(TextureTarget.Texture2D, waterMaskTex);
+            EnsureImmutableMaskStorage(g, ref waterMaskTex, ref waterMaskTexW, ref waterMaskTexH,
+                mask.Width, mask.Height, SizedInternalFormat.R8);
             g.PixelStore(PixelStoreParameter.UnpackAlignment, 1); // tightly-packed single-channel rows
-            g.TexImage2D<byte>(
-                TextureTarget.Texture2D, 0, (int)InternalFormat.R8,
-                (uint)mask.Width, (uint)mask.Height, 0,
+            g.TexSubImage2D<byte>(
+                TextureTarget.Texture2D, 0, 0, 0,
+                (uint)mask.Width, (uint)mask.Height,
                 PixelFormat.Red, PixelType.UnsignedByte, waterField);
             g.PixelStore(PixelStoreParameter.UnpackAlignment, 4);
             g.GenerateMipmap(TextureTarget.Texture2D); // same minification story as the RGBA mask above
@@ -12074,6 +12091,32 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         trailMaskSizeX = built.SizeX;
         trailMaskSizeY = built.SizeY;
         trailMaskValid = true;
+    }
+
+    // Binds the mask texture, (re)allocating its immutable storage only when the window size actually changes
+    // (the 500 m-quantised window is ~always the same 4096², so in practice this allocates once per session).
+    private static void EnsureImmutableMaskStorage(
+        GL g, ref uint tex, ref int allocW, ref int allocH, int width, int height, SizedInternalFormat format)
+    {
+        if (tex != 0 && (allocW != width || allocH != height))
+        {
+            GlTrack.DeleteTexture(g, tex);
+            tex = 0;
+        }
+
+        if (tex == 0)
+        {
+            tex = GlTrack.GenTexture(g);
+            g.BindTexture(TextureTarget.Texture2D, tex);
+            uint levels = (uint)(Math.ILogB(Math.Max(width, height)) + 1);
+            g.TexStorage2D(TextureTarget.Texture2D, levels, format, (uint)width, (uint)height);
+            allocW = width;
+            allocH = height;
+        }
+        else
+        {
+            g.BindTexture(TextureTarget.Texture2D, tex);
+        }
     }
 
     // The mask window in absolute world-XY: the near-field detail window when streaming (fine resolution where
@@ -12635,39 +12678,39 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         var buffers = new LineBuffers { IndexCount = ribbon.Indices.Count };
-        buffers.Vao = g.GenVertexArray();
+        buffers.Vao = GlTrack.GenVertexArray(g);
         g.BindVertexArray(buffers.Vao);
 
         float[] positions = ribbon.Positions.ToArray();
-        buffers.PositionVbo = g.GenBuffer();
+        buffers.PositionVbo = GlTrack.GenBuffer(g);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.PositionVbo);
         g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(positions.Length * sizeof(float)), positions, BufferUsageARB.StaticDraw);
         g.EnableVertexAttribArray(0);
         g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
 
         byte[] colors = ribbon.Colors.ToArray();
-        buffers.ColorVbo = g.GenBuffer();
+        buffers.ColorVbo = GlTrack.GenBuffer(g);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.ColorVbo);
         g.BufferData<byte>(BufferTargetARB.ArrayBuffer, (nuint)colors.Length, colors, BufferUsageARB.StaticDraw);
         g.EnableVertexAttribArray(1);
         g.VertexAttribPointer(1, 4, VertexAttribPointerType.UnsignedByte, true, 4, (void*)0);
 
         float[] others = ribbon.Others.ToArray();
-        buffers.OtherVbo = g.GenBuffer();
+        buffers.OtherVbo = GlTrack.GenBuffer(g);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.OtherVbo);
         g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(others.Length * sizeof(float)), others, BufferUsageARB.StaticDraw);
         g.EnableVertexAttribArray(2);
         g.VertexAttribPointer(2, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
 
         float[] sides = ribbon.Sides.ToArray();
-        buffers.SideVbo = g.GenBuffer();
+        buffers.SideVbo = GlTrack.GenBuffer(g);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.SideVbo);
         g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(sides.Length * sizeof(float)), sides, BufferUsageARB.StaticDraw);
         g.EnableVertexAttribArray(3);
         g.VertexAttribPointer(3, 1, VertexAttribPointerType.Float, false, sizeof(float), (void*)0);
 
         uint[] indices = ribbon.Indices.ToArray();
-        buffers.Ebo = g.GenBuffer();
+        buffers.Ebo = GlTrack.GenBuffer(g);
         g.BindBuffer(BufferTargetARB.ElementArrayBuffer, buffers.Ebo);
         g.BufferData<uint>(BufferTargetARB.ElementArrayBuffer, (nuint)(indices.Length * sizeof(uint)), indices, BufferUsageARB.StaticDraw);
 
@@ -12694,12 +12737,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             return;
         }
 
-        g.DeleteBuffer(line.PositionVbo);
-        g.DeleteBuffer(line.ColorVbo);
-        g.DeleteBuffer(line.OtherVbo);
-        g.DeleteBuffer(line.SideVbo);
-        g.DeleteBuffer(line.Ebo);
-        g.DeleteVertexArray(line.Vao);
+        GlTrack.DeleteBuffer(g, line.PositionVbo);
+        GlTrack.DeleteBuffer(g, line.ColorVbo);
+        GlTrack.DeleteBuffer(g, line.OtherVbo);
+        GlTrack.DeleteBuffer(g, line.SideVbo);
+        GlTrack.DeleteBuffer(g, line.Ebo);
+        GlTrack.DeleteVertexArray(g, line.Vao);
         line = null;
     }
 
@@ -13018,9 +13061,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         forestVertexCount = verts.Length / 7;
 
         const int stride = 7 * sizeof(float);
-        forestVao = g.GenVertexArray();
+        forestVao = GlTrack.GenVertexArray(g);
         g.BindVertexArray(forestVao);
-        forestBaseVbo = g.GenBuffer();
+        forestBaseVbo = GlTrack.GenBuffer(g);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, forestBaseVbo);
         g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(verts.Length * sizeof(float)), verts, BufferUsageARB.StaticDraw);
         g.EnableVertexAttribArray(0); // aPos
@@ -13031,7 +13074,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.VertexAttribPointer(2, 1, VertexAttribPointerType.Float, false, stride, (void*)(6 * sizeof(float)));
 
         // Per-instance buffer (filled in EnsureForestInstances) — (posX,posY,posZ, scale, yaw), divisor 1.
-        forestInstanceVbo = g.GenBuffer();
+        forestInstanceVbo = GlTrack.GenBuffer(g);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, forestInstanceVbo);
         g.EnableVertexAttribArray(3); // aInstPos
         g.VertexAttribPointer(3, 3, VertexAttribPointerType.Float, false, 5 * sizeof(float), (void*)0);
@@ -13077,7 +13120,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.GetInteger(GLEnum.Viewport, prevVp);
 
         // Atlas colour texture (RGBA8) + a depth RB so the conifer's three tiers occlude correctly.
-        forestAtlasTex = g.GenTexture();
+        forestAtlasTex = GlTrack.GenTexture(g);
         g.BindTexture(TextureTarget.Texture2D, forestAtlasTex);
         g.TexImage2D(
             TextureTarget.Texture2D, 0, (int)InternalFormat.Rgba8,
@@ -13091,12 +13134,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
         g.BindTexture(TextureTarget.Texture2D, 0);
 
-        forestAtlasDepthRb = g.GenRenderbuffer();
+        forestAtlasDepthRb = GlTrack.GenRenderbuffer(g);
         g.BindRenderbuffer(RenderbufferTarget.Renderbuffer, forestAtlasDepthRb);
         g.RenderbufferStorage(RenderbufferTarget.Renderbuffer, InternalFormat.DepthComponent16, ForestAtlasSize, ForestAtlasSize);
         g.BindRenderbuffer(RenderbufferTarget.Renderbuffer, 0);
 
-        forestAtlasFbo = g.GenFramebuffer();
+        forestAtlasFbo = GlTrack.GenFramebuffer(g);
         g.BindFramebuffer(FramebufferTarget.Framebuffer, forestAtlasFbo);
         g.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, forestAtlasTex, 0);
         g.FramebufferRenderbuffer(FramebufferTarget.Framebuffer, FramebufferAttachment.DepthAttachment, RenderbufferTarget.Renderbuffer, forestAtlasDepthRb);
@@ -13105,9 +13148,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             Log.Information("[GL3D] forest atlas FBO incomplete ({Status}) — impostor bake disabled", status);
             g.BindFramebuffer(FramebufferTarget.Framebuffer, (uint)prevFbo[0]);
-            g.DeleteFramebuffer(forestAtlasFbo);
-            g.DeleteTexture(forestAtlasTex);
-            g.DeleteRenderbuffer(forestAtlasDepthRb);
+            GlTrack.DeleteFramebuffer(g, forestAtlasFbo);
+            GlTrack.DeleteTexture(g, forestAtlasTex);
+            GlTrack.DeleteRenderbuffer(g, forestAtlasDepthRb);
             forestAtlasFbo = 0;
             forestAtlasTex = 0;
             forestAtlasDepthRb = 0;
@@ -13118,7 +13161,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Bake VAO: the conifer mesh (loc 0,1,2) with the per-instance attrs (loc 3,4) left DISABLED, so a
         // plain (non-instanced) DrawArrays reads their generic constant values — one upright tree at the
         // origin, unit scale, no yaw.
-        forestBakeVao = g.GenVertexArray();
+        forestBakeVao = GlTrack.GenVertexArray(g);
         g.BindVertexArray(forestBakeVao);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, forestBaseVbo);
         const int stride = 7 * sizeof(float);
@@ -13290,9 +13333,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         cumulusMemberSeedLocation = g.GetUniformLocation(cumulusProgram, "uMemberSeed");
 
         float[] quad = { -1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f }; // triangle strip [-1,1]²
-        cumulusVao = g.GenVertexArray();
+        cumulusVao = GlTrack.GenVertexArray(g);
         g.BindVertexArray(cumulusVao);
-        cumulusQuadVbo = g.GenBuffer();
+        cumulusQuadVbo = GlTrack.GenBuffer(g);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, cumulusQuadVbo);
         g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(quad.Length * sizeof(float)), quad, BufferUsageARB.StaticDraw);
         g.EnableVertexAttribArray(0); // aCard
@@ -13300,7 +13343,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         float[] instances = BuildCumulusField();
         cumulusInstanceCount = instances.Length / 5;
-        cumulusInstanceVbo = g.GenBuffer();
+        cumulusInstanceVbo = GlTrack.GenBuffer(g);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, cumulusInstanceVbo);
         g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(instances.Length * sizeof(float)), instances, BufferUsageARB.StaticDraw);
         g.EnableVertexAttribArray(1); // aOffset (x,y,z)
@@ -13580,9 +13623,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         float[] mesh = BuildSauronMesh();
         sauronVertexCount = mesh.Length / 10;
         sauronTowerVertexCount = sauronVertexCount - 6; // last 6 verts are the eye billboard quad
-        sauronVao = g.GenVertexArray();
+        sauronVao = GlTrack.GenVertexArray(g);
         g.BindVertexArray(sauronVao);
-        sauronVbo = g.GenBuffer();
+        sauronVbo = GlTrack.GenBuffer(g);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, sauronVbo);
         g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(mesh.Length * sizeof(float)), mesh, BufferUsageARB.StaticDraw);
         const int stride = 10 * sizeof(float);
@@ -13670,15 +13713,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         eagleColorLocation = g.GetUniformLocation(eagleProgram, "uEagleColor");
 
         float[] quad = { -1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f }; // triangle strip [-1,1]²
-        eagleVao = g.GenVertexArray();
+        eagleVao = GlTrack.GenVertexArray(g);
         g.BindVertexArray(eagleVao);
-        eagleQuadVbo = g.GenBuffer();
+        eagleQuadVbo = GlTrack.GenBuffer(g);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, eagleQuadVbo);
         g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(quad.Length * sizeof(float)), quad, BufferUsageARB.StaticDraw);
         g.EnableVertexAttribArray(0);
         g.VertexAttribPointer(0, 2, VertexAttribPointerType.Float, false, 2 * sizeof(float), (void*)0);
 
-        eagleInstanceVbo = g.GenBuffer();
+        eagleInstanceVbo = GlTrack.GenBuffer(g);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, eagleInstanceVbo);
         const int stride = 8 * sizeof(float);
         g.EnableVertexAttribArray(1); // aOrbit (cx,cy,cz,radius)
@@ -13777,9 +13820,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Base quad (triangle strip, [-1,1]²) shared by every instance; the instance attribs come from the
         // existing per-tree buffer with divisor 1.
         float[] quad = { -1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f };
-        forestImpostorVao = g.GenVertexArray();
+        forestImpostorVao = GlTrack.GenVertexArray(g);
         g.BindVertexArray(forestImpostorVao);
-        forestImpostorQuadVbo = g.GenBuffer();
+        forestImpostorQuadVbo = GlTrack.GenBuffer(g);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, forestImpostorQuadVbo);
         g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(quad.Length * sizeof(float)), quad, BufferUsageARB.StaticDraw);
         g.EnableVertexAttribArray(0); // aCard
@@ -13925,39 +13968,39 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         DeleteLine(gl, ref roadLines);
         DeleteLine(gl, ref offTrailLines);
         DeleteLine(gl, ref exposedLines);
-        gl.DeleteFramebuffer(msaaFbo);
-        gl.DeleteRenderbuffer(msaaColorRb);
-        gl.DeleteRenderbuffer(msaaDepthRb);
+        GlTrack.DeleteFramebuffer(gl, msaaFbo);
+        GlTrack.DeleteRenderbuffer(gl, msaaColorRb);
+        GlTrack.DeleteRenderbuffer(gl, msaaDepthRb);
         msaaFbo = 0;
         msaaColorRb = 0;
         msaaDepthRb = 0;
-        gl.DeleteFramebuffer(presentFbo);
-        gl.DeleteTexture(presentColorTex);
-        gl.DeleteRenderbuffer(presentDepthRb);
+        GlTrack.DeleteFramebuffer(gl, presentFbo);
+        GlTrack.DeleteTexture(gl, presentColorTex);
+        GlTrack.DeleteRenderbuffer(gl, presentDepthRb);
         presentFbo = 0;
         presentColorTex = 0;
         presentDepthRb = 0;
-        gl.DeleteFramebuffer(ghostDepthFbo);
-        gl.DeleteTexture(ghostDepthTex);
+        GlTrack.DeleteFramebuffer(gl, ghostDepthFbo);
+        GlTrack.DeleteTexture(gl, ghostDepthTex);
         ghostDepthFbo = 0;
         ghostDepthTex = 0;
-        gl.DeleteFramebuffer(postFbo);
-        gl.DeleteTexture(postColorTex);
+        GlTrack.DeleteFramebuffer(gl, postFbo);
+        GlTrack.DeleteTexture(gl, postColorTex);
         postFbo = 0;
         postColorTex = 0;
-        gl.DeleteFramebuffer(bloomBrightFbo);
-        gl.DeleteTexture(bloomBrightTex);
-        gl.DeleteFramebuffer(bloomFboA);
-        gl.DeleteTexture(bloomTexA);
-        gl.DeleteFramebuffer(bloomFboB);
-        gl.DeleteTexture(bloomTexB);
-        gl.DeleteFramebuffer(godrayFbo);
-        gl.DeleteTexture(godrayTex);
+        GlTrack.DeleteFramebuffer(gl, bloomBrightFbo);
+        GlTrack.DeleteTexture(gl, bloomBrightTex);
+        GlTrack.DeleteFramebuffer(gl, bloomFboA);
+        GlTrack.DeleteTexture(gl, bloomTexA);
+        GlTrack.DeleteFramebuffer(gl, bloomFboB);
+        GlTrack.DeleteTexture(gl, bloomTexB);
+        GlTrack.DeleteFramebuffer(gl, godrayFbo);
+        GlTrack.DeleteTexture(gl, godrayTex);
         bloomBrightFbo = bloomBrightTex = bloomFboA = bloomTexA = bloomFboB = bloomTexB = godrayFbo = godrayTex = 0;
         for (int i = 0; i < ShadowCascadeCount; i++)
         {
-            gl.DeleteFramebuffer(shadowFbos[i]);
-            gl.DeleteTexture(shadowDepthTex[i]);
+            GlTrack.DeleteFramebuffer(gl, shadowFbos[i]);
+            GlTrack.DeleteTexture(gl, shadowDepthTex[i]);
             shadowFbos[i] = 0;
             shadowDepthTex[i] = 0;
         }
@@ -13972,31 +14015,31 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gpuQueries = null;
         }
         shadowMapsAllocated = false;
-        gl.DeleteFramebuffer(reflectionFbo);
-        gl.DeleteTexture(reflectionColorTex);
-        gl.DeleteRenderbuffer(reflectionDepthRb);
+        GlTrack.DeleteFramebuffer(gl, reflectionFbo);
+        GlTrack.DeleteTexture(gl, reflectionColorTex);
+        GlTrack.DeleteRenderbuffer(gl, reflectionDepthRb);
         reflectionFbo = 0;
         reflectionColorTex = 0;
         reflectionDepthRb = 0;
         reflectionTexW = 0;
         reflectionTexH = 0;
-        gl.DeleteTexture(trailMaskTex);
+        GlTrack.DeleteTexture(gl, trailMaskTex);
         trailMaskTex = 0;
         trailMaskValid = false;
-        gl.DeleteTexture(waterMaskTex);
+        GlTrack.DeleteTexture(gl, waterMaskTex);
         waterMaskTex = 0;
         waterMaskValid = false;
-        gl.DeleteTexture(baseCoverTex);
+        GlTrack.DeleteTexture(gl, baseCoverTex);
         baseCoverTex = 0;
         uploadedBaseCoverageMask = null;
-        if (orthoDet25Texture != 0) { gl.DeleteTexture(orthoDet25Texture); orthoDet25Texture = 0; }
-        if (orthoDet05Texture != 0) { gl.DeleteTexture(orthoDet05Texture); orthoDet05Texture = 0; }
+        if (orthoDet25Texture != 0) { GlTrack.DeleteTexture(gl, orthoDet25Texture); orthoDet25Texture = 0; }
+        if (orthoDet05Texture != 0) { GlTrack.DeleteTexture(gl, orthoDet05Texture); orthoDet05Texture = 0; }
         det25GeoSet = false;
         det05GeoSet = false;
         foreach (DetailCellGpu c in det25Cells.Values)
         {
-            if (c.Texture != 0) { gl.DeleteTexture(c.Texture); }
-            if (c.StagingTexture != 0) { gl.DeleteTexture(c.StagingTexture); }
+            if (c.Texture != 0) { GlTrack.DeleteTexture(gl, c.Texture); }
+            if (c.StagingTexture != 0) { GlTrack.DeleteTexture(gl, c.StagingTexture); }
         }
         det25Cells.Clear();
         det25UploadQueue.Clear();
@@ -14004,27 +14047,27 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         det25BoundTexture = 0;
         foreach (DetailCellGpu c in det05Cells.Values)
         {
-            if (c.Texture != 0) { gl.DeleteTexture(c.Texture); }
-            if (c.StagingTexture != 0) { gl.DeleteTexture(c.StagingTexture); }
+            if (c.Texture != 0) { GlTrack.DeleteTexture(gl, c.Texture); }
+            if (c.StagingTexture != 0) { GlTrack.DeleteTexture(gl, c.StagingTexture); }
         }
         det05Cells.Clear();
         det05UploadQueue.Clear();
         det05ResidentBytes = 0;
         if (det05ArrayTexture != 0)
         {
-            gl.DeleteTexture(det05ArrayTexture);
+            GlTrack.DeleteTexture(gl, det05ArrayTexture);
             det05ArrayTexture = 0;
         }
 
         if (det05ArrayTextureC != 0)
         {
-            gl.DeleteTexture(det05ArrayTextureC);
+            GlTrack.DeleteTexture(gl, det05ArrayTextureC);
             det05ArrayTextureC = 0;
         }
 
         if (det05ArrayTextureB != 0)
         {
-            gl.DeleteTexture(det05ArrayTextureB);
+            GlTrack.DeleteTexture(gl, det05ArrayTextureB);
             det05ArrayTextureB = 0;
         }
 
@@ -14034,7 +14077,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             if (t.Texture != 0)
             {
-                gl.DeleteTexture(t.Texture);
+                GlTrack.DeleteTexture(gl, t.Texture);
                 t.Texture = 0;
             }
 
@@ -14044,7 +14087,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             if (t.Texture != 0)
             {
-                gl.DeleteTexture(t.Texture);
+                GlTrack.DeleteTexture(gl, t.Texture);
                 t.Texture = 0;
             }
 
@@ -14063,20 +14106,20 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.DeleteProgram(bloomCompositeProgram);
             gl.DeleteProgram(godrayProgram);
             gl.DeleteProgram(shadowDepthProgram);
-            gl.DeleteVertexArray(skyVao);
-            gl.DeleteBuffer(skyVbo);
+            GlTrack.DeleteVertexArray(gl, skyVao);
+            GlTrack.DeleteBuffer(gl, skyVbo);
             gl.DeleteProgram(starProgram);
-            gl.DeleteVertexArray(starVao);
-            gl.DeleteBuffer(starVbo);
+            GlTrack.DeleteVertexArray(gl, starVao);
+            GlTrack.DeleteBuffer(gl, starVbo);
             gl.DeleteProgram(moonProgram);
             gl.DeleteProgram(cloudProgram);
-            gl.DeleteVertexArray(cloudVao);
-            gl.DeleteBuffer(cloudVbo);
-            gl.DeleteBuffer(cloudIbo);
+            GlTrack.DeleteVertexArray(gl, cloudVao);
+            GlTrack.DeleteBuffer(gl, cloudVbo);
+            GlTrack.DeleteBuffer(gl, cloudIbo);
             gl.DeleteProgram(cumulusProgram);
-            gl.DeleteVertexArray(cumulusVao);
-            gl.DeleteBuffer(cumulusQuadVbo);
-            gl.DeleteBuffer(cumulusInstanceVbo);
+            GlTrack.DeleteVertexArray(gl, cumulusVao);
+            GlTrack.DeleteBuffer(gl, cumulusQuadVbo);
+            GlTrack.DeleteBuffer(gl, cumulusInstanceVbo);
             skyProgram = 0;
             postProgram = 0;
             postTexLocation = -1;
@@ -14110,9 +14153,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         if (forestProgram != 0)
         {
             gl.DeleteProgram(forestProgram);
-            gl.DeleteVertexArray(forestVao);
-            gl.DeleteBuffer(forestBaseVbo);
-            gl.DeleteBuffer(forestInstanceVbo);
+            GlTrack.DeleteVertexArray(gl, forestVao);
+            GlTrack.DeleteBuffer(gl, forestBaseVbo);
+            GlTrack.DeleteBuffer(gl, forestInstanceVbo);
             forestProgram = 0;
             forestVao = 0;
             forestBaseVbo = 0;
@@ -14120,10 +14163,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
         if (forestAtlasTex != 0)
         {
-            gl.DeleteFramebuffer(forestAtlasFbo);
-            gl.DeleteTexture(forestAtlasTex);
-            gl.DeleteRenderbuffer(forestAtlasDepthRb);
-            gl.DeleteVertexArray(forestBakeVao);
+            GlTrack.DeleteFramebuffer(gl, forestAtlasFbo);
+            GlTrack.DeleteTexture(gl, forestAtlasTex);
+            GlTrack.DeleteRenderbuffer(gl, forestAtlasDepthRb);
+            GlTrack.DeleteVertexArray(gl, forestBakeVao);
             forestAtlasFbo = 0;
             forestAtlasTex = 0;
             forestAtlasDepthRb = 0;
@@ -14132,8 +14175,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         if (forestImpostorProgram != 0)
         {
             gl.DeleteProgram(forestImpostorProgram);
-            gl.DeleteVertexArray(forestImpostorVao);
-            gl.DeleteBuffer(forestImpostorQuadVbo);
+            GlTrack.DeleteVertexArray(gl, forestImpostorVao);
+            GlTrack.DeleteBuffer(gl, forestImpostorQuadVbo);
             forestImpostorProgram = 0;
             forestImpostorVao = 0;
             forestImpostorQuadVbo = 0;
@@ -14141,8 +14184,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         if (markerProgram != 0)
         {
             gl.DeleteProgram(markerProgram);
-            gl.DeleteVertexArray(markerVao);
-            gl.DeleteBuffer(markerVbo);
+            GlTrack.DeleteVertexArray(gl, markerVao);
+            GlTrack.DeleteBuffer(gl, markerVbo);
             markerProgram = 0;
             markerVao = 0;
             markerVbo = 0;
@@ -14151,10 +14194,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             gl.DeleteProgram(gearRibbonProgram);
             gl.DeleteProgram(gearRingProgram);
-            gl.DeleteVertexArray(gearRibbonVao);
-            gl.DeleteVertexArray(gearRingVao);
-            gl.DeleteBuffer(gearRibbonVbo);
-            gl.DeleteBuffer(gearRingVbo);
+            GlTrack.DeleteVertexArray(gl, gearRibbonVao);
+            GlTrack.DeleteVertexArray(gl, gearRingVao);
+            GlTrack.DeleteBuffer(gl, gearRibbonVbo);
+            GlTrack.DeleteBuffer(gl, gearRingVbo);
             gearRibbonProgram = 0;
             gearRingProgram = 0;
             gearRibbonVao = 0;
@@ -14166,7 +14209,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             if (tex != 0)
             {
-                gl.DeleteTexture(tex);
+                GlTrack.DeleteTexture(gl, tex);
             }
         }
 
