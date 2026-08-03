@@ -140,6 +140,24 @@ chmury Tier 1/Tier 3 · instalka/paczki · **współpraca z Codexem: oczekiwany 
 
 ---
 
+## 6B. WSZYSTKO JEST W LIŚCIE ZADAŃ (na polecenie usera: „dodaj wszystko do weryfikacji lub zrobienia")
+
+Cała archeologia trafiła do listy zadań — **214 pozycji pokryte w 100 %**, w 41 zadaniach:
+
+- **#6–#42 — pozycje WYSOKIEJ wagi, każda osobno** (prefiks `ARCH-H01`…`ARCH-H40`). Te z dowodem
+  w kodzie mają gotowy pierwszy krok w opisie; niezweryfikowane mają to wprost napisane.
+- **#43 `ARCH-W1`** — 22 werdykty usera do rozliczenia (każdy: zrealizowany / nieaktualny /
+  świadomie odrzucony).
+- **#44 `ARCH-W2`** — 85 pozycji średniej wagi do weryfikacji w kodzie.
+- **#45 `ARCH-W3`** — 89 pozycji niskiej wagi jako backlog obszarowy.
+- **#46 `ARCH-H41`** — 17 zamrożeń do przeglądu (odmrażamy z terminem / zostaje / porzucone).
+
+Zadania sprzed archeologii (#1–#5) zostają: P0 menu, wyciek pamięci, zachód 20×, push maina,
+całe Tatry w 5 cm.
+
+**Zasada przy sięganiu po cokolwiek z listy:** pozycje niezweryfikowane sprawdzić NAJPIERW w kodzie —
+6 z 27 zweryfikowanych okazało się już domkniętych, więc część backlogu jest fantomowa.
+
 ## 7. JAK KORZYSTAĆ Z TEGO DOKUMENTU
 
 - Pełne dane: `dev/handoff-archeologia.json` (214 pozycji z cytatami źródłowymi i wagą).
