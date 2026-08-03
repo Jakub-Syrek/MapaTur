@@ -166,3 +166,45 @@ całe Tatry w 5 cm.
   dopiero potem planuj. 6 z 27 zweryfikowanych okazało się już domkniętych — proporcja może się
   powtórzyć.
 - Przy podejmowaniu czegokolwiek z tej listy: zaktualizuj tę sekcję, żeby nie odkrywać jej trzeci raz.
+
+## 8. WERYFIKACJA W KODZIE (wykonana 2026-08-02, na polecenie usera „zweryfikuj w kodzie")
+174 pozycje sprawdzone w 19 grupach tematycznych — dowodem był kod, `git log -S`, testy i pliki
+danych, NIE dokumenty. Wynik: **93 OTWARTE, 60 CZĘŚCIOWE, 11 DOMKNIĘTE, 10 NIEAKTUALNE**.
+Pełne dane z dowodami: `docs/weryfikacja-backlogu-2026-08-02.json`.
+### 8.1 Trzy pozycje, którym weryfikacja PODNIOSŁA wagę
+- **Crash AV 0xc0000005 w coreclr.dll (11.07 15:18) przy masowych ewikcjach — LocalDumps włączone, analiza dumpa nigdy nie n** — LocalDumps dla MapaTur.App.exe SĄ nadal włączone w rejestrze (DumpType=2 = full, DumpCount=3, DumpFolder=C:\Users\jaqbs\AppData\Local\CrashDumps) i realnie zbierają dumpy: w katalogu leżą DWA pełne dumpy MapaTur.App z 2026-08-01 23:48 (38 715 696 194 B ≈ 38,7 
+  *Krok:* Otworzyć NAJŚWIEŻSZY dump (MapaTur.App.exe.34136.dmp, 08-02) w WinDbg/dotnet-dump: `dotnet-dump analyze` → `clrstack -all` + `!analyze -v`, i sprawdzić czy stos faktycznie siedzi w ewikcji/uploadzie k
+- **Wypalone cienie w det05 — ~4% cienia bez referencji w ŻADNYM nalocie (korekcja ma tam płynnie zejść do zera)** — Jest DIAGNOZA i jest NARZĘDZIE, nie ma zastosowania na danych. Audyt: `testdata/maps/audit-det05-shadow-map.py` (commit 0080988) skwantyfikował problem — 6,4% kafli >60% pikseli w cieniu, cast B-R rośnie liniowo z cieniem. Korekcja: `testdata/maps/deshadow-det
+  *Krok:* Uruchomić `deshadow-det05-field.py --preview` na rejonie z 6,4% czarnych kafli i sprawdzić, co robi z nimi gain — jeśli daje „cement", dodać do skryptu bramkę: gdzie luminancja przed gainem < progu st
+- **282 kafle z16 NoData na skrajnym zachodzie (lon 19.50–19.58) — róg arkusza LOT26, potrzebny sąsiedni LOT SK** — Dziura POTWIERDZONA POMIAREM na danych, nie tylko w dokumencie. Zdekodowałem cache z16 w AppData: w kolumnach x∈[36318..36334] (dokładnie lon 19.50–19.58 przy z16) jest 678 kafli, z czego 136 to CZYSTY NoData (cały raster ≤ -999) i 17 częściowo NoData. W całym
+  *Krok:* Uruchomić istniejący `testdata/maps/bake-sk-dmr5-tiles.py` dla bboxa lon 19.50–19.58 (sąsiedni LOT SK) i sprawdzić ponownie licznik czystych NoData w x 36318-36334 — cel: 0.
+
+### 8.2 Do skreślenia — DOMKNIĘTE (11, z dowodem w kodzie)
+- Lake ~160 ms w pierwszej klatce swapu (`BuildLakeWater`) — ostatni gap startu, kandydat na wzorzec async — C:\Repos\MapaTur\src\MapaTur.App\Services\Terrain3DGlRenderer.cs:8953-8956 (komentarz „~160 ms on the swap frame — the last chunk 
+- Nagrywanie desktopu: Game Bar nie startuje, apka nie ma desktopowego rekordera — czeka na WYBOR usera (Game Ba — C:\Repos\MapaTur\src\MapaTur.App\Platforms\Windows\GameBarCapture.windows.cs:5-16 (decyzja usera 2026-07-25 + uzasadnienie „Dlacze
+- Współpraca z Codexem: oczekiwany ACK C2C-20260731-019 i uzgodniona kolejność „mój merge → rebase Codeksa → int — C:\Repos\MAPATUR-AGENT-COMMS.md: C2C-20260731-033 („ACK: C2C-20260731-019"), -042, -043, -044 (rebase na 4ecb89f), -045 (c965e78),
+- Pre-existing whitespace w shaderze lasu (`Terrain3DGlRenderer.cs` ~9163) blokujący bramkę `dotnet format --ver — git show --stat d21f3a0 (2026-07-31) obejmuje src/MapaTur.App/Services/Terrain3DGlRenderer.cs | 8 ++++----; grep [ \t]+$ w src/**/
+- Niezacommitowane pliki usera w drzewie roboczym (`data/*.glb|zip`, `testdata/tracks/*.gpx`) — git ls-files testdata/tracks (6/6 plików śledzonych) i git ls-files data (zip + dragon v5/*); .gitignore:14-19; git status --porce
+- Ryzyko alloc-storm ~450 MB/s → gen2 GC przy scatterze — ten sam otwarty problem alokacji co w epiku sub-1m — git log -- tests/MapaTur.Application.Tests/Terrain/TerrainAllocationBudgetTests.cs => bae64e7 (2026-07-16) „perf(terrain): stop th
+- Pas graniczny PL/SK na z17 wymaga DMR5-merge (żywy GUGiK zwraca tam zera) — testdata/maps/repair-z17-border-dmr5.py:1-28 (nagłówek: „closes the documented OPEN item „pas graniczny PL/SK na z17: DMR5-merge""
+- Duch rejestracji pixel-centre/node na przejściu ringów (~0.4 m na grani) — decyzja odroczona — src\MapaTur.Infrastructure\Terrain\GugikNmtDemTileSource.cs:73 (NodeRegisterMinZoom=16), :199, :211-225; commit 54b7b69 (2026-07-1
+- Skrypt bake DEM generate-tatry-dem-lidar.py: decyzja 'revert albo zachowac jako latentne ulepszenie' — podjeta — testdata/maps/generate-tatry-dem-lidar.py:53-58 (LIDAR_LOWPASS_SIGMA), :272-300 (funkcja czyszczaca: despike + masked Gaussian low
+- Mylące liczniki w logu [Mem] („det25 resident 0" przy działającej tablicy) — „poprawić log, bo dwa razy wysłał — git show 09dfd22: '- if (c.Texture != 0) { resident++; }' -> '+ if (c.Texture != 0 || c.LayerReady) { resident++; }' oraz '- (resi
+- i18n przyrostowo — dlugie komunikaty/pozostale ekrany poza AppStrings — src/MapaTur.App/Resources/Localization/AppResources.resx i AppResources.pl.resx — po 257 wpisow <data name=>; grep 'Text="[litera]
+
+### 8.3 Do skreślenia — NIEAKTUALNE (10, architektura się zmieniła)
+- Sync 3D↔2D na calym obszarze (usuniecie clampu do extentu Tatr w SyncCameraToMap) — P1 nigdy nie zrobione
+- Tier 1 pkt 4 / Tier 3 pkt 8: kadencja hold-to-climb (`ClimbCadenceHz`, `ClimbPhase`) + audio/haptyka na axe-plant
+- Wariant B assetu (Quaternius UAL2 — klipy climb/parkour) jako warunkowa ścieżka „gdy zabraknie ruchów"
+- Wyciszenie cirrusow gdy aktywne cumulusy (kolizja stylow na gorze nieba) + strojenie chmur (krzywa slidera, gestosc pola
+- Decyzja usera §4 pkt 5 (potwierdzenie „NIE ruszamy piramidy z13–z16") — nigdy formalnie nie potwierdzona
+- Nieodpowiedziane pytanie do usera z sesji LOD: czy kamera w demo ma startowac w srodku DEM czy w wysokim rdzeniu Tatr
+- HACK PRELIMINARY: `det25_mosaic.png` nadpisany mozaiką 2 km regionu, backup `.mo-window.bak` — miał być cofnięty po wejś
+- Werdykt A/B usera dla streamowanego det05 (flaga MAPATUR_DET05_STREAM) — nigdy nie padł
+- Weryfikacja wizualna zachowania kafli terenu GRUBSZYCH niż z17 w strefie detalu (plan B: wybór komórki per bazowy tier)
+- R4 — okna det05 przy POI z listy usera (schroniska, przełęcze, brzegi stawów) — lista nigdy nie zebrana
+
+### 8.4 Co zostaje
+153 pozycje realnie otwarte lub częściowe. Rozkład wagi po rewizji: 3 wysokie (8.1),
+63 średnie, 108 niskich. Zadania `ARCH-W2` i `ARCH-W3` zamknięte — ich treść przeszła
+w zweryfikowany rejestr; nowe wysokie trafiły jako `ARCH-V1`…`ARCH-V3`.
