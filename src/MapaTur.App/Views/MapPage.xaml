@@ -316,8 +316,10 @@
                         </CollectionView>
 
                         <Label Text="{x:Static loc:AppStrings.RouteStopsHeader}" Style="{StaticResource GlassCaption}" />
-                        <!-- Drag ⠿ to reorder the stops (designs the route order); ReorderCompleted re-plans.
-                             Each stop is a card with the name, elevation and a delete chip. -->
+                        <!-- Kolejność przystanków zmieniają strzałki ▲▼ (zmierzone 08-05: WinUI drag-reorder na tym
+                             sprzęcie NIGDY nie startuje — każda próba to COMException 0x8000FFFF „Drag start failed";
+                             do 6a79011 zabijała cały proces, teraz jest odrzucana). CanReorderItems zostaje dla maszyn,
+                             gdzie drag działa; ReorderCompleted re-planuje. Karta: nazwa, wysokość, ▲▼ i chip usuń. -->
                         <CollectionView ItemsSource="{Binding RouteStops}" HeightRequest="200" SelectionMode="None"
                                         CanReorderItems="True" ReorderCompleted="OnRouteStopsReorderCompleted">
                             <CollectionView.EmptyView>
@@ -328,7 +330,7 @@
                                 <DataTemplate x:DataType="routing:RouteWaypoint">
                                     <Border Padding="11,9" Margin="0,0,0,6" StrokeThickness="1" Stroke="#3036E2FF" Background="#1F36E2FF">
                                         <Border.StrokeShape><RoundRectangle CornerRadius="13" /></Border.StrokeShape>
-                                        <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="11">
+                                        <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto" ColumnSpacing="8">
                                             <Label Grid.Column="0" Text="⠿" FontSize="18" TextColor="#9936E2FF" VerticalOptions="Center" />
                                             <VerticalStackLayout Grid.Column="1" Spacing="0" VerticalOptions="Center">
                                                 <Label Text="{Binding Name}" Style="{StaticResource GlassLabel}"
@@ -336,7 +338,27 @@
                                                 <Label Text="{Binding ElevationMeters, StringFormat='{0:F0} m'}"
                                                        Style="{StaticResource GlassCaption}" FontSize="10" />
                                             </VerticalStackLayout>
-                                            <Border Grid.Column="2" Padding="9,4" StrokeThickness="1" Stroke="#33FF6B7A"
+                                            <Border Grid.Column="2" Padding="8,4" StrokeThickness="1" Stroke="#3036E2FF"
+                                                    Background="#1F36E2FF" VerticalOptions="Center">
+                                                <Border.StrokeShape><RoundRectangle CornerRadius="10" /></Border.StrokeShape>
+                                                <Label Text="▲" FontSize="12" TextColor="#B8E8FF" />
+                                                <Border.GestureRecognizers>
+                                                    <TapGestureRecognizer
+                                                        Command="{Binding Source={x:Reference PageRoot}, Path=BindingContext.MoveStopUpCommand}"
+                                                        CommandParameter="{Binding .}" />
+                                                </Border.GestureRecognizers>
+                                            </Border>
+                                            <Border Grid.Column="3" Padding="8,4" StrokeThickness="1" Stroke="#3036E2FF"
+                                                    Background="#1F36E2FF" VerticalOptions="Center">
+                                                <Border.StrokeShape><RoundRectangle CornerRadius="10" /></Border.StrokeShape>
+                                                <Label Text="▼" FontSize="12" TextColor="#B8E8FF" />
+                                                <Border.GestureRecognizers>
+                                                    <TapGestureRecognizer
+                                                        Command="{Binding Source={x:Reference PageRoot}, Path=BindingContext.MoveStopDownCommand}"
+                                                        CommandParameter="{Binding .}" />
+                                                </Border.GestureRecognizers>
+                                            </Border>
+                                            <Border Grid.Column="4" Padding="9,4" StrokeThickness="1" Stroke="#33FF6B7A"
                                                     Background="#22FF6B7A" VerticalOptions="Center">
                                                 <Border.StrokeShape><RoundRectangle CornerRadius="10" /></Border.StrokeShape>
                                                 <Label Text="{x:Static loc:AppStrings.StopRemove}" FontSize="12" TextColor="#FFC0C8" />

@@ -410,9 +410,11 @@ public sealed partial class MapPageViewModel : ObservableObject
     {
         if (LastPlannedRoute is not { } route)
         {
+            logger.LogWarning("[Trasa] POKAŻ odrzucone: brak przeliczonej trasy");
             return;
         }
 
+        logger.LogInformation("[Trasa] POKAŻ na mapie: {Km:F2} km", route.TotalDistanceMeters / 1000.0);
         ActiveSection = 0; // collapse the Dane panel so the route is unobstructed
         RouteFocusRequested?.Invoke(this, Application.Routing.RouteCameraFraming.Fit(route.ToPolyline()));
     }
@@ -2825,6 +2827,39 @@ public sealed partial class MapPageViewModel : ObservableObject
         }
 
         RouteStops.Add(waypoint);
+        logger.LogInformation(
+            "[Trasa] przystanek DODANY: '{Name}' ({Kind}) @ {Lat:F5},{Lon:F5} — przystanków {Count}",
+            waypoint.Name, waypoint.Kind, waypoint.Location.Latitude, waypoint.Location.Longitude, RouteStops.Count);
+        await ReplanRouteAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>Przesuwa przystanek o jedno miejsce w górę łańcucha i przelicza trasę (przyciski ▲▼ —
+    /// drag-reorder WinUI na tej maszynie nie startuje: COMException 0x8000FFFF, zmierzone 08-05).</summary>
+    [RelayCommand]
+    private async Task MoveStopUpAsync(Domain.Routing.RouteWaypoint waypoint) => await MoveStopAsync(waypoint, -1).ConfigureAwait(true);
+
+    /// <summary>Przesuwa przystanek o jedno miejsce w dół łańcucha i przelicza trasę.</summary>
+    [RelayCommand]
+    private async Task MoveStopDownAsync(Domain.Routing.RouteWaypoint waypoint) => await MoveStopAsync(waypoint, +1).ConfigureAwait(true);
+
+    private async Task MoveStopAsync(Domain.Routing.RouteWaypoint? waypoint, int delta)
+    {
+        if (waypoint is null)
+        {
+            return;
+        }
+
+        int index = RouteStops.IndexOf(waypoint);
+        int target = index + delta;
+        if (index < 0 || target < 0 || target >= RouteStops.Count)
+        {
+            return; // pierwszy nie idzie wyżej, ostatni nie idzie niżej
+        }
+
+        RouteStops.Move(index, target);
+        logger.LogInformation(
+            "[Trasa] przystanek PRZESUNIĘTY: '{Name}' {From}→{To} — kolejność: {Order}",
+            waypoint.Name, index, target, string.Join(" → ", RouteStops.Select(s => s.Name)));
         await ReplanRouteAsync().ConfigureAwait(true);
     }
 
@@ -2841,8 +2876,14 @@ public sealed partial class MapPageViewModel : ObservableObject
     {
         if (!HasPlannedRoute || LastPlannedRoute is null)
         {
+            logger.LogWarning(
+                "[Trasa] FILM odrzucony: HasPlannedRoute={Has}, LastPlannedRoute null={Null} — brak przeliczonej trasy",
+                HasPlannedRoute, LastPlannedRoute is null);
             return; // the flight reads the route polyline itself from the bound Route overlay
         }
+
+        logger.LogInformation(
+            "[Trasa] FILM start: {Km:F2} km, {Segments} segmentów", LastPlannedRoute.TotalDistanceMeters / 1000.0, LastPlannedRoute.Segments.Count);
 
         ActiveSection = 0; // clear the panel for a clean cinematic shot
 
@@ -2887,6 +2928,8 @@ public sealed partial class MapPageViewModel : ObservableObject
             return;
         }
 
+        logger.LogInformation(
+            "[Trasa] przystanek USUNIĘTY: '{Name}' — zostało {Count}", waypoint.Name, RouteStops.Count);
         await ReplanRouteAsync().ConfigureAwait(true);
     }
 
@@ -2925,12 +2968,25 @@ public sealed partial class MapPageViewModel : ObservableObject
 
     // Drag-reorder finished in the route-stops list (CollectionView CanReorderItems): the ObservableCollection
     // is already in the new order, so just re-plan the chained route to match the new stop sequence.
-    public Task ReplanAfterReorderAsync() => ReplanRouteAsync();
+    public Task ReplanAfterReorderAsync()
+    {
+        // Uwaga: na tej maszynie ta ścieżka może nigdy nie strzelić — WinUI drag-reorder odpada na
+        // starcie gestu (0x8000FFFF); kolejność zmieniają wtedy przyciski ▲▼ (MoveStopUp/Down).
+        logger.LogInformation(
+            "[Trasa] REORDER (drag) zakończony — kolejność: {Order}",
+            string.Join(" → ", RouteStops.Select(s => s.Name)));
+        return ReplanRouteAsync();
+    }
 
     // Renders the current stop markers, then (with ≥2 stops) plans the chained route over the trail
     // graph and renders it. A leg with no path names the gap so the user knows where the chain broke.
     private async Task ReplanRouteAsync()
     {
+        // Każde przeliczenie loguje wejście (żądanie usera 08-05: „wstaw logowanie w planowanie…") —
+        // wcześniej ciche gałęzie (null z plannera, <2 przystanków) gasiły trasę bez śladu.
+        logger.LogInformation(
+            "[Trasa] PRZELICZENIE: {Count} przystanków [{Order}]",
+            RouteStops.Count, string.Join(" → ", RouteStops.Select(s => s.Name)));
         PersistRouteStops();
         routeRenderer.RenderWaypoints(Map, RouteStops.Select(s => s.Location).ToList());
 
@@ -2962,6 +3018,11 @@ public sealed partial class MapPageViewModel : ObservableObject
             if (result.Route is null)
             {
                 int leg = result.FailedLegIndex ?? 0;
+                // Ta gałąź gasi HasPlannedRoute (znika podsumowanie + „Pokaż" + „Film") — do 08-05 robiła
+                // to BEZ śladu w logu i diagnoza „zniknęły opcje filmu" wymagała zgadywania. Zawsze loguj.
+                logger.LogWarning(
+                    "Multi-stop route: brak ścieżki na odcinku {Leg} ('{From}' → '{To}') — trasa wyczyszczona",
+                    leg, RouteStops[leg].Name, RouteStops[leg + 1].Name);
                 StatusMessage = Fmt(Localization.AppStrings.StatusNoTrailBetweenFormat, RouteStops[leg].Name, RouteStops[leg + 1].Name);
                 LastPlannedRoute = null;
                 Route3DOverlay = null;
@@ -5112,6 +5173,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     [RelayCommand]
     public void ClearRoute()
     {
+        logger.LogInformation("[Trasa] WYCZYSZCZONA ({Count} przystanków skasowanych)", RouteStops.Count);
         RouteStops.Clear();
         LastPlannedRoute = null;
         Route3DOverlay = null;

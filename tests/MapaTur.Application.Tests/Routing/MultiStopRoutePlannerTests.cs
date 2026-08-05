@@ -99,6 +99,42 @@ public sealed class MultiStopRoutePlannerTests
     }
 
     [Fact]
+    public async Task PlanAsync_ConsecutiveDuplicateStop_SkipsTheDegenerateLegAndStillPlans()
+    {
+        // Repro 2026-08-05: „Parking Zverovka – Spálená" dodany DWA razy pod rząd. Oba końce odcinka
+        // parking→parking przycinają się do tego samego węzła grafu, A* mówi „brak ścieżki"
+        // (start == goal → null) i padał CAŁY plan — podsumowanie trasy i opcje filmu znikały z
+        // panelu bez śladu w logu. Odcinek między identycznymi punktami to nie błąd, tylko brak
+        // ruchu — pomijamy go, zamiast pytać router. Stub oznacza parę parking→parking jako
+        // „no path", dokładnie jak prawdziwy A* dziś.
+        var parking = P(49.23871, 19.71407);
+        var stops = new[] { P(49.19712, 19.74812), P(49.22199, 19.74773), parking, parking };
+        var stub = new StubPlanner((parking, parking));
+        var planner = new MultiStopRoutePlanner(stub);
+
+        MultiStopRouteResult result = await planner.PlanAsync(stops, RouteProfile.ShortestDistance);
+
+        result.FailedLegIndex.Should().BeNull();
+        result.Route.Should().NotBeNull();
+        result.Route!.Segments.Should().HaveCount(2, "the parking→parking leg adds no segments");
+        stub.Requests.Should().HaveCount(2, "the degenerate leg never reaches the A* planner");
+    }
+
+    [Fact]
+    public async Task PlanAsync_AllStopsIdentical_FailsHonestlyInsteadOfThrowing()
+    {
+        // Wszystkie odcinki zdegenerowane ⇒ nie ma czego iść; Route nie może być pusta (inwariant
+        // domeny), więc wynik to uczciwa porażka pierwszego odcinka — nie wyjątek z konstruktora.
+        var b = P(49.23871, 19.71407);
+        var planner = new MultiStopRoutePlanner(new StubPlanner());
+
+        MultiStopRouteResult result = await planner.PlanAsync(new[] { b, b }, RouteProfile.ShortestDistance);
+
+        result.Route.Should().BeNull();
+        result.FailedLegIndex.Should().Be(0);
+    }
+
+    [Fact]
     public async Task PlanAsync_FewerThanTwoStops_Throws()
     {
         var planner = new MultiStopRoutePlanner(new StubPlanner());

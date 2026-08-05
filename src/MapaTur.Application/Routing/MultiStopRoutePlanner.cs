@@ -21,6 +21,9 @@ public readonly record struct MultiStopRouteResult(Route? Route, int? FailedLegI
 /// </summary>
 public sealed class MultiStopRoutePlanner
 {
+    /// <summary>Odcinek krótszy niż to (metry) uznajemy za zdegenerowany (podwójnie dodany przystanek).</summary>
+    private const double DegenerateLegMeters = 1.0;
+
     private readonly IRoutePlanner planner;
 
     /// <summary>Initializes the planner over an <see cref="IRoutePlanner"/> (the A* trail planner).</summary>
@@ -53,6 +56,16 @@ public sealed class MultiStopRoutePlanner
         var segments = new List<RouteSegment>();
         for (int leg = 0; leg < waypoints.Count - 1; leg++)
         {
+            // Podwójnie dodany przystanek (repro 2026-08-05: „Parking Zverovka – Spálená" 2× pod rząd)
+            // daje odcinek start==cel: oba końce przycinają się do TEGO SAMEGO węzła grafu, a A* zwraca
+            // „brak ścieżki" (start == goal → null) — padał cały plan i z panelu znikały podsumowanie
+            // trasy oraz opcje filmu, bez śladu w logu. Zerowy odcinek to nie błąd, tylko brak ruchu —
+            // pomijamy go, zamiast pytać router o „ścieżkę z X do X".
+            if (waypoints[leg].HaversineDistanceMetersTo(waypoints[leg + 1]) < DegenerateLegMeters)
+            {
+                continue;
+            }
+
             var request = new RouteRequest(waypoints[leg], waypoints[leg + 1], profile, includeOffTrailTracks);
             Route? legRoute = await planner.PlanRouteAsync(request, cancellationToken).ConfigureAwait(false);
             if (legRoute is null)
@@ -61,6 +74,14 @@ public sealed class MultiStopRoutePlanner
             }
 
             segments.AddRange(legRoute.Segments);
+        }
+
+        // Wszystkie odcinki zdegenerowane (np. dwa identyczne przystanki i nic więcej) ⇒ nie ma czego
+        // iść; Route nie może być pusta (inwariant domeny), więc zwracamy uczciwą porażkę pierwszego
+        // odcinka zamiast wyjątku z konstruktora.
+        if (segments.Count == 0)
+        {
+            return new MultiStopRouteResult(null, 0);
         }
 
         return new MultiStopRouteResult(new Route(segments), null);
