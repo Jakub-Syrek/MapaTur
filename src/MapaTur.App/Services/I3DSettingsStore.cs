@@ -73,6 +73,13 @@ public interface I3DSettingsStore
     string? RouteStopsJson { get; set; }
 
     /// <summary>
+    /// Znacznik czasu (ISO-8601, UTC) ostatniego auto-syncu szlaków całych Tatr — patrz
+    /// <c>MapaTur.Application.Trails.TrailAutoSyncPolicy</c>. Null = nigdy nie synchronizowano
+    /// (⇒ sync przy najbliższym starcie). Czyszczone razem z cache przy „wyczyść pobrane dane".
+    /// </summary>
+    string? TrailsAutoSyncUtc { get; set; }
+
+    /// <summary>
     /// Preferred UI language as a bare code ("pl" / "en"); see <c>MapaTur.Application.Localization.AppLanguage</c>.
     /// Null until the user picks one, in which case the app starts in Polish (the default).
     /// </summary>

@@ -16,6 +16,7 @@ public sealed class MauiPreferences3DSettingsStore : I3DSettingsStore
     private const string PeakLabelRadiusKey = "Terrain3D.PeakLabelRadius";
     private const string CameraStateKey = "Terrain3D.CameraState";
     private const string RouteStopsKey = "Terrain3D.RouteStops";
+    private const string TrailsAutoSyncKey = "Trails.AutoSyncUtc";
     private const string LanguageKey = "App.Language";
     private const string FollowCameraKey = "App.FollowCamera";
     private const double SentinelMissing = double.NaN;
@@ -226,6 +227,27 @@ public sealed class MauiPreferences3DSettingsStore : I3DSettingsStore
             else
             {
                 Preferences.Default.Set(RouteStopsKey, value);
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public string? TrailsAutoSyncUtc
+    {
+        get
+        {
+            string value = Preferences.Default.Get(TrailsAutoSyncKey, string.Empty);
+            return string.IsNullOrEmpty(value) ? null : value;
+        }
+        set
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                Preferences.Default.Remove(TrailsAutoSyncKey);
+            }
+            else
+            {
+                Preferences.Default.Set(TrailsAutoSyncKey, value);
             }
         }
     }

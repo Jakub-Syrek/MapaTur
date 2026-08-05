@@ -775,6 +775,9 @@ public sealed partial class MapPageViewModel : ObservableObject
             await trailRepository.ClearAsync().ConfigureAwait(true);
             await poiRepository.ClearAsync().ConfigureAwait(true);
             await climbingRepository.ClearAsync().ConfigureAwait(true);
+            // Pusta baza = znacznik auto-syncu też do zera, inaczej świeży znacznik zablokowałby
+            // odbudowę szlaków na tydzień po wyczyszczeniu cache.
+            settingsStore.TrailsAutoSyncUtc = null;
             StatusMessage = Localization.AppStrings.StatusCacheCleared;
         }
         catch (Exception ex)
@@ -1545,6 +1548,12 @@ public sealed partial class MapPageViewModel : ObservableObject
             if (cached.Count > 0)
             {
                 await ApplyTrailsAsync(cached).ConfigureAwait(true);
+                // Cache wchodzi od razu, ale NIE kończy sprawy: do 08-05 istniejąca baza blokowała
+                // każde kolejne pobranie na zawsze — baza z 26 czerwca nigdy nie dostała Rohaczy
+                // i planer „prowadził dookoła" (ta sama klasa co żleb Kulczyńskiego). Auto-sync
+                // dociąga CAŁE Tatry w tle raz na tydzień („wszystkie szlaki powinny się pobierać
+                // same" — user 08-05).
+                await AutoSyncTatraTrailsAsync().ConfigureAwait(true);
                 return;
             }
         }
@@ -1554,6 +1563,42 @@ public sealed partial class MapPageViewModel : ObservableObject
         }
 
         await DownloadTrailsForViewportAsync().ConfigureAwait(true);
+        await AutoSyncTatraTrailsAsync().ConfigureAwait(true);
+    }
+
+    // Auto-sync szlaków całych Tatr (region C, jeden box — to kadry-wycinki gubiły łączniki).
+    // Best-effort: offline/timeout ⇒ zostajemy na cache i próbujemy przy następnym starcie.
+    // Bez IsBusy — to tło, nie może blokować przycisków na czas wolnego Overpassa.
+    private async Task AutoSyncTatraTrailsAsync()
+    {
+        DateTime? last = Application.Trails.TrailAutoSyncPolicy.Parse(settingsStore.TrailsAutoSyncUtc);
+        if (!Application.Trails.TrailAutoSyncPolicy.ShouldSync(last, DateTime.UtcNow))
+        {
+            logger.LogInformation("[Szlaki] auto-sync pominięty — ostatni {Last:u} (limit {Days} dni)",
+                last, Application.Trails.TrailAutoSyncPolicy.MaxAge.TotalDays);
+            return;
+        }
+
+        try
+        {
+            logger.LogInformation("[Szlaki] AUTO-SYNC startuje: całe Tatry (ostatni sync: {Last})",
+                last is { } l ? l.ToString("u", System.Globalization.CultureInfo.InvariantCulture) : "nigdy");
+            IReadOnlyList<Trail> trails = await overpassClient
+                .FetchHikingTrailsAsync(Application.Trails.TrailAutoSyncPolicy.TatraBounds).ConfigureAwait(true);
+            if (trails.Count == 0)
+            {
+                logger.LogWarning("[Szlaki] AUTO-SYNC: Overpass zwrócił 0 tras — znacznik NIE zapisany, spróbuję ponownie");
+                return;
+            }
+
+            await ApplyTrailsAsync(trails).ConfigureAwait(true);
+            settingsStore.TrailsAutoSyncUtc = Application.Trails.TrailAutoSyncPolicy.Stamp(DateTime.UtcNow);
+            logger.LogInformation("[Szlaki] AUTO-SYNC gotowy: {Count} tras (upsert — niczego nie skasowano)", trails.Count);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "[Szlaki] AUTO-SYNC nieudany — zostaję na cache, ponowię przy następnym starcie");
+        }
     }
 
     // PTTK colour toggles for the trail filter. All true by default — the
