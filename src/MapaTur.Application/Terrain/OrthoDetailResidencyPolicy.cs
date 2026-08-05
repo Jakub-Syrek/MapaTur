@@ -73,8 +73,13 @@ public sealed class OrthoDetailResidencyPolicy
             .OrderBy(c => DistMeters(CellCentre(c.Ci, c.Cj), led))
             .ToList();
 
+        // Dedup przez HashSet, nie List.Contains: gałąź coverage-gated (det05) prosi o CAŁY pierścień
+        // (nearCap = int.MaxValue, 256-289 cel), a liniowy skan listy robił z tego ~40 tys. porównań
+        // na klatkę na wątku renderu. Kolejność wyniku bez zmian (focus pierwszy, potem ranking).
         var (fci, fcj) = grid.CellForPoint(focus);
-        var result = new List<int> { grid.CellKey(fci, fcj) };
+        int focusKey = grid.CellKey(fci, fcj);
+        var result = new List<int> { focusKey };
+        var seen = new HashSet<int> { focusKey };
         foreach ((int Ci, int Cj) c in ranked)
         {
             if (result.Count >= nearCap)
@@ -83,7 +88,7 @@ public sealed class OrthoDetailResidencyPolicy
             }
 
             int key = grid.CellKey(c.Ci, c.Cj);
-            if (!result.Contains(key))
+            if (seen.Add(key))
             {
                 result.Add(key);
             }

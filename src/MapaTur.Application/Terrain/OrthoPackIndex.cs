@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 
 namespace MapaTur.Application.Terrain;
 
@@ -49,16 +50,35 @@ public sealed class OrthoPackIndex
     /// <summary>Czy kafel źródłowy (ti,tj) istniał w bake'u (bitmapa pokrycia — shaderowy coverage-gate).</summary>
     public bool IsTileCovered(int ti, int tj) => tileSet.Contains(Key(ti, tj));
 
+    // Memoizacja werdyktów okien (2026-08-05): planner det05 pyta o CAŁY pierścień (256-289 cel przy
+    // promieniu 3200 m) CO KLATKĘ, a cela niepokryta płaci pełne 16×16 sond w tileSet (1,14 mln wpisów =
+    // każda sonda to zimny dostęp do pamięci) — zmierzone profilem 20 s: 88% czasu wątku UI siedziało w
+    // IsTileCovered podczas planowania trasy nad Rohaczami (renderFps ~10 przy sumGpu ~21 ms). tileSet jest
+    // readonly i bez hot-reloadu (Load raz na bramkę), więc werdykt okna jest stały na życie instancji.
+    // Klucz MUSI nieść geometrię okna — ten sam indeks obsługuje det05 (16/16) i det25 (6/8) — a walidacja
+    // argumentów zostaje PRZED odczytem cache. ConcurrentDictionary: dziś woła tylko wątek renderu, ale
+    // det1m pokazuje, że indeksy bywają dotykane z puli — memoizacja nie może tego kontraktu zaostrzać.
+    private readonly ConcurrentDictionary<(int Ci, int Cj, int Pitch, int Coverage), bool> windowVerdicts = new();
+
     /// <summary>
     /// Czy nakładkowe okno runtime'owej celi zawiera choć jeden kafel obecny w prebake'u.
     /// To jest jedyne źródło coverage produkcyjnego streamera: bez skanu drzewa WebP i bez
     /// osobnego pliku <c>_coverage*.txt</c>, który mógł się rozjechać z aktywnym pakietem.
+    /// Werdykt liczony raz na okno i zapamiętany (indeks jest niezmienny po załadowaniu).
     /// </summary>
     public bool WindowHasCoverage(int ci, int cj, int pitchTiles, int coverageTiles)
     {
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(pitchTiles, 0);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(coverageTiles, 0);
 
+        return windowVerdicts.GetOrAdd(
+            (ci, cj, pitchTiles, coverageTiles),
+            static (k, self) => self.ScanWindow(k.Ci, k.Cj, k.Pitch, k.Coverage),
+            this);
+    }
+
+    private bool ScanWindow(int ci, int cj, int pitchTiles, int coverageTiles)
+    {
         int ti0 = ci * pitchTiles;
         int tj0 = cj * pitchTiles;
         for (int ti = ti0; ti < ti0 + coverageTiles; ti++)

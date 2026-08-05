@@ -72,4 +72,22 @@ public sealed class OrthoDetailResidencyPolicyTests
             Math.Sqrt((dLat * dLat) + (dLon * dLon)).Should().BeLessThan(2500.0 + 1024.0); // ring + cell span
         }
     }
+
+    [Fact]
+    public void DesiredCells_UnboundedCap_ProductionDet05Geometry_ReturnsDistinctCellsFocusFirst()
+    {
+        // The production det05 path (coverage-gated) requests the WHOLE ring: nearCap = int.MaxValue with a
+        // 3200 m radius over disjoint 409.6 m cells (pitch == coverage == 16) — the geometry the other tests
+        // never exercised (they run det25 pitch 6). Pins the full-ring contract the per-frame planner relies
+        // on: focus cell first, no duplicates, every ring cell present exactly once.
+        var det05Grid = new OrthoDetailGrid(resMeters: 0.05, coverageTiles: 16, pitchTiles: 16);
+        var det05Policy = new OrthoDetailResidencyPolicy(
+            det05Grid, ringRadiusMeters: 3200.0, fastMotionSpeedMps: 25.0, prefetchLeadMeters: 120.0);
+
+        var cells = det05Policy.DesiredCells(Focus, 0, 0, nearCap: int.MaxValue);
+
+        cells.Should().OnlyHaveUniqueItems();
+        cells[0].Should().Be(det05Grid.CellKey(det05Grid.CellForPoint(Focus).Ci, det05Grid.CellForPoint(Focus).Cj));
+        cells.Count.Should().BeInRange(256, 289); // zmierzone spektrum CellsInRadius dla 3200 m / 409,6 m
+    }
 }

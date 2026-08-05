@@ -110,4 +110,64 @@ public sealed class OrthoPackIndexTests : IDisposable
 
         covered.Should().BeFalse();
     }
+
+    // Kontrakt memoizacji (2026-08-05): planner det05 pyta o CAŁY pierścień (256-289 cel) CO KLATKĘ, a cela
+    // niepokryta płaciła pełne 16×16 sond — zmierzone 88% czasu wątku UI w IsTileCovered (profil 20 s,
+    // planowanie trasy nad Rohaczami). Werdykt okna jest czysty i stały na życie instancji (tileSet jest
+    // readonly, bez hot-reloadu), więc wolno go zapamiętać — ale NIE wolno przy tym zgubić geometrii okna
+    // ani walidacji argumentów. Trzy testy niżej przypinają dokładnie te pułapki.
+
+    [Fact]
+    public void WindowHasCoverage_RepeatedCalls_KeepReturningTheSameVerdicts()
+    {
+        OrthoPackIndex.Write(
+            IndexPath,
+            16,
+            new[] { Cell(1, 1, 2, 100) },
+            new (int, int)[] { (20, 32) });
+        OrthoPackIndex idx = OrthoPackIndex.Load(IndexPath)!;
+
+        for (int i = 0; i < 3; i++)
+        {
+            idx.WindowHasCoverage(1, 2, pitchTiles: 16, coverageTiles: 16).Should().BeTrue();
+            idx.WindowHasCoverage(9, 9, pitchTiles: 16, coverageTiles: 16).Should().BeFalse();
+        }
+    }
+
+    [Fact]
+    public void WindowHasCoverage_SameCellDifferentWindowGeometry_IsNotCrossContaminated()
+    {
+        // Ta sama cela (2,5) pytana NAPRZEMIENNIE dwiema geometriami okna: det05-podobną (16/16 — okno
+        // kafli [32..48)×[80..96), puste) i det25-podobną (6/8 — okno [12..20)×[30..38), trafia kafel
+        // (14,33)). Cache, który kluczuje tylko po (ci,cj), skleiłby te dwa pytania w jedno.
+        OrthoPackIndex.Write(
+            IndexPath,
+            16,
+            new[] { Cell(1, 1, 2, 100) },
+            new (int, int)[] { (14, 33) });
+        OrthoPackIndex idx = OrthoPackIndex.Load(IndexPath)!;
+
+        for (int i = 0; i < 3; i++)
+        {
+            idx.WindowHasCoverage(2, 5, pitchTiles: 16, coverageTiles: 16).Should().BeFalse();
+            idx.WindowHasCoverage(2, 5, pitchTiles: 6, coverageTiles: 8).Should().BeTrue();
+        }
+    }
+
+    [Fact]
+    public void WindowHasCoverage_InvalidArguments_KeepThrowingAfterACachedCall()
+    {
+        OrthoPackIndex.Write(
+            IndexPath,
+            16,
+            new[] { Cell(1, 1, 2, 100) },
+            new (int, int)[] { (20, 32) });
+        OrthoPackIndex idx = OrthoPackIndex.Load(IndexPath)!;
+        idx.WindowHasCoverage(1, 2, pitchTiles: 16, coverageTiles: 16).Should().BeTrue();
+
+        FluentActions.Invoking(() => idx.WindowHasCoverage(1, 2, pitchTiles: 0, coverageTiles: 16))
+            .Should().Throw<ArgumentOutOfRangeException>();
+        FluentActions.Invoking(() => idx.WindowHasCoverage(1, 2, pitchTiles: 16, coverageTiles: 0))
+            .Should().Throw<ArgumentOutOfRangeException>();
+    }
 }
