@@ -948,7 +948,12 @@ public partial class Terrain3DView : ContentView
         // camera sat still with atmosphere on — the HUD read "13 FPS" on an idle RTX 5080 because nothing else
         // invalidated. After the pano-streaming pass sumGpu is 10–23 ms, so 33 ms comfortably fits. Mobile
         // keeps 66 ms (battery). Walk/dragon vsync loop is untouched (it self-invalidates per frame).
-        animationTimer.Interval = TimeSpan.FromMilliseconds(OperatingSystem.IsWindows() ? 33 : 66);
+        //
+        // Desktop 16 ms (2026-08-05): ZMIERZONE — 33 ms interwału kwantyzuje się systemowym zegarem
+        // (~15,6 ms) do ticku co ~46,8 ms = 21,4 FPS, dokładnie obserwowane 21–23 FPS w spoczynku mimo
+        // sumGpu 8–13 ms. Po memoizacji pokrycia det05 (88% wątku UI → 0%) klatka jest tania; 16 ms
+        // kwantyzuje się do ~31 ms ⇒ ~32 FPS realnie, bez zmiany żadnego kosztu per klatkę.
+        animationTimer.Interval = TimeSpan.FromMilliseconds(OperatingSystem.IsWindows() ? 16 : 66);
         animationTimer.Tick += OnAnimationTick;
         animationTimer.Start();
 
@@ -8956,7 +8961,7 @@ public partial class Terrain3DView : ContentView
         bool Coverage(int ci, int cj) => index.WindowHasCoverage(
             ci, cj, grid.PitchTiles, grid.CoverageTiles);
         renderer.Det05OpkDir = det05Opk;
-        renderer.SetOrthoDetail05Streaming(grid, Coverage);
+        renderer.SetOrthoDetail05Streaming(grid, Coverage, index); // reuse — bez drugiego Load 1,14 mln kafli na wątku paintu
         Serilog.Log.Information("[OrthoDetail05] det05 `.opk` streaming wired from {Dir} ({N} groups)",
             det05Opk, index.Cells.Count);
         return true;

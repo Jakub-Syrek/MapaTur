@@ -3695,7 +3695,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     /// this is on the static 5 cm mosaic is not loaded and streamed det05 owns unit 11.</summary>
     public void SetOrthoDetail05Streaming(
         MapaTur.Application.Terrain.OrthoDetailGrid grid,
-        Func<int, int, bool> coverage)
+        Func<int, int, bool> coverage,
+        MapaTur.Application.Terrain.OrthoPackIndex? index = null)
     {
         if (det25Grid is null || det25Policy is null)
         {
@@ -3704,6 +3705,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         det05Grid = grid;
+
+        // Reuse indeksu z widoku (2026-08-05): bez tego renderer robił WŁASNY Load tego samego
+        // index.bin (9,2 MB, HashSet 1,14 mln wpisów) na wątku paintu przy pierwszym StreamDet05 —
+        // drugi, zbędny snapshot pliku i wkład w startowe zwisy. Widok już go wczytał — podajemy dalej.
+        if (index is not null)
+        {
+            det05OpkIndex = index;
+            det05OpkProbed = true;
+        }
 
         // BC1 chain (jedyna produkcyjna ścieżka det05-stream — desktop ANGLE zawsze ma s3tc): cela 8192²
         // to ~45 MB, nie 357 MB RGBA. Stara arytmetyka dusiła near-cap i CAŁY zasięg 5 cm do „kałuży".
