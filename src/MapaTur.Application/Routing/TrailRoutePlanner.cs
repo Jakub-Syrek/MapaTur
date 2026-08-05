@@ -23,6 +23,7 @@ public sealed class TrailRoutePlanner : IRoutePlanner
     private readonly ITrailRepository repository;
     private readonly IElevationSource? elevation;
     private readonly ITrackRepository? offTrailTracks;
+    private readonly ITrailRepository? unmarkedPaths;
 
     /// <summary>
     /// Initializes a new route planner.
@@ -37,12 +38,22 @@ public sealed class TrailRoutePlanner : IRoutePlanner
     /// Optional store of user-imported off-trail ("pozaszlaki") tracks. Only consulted when the request opts in
     /// via <see cref="RouteRequest.IncludeOffTrailTracks"/>; null disables off-trail routing entirely.
     /// </param>
-    public TrailRoutePlanner(ITrailRepository repository, IElevationSource? elevation = null, ITrackRepository? offTrailTracks = null)
+    /// <param name="unmarkedPaths">
+    /// Optional store of UNMARKED OSM paths (perci/ways bez koloru i bez relacji szlaku — 2026-08-05, Rohacze:
+    /// zejście z Nohavicy i łącznik na Zadną Zábrať istnieją w OSM tylko w tej postaci). Consulted under the
+    /// SAME opt-in flag as the user's tracks, so default planning stays byte-identical on marked trails.
+    /// </param>
+    public TrailRoutePlanner(
+        ITrailRepository repository,
+        IElevationSource? elevation = null,
+        ITrackRepository? offTrailTracks = null,
+        ITrailRepository? unmarkedPaths = null)
     {
         ArgumentNullException.ThrowIfNull(repository);
         this.repository = repository;
         this.elevation = elevation;
         this.offTrailTracks = offTrailTracks;
+        this.unmarkedPaths = unmarkedPaths;
     }
 
     /// <inheritdoc />
@@ -59,6 +70,17 @@ public sealed class TrailRoutePlanner : IRoutePlanner
         if (request.IncludeOffTrailTracks && offTrailTracks is not null)
         {
             offTrail = await LoadOffTrailTrailsAsync(searchBounds, cancellationToken).ConfigureAwait(false);
+        }
+
+        // Nieznakowane ścieżki OSM wchodzą pod TĘ SAMĄ flagę i z TĄ SAMĄ karą kosztu co ślady usera —
+        // graf szlaków znakowanych zostaje nietknięty, dopóki user świadomie nie włączy pozaszlaków.
+        if (request.IncludeOffTrailTracks && unmarkedPaths is not null)
+        {
+            IReadOnlyList<Trail> paths = await unmarkedPaths.FindIntersectingAsync(searchBounds, cancellationToken).ConfigureAwait(false);
+            if (paths.Count > 0)
+            {
+                offTrail = offTrail.Count == 0 ? paths : offTrail.Concat(paths).ToList();
+            }
         }
 
         if (trails.Count == 0 && offTrail.Count == 0)

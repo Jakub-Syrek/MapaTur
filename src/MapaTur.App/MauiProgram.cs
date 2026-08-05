@@ -195,12 +195,25 @@ public static class MauiProgram
             new SqliteTrailRepository(
                 Path.Combine(FileSystem.AppDataDirectory, "mapatur-trails.db"),
                 simplificationEpsilonMeters: 0.0));
+        // Perci (nieznakowane ways OSM) żyją w OSOBNYM pliku — wchodzą do planowania wyłącznie jako
+        // pozaszlaki (opt-in, kara kosztu), więc nie wolno im wylądować w mapatur-trails.db, skąd
+        // domyślny graf bierze szlaki znakowane. Powód: Rohacze 08-05 (Nohavica/Zadná Zábrať istnieją
+        // w OSM tylko jako perci — planer „prowadził dookoła").
+        services.AddSingleton<IUnmarkedPathRepository>(_ =>
+            new SqliteUnmarkedPathRepository(
+                Path.Combine(FileSystem.AppDataDirectory, "mapatur-paths.db")));
         // Elevation source for the router: lifts trail geometry onto the base DEM so "fastest time" sees real
         // slopes (in the mountains shortest != fastest). One instance, shared: the view-model sets its raster
         // once the base DEM loads; the planner reads it.
         services.AddSingleton<DemElevationSource>();
         services.AddSingleton<IElevationSource>(sp => sp.GetRequiredService<DemElevationSource>());
-        services.AddSingleton<IRoutePlanner, TrailRoutePlanner>();
+        // Jawna fabryka zamiast auto-wire: planer bierze DWA magazyny tego samego kontraktu (szlaki
+        // znakowane + perci) — kontener nie rozróżniłby ich po typie ITrailRepository.
+        services.AddSingleton<IRoutePlanner>(sp => new TrailRoutePlanner(
+            sp.GetRequiredService<ITrailRepository>(),
+            sp.GetService<IElevationSource>(),
+            sp.GetService<ITrackRepository>(),
+            sp.GetRequiredService<IUnmarkedPathRepository>()));
         services.AddSingleton<IGpxWriter, GpxWriter>();
         services.AddTransient<PlanRouteUseCase>();
         services.AddTransient<MultiStopRoutePlanner>();

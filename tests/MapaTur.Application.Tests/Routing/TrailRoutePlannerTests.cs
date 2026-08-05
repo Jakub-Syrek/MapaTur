@@ -130,4 +130,64 @@ public sealed class TrailRoutePlannerTests
 
         route.Should().BeNull();
     }
+
+    // Nieznakowane ścieżki z OSM (2026-08-05, Rohacze): zejście z Nohavicy, grań Otrhance i łącznik na
+    // Zadną Zábrať istnieją w OSM WYŁĄCZNIE jako ways bez koloru i bez relacji szlaku — pobieranie relacji
+    // nigdy ich nie przyniesie i planer „prowadził dookoła". Osobne repozytorium takich ścieżek zasila ten
+    // sam mechanizm co pozaszlaki usera: TYLKO przy IncludeOffTrailTracks (kara kosztu w grafie), żeby
+    // domyślne planowanie zostało co do bita na szlakach znakowanych.
+
+    private static ITrailRepository UnmarkedPathsReturning(params Trail[] paths) => RepositoryReturning(paths);
+
+    private static Trail UnmarkedPath(long id, params GeoPoint[] pts) =>
+        new(id, "perć", Array.Empty<TrailMarking>(), pts);
+
+    [Fact]
+    public async Task PlanRouteAsync_OffTrailEnabled_UnmarkedOsmPathBridgesTwoDisconnectedTrails()
+    {
+        var paths = UnmarkedPathsReturning(UnmarkedPath(900, A1, B0));
+        var sut = new TrailRoutePlanner(
+            RepositoryReturning(TwoDisconnectedTrails()), elevation: null, offTrailTracks: null, unmarkedPaths: paths);
+
+        var route = await sut.PlanRouteAsync(new RouteRequest(A0, B1, RouteProfile.ShortestDistance, IncludeOffTrailTracks: true));
+
+        route.Should().NotBeNull();
+        route!.Start.Latitude.Should().BeApproximately(A0.Latitude, 1e-6);
+        route.End.Latitude.Should().BeApproximately(B1.Latitude, 1e-6);
+    }
+
+    [Fact]
+    public async Task PlanRouteAsync_OffTrailDisabled_UnmarkedOsmPathsAreNotEvenQueried()
+    {
+        var paths = UnmarkedPathsReturning(UnmarkedPath(900, A1, B0));
+        var sut = new TrailRoutePlanner(
+            RepositoryReturning(TwoDisconnectedTrails()), elevation: null, offTrailTracks: null, unmarkedPaths: paths);
+
+        var route = await sut.PlanRouteAsync(new RouteRequest(A0, B1, RouteProfile.ShortestDistance, IncludeOffTrailTracks: false));
+
+        route.Should().BeNull();
+        await paths.DidNotReceive().FindIntersectingAsync(Arg.Any<MapBounds>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task PlanRouteAsync_UserTracksAndUnmarkedPaths_Combine()
+    {
+        // Ślad usera domyka jedną dziurę, ścieżka OSM drugą — oba źródła pozaszlaków działają NARAZ.
+        var c0 = new GeoPoint(49.04, 19.04);
+        var trails = new[]
+        {
+            new Trail(1, "A", Array.Empty<TrailMarking>(), new[] { A0, A1 }),
+            new Trail(2, "B", Array.Empty<TrailMarking>(), new[] { B0, B1 }),
+            new Trail(3, "C", Array.Empty<TrailMarking>(), new[] { c0, new GeoPoint(49.05, 19.05) }),
+        };
+        var trackRepo = TrackRepositoryReturning(OffTrailTrack(A1, B0));
+        var paths = UnmarkedPathsReturning(UnmarkedPath(900, B1, c0));
+        var sut = new TrailRoutePlanner(
+            RepositoryReturning(trails), elevation: null, offTrailTracks: trackRepo, unmarkedPaths: paths);
+
+        var route = await sut.PlanRouteAsync(new RouteRequest(A0, new GeoPoint(49.05, 19.05), RouteProfile.ShortestDistance, IncludeOffTrailTracks: true));
+
+        route.Should().NotBeNull();
+        route!.End.Latitude.Should().BeApproximately(49.05, 1e-6);
+    }
 }

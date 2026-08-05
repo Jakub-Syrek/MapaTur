@@ -27,4 +27,14 @@ public interface IOverpassClient
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>One trail per exposed way. Empty when the area contains none.</returns>
     Task<IReadOnlyList<Trail>> FetchExposedRoutesAsync(MapBounds bounds, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Pobiera NIEZNAKOWANE ścieżki (highway=path/footway/track jako samodzielne ways) w boxie — perci
+    /// bez koloru i bez relacji szlaku, których nie przynosi ani pobieranie relacji, ani tras
+    /// eksponowanych (2026-08-05, Rohacze). Zasilają magazyn pozaszlaków dla planera (opt-in).
+    /// </summary>
+    /// <param name="bounds">Box geograficzny.</param>
+    /// <param name="cancellationToken">Token anulowania.</param>
+    /// <returns>Jedna trasa na way; pusto, gdy w boxie nic nie ma.</returns>
+    Task<IReadOnlyList<Trail>> FetchUnmarkedPathsAsync(MapBounds bounds, CancellationToken cancellationToken = default);
 }

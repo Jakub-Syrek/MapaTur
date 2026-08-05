@@ -65,6 +65,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     private readonly ImportTcxFileUseCase importTcxFileUseCase;
     private readonly ImportTrackFileUseCase? importTrackFileUseCase;
     private readonly ITrackRepository? trackRepository;
+    private readonly IUnmarkedPathRepository? unmarkedPathRepository;
     private readonly IOverpassClient overpassClient;
     private readonly ITrailRepository trailRepository;
     private readonly IClimbingOverpassClient climbingOverpassClient;
@@ -775,6 +776,11 @@ public sealed partial class MapPageViewModel : ObservableObject
             await trailRepository.ClearAsync().ConfigureAwait(true);
             await poiRepository.ClearAsync().ConfigureAwait(true);
             await climbingRepository.ClearAsync().ConfigureAwait(true);
+            if (unmarkedPathRepository is not null)
+            {
+                await unmarkedPathRepository.ClearAsync().ConfigureAwait(true);
+            }
+
             // Pusta baza = znacznik auto-syncu też do zera, inaczej świeży znacznik zablokowałby
             // odbudowę szlaków na tydzień po wyczyszczeniu cache.
             settingsStore.TrailsAutoSyncUtc = null;
@@ -1548,12 +1554,6 @@ public sealed partial class MapPageViewModel : ObservableObject
             if (cached.Count > 0)
             {
                 await ApplyTrailsAsync(cached).ConfigureAwait(true);
-                // Cache wchodzi od razu, ale NIE kończy sprawy: do 08-05 istniejąca baza blokowała
-                // każde kolejne pobranie na zawsze — baza z 26 czerwca nigdy nie dostała Rohaczy
-                // i planer „prowadził dookoła" (ta sama klasa co żleb Kulczyńskiego). Auto-sync
-                // dociąga CAŁE Tatry w tle raz na tydzień („wszystkie szlaki powinny się pobierać
-                // same" — user 08-05).
-                await AutoSyncTatraTrailsAsync().ConfigureAwait(true);
                 return;
             }
         }
@@ -1563,13 +1563,15 @@ public sealed partial class MapPageViewModel : ObservableObject
         }
 
         await DownloadTrailsForViewportAsync().ConfigureAwait(true);
-        await AutoSyncTatraTrailsAsync().ConfigureAwait(true);
     }
 
     // Auto-sync szlaków całych Tatr (region C, jeden box — to kadry-wycinki gubiły łączniki).
     // Best-effort: offline/timeout ⇒ zostajemy na cache i próbujemy przy następnym starcie.
     // Bez IsBusy — to tło, nie może blokować przycisków na czas wolnego Overpassa.
-    private async Task AutoSyncTatraTrailsAsync()
+    // UWAGA wpięcie: wołane z AutoLoad BEZ WARUNKÓW (nie z LoadOrFetchTrailsOnStartupAsync) — pierwsze
+    // wpięcie 08-05 siedziało za guardem `TerrainRaster is not { }` i na starcie direct-LOD nigdy nie
+    // odpaliło (zmierzone: zero [Szlaki] w logu). Box syncu jest stały, raster niepotrzebny.
+    public async Task AutoSyncTatraTrailsAsync()
     {
         DateTime? last = Application.Trails.TrailAutoSyncPolicy.Parse(settingsStore.TrailsAutoSyncUtc);
         if (!Application.Trails.TrailAutoSyncPolicy.ShouldSync(last, DateTime.UtcNow))
@@ -1592,6 +1594,25 @@ public sealed partial class MapPageViewModel : ObservableObject
             }
 
             await ApplyTrailsAsync(trails).ConfigureAwait(true);
+
+            // Perci (nieznakowane ways) do OSOBNEGO magazynu — zasilają planowanie tylko pod suwakiem
+            // „Pozaszlaki w planowaniu". Rohacze 08-05: zejście z Nohavicy i łącznik na Zadną Zábrať
+            // istnieją w OSM wyłącznie w tej postaci. Best-effort w ramach tego samego syncu.
+            if (unmarkedPathRepository is not null)
+            {
+                try
+                {
+                    IReadOnlyList<Trail> paths = await overpassClient
+                        .FetchUnmarkedPathsAsync(Application.Trails.TrailAutoSyncPolicy.TatraBounds).ConfigureAwait(true);
+                    await unmarkedPathRepository.UpsertAsync(paths).ConfigureAwait(true);
+                    logger.LogInformation("[Szlaki] AUTO-SYNC perci: {Count} nieznakowanych ścieżek w magazynie pozaszlaków", paths.Count);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "[Szlaki] AUTO-SYNC perci nieudany — pozaszlaki bez zmian");
+                }
+            }
+
             settingsStore.TrailsAutoSyncUtc = Application.Trails.TrailAutoSyncPolicy.Stamp(DateTime.UtcNow);
             logger.LogInformation("[Szlaki] AUTO-SYNC gotowy: {Count} tras (upsert — niczego nie skasowano)", trails.Count);
         }
@@ -2065,6 +2086,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <param name="waterwayClient">Optional Overpass client for watercourses (streams/rivers + waterfalls); null disables the water layer download.</param>
     /// <param name="importTrackFileUseCase">Optional unified GPX/TCX import use case for off-trail tracks; null disables the off-trail add command.</param>
     /// <param name="trackRepository">Optional persistence for imported off-trail tracks; null disables the off-trail layer.</param>
+    /// <param name="unmarkedPathRepository">Optional store of unmarked OSM paths (perci) for opt-in off-trail planning; null disables their sync and use.</param>
     public MapPageViewModel(
         IFilePickerService filePicker,
         IFileSaverService fileSaver,
@@ -2101,7 +2123,8 @@ public sealed partial class MapPageViewModel : ObservableObject
         MapaTur.Application.Terrain.BakedTileAvailabilityIndex? bakedTileIndex = null,
         MapaTur.Application.Waterways.IWaterwayOverpassClient? waterwayClient = null,
         ImportTrackFileUseCase? importTrackFileUseCase = null,
-        ITrackRepository? trackRepository = null)
+        ITrackRepository? trackRepository = null,
+        IUnmarkedPathRepository? unmarkedPathRepository = null)
     {
         ArgumentNullException.ThrowIfNull(filePicker);
         ArgumentNullException.ThrowIfNull(fileSaver);
@@ -2145,6 +2168,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         this.waterwayClient = waterwayClient;
         this.importTrackFileUseCase = importTrackFileUseCase;
         this.trackRepository = trackRepository;
+        this.unmarkedPathRepository = unmarkedPathRepository;
 
         // Subscribe to the location feed once at construction. The service stays silent until the
         // user opts in via ToggleLocationTracking; we just need to be listening so the first fix
@@ -5464,6 +5488,11 @@ public sealed partial class MapPageViewModel : ObservableObject
             // Default-ON trails: if nothing was bundled, seat them offline-first from the SQLite cache (or
             // fetch when online + uncached) so the map shows trails without a manual toggle.
             await LoadOrFetchTrailsOnStartupAsync().ConfigureAwait(true);
+
+            // Auto-sync CAŁYCH Tatr (szlaki + perci) raz na tydzień — bezwarunkowo, bo box jest stały
+            // („wszystkie szlaki powinny się pobierać same", user 08-05). NIE wewnątrz LoadOrFetch...:
+            // tamten guard (raster/rawTrails) ubijał sync na starcie direct-LOD.
+            await AutoSyncTatraTrailsAsync().ConfigureAwait(true);
 
             // Restore the user's saved tourist route (stops persist across restarts). Best-effort: the stop
             // markers come back now; the route LINE draws once trails are available (bundled above, or after a
