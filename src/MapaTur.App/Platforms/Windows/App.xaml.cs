@@ -24,8 +24,26 @@ public partial class App : MauiWinUIApplication
         // user planned a multi-stop route; Serilog was silent both times). This hook is the only place
         // that sees them with a stack trace. Handled=false: after logging we still let the process die —
         // the app state after a swallowed dispatcher exception is not trustworthy.
+        //
+        // JEDEN wyjątek od tej polityki (2026-08-05, zmierzone): przeciągnięcie przystanku na liście
+        // trasy (CollectionView CanReorderItems) potrafi rzucić COMException 0x8000FFFF „Drag start
+        // failed" ze startu drag-dropu WinUI — przejściowy błąd inicjacji GESTU, zanim cokolwiek
+        // zostało przeniesione; stan apki jest nietknięty. Pozwolenie procesowi umrzeć kosztowało
+        // sesję usera + ponad minutę zamrożenia na zapis 36 GB dumpa przez WER (10:29:28, PID 48844;
+        // ta sama sygnatura co pady 07-03 i 08-04 22:44 — wszystkie przy planowaniu trasy). Ten jeden
+        // przypadek przeżywa: gest po prostu nie startuje, ponowne przeciągnięcie zwykle działa.
         this.UnhandledException += (_, e) =>
         {
+            if (e.Exception is System.Runtime.InteropServices.COMException com
+                && unchecked((uint)com.HResult) == 0x8000FFFFu
+                && (e.Message?.Contains("Drag start failed", StringComparison.OrdinalIgnoreCase) ?? false))
+            {
+                Serilog.Log.Warning(e.Exception,
+                    "WinUI drag start failed (0x8000FFFF) — gest odrzucony, apka żyje dalej: {Message}", e.Message);
+                e.Handled = true;
+                return;
+            }
+
             Serilog.Log.Fatal(e.Exception, "WinUI unhandled exception: {Message}", e.Message);
             Serilog.Log.CloseAndFlush();
         };
