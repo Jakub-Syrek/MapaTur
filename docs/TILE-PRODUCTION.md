@@ -909,3 +909,42 @@ NCC≥0.65 = 0, ≥0.55 = 17 (obejrzane — fałszywki terenowe i ślady napraw,
 Rollbacki: `sk25/` surowe nietknięte · harmonizacja: rerun ~15 min · znaki: `sk25-harm-prewm/` +
 `_wm-fixed.txt`; @5cm: `sk05-harm-prewm/` + `_wm-fixed-from25.txt` · merge: `det25-premerge/` +
 `_sk-merged.txt` · integracja: `det25/_sk-pilot-added.txt` (usunięcie plików z listy = stan sprzed).
+
+## §13. Znaki wodne w ZINTEGROWANYM det05 — skan regionalny + naprawa klonem płatów (2026-08-05, WYKONANE)
+
+Kontekst: user widział stemple `© GKÚ, NLC` w apce w Rohaczach JUŻ PO usunięciu 1352/1360 na
+stagingu sk05-harm. Pomiar: 98/103 pozostałych instancji leżało TUŻ POD progiem 0.55 skanu
+stagingowego — katalog ich nie miał. Prawda jest w drzewie, które zasila bake, więc skan i
+naprawa działają na `det05` wprost.
+
+```bash
+# 1. skan regionu (próg 0.50 łapie stemple osłabione harmonizacją); wynik: det05/_watermarks-region.json
+python testdata/maps/scan-det05-watermarks-region.py --lon0 19.63 --lon1 19.80 --lat0 49.17 --lat1 49.26 --thr 0.50
+
+# 2. pilot naprawy (podgląd, bez zapisu) — dev/det05-preview/wm-repair-pilot.png
+python testdata/maps/repair-zbgis-watermarks.py --level det05 --pilot 19.7720,49.1780,19.7775,49.1810
+
+# 3. batch (backup automatyczny do det05-prewm; lista kafli -> det05/_wm-fixed.txt)
+python testdata/maps/repair-zbgis-watermarks.py --level det05 --write
+
+# 4. kontrolny re-skan (oczekiwane 0 trafień)
+python testdata/maps/scan-det05-watermarks-region.py --lon0 19.63 --lon1 19.80 --lat0 49.17 --lat1 49.26 --thr 0.50
+
+# 5. OKNO APP-LOCK (apka zamknięta!): kafle z _wm-fixed.txt -> AppData det05, potem bake przyrostowy
+#    (srcHash mtime+size — przebuduje TYLKO cele ze zmienionymi kaflami)
+dotnet run --project src/MapaTur.OrthoBake -c Release -- --layer det05 \
+  --src "C:\Users\jaqbs\AppData\Local\User Name\com.companyname.mapatur.app\Data\dem\ortho-detail\tatry\det05" \
+  --out "C:\Users\jaqbs\AppData\Local\User Name\com.companyname.mapatur.app\Data\dem\ortho-detail\tatry\opk\det05"
+```
+
+Wynik zmierzony 2026-08-05: skan 78 637 kafli → 103 stemple (`gku_nlc`); naprawa 103/103,
+339 kafli, re-skan **0 trafień**; bake przyrostowy **94 wypieczone + 4550 pominięte**, 0 złych,
+TOC=źródła (1 140 347), CRC 128/128, 3,7 min.
+
+WYPEŁNIENIE — decyzja pilotem (NIE zmieniać bez nowego pilota):
+- **median-fill @5cm na koronach lasu ODRZUCONY** — mediana 7×7 zabija wysokie częstotliwości
+  igliwia i zostawia płaskie kleksy GORSZE od stempla;
+- **clone_fill przyjęty**: klon PRZESUNIĘTEGO płata tej samej mozaiki (las samopodobny w 1–3 m),
+  offset wybierany po niedopasowaniu mean+std lumy na pierścieniu, źródło musi być w całości
+  niezamaskowane, dopasowanie tonu offsetem średniej, szew wtapiany rampą 8 px; fallback median,
+  gdy żaden kandydat nie jest legalny.

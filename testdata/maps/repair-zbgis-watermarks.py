@@ -61,6 +61,12 @@ LEVELS = {
              "dil": 7, "mos": (6, 3), "src": "sk05-harm", "catalog": ("sk05-harm", "_watermarks.json")},
     "sk25": {"dlon": 0.0017615030639533283, "dlat": 0.0011498383039885017, "scale": 1.0,
              "dil": 2, "mos": (3, 3), "src": "sk25-harm", "catalog": ("sk25", "_watermarks.json")},
+    # det05 = ZINTEGROWANE drzewo (po 08-04): 103 stemple znalezione 08-05 skanem regionalnym
+    # z progiem 0.50 — 98/103 lezalo TUZ POD starym progiem 0.55 skanu stagingowego, wiec katalog
+    # sk05-harm ich nie mial. Parametry identyczne z sk05 (ta sama krata 5 cm, ta sama metoda
+    # median-fill); katalog z scan-det05-watermarks-region.py; backup do det05-prewm.
+    "det05": {"dlon": 0.00035230061279066565, "dlat": 0.00022996766079770033, "scale": 5.0,
+              "dil": 7, "mos": (6, 3), "src": "det05", "catalog": ("det05", "_watermarks-region.json")},
 }
 SRC = BACKUP = CATALOG = FIXED_LIST = PREVIEW = None
 DLON = DLAT = SCALE = None
@@ -92,6 +98,7 @@ def luma(a: np.ndarray) -> np.ndarray:
 
 
 SK05_HARM = None  # ustawiane w main() dla --level sk25 (zrodlo prawdziwej tekstury wypelnienia)
+CLONE_FILL = False  # det05: klon plata zamiast median-fill (korony lasu — pilot 08-05)
 
 
 def sk05_patch(i0: int, j0: int, y0: int, y1: int, x0: int, x1: int) -> np.ndarray | None:
@@ -119,6 +126,61 @@ def sk05_patch(i0: int, j0: int, y0: int, y1: int, x0: int, x1: int) -> np.ndarr
         return None                       # dziura w sk05 pod maska -> fallback median-fill
     h, w = y1 - y0, x1 - x0
     return acc.reshape(h, 5, w, 5, 3).mean(axis=(1, 3))
+
+
+def clone_fill(img: np.ndarray, mask: np.ndarray) -> np.ndarray | None:
+    """Wypelnienie klonem PRZESUNIETEGO plata tej samej mozaiki — dla koron lasu @5cm.
+
+    Pilot 2026-08-05 (det05, Rohacze): median-fill na koronach zostawia plaskie kleksy GORSZE od
+    samego stempla (mediana 7x7 zabija wysokie czestotliwosci igliwia). Las jest samopodobny w
+    skali 1-3 m, wiec skopiowany plat o staly wektor wyglada naturalnie tam, gdzie synteza sie
+    sypie. Offset wybierany po niedopasowaniu na PIERSCIENIU wokol maski (mean+std lumy), zrodlo
+    musi byc w calosci niezamaskowane i wewnatrz mozaiki; szew wtapiany rampa 8 px. None, gdy
+    zaden kandydat nie jest legalny -> caller spada na median-fill."""
+    ys, xs = np.where(mask)
+    y0b, y1b = int(ys.min()), int(ys.max()) + 1
+    x0b, x1b = int(xs.min()), int(xs.max()) + 1
+    mh, mw = y1b - y0b, x1b - x0b
+    ring = ndimage.binary_dilation(mask, iterations=6) & ~mask
+    lum = luma(img)
+    best = None
+    # kandydaci: przesuniecia o wysokosc/szerokosc maski + margines, 8 kierunkow
+    dyx = max(mh, 24) + 12
+    dxx = max(mw // 3, 24) + 12   # w poziomie stempel jest dlugi — wystarczy ulamek szerokosci
+    for dy, dx in [(dyx, 0), (-dyx, 0), (0, dxx), (0, -dxx),
+                   (dyx, dxx), (dyx, -dxx), (-dyx, dxx), (-dyx, -dxx)]:
+        sy0, sy1 = y0b + dy, y1b + dy
+        sx0, sx1 = x0b + dx, x1b + dx
+        if sy0 < 0 or sx0 < 0 or sy1 > img.shape[0] or sx1 > img.shape[1]:
+            continue
+        if mask[sy0:sy1, sx0:sx1].any():
+            continue                      # zrodlo nie moze zawierac innego stempla
+        # niedopasowanie: srednia+std lumy zrodla vs pierscienia celu
+        ring_box = ring[y0b:y1b, x0b:x1b]
+        if not ring_box.any():
+            continue
+        src_l = lum[sy0:sy1, sx0:sx1]
+        tgt_l = lum[y0b:y1b, x0b:x1b][ring_box]
+        score = abs(float(src_l.mean()) - float(tgt_l.mean())) + 0.5 * abs(float(src_l.std()) - float(tgt_l.std()))
+        if best is None or score < best[0]:
+            best = (score, dy, dx)
+    if best is None:
+        return None
+    _, dy, dx = best
+    out = img.copy()
+    src = img[y0b + dy:y1b + dy, x0b + dx:x1b + dx]
+    box_m = mask[y0b:y1b, x0b:x1b]
+    # dopasowanie tonu jak we wstawce sk05->sk25: sam offset sredniej na pierscieniu
+    ring_box = ring[y0b:y1b, x0b:x1b]
+    b = img[y0b:y1b, x0b:x1b][ring_box].mean(axis=0) - src[ring_box].mean(axis=0) if ring_box.any() else 0.0
+    patch = np.clip(src + b, 0, 255)
+    # rampa 4 px na krawedzi maski, zeby szew klonu nie cial ostro
+    dist = ndimage.distance_transform_edt(box_m)
+    w = np.clip(dist / 8.0, 0.0, 1.0)[..., None]
+    cut = out[y0b:y1b, x0b:x1b]
+    blended = cut * (1.0 - w) + patch * w
+    cut[box_m] = blended[box_m]
+    return out
 
 
 def median_fill(img: np.ndarray, mask: np.ndarray, max_iter: int = 80) -> np.ndarray:
@@ -211,6 +273,8 @@ def process(hit: dict, templates: dict, write: bool, previews: list) -> set[tupl
             b = cut[ring].mean(axis=0) - patch[ring].mean(axis=0)
             out = mos.copy()
             out[y0b:y1b, x0b:x1b][box_m] = np.clip(patch + b, 0, 255)[box_m]
+    if out is None and CLONE_FILL:
+        out = clone_fill(mos, mask)       # det05: korony lasu — klon plata zamiast syntezy mediany
     if out is None:
         out = median_fill(mos, mask)
     touched: set[tuple[int, int]] = set()
@@ -244,7 +308,7 @@ def process(hit: dict, templates: dict, write: bool, previews: list) -> set[tupl
 
 
 def main() -> None:
-    global SRC, BACKUP, CATALOG, FIXED_LIST, PREVIEW, DLON, DLAT, SCALE, DIL, MOS_W, MOS_H, SK05_HARM
+    global SRC, BACKUP, CATALOG, FIXED_LIST, PREVIEW, DLON, DLAT, SCALE, DIL, MOS_W, MOS_H, SK05_HARM, CLONE_FILL
     ap = argparse.ArgumentParser()
     ap.add_argument("--level", default="sk05", choices=list(LEVELS))
     ap.add_argument("--pilot", help="W,S,E,N — tylko ten bbox, bez zapisu, z podgladem")
@@ -262,6 +326,7 @@ def main() -> None:
     DLON, DLAT, SCALE, DIL = lv["dlon"], lv["dlat"], lv["scale"], lv["dil"]
     MOS_W, MOS_H = lv["mos"]
     SK05_HARM = os.path.join(TATRY, "sk05-harm") if a.level == "sk25" else None
+    CLONE_FILL = a.level == "det05"
     print(f"poziom {a.level}: SRC={SRC}, katalog={CATALOG}, scale={SCALE}, dil={DIL}, "
           f"mozaika {MOS_W}x{MOS_H}, fill={'sk05-harm patch' if SK05_HARM else 'median'}")
 
