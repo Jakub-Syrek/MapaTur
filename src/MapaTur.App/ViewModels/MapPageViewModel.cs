@@ -1805,9 +1805,10 @@ public sealed partial class MapPageViewModel : ObservableObject
 
     /// <summary>
     /// The POI set actually shown + searched: downloaded/cached POIs unioned with the bundled offline
-    /// gazetteers (huts + Tatra-core cols/passes), so well-known huts and przełęcze (incl. Honoratka) are
-    /// visible AND searchable without a POI download. Downloaded OSM features win — a bundled entry whose
-    /// name already arrived from OSM is skipped (dedup by name).
+    /// gazetteers (huts + Tatra-core cols/passes + trailhead car parks), so well-known huts, przełęcze
+    /// (incl. Honoratka) and the parkings a walk starts at are visible AND searchable without a POI
+    /// download. Downloaded OSM features win — a bundled entry whose name already arrived from OSM is
+    /// skipped (dedup by name).
     /// </summary>
     private IReadOnlyList<MapaTur.Domain.Pois.MountainPoi> EffectivePois()
     {
@@ -1815,7 +1816,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         // one kind (the "Schronisko nad Morskim Okiem" vs "Schronisko PTTK Morskie Oko" double label);
         // suppressed downloaded names drop entirely (the Honoratka node). Logged deltas for observability.
         IReadOnlyList<MapaTur.Domain.Pois.MountainPoi> bundled =
-            TatraHuts.All.Concat(TatraPasses.All).ToList();
+            TatraHuts.All.Concat(TatraPasses.All).Concat(TatraTrailheadParking.All).ToList();
         IReadOnlyList<MapaTur.Domain.Pois.MountainPoi> merged =
             PoiMerger.Merge(rawPois, bundled, TatraPasses.SuppressedOsmNames);
         int dropped = ((rawPois?.Count ?? 0) + bundled.Count) - merged.Count;
