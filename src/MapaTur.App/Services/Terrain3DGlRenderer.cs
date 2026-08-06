@@ -5398,6 +5398,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             return;
         }
 
+        EnsureUploadPbos(gl, (nuint)OrthoUploadBytesPerChunk); // P0 B3: det25 na ringu PBO jak det05/det1m
         double start = frameClock.ElapsedMilliseconds;
         const GLEnum maxAnisotropyPName = (GLEnum)0x84FF;
         Span<float> maxAniso = stackalloc float[1] { 1f };
@@ -5487,17 +5488,39 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     int yoff = cell.UploadedRows * 4;
                     uint height = (uint)Math.Min(lPx - yoff, rows * 4);
                     long srcOff = lvOffset + ((long)cell.UploadedRows * rowBytesBlk);
-                    fixed (byte* p = &bc1[srcOff])
+                    // P0 B3 (08-06): det25 był OSTATNIM torem warstw z klienckim wskaźnikiem — TexSubImage
+                    // z pamięci klienta każe ANGLE stagować chunk wewnętrznie przy każdym wywołaniu
+                    // (pomiar B2: churn buforów sfalsyfikowany, kandydatem osadu został wolumen transferu).
+                    // Teraz ten sam fence'owany ring PBO co det05/det1m; fixed zostaje jako fallback.
+                    if (StageChunkInPbo(gl, bc1, srcOff, bytes))
                     {
                         if (arr)
                         {
                             gl.CompressedTexSubImage3D(TextureTarget.Texture2DArray, lv, 0, yoff, cell.Layer,
-                                (uint)lPx, height, 1, (InternalFormat)GlCompressedRgbS3tcDxt1, (uint)bytes, p);
+                                (uint)lPx, height, 1, (InternalFormat)GlCompressedRgbS3tcDxt1, (uint)bytes, null);
                         }
                         else
                         {
                             gl.CompressedTexSubImage2D(TextureTarget.Texture2D, lv, 0, yoff,
-                                (uint)lPx, height, (InternalFormat)GlCompressedRgbS3tcDxt1, (uint)bytes, p);
+                                (uint)lPx, height, (InternalFormat)GlCompressedRgbS3tcDxt1, (uint)bytes, null);
+                        }
+
+                        gl.BindBuffer(BufferTargetARB.PixelUnpackBuffer, 0);
+                    }
+                    else
+                    {
+                        fixed (byte* p = &bc1[srcOff])
+                        {
+                            if (arr)
+                            {
+                                gl.CompressedTexSubImage3D(TextureTarget.Texture2DArray, lv, 0, yoff, cell.Layer,
+                                    (uint)lPx, height, 1, (InternalFormat)GlCompressedRgbS3tcDxt1, (uint)bytes, p);
+                            }
+                            else
+                            {
+                                gl.CompressedTexSubImage2D(TextureTarget.Texture2D, lv, 0, yoff,
+                                    (uint)lPx, height, (InternalFormat)GlCompressedRgbS3tcDxt1, (uint)bytes, p);
+                            }
                         }
                     }
 
@@ -5523,10 +5546,20 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 while (cell.UploadedRows < h)
                 {
                     int rows = Math.Min(rowsPerChunk, h - cell.UploadedRows);
-                    fixed (byte* p = &rgba![(long)cell.UploadedRows * rowBytes])
+                    int stripBytes = rows * rowBytes;
+                    if (StageChunkInPbo(gl, rgba!, (long)cell.UploadedRows * rowBytes, stripBytes))
                     {
                         gl.TexSubImage2D(TextureTarget.Texture2D, 0, 0, cell.UploadedRows, (uint)w, (uint)rows,
-                            PixelFormat.Rgba, PixelType.UnsignedByte, p);
+                            PixelFormat.Rgba, PixelType.UnsignedByte, null);
+                        gl.BindBuffer(BufferTargetARB.PixelUnpackBuffer, 0);
+                    }
+                    else
+                    {
+                        fixed (byte* p = &rgba![(long)cell.UploadedRows * rowBytes])
+                        {
+                            gl.TexSubImage2D(TextureTarget.Texture2D, 0, 0, cell.UploadedRows, (uint)w, (uint)rows,
+                                PixelFormat.Rgba, PixelType.UnsignedByte, p);
+                        }
                     }
 
                     cell.UploadedRows += rows;
@@ -8906,6 +8939,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             return;
         }
 
+        EnsureUploadPbos(g, (nuint)OrthoUploadBytesPerChunk); // P0 B3: paski bazy orto na ringu PBO
+
         // Driver limits queried only when there is actual work (queue almost always empty).
         Span<int> maxTexSize = stackalloc int[1] { 2048 };
         g.GetInteger(GLEnum.MaxTextureSize, maxTexSize);
@@ -8958,12 +8993,27 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             while (tile.UploadedRows < tile.Height)
             {
                 int rows = Math.Min(rowsPerChunk, tile.Height - tile.UploadedRows);
-                fixed (byte* p = &tile.Rgba[(long)tile.UploadedRows * rowBytes])
+                int stripBytes = rows * rowBytes;
+                // P0 B3 (08-06): paski bazy orto przez fence'owany ring PBO zamiast pamięci klienta —
+                // każdy kliencki TexSubImage2D to wewnętrzny staging ANGLE per wywołanie (kandydat osadu
+                // po falsyfikacji churnu buforów w B2). Fallback = dotychczasowa ścieżka.
+                if (StageChunkInPbo(g, tile.Rgba, (long)tile.UploadedRows * rowBytes, stripBytes))
                 {
                     g.TexSubImage2D(
                         TextureTarget.Texture2D, 0, 0, tile.UploadedRows,
                         (uint)tile.Width, (uint)rows,
-                        PixelFormat.Rgba, PixelType.UnsignedByte, p);
+                        PixelFormat.Rgba, PixelType.UnsignedByte, null);
+                    g.BindBuffer(BufferTargetARB.PixelUnpackBuffer, 0);
+                }
+                else
+                {
+                    fixed (byte* p = &tile.Rgba[(long)tile.UploadedRows * rowBytes])
+                    {
+                        g.TexSubImage2D(
+                            TextureTarget.Texture2D, 0, 0, tile.UploadedRows,
+                            (uint)tile.Width, (uint)rows,
+                            PixelFormat.Rgba, PixelType.UnsignedByte, p);
+                    }
                 }
 
                 tile.UploadedRows += rows;
@@ -12459,16 +12509,46 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // Immutable TexStorage2D allocated once per size (2026-08-02): respecifying TexImage2D on every 500 m window
     // jump made ANGLE/D3D11 ghost the old storage (~107 MB per rebuild × ~37 rebuilds/flight) faster than the
     // driver reclaimed it — measured as ~+1 GB of unbooked native ws per F9 flight, killing the app near 30 GB.
+    // P0 B3 (08-06): strip-upload tekstury 2D przez fence'owany ring PBO; fallback = pamięć klienta.
+    // Maski to NAJWIĘKSZY kliencki wolumen w locie (~107 MB × ~37 rebuildów ≈ 4 GB/lot) — fix 08-02 zdjął
+    // respecyfikację storage, ale transfer dalej szedł z klienta = wewnętrzny staging ANGLE per wywołanie.
+    // Wołający ma zbindowaną docelową teksturę na aktywnej jednostce.
+    private unsafe void TexSubImage2DStrips(GL g, byte[] src, int width, int height, int bytesPerPixel, PixelFormat fmt)
+    {
+        EnsureUploadPbos(g, (nuint)OrthoUploadBytesPerChunk);
+        int rowBytes = width * bytesPerPixel;
+        int rowsPerChunk = Math.Max(1, OrthoUploadBytesPerChunk / Math.Max(1, rowBytes));
+        int uploaded = 0;
+        while (uploaded < height)
+        {
+            int rows = Math.Min(rowsPerChunk, height - uploaded);
+            int bytes = rows * rowBytes;
+            if (StageChunkInPbo(g, src, (long)uploaded * rowBytes, bytes))
+            {
+                g.TexSubImage2D(TextureTarget.Texture2D, 0, 0, uploaded, (uint)width, (uint)rows,
+                    fmt, PixelType.UnsignedByte, null);
+                g.BindBuffer(BufferTargetARB.PixelUnpackBuffer, 0);
+            }
+            else
+            {
+                fixed (byte* p = &src[(long)uploaded * rowBytes])
+                {
+                    g.TexSubImage2D(TextureTarget.Texture2D, 0, 0, uploaded, (uint)width, (uint)rows,
+                        fmt, PixelType.UnsignedByte, p);
+                }
+            }
+
+            uploaded += rows;
+        }
+    }
+
     private void UploadTrailMask(GL g, TrailMaskBuildResult built)
     {
         TrailMask mask = built.Mask!;
         g.ActiveTexture(TextureUnit.Texture5);
         EnsureImmutableMaskStorage(g, ref trailMaskTex, ref trailMaskTexW, ref trailMaskTexH,
             mask.Width, mask.Height, SizedInternalFormat.Rgba8);
-        g.TexSubImage2D<byte>(
-            TextureTarget.Texture2D, 0, 0, 0,
-            (uint)mask.Width, (uint)mask.Height,
-            PixelFormat.Rgba, PixelType.UnsignedByte, mask.Rgba);
+        TexSubImage2DStrips(g, mask.Rgba, mask.Width, mask.Height, 4, PixelFormat.Rgba);
         // Mipmapped MIN filter: the 8.5 km window is heavily minified at its far edge; sampling the raw
         // level there made the reconstructed distance jump per pixel (fwidth explosion → fat fuzzy ribbons).
         // Averaged mips fade the distance-alpha smoothly instead, so far trails thin out and dissolve.
@@ -12487,10 +12567,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             EnsureImmutableMaskStorage(g, ref waterMaskTex, ref waterMaskTexW, ref waterMaskTexH,
                 mask.Width, mask.Height, SizedInternalFormat.R8);
             g.PixelStore(PixelStoreParameter.UnpackAlignment, 1); // tightly-packed single-channel rows
-            g.TexSubImage2D<byte>(
-                TextureTarget.Texture2D, 0, 0, 0,
-                (uint)mask.Width, (uint)mask.Height,
-                PixelFormat.Red, PixelType.UnsignedByte, waterField);
+            TexSubImage2DStrips(g, waterField, mask.Width, mask.Height, 1, PixelFormat.Red);
             g.PixelStore(PixelStoreParameter.UnpackAlignment, 4);
             g.GenerateMipmap(TextureTarget.Texture2D); // same minification story as the RGBA mask above
             g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
