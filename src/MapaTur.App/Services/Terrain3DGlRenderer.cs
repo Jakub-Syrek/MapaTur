@@ -3252,11 +3252,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private static bool GlPoolOn(string subsystem)
         => GlPoolMasterEnabled && !GlPoolDisabledSubsystems.Contains(subsystem);
 
-    // Capy WOLNYCH jednostek (po weryfikacji 08-06 — VRAM to karta 16 GB z det05 ~8 GB; drabinka ×1,25
-    // dokłada do +25% na jednostkach W UŻYCIU, więc wolny zapas musi być skromny): rotacja detalu to
-    // ~170 kafli × ~2–4 MB ≈ 0,3–0,7 GB między szczytami — 512 MB absorbuje ją w całości, a LRU kasuje
-    // rzadkie nadwyżki. Łączny wolny zapas wszystkich pul ≤ ~1,1 GB zamiast pierwotnych 2,4 GB.
-    private const long TilePoolMaxFreeBytes = 512L << 20;
+    // Cap WOLNYCH jednostek mesh — ZMIERZONY, nie teoretyczny (bench B 08-06, dev/p0-pooling/bench-B-0806-1936.csv):
+    // reload detalu zwalnia jednostki HURTEM (glVboMB bujało się 1,7↔6,6 GB w locie F9), więc pierwotne
+    // 512 MB kasowało ~83% zwrotów i hit-rate spadł do 27,6% — churn alokacji trwał mimo puli. 4 GB
+    // absorbuje zmierzone wahnięcie rotacji; commit GPU przy pełnym zasobie jest WYSOKI ale PŁASKI
+    // (kryterium P0 = brak monotonicznego wzrostu, nie niski szczyt — śmierć była przy nieograniczonym
+    // wzroście ws do ~30 GB, nie przy stabilnym plateau).
+    private const long TilePoolMaxFreeBytes = 4096L << 20;
     private readonly MapaTur.Application.Terrain.GlBufferPoolPolicy<TileBuffers> tilePool =
         new(bytesPerVertex: 40, bytesPerIndex: 4, maxFreeBytes: TilePoolMaxFreeBytes);
 
@@ -11869,7 +11871,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             // P0 pooling: jednostka o pojemnościach z drabinki klas, wypełniana WYŁĄCZNIE BufferSubData —
             // sterownik nie widzi ani jednej realokacji storage po utworzeniu jednostki.
-            MapaTur.Application.Terrain.GlPoolAcquire<TileBuffers> got = tilePool.Acquire(vertexCount, indices.Length);
+            // JEDEN wymiar klasy (pomiar B 08-06: klucz po parze (vertCap, idxCap) fragmentował koszyki —
+            // hit-rate 27,6%, pula stale eksmitowana): indeksy normalizujemy do 6×wierzchołki (siatka:
+            // ~2 trójkąty/quad ⇒ idx ≈ 6×vert), klasę liczymy RAZ i żądamy pary (cls, 6·cls) — RoundUpCap
+            // jest deterministyczny, więc KAŻDY kafel danej klasy trafia w TEN SAM koszyk.
+            int effVerts = Math.Max(vertexCount, (indices.Length + 5) / 6);
+            int cls = MapaTur.Application.Terrain.GlBufferPoolPolicy<TileBuffers>.RoundUpCap(effVerts);
+            MapaTur.Application.Terrain.GlPoolAcquire<TileBuffers> got = tilePool.Acquire(cls, cls * 6);
             buffers = got.Reused ?? CreateTileUnit(g, got.VertexCap, got.IndexCap);
             buffers.IndexCount = indices.Length;
 
