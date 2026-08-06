@@ -25,6 +25,34 @@ internal static class GlTrack
     internal static long VboBytes => Interlocked.Read(ref vboBytes);
 
     internal static void AddVboBytes(long delta) => Interlocked.Add(ref vboBytes, delta);
+
+    /// <summary>Utrata kontekstu GL: wszystkie zaksięgowane jednostki pooled umarły z kontekstem bez
+    /// Delete*Unit (słusznie — martwy kontekst), więc licznik trzeba wyzerować wprost. Bez tego glVboMB
+    /// dubluje się po każdej rekreacji kontekstu (finding weryfikacji 08-06) i fałszuje bench P0.
+    /// Poprawne, bo KAŻDE użycie AddVboBytes pochodzi z jednostek pooled żyjących w tym kontekście.</summary>
+    internal static void ResetVboBytes() => Interlocked.Exchange(ref vboBytes, 0);
+
+    // P0 pooling (2026-08-06): migawka statystyk pul GL renderera (tile+line+staging) publikowana per
+    // klatka do status.json — hit-rate i wolne bajty puli to kryterium „pooling faktycznie pracuje"
+    // w benchu przed/po (obok płaskiej krzywej ws/commit D3D).
+    private static long poolFreeBytes;
+    private static long poolHits;
+    private static long poolMisses;
+    private static long pboFenceWaits;
+
+    internal static long PoolFreeBytes => Interlocked.Read(ref poolFreeBytes);
+    internal static long PoolHits => Interlocked.Read(ref poolHits);
+    internal static long PoolMisses => Interlocked.Read(ref poolMisses);
+    internal static long PboFenceWaits => Interlocked.Read(ref pboFenceWaits);
+
+    internal static void PublishPoolStats(long freeBytes, long hits, long misses, long fenceWaits)
+    {
+        Interlocked.Exchange(ref poolFreeBytes, freeBytes);
+        Interlocked.Exchange(ref poolHits, hits);
+        Interlocked.Exchange(ref poolMisses, misses);
+        Interlocked.Exchange(ref pboFenceWaits, fenceWaits);
+    }
+
     internal static long VaoAlive => Interlocked.Read(ref vaoAlive);
     internal static long FboAlive => Interlocked.Read(ref fboAlive);
     internal static long RboAlive => Interlocked.Read(ref rboAlive);

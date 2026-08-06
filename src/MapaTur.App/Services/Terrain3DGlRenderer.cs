@@ -2128,6 +2128,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         public uint DetailVbo;
         public uint Ebo;
         public int IndexCount;
+
+        // P0 pooling (2026-08-06): pojemności jednostki z drabinki klas GlBufferPoolPolicy. Storage każdego
+        // bufora jest alokowany RAZ na te pojemności (BufferData(cap, null)) przy tworzeniu jednostki, a kafle
+        // wypełniają go wyłącznie BufferSubData — zero respecyfikacji = zero osadu ANGLE (wzorzec z fixu masek).
+        // 0 = jednostka legacy (pool wyłączony) alokowana na dokładny rozmiar — przy zwolnieniu jest kasowana.
+        public int VertexCap;
+        public int IndexCap;
     }
 
     // GL line geometry (GL_LINES, 32-bit indices) for trails / route, drawn depth-tested so the terrain
@@ -2142,6 +2149,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         public uint SideVbo;
         public uint Ebo;
         public int IndexCount;
+
+        // P0 pooling (2026-08-06): jak TileBuffers.VertexCap/IndexCap — pojemności storage'u jednostki;
+        // 0 = jednostka legacy (dokładny rozmiar, kasowana przy zwolnieniu).
+        public int VertexCap;
+        public int IndexCap;
     }
 
     private GL? gl;
@@ -3221,6 +3233,52 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
     private readonly Dictionary<TerrainMesh3D, TileBuffers> tileBuffers = new();
     private IReadOnlyList<TerrainMesh3D>? lastTiles;
+
+    // ── P0 pooling zasobów GL (2026-08-06) ────────────────────────────────────────────────────────
+    // Zmierzone 08-02 (dev/p0-morning, HANDOFF-2026-08-02-p0-pomiary-dnia): +1 GB ws na identyczny lot F9,
+    // commit D3D 8,4→16,9 GB przy STAŁYCH licznikach GlTrack ⇒ osad w pulach ANGLE/D3D11 z churnu
+    // Gen/Delete + BufferData/TexImage2D o niepowtarzalnych rozmiarach. Naprawa = wzorzec fixu masek
+    // (EnsureImmutableMaskStorage): storage alokowany RAZ, aktualizacje wyłącznie SubData, uchwyty krążą
+    // w pulach zamiast Delete. Wyłączniki do bisekcji A/B: MAPATUR_GL_POOL=0 (całość) albo
+    // MAPATUR_GL_POOL_DISABLE=tiles,pbo,staging,lines (podsystemy).
+    private static readonly bool GlPoolMasterEnabled =
+        Environment.GetEnvironmentVariable("MAPATUR_GL_POOL") != "0";
+
+    private static readonly HashSet<string> GlPoolDisabledSubsystems = new(
+        (Environment.GetEnvironmentVariable("MAPATUR_GL_POOL_DISABLE") ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+        StringComparer.OrdinalIgnoreCase);
+
+    private static bool GlPoolOn(string subsystem)
+        => GlPoolMasterEnabled && !GlPoolDisabledSubsystems.Contains(subsystem);
+
+    // Capy WOLNYCH jednostek (po weryfikacji 08-06 — VRAM to karta 16 GB z det05 ~8 GB; drabinka ×1,25
+    // dokłada do +25% na jednostkach W UŻYCIU, więc wolny zapas musi być skromny): rotacja detalu to
+    // ~170 kafli × ~2–4 MB ≈ 0,3–0,7 GB między szczytami — 512 MB absorbuje ją w całości, a LRU kasuje
+    // rzadkie nadwyżki. Łączny wolny zapas wszystkich pul ≤ ~1,1 GB zamiast pierwotnych 2,4 GB.
+    private const long TilePoolMaxFreeBytes = 512L << 20;
+    private readonly MapaTur.Application.Terrain.GlBufferPoolPolicy<TileBuffers> tilePool =
+        new(bytesPerVertex: 40, bytesPerIndex: 4, maxFreeBytes: TilePoolMaxFreeBytes);
+
+    // Wstążki (szlaki/drogi/perci/trasa/liny/gondole): 32 B/wierzchołek (pos12+other12+side4+color4).
+    private readonly MapaTur.Application.Terrain.GlBufferPoolPolicy<LineBuffers> linePool =
+        new(bytesPerVertex: 32, bytesPerIndex: 4, maxFreeBytes: 64L << 20);
+
+    // Tekstury staging bazy orto (tier near↔far): reuse po dokładnym (W,H), immutable TexStorage2D.
+    // 512 MB ≈ 2 największe cele near-tier z mipami — wystarcza na flap near↔far bez trzymania flotylli.
+    private readonly MapaTur.Application.Terrain.GlTexturePoolPolicy<OrthoStagingTex> orthoTexPool =
+        new(bytesPerPixel: 4, maxFreeBytes: 512L << 20);
+
+    // Uchwyt tekstury z wymiarami storage'u — tier swap zmienia tile.Width/Height ZANIM stara tekstura
+    // wraca do puli, więc wymiary muszą podróżować z uchwytem, nie z kaflem.
+    private sealed class OrthoStagingTex
+    {
+        public uint Id;
+        public int W;
+        public int H;
+    }
+
+    private readonly Dictionary<uint, OrthoStagingTex> orthoTexById = new();
     // Deferred mesh upload: a detail reload can bring ~100 new tiles; uploading them all in the swap frame froze
     // it ~300 ms. Instead enqueue here and upload a few per frame (DrainTileUploads) — the detail fills in over a
     // few frames with no single-frame freeze. Reused (cached) tiles are already resident ⇒ never enqueued.
@@ -4536,10 +4594,25 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // makes ANGLE copy the chunk synchronously on the GL thread and sync the real transfer at swap (the
     // "bites at swap" 150–300 ms gaps). From a PBO the call is a GPU-side transfer the driver overlaps with
     // rendering. Ring of 3 so consecutive chunks never stall on each other's in-flight DMA.
-    private readonly uint[] uploadPbo = new uint[3];
+    // P0 pooling (2026-08-06, podsystem "pbo"): fence per slot ringu zamiast bezwarunkowego orphaningu
+    // BufferData(null). Każdy orphan każe ANGLE/sterownikowi wystawić świeży backing store (24 MB × setki
+    // chunków na lot = strumień alokacji do odroczonej destrukcji — profil osadu z pomiaru 08-02).
+    // PROTOKÓŁ (po weryfikacji 08-06 — wariant NIGDY-GORZEJ-NIŻ-LEGACY, zero blokowania):
+    //   • fence slotu wstawiamy przy NASTĘPNYM wejściu (konsumujący TexSubImage jest już w strumieniu
+    //     komend), więc call site'y bez zmian;
+    //   • przed nadpisaniem slotu sprawdzamy fence z TIMEOUTEM 0 — zasygnalizowany ⇒ czysty reuse
+    //     (zero alokacji), niezasygnalizowany ⇒ NATYCHMIASTOWY orphan jak w torze legacy (bez czekania;
+    //     pierwotny wariant czekał do 4 ms/chunk i na scenach GPU-bound palił ~40 ms/klatkę na det1m);
+    //   • ring 6 (nie 3): chunki idą back-to-back w klatce, a GPU bywa 1–2 klatki w tyle — głębszy ring
+    //     realnie łapie sygnalizację (koszt stały +72 MB systemowej pamięci PBO, raz na sesję);
+    //   • pboWaits w status.json liczy ORPHANY-NA-MISS — miara, ile churnu zostało (0 = pełny reuse).
+    private readonly uint[] uploadPbo = new uint[6];
     private int uploadPboIndex;
     private nuint uploadPboSize;
     private bool uploadPboBroken; // MapBufferRange refused once → stay on the direct path (no per-frame retries)
+    private readonly nint[] uploadPboFence = new nint[6];
+    private int uploadPboLastStaged = -1;
+    private long pboFenceWaits; // = liczba orphanów-na-miss (nazwa pola w status.json: pboWaits)
 
     private unsafe void EnsureUploadPbos(GL gl, nuint size)
     {
@@ -4550,6 +4623,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         for (int i = 0; i < uploadPbo.Length; i++)
         {
+            if (uploadPboFence[i] != 0)
+            {
+                gl.DeleteSync(uploadPboFence[i]);
+                uploadPboFence[i] = 0;
+            }
+
             if (uploadPbo[i] != 0) { GlTrack.DeleteBuffer(gl, uploadPbo[i]); }
             uploadPbo[i] = GlTrack.GenBuffer(gl);
             gl.BindBuffer(BufferTargetARB.PixelUnpackBuffer, uploadPbo[i]);
@@ -4558,6 +4637,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         gl.BindBuffer(BufferTargetARB.PixelUnpackBuffer, 0);
         uploadPboSize = size;
+        uploadPboLastStaged = -1;
         Log.Information("[Upload] PBO ring ready: {N} × {MB} MB", uploadPbo.Length, size / (1024 * 1024));
     }
 
@@ -4571,12 +4651,57 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             return false;
         }
 
+        bool fenced = GlPoolOn("pbo");
+        if (fenced && uploadPboLastStaged >= 0 && uploadPboFence[uploadPboLastStaged] == 0)
+        {
+            // Slot sprzed chwili został już skonsumowany przez TexSubImage — ogrodź go teraz.
+            uploadPboFence[uploadPboLastStaged] = gl.FenceSync(SyncCondition.SyncGpuCommandsComplete, SyncBehaviorFlags.None);
+        }
+
         uploadPboIndex = (uploadPboIndex + 1) % uploadPbo.Length;
         gl.BindBuffer(BufferTargetARB.PixelUnpackBuffer, uploadPbo[uploadPboIndex]);
-        gl.BufferData(BufferTargetARB.PixelUnpackBuffer, uploadPboSize, null, BufferUsageARB.StreamDraw); // orphan
-        void* ptr = gl.MapBufferRange(
-            BufferTargetARB.PixelUnpackBuffer, 0, (nuint)bytes,
-            (uint)(MapBufferAccessMask.WriteBit | MapBufferAccessMask.InvalidateBufferBit));
+
+        void* ptr;
+        if (fenced)
+        {
+            bool slotFree = true;
+            nint fence = uploadPboFence[uploadPboIndex];
+            if (fence != 0)
+            {
+                // Timeout 0: sama kontrola sygnalizacji (+flush), ŻADNEGO czekania na wątku renderu.
+                GLEnum wait = gl.ClientWaitSync(fence, SyncObjectMask.Bit, 0);
+                slotFree = wait is GLEnum.AlreadySignaled or GLEnum.ConditionSatisfied;
+                gl.DeleteSync(fence);
+                uploadPboFence[uploadPboIndex] = 0;
+            }
+
+            if (!slotFree)
+            {
+                // GPU wciąż czyta slot: orphan jak w legacy (na tym torze nie jesteśmy ani o bajt gorsi),
+                // zliczany do pboWaits — bench pokaże, ile churnu faktycznie zostało.
+                pboFenceWaits++;
+                gl.BufferData(BufferTargetARB.PixelUnpackBuffer, uploadPboSize, null, BufferUsageARB.StreamDraw);
+                ptr = gl.MapBufferRange(
+                    BufferTargetARB.PixelUnpackBuffer, 0, (nuint)bytes,
+                    (uint)(MapBufferAccessMask.WriteBit | MapBufferAccessMask.InvalidateBufferBit));
+            }
+            else
+            {
+                // Czysty reuse: nadpisujemy zakres w istniejącym storage; fence'y dają nam własną
+                // synchronizację, więc UnsynchronizedBit (ANGLE bez stalla i bez ghost-kopii).
+                ptr = gl.MapBufferRange(
+                    BufferTargetARB.PixelUnpackBuffer, 0, (nuint)bytes,
+                    (uint)(MapBufferAccessMask.WriteBit | MapBufferAccessMask.InvalidateRangeBit | MapBufferAccessMask.UnsynchronizedBit));
+            }
+        }
+        else
+        {
+            gl.BufferData(BufferTargetARB.PixelUnpackBuffer, uploadPboSize, null, BufferUsageARB.StreamDraw); // orphan (tor legacy)
+            ptr = gl.MapBufferRange(
+                BufferTargetARB.PixelUnpackBuffer, 0, (nuint)bytes,
+                (uint)(MapBufferAccessMask.WriteBit | MapBufferAccessMask.InvalidateBufferBit));
+        }
+
         if (ptr == null)
         {
             gl.BindBuffer(BufferTargetARB.PixelUnpackBuffer, 0);
@@ -4591,6 +4716,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         gl.UnmapBuffer(BufferTargetARB.PixelUnpackBuffer);
+        uploadPboLastStaged = uploadPboIndex;
         return true;
     }
 
@@ -5610,6 +5736,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         dbgLastFrameMs = nowFrameMs;
         dbgLastGen2 = gen2Now;
 
+        // P0 pooling: migawka statystyk pul do status.json (tania — cztery Interlocked.Exchange).
+        GlTrack.PublishPoolStats(
+            tilePool.FreeBytes + linePool.FreeBytes + orthoTexPool.FreeBytes,
+            tilePool.Hits + linePool.Hits + orthoTexPool.Hits,
+            tilePool.Misses + linePool.Misses + orthoTexPool.Misses,
+            pboFenceWaits);
+
         // Resizing the window (e.g. maximise) makes SKGLView recreate the GL context, which invalidates
         // every GPU object ID we cached (shader program, VAOs, VBOs). Detect that — the old program ID is
         // no longer a program in the fresh context — and rebuild from scratch (without deleting the stale
@@ -5619,6 +5752,20 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             Log.Information("[GL3D] context lost (program {Program} no longer valid) — rebuilding GPU objects", program);
             tileBuffers.Clear();
             lastTiles = null;
+            // P0 pooling: uchwyty jednostek umarły z kontekstem — zapomnij bez DeleteBuffer (Reset, nie Drain).
+            tilePool.Reset();
+            linePool.Reset();
+            orthoTexPool.Reset();
+            orthoTexById.Clear();
+            GlTrack.ResetVboBytes(); // jednostki umarły bez Delete*Unit — bez zera glVboMB dubluje się po rekreacji
+            // PBO ring + fence'y też należały do martwego kontekstu (przedtem stale ID przeżywały utratę —
+            // ratowała nas dopiero zapadka uploadPboBroken; teraz zerujemy jawnie i ring odtworzy się czysto).
+            Array.Clear(uploadPbo);
+            Array.Clear(uploadPboFence);
+            uploadPboSize = 0;
+            uploadPboIndex = 0;
+            uploadPboLastStaged = -1;
+            uploadPboBroken = false;
             trailLines = null;
             lastTrails = null;
             lastTrailRaster = null;
@@ -8508,7 +8655,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             if (old.Texture != 0)
             {
-                GlTrack.DeleteTexture(g, old.Texture);
+                // P0 pooling (finding weryfikacji 08-06): przez pulę, nie goły DeleteTexture — swap zestawu
+                // to NAJCIĘŻSZY masowy retire tekstur (8 cel na raz) i musi zasilać pulę jak tier/evict,
+                // inaczej wpisy orthoTexById wyciekają, a churn delete+create wraca na tej ścieżce.
+                ReleaseOrthoTexture(g, old.Texture);
                 old.Texture = 0;
             }
 
@@ -8620,7 +8770,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             t.UploadedCapPx = desiredCap;
             if (t.Texture != 0)
             {
-                GlTrack.DeleteTexture(g, t.Texture);
+                ReleaseOrthoTexture(g, t.Texture); // tier flap: tekstura wróci przy powrocie do tego rozmiaru
                 t.Texture = 0;
             }
 
@@ -8640,7 +8790,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             OrthoTile tile = orthoTiles[idx];
             if (tile.Texture != 0)
             {
-                GlTrack.DeleteTexture(g, tile.Texture);
+                ReleaseOrthoTexture(g, tile.Texture);
                 tile.Texture = 0;
             }
 
@@ -8676,15 +8826,69 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
     // Clears a tile's half-finished strip upload (tier change / eviction / new set): the staging texture
     // belongs to the OLD resolution and must be rebuilt from row 0.
-    private static void ResetStagingUpload(GL g, OrthoTile tile)
+    private void ResetStagingUpload(GL g, OrthoTile tile)
     {
         if (tile.StagingTexture != 0)
         {
-            GlTrack.DeleteTexture(g, tile.StagingTexture);
+            ReleaseOrthoTexture(g, tile.StagingTexture);
             tile.StagingTexture = 0;
         }
 
         tile.UploadedRows = 0;
+    }
+
+    // P0 pooling (podsystem "staging"): tekstury bazy orto przez pulę po dokładnym (W,H) + immutable
+    // TexStorage2D. Tier near↔far flipuje celę między DWOMA rozmiarami — delete+create mutable TexImage2D
+    // przy każdym flipie to wzorzec, który na maskach zostawiał ~1 GB/lot osadu (patrz UploadTrailMask).
+    // Zwrócona tekstura zostaje ZBINDOWANA na Texture2D (każdy caller i tak binduje).
+    private uint AcquireOrthoTexture(GL g, int width, int height)
+    {
+        if (GlPoolOn("staging"))
+        {
+            OrthoStagingTex? pooled = orthoTexPool.Acquire(width, height);
+            if (pooled is not null)
+            {
+                g.BindTexture(TextureTarget.Texture2D, pooled.Id);
+                return pooled.Id;
+            }
+
+            uint id = GlTrack.GenTexture(g);
+            g.BindTexture(TextureTarget.Texture2D, id);
+            uint levels = (uint)(Math.ILogB(Math.Max(width, height)) + 1);
+            g.TexStorage2D(TextureTarget.Texture2D, levels, SizedInternalFormat.Rgba8, (uint)width, (uint)height);
+            orthoTexById[id] = new OrthoStagingTex { Id = id, W = width, H = height };
+            return id;
+        }
+
+        // Tor legacy: mutable TexImage2D dokładnie jak przed 2026-08-06.
+        uint tex = GlTrack.GenTexture(g);
+        g.BindTexture(TextureTarget.Texture2D, tex);
+        g.TexImage2D(
+            TextureTarget.Texture2D, 0, (int)InternalFormat.Rgba8,
+            (uint)width, (uint)height, 0,
+            PixelFormat.Rgba, PixelType.UnsignedByte, null);
+        return tex;
+    }
+
+    private void ReleaseOrthoTexture(GL g, uint id)
+    {
+        if (id == 0)
+        {
+            return;
+        }
+
+        if (GlPoolOn("staging") && orthoTexById.TryGetValue(id, out OrthoStagingTex? st))
+        {
+            foreach (OrthoStagingTex dead in orthoTexPool.Release(st, st.W, st.H))
+            {
+                orthoTexById.Remove(dead.Id);
+                GlTrack.DeleteTexture(g, dead.Id);
+            }
+
+            return;
+        }
+
+        GlTrack.DeleteTexture(g, id);
     }
 
     // Per-frame ortho upload budget: strips totalling at most this much time leave the CPU each frame, so a
@@ -8738,13 +8942,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             if (tile.StagingTexture == 0)
             {
                 // Allocate the full-size texture EMPTY (no bulk transfer) — the strips fill it below.
-                tile.StagingTexture = GlTrack.GenTexture(g);
+                // P0: przez pulę/immutable (AcquireOrthoTexture binduje) — patrz komentarz przy metodzie.
+                tile.StagingTexture = AcquireOrthoTexture(g, tile.Width, tile.Height);
                 tile.UploadedRows = 0;
-                g.BindTexture(TextureTarget.Texture2D, tile.StagingTexture);
-                g.TexImage2D(
-                    TextureTarget.Texture2D, 0, (int)InternalFormat.Rgba8,
-                    (uint)tile.Width, (uint)tile.Height, 0,
-                    PixelFormat.Rgba, PixelType.UnsignedByte, null);
             }
             else
             {
@@ -11659,51 +11859,80 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         uint[] indices = tile.Indices;
-
-        var buffers = new TileBuffers { IndexCount = indices.Length };
-        buffers.Vao = GlTrack.GenVertexArray(g);
-        g.BindVertexArray(buffers.Vao);
-
-        buffers.PositionVbo = GlTrack.GenBuffer(g);
-        g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.PositionVbo);
-        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(positions.Length * sizeof(float)), positions, BufferUsageARB.StaticDraw);
-        g.EnableVertexAttribArray(0);
-        g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
-
-        buffers.ColorVbo = GlTrack.GenBuffer(g);
-        g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.ColorVbo);
-        g.BufferData<byte>(BufferTargetARB.ArrayBuffer, (nuint)(vertexCount * 4), colorsRented.AsSpan(0, vertexCount * 4), BufferUsageARB.StaticDraw);
-        g.EnableVertexAttribArray(1);
-        g.VertexAttribPointer(1, 4, VertexAttribPointerType.UnsignedByte, true, 4, (void*)0);
-        MapaTur.Application.Terrain.MeshBufferPool.Shared.Return(colorsRented); // BufferData copied — pool it back
-
-        buffers.NormalVbo = GlTrack.GenBuffer(g);
-        g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.NormalVbo);
-        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(normalsSpan.Length * sizeof(float)), normalsSpan, BufferUsageARB.StaticDraw);
-        g.EnableVertexAttribArray(2);
-        g.VertexAttribPointer(2, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
-
         float[] texCoords = tile.TexCoords;
-        buffers.TexVbo = GlTrack.GenBuffer(g);
-        g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.TexVbo);
-        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(texCoords.Length * sizeof(float)), texCoords, BufferUsageARB.StaticDraw);
-        g.EnableVertexAttribArray(3);
-        g.VertexAttribPointer(3, 2, VertexAttribPointerType.Float, false, 2 * sizeof(float), (void*)0);
-
         // Per-vertex mid-frequency detail amplitude (m RMS): one float at attribute location 4, baked into the
         // VAO so the main terrain draw carries it with no per-tile bind. 0 on the finest/live tiles (no-op shading).
         float[] detail = tile.Detail;
-        buffers.DetailVbo = GlTrack.GenBuffer(g);
-        g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.DetailVbo);
-        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(detail.Length * sizeof(float)), detail, BufferUsageARB.StaticDraw);
-        g.EnableVertexAttribArray(4);
-        g.VertexAttribPointer(4, 1, VertexAttribPointerType.Float, false, sizeof(float), (void*)0);
 
-        buffers.Ebo = GlTrack.GenBuffer(g);
-        g.BindBuffer(BufferTargetARB.ElementArrayBuffer, buffers.Ebo);
-        g.BufferData<uint>(BufferTargetARB.ElementArrayBuffer, (nuint)(indices.Length * sizeof(uint)), indices, BufferUsageARB.StaticDraw);
+        TileBuffers buffers;
+        if (GlPoolOn("tiles"))
+        {
+            // P0 pooling: jednostka o pojemnościach z drabinki klas, wypełniana WYŁĄCZNIE BufferSubData —
+            // sterownik nie widzi ani jednej realokacji storage po utworzeniu jednostki.
+            MapaTur.Application.Terrain.GlPoolAcquire<TileBuffers> got = tilePool.Acquire(vertexCount, indices.Length);
+            buffers = got.Reused ?? CreateTileUnit(g, got.VertexCap, got.IndexCap);
+            buffers.IndexCount = indices.Length;
 
-        g.BindVertexArray(0);
+            g.BindVertexArray(buffers.Vao); // EBO wisi na stanie VAO — SubData indeksów wymaga jego bindu
+            g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.PositionVbo);
+            g.BufferSubData<float>(BufferTargetARB.ArrayBuffer, 0, (nuint)(positions.Length * sizeof(float)), positions);
+            g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.ColorVbo);
+            g.BufferSubData<byte>(BufferTargetARB.ArrayBuffer, 0, (nuint)(vertexCount * 4), colorsRented.AsSpan(0, vertexCount * 4));
+            g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.NormalVbo);
+            g.BufferSubData<float>(BufferTargetARB.ArrayBuffer, 0, (nuint)(normalsSpan.Length * sizeof(float)), normalsSpan);
+            g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.TexVbo);
+            g.BufferSubData<float>(BufferTargetARB.ArrayBuffer, 0, (nuint)(texCoords.Length * sizeof(float)), texCoords);
+            g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.DetailVbo);
+            g.BufferSubData<float>(BufferTargetARB.ArrayBuffer, 0, (nuint)(detail.Length * sizeof(float)), detail);
+            g.BufferSubData<uint>(BufferTargetARB.ElementArrayBuffer, 0, (nuint)(indices.Length * sizeof(uint)), indices);
+            g.BindVertexArray(0);
+            MapaTur.Application.Terrain.MeshBufferPool.Shared.Return(colorsRented);
+        }
+        else
+        {
+            // Tor legacy (MAPATUR_GL_POOL=0 / DISABLE=tiles): dokładne rozmiary, Gen+BufferData per kafel.
+            buffers = new TileBuffers { IndexCount = indices.Length };
+            buffers.Vao = GlTrack.GenVertexArray(g);
+            g.BindVertexArray(buffers.Vao);
+
+            buffers.PositionVbo = GlTrack.GenBuffer(g);
+            g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.PositionVbo);
+            g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(positions.Length * sizeof(float)), positions, BufferUsageARB.StaticDraw);
+            g.EnableVertexAttribArray(0);
+            g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
+
+            buffers.ColorVbo = GlTrack.GenBuffer(g);
+            g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.ColorVbo);
+            g.BufferData<byte>(BufferTargetARB.ArrayBuffer, (nuint)(vertexCount * 4), colorsRented.AsSpan(0, vertexCount * 4), BufferUsageARB.StaticDraw);
+            g.EnableVertexAttribArray(1);
+            g.VertexAttribPointer(1, 4, VertexAttribPointerType.UnsignedByte, true, 4, (void*)0);
+            MapaTur.Application.Terrain.MeshBufferPool.Shared.Return(colorsRented); // BufferData copied — pool it back
+
+            buffers.NormalVbo = GlTrack.GenBuffer(g);
+            g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.NormalVbo);
+            g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(normalsSpan.Length * sizeof(float)), normalsSpan, BufferUsageARB.StaticDraw);
+            g.EnableVertexAttribArray(2);
+            g.VertexAttribPointer(2, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
+
+            buffers.TexVbo = GlTrack.GenBuffer(g);
+            g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.TexVbo);
+            g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(texCoords.Length * sizeof(float)), texCoords, BufferUsageARB.StaticDraw);
+            g.EnableVertexAttribArray(3);
+            g.VertexAttribPointer(3, 2, VertexAttribPointerType.Float, false, 2 * sizeof(float), (void*)0);
+
+            buffers.DetailVbo = GlTrack.GenBuffer(g);
+            g.BindBuffer(BufferTargetARB.ArrayBuffer, buffers.DetailVbo);
+            g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(detail.Length * sizeof(float)), detail, BufferUsageARB.StaticDraw);
+            g.EnableVertexAttribArray(4);
+            g.VertexAttribPointer(4, 1, VertexAttribPointerType.Float, false, sizeof(float), (void*)0);
+
+            buffers.Ebo = GlTrack.GenBuffer(g);
+            g.BindBuffer(BufferTargetARB.ElementArrayBuffer, buffers.Ebo);
+            g.BufferData<uint>(BufferTargetARB.ElementArrayBuffer, (nuint)(indices.Length * sizeof(uint)), indices, BufferUsageARB.StaticDraw);
+
+            g.BindVertexArray(0);
+        }
+
         tileBuffers[tile] = buffers;
         uploadTileDataMs += frameClock.ElapsedMilliseconds - tUp0;
         uploadTileDataCount++;
@@ -11728,7 +11957,73 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         tileBuffers.Clear();
     }
 
-    private static void ReleaseTileBuffers(GL g, TileBuffers b)
+    // P0 pooling: eksmisja kafla NIE kasuje obiektów GL — jednostka wraca do puli i następny kafel tej klasy
+    // wypełni ją SubData. Kasujemy tylko jednostki, które polityka wskaże jako nadmiar ponad budżet (LRU),
+    // oraz jednostki legacy (VertexCap==0 — pool był wyłączony przy ich tworzeniu).
+    private void ReleaseTileBuffers(GL g, TileBuffers b)
+    {
+        if (GlPoolOn("tiles") && b.VertexCap > 0)
+        {
+            foreach (TileBuffers dead in tilePool.Release(b, b.VertexCap, b.IndexCap))
+            {
+                DeleteTileUnit(g, dead);
+            }
+
+            return;
+        }
+
+        DeleteTileUnit(g, b);
+    }
+
+    // Jednostka puli kafli: 5×VBO + EBO alokowane RAZ na pojemności klasy (BufferData(cap, null)) z atrybutami
+    // spiętymi w VAO — potem żyje przez sesję, a kafle tylko nadpisują zawartość SubData. StaticDraw = D3D11
+    // DEFAULT + UpdateSubresource pod ANGLE, właściwy tor dla „rzadko pisz, często czytaj".
+    private TileBuffers CreateTileUnit(GL g, int vertexCap, int indexCap)
+    {
+        var b = new TileBuffers { VertexCap = vertexCap, IndexCap = indexCap };
+        b.Vao = GlTrack.GenVertexArray(g);
+        g.BindVertexArray(b.Vao);
+
+        b.PositionVbo = GlTrack.GenBuffer(g);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, b.PositionVbo);
+        g.BufferData(BufferTargetARB.ArrayBuffer, (nuint)(vertexCap * 12L), null, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(0);
+        g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
+
+        b.ColorVbo = GlTrack.GenBuffer(g);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, b.ColorVbo);
+        g.BufferData(BufferTargetARB.ArrayBuffer, (nuint)(vertexCap * 4L), null, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(1);
+        g.VertexAttribPointer(1, 4, VertexAttribPointerType.UnsignedByte, true, 4, (void*)0);
+
+        b.NormalVbo = GlTrack.GenBuffer(g);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, b.NormalVbo);
+        g.BufferData(BufferTargetARB.ArrayBuffer, (nuint)(vertexCap * 12L), null, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(2);
+        g.VertexAttribPointer(2, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
+
+        b.TexVbo = GlTrack.GenBuffer(g);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, b.TexVbo);
+        g.BufferData(BufferTargetARB.ArrayBuffer, (nuint)(vertexCap * 8L), null, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(3);
+        g.VertexAttribPointer(3, 2, VertexAttribPointerType.Float, false, 2 * sizeof(float), (void*)0);
+
+        b.DetailVbo = GlTrack.GenBuffer(g);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, b.DetailVbo);
+        g.BufferData(BufferTargetARB.ArrayBuffer, (nuint)(vertexCap * 4L), null, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(4);
+        g.VertexAttribPointer(4, 1, VertexAttribPointerType.Float, false, sizeof(float), (void*)0);
+
+        b.Ebo = GlTrack.GenBuffer(g);
+        g.BindBuffer(BufferTargetARB.ElementArrayBuffer, b.Ebo);
+        g.BufferData(BufferTargetARB.ElementArrayBuffer, (nuint)(indexCap * 4L), null, BufferUsageARB.StaticDraw);
+
+        g.BindVertexArray(0);
+        GlTrack.AddVboBytes((40L * vertexCap) + (4L * indexCap));
+        return b;
+    }
+
+    private static void DeleteTileUnit(GL g, TileBuffers b)
     {
         GlTrack.DeleteBuffer(g, b.PositionVbo);
         GlTrack.DeleteBuffer(g, b.ColorVbo);
@@ -11737,6 +12032,37 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         GlTrack.DeleteBuffer(g, b.DetailVbo);
         GlTrack.DeleteBuffer(g, b.Ebo);
         GlTrack.DeleteVertexArray(g, b.Vao);
+        if (b.VertexCap > 0)
+        {
+            GlTrack.AddVboBytes(-((40L * b.VertexCap) + (4L * b.IndexCap)));
+        }
+    }
+
+    // Teardown na ŻYWYM kontekście: po zwrocie kafli do puli skasuj też wolne jednostki (utrata kontekstu
+    // używa Reset() — bez kasowania; tu kontekst żyje, więc DeleteBuffer jest poprawny i obowiązkowy).
+    private void DestroyGlPools(GL g)
+    {
+        var deadTiles = new List<TileBuffers>(tilePool.FreeCount);
+        tilePool.DrainTo(deadTiles);
+        foreach (TileBuffers dead in deadTiles)
+        {
+            DeleteTileUnit(g, dead);
+        }
+
+        var deadLines = new List<LineBuffers>(linePool.FreeCount);
+        linePool.DrainTo(deadLines);
+        foreach (LineBuffers dead in deadLines)
+        {
+            DeleteLineUnit(g, dead);
+        }
+
+        var deadTex = new List<OrthoStagingTex>(orthoTexPool.FreeCount);
+        orthoTexPool.DrainTo(deadTex);
+        foreach (OrthoStagingTex dead in deadTex)
+        {
+            orthoTexById.Remove(dead.Id);
+            GlTrack.DeleteTexture(g, dead.Id);
+        }
     }
 
     // Incremental tile residency. The base tiles are REUSED across detail reloads (same TerrainMesh3D refs;
@@ -12759,7 +13085,38 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             return null;
         }
 
-        var buffers = new LineBuffers { IndexCount = ribbon.Indices.Count };
+        int vertexCount = ribbon.Positions.Count / 3;
+        int indexCount = ribbon.Indices.Count;
+
+        if (GlPoolOn("lines"))
+        {
+            // P0 pooling: jednostka z puli klas + SubData prosto ze List<T> (CollectionsMarshal — bez kopii
+            // ToArray). Gondole wołają Upload+Delete CO KLATKĘ — po rozgrzaniu to czysty SubData, zero alokacji.
+            MapaTur.Application.Terrain.GlPoolAcquire<LineBuffers> got = linePool.Acquire(vertexCount, indexCount);
+            LineBuffers unit = got.Reused ?? CreateLineUnit(g, got.VertexCap, got.IndexCap);
+            unit.IndexCount = indexCount;
+
+            g.BindVertexArray(unit.Vao);
+            g.BindBuffer(BufferTargetARB.ArrayBuffer, unit.PositionVbo);
+            g.BufferSubData<float>(BufferTargetARB.ArrayBuffer, 0, (nuint)(ribbon.Positions.Count * sizeof(float)),
+                (System.ReadOnlySpan<float>)System.Runtime.InteropServices.CollectionsMarshal.AsSpan(ribbon.Positions));
+            g.BindBuffer(BufferTargetARB.ArrayBuffer, unit.ColorVbo);
+            g.BufferSubData<byte>(BufferTargetARB.ArrayBuffer, 0, (nuint)ribbon.Colors.Count,
+                (System.ReadOnlySpan<byte>)System.Runtime.InteropServices.CollectionsMarshal.AsSpan(ribbon.Colors));
+            g.BindBuffer(BufferTargetARB.ArrayBuffer, unit.OtherVbo);
+            g.BufferSubData<float>(BufferTargetARB.ArrayBuffer, 0, (nuint)(ribbon.Others.Count * sizeof(float)),
+                (System.ReadOnlySpan<float>)System.Runtime.InteropServices.CollectionsMarshal.AsSpan(ribbon.Others));
+            g.BindBuffer(BufferTargetARB.ArrayBuffer, unit.SideVbo);
+            g.BufferSubData<float>(BufferTargetARB.ArrayBuffer, 0, (nuint)(ribbon.Sides.Count * sizeof(float)),
+                (System.ReadOnlySpan<float>)System.Runtime.InteropServices.CollectionsMarshal.AsSpan(ribbon.Sides));
+            g.BufferSubData<uint>(BufferTargetARB.ElementArrayBuffer, 0, (nuint)(indexCount * sizeof(uint)),
+                (System.ReadOnlySpan<uint>)System.Runtime.InteropServices.CollectionsMarshal.AsSpan(ribbon.Indices));
+            g.BindVertexArray(0);
+            return unit;
+        }
+
+        // Tor legacy (pool wyłączony): dokładne rozmiary, Gen+BufferData per przebudowa.
+        var buffers = new LineBuffers { IndexCount = indexCount };
         buffers.Vao = GlTrack.GenVertexArray(g);
         g.BindVertexArray(buffers.Vao);
 
@@ -12800,6 +13157,46 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         return buffers;
     }
 
+    // Jednostka puli wstążek: 4×VBO + EBO na pojemności klasy, atrybuty jak w torze legacy UploadLine.
+    private LineBuffers CreateLineUnit(GL g, int vertexCap, int indexCap)
+    {
+        var b = new LineBuffers { VertexCap = vertexCap, IndexCap = indexCap };
+        b.Vao = GlTrack.GenVertexArray(g);
+        g.BindVertexArray(b.Vao);
+
+        b.PositionVbo = GlTrack.GenBuffer(g);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, b.PositionVbo);
+        g.BufferData(BufferTargetARB.ArrayBuffer, (nuint)(vertexCap * 12L), null, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(0);
+        g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
+
+        b.ColorVbo = GlTrack.GenBuffer(g);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, b.ColorVbo);
+        g.BufferData(BufferTargetARB.ArrayBuffer, (nuint)(vertexCap * 4L), null, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(1);
+        g.VertexAttribPointer(1, 4, VertexAttribPointerType.UnsignedByte, true, 4, (void*)0);
+
+        b.OtherVbo = GlTrack.GenBuffer(g);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, b.OtherVbo);
+        g.BufferData(BufferTargetARB.ArrayBuffer, (nuint)(vertexCap * 12L), null, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(2);
+        g.VertexAttribPointer(2, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
+
+        b.SideVbo = GlTrack.GenBuffer(g);
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, b.SideVbo);
+        g.BufferData(BufferTargetARB.ArrayBuffer, (nuint)(vertexCap * 4L), null, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(3);
+        g.VertexAttribPointer(3, 1, VertexAttribPointerType.Float, false, sizeof(float), (void*)0);
+
+        b.Ebo = GlTrack.GenBuffer(g);
+        g.BindBuffer(BufferTargetARB.ElementArrayBuffer, b.Ebo);
+        g.BufferData(BufferTargetARB.ElementArrayBuffer, (nuint)(indexCap * 4L), null, BufferUsageARB.StaticDraw);
+
+        g.BindVertexArray(0);
+        GlTrack.AddVboBytes((32L * vertexCap) + (4L * indexCap));
+        return b;
+    }
+
     private void DrawLine(GL g, LineBuffers? line, float halfWidthPx)
     {
         if (line is null)
@@ -12812,20 +13209,42 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.DrawElements(PrimitiveType.Triangles, (uint)line.IndexCount, DrawElementsType.UnsignedInt, (void*)0);
     }
 
-    private static void DeleteLine(GL g, ref LineBuffers? line)
+    // P0 pooling: jednostka wstążki wraca do puli zamiast pod DeleteBuffer (kasujemy tylko nadmiar LRU
+    // wskazany przez politykę oraz jednostki legacy z VertexCap==0). Call site'y bez zmian.
+    private void DeleteLine(GL g, ref LineBuffers? line)
     {
         if (line is null)
         {
             return;
         }
 
-        GlTrack.DeleteBuffer(g, line.PositionVbo);
-        GlTrack.DeleteBuffer(g, line.ColorVbo);
-        GlTrack.DeleteBuffer(g, line.OtherVbo);
-        GlTrack.DeleteBuffer(g, line.SideVbo);
-        GlTrack.DeleteBuffer(g, line.Ebo);
-        GlTrack.DeleteVertexArray(g, line.Vao);
+        if (GlPoolOn("lines") && line.VertexCap > 0)
+        {
+            foreach (LineBuffers dead in linePool.Release(line, line.VertexCap, line.IndexCap))
+            {
+                DeleteLineUnit(g, dead);
+            }
+
+            line = null;
+            return;
+        }
+
+        DeleteLineUnit(g, line);
         line = null;
+    }
+
+    private static void DeleteLineUnit(GL g, LineBuffers b)
+    {
+        GlTrack.DeleteBuffer(g, b.PositionVbo);
+        GlTrack.DeleteBuffer(g, b.ColorVbo);
+        GlTrack.DeleteBuffer(g, b.OtherVbo);
+        GlTrack.DeleteBuffer(g, b.SideVbo);
+        GlTrack.DeleteBuffer(g, b.Ebo);
+        GlTrack.DeleteVertexArray(g, b.Vao);
+        if (b.VertexCap > 0)
+        {
+            GlTrack.AddVboBytes(-((32L * b.VertexCap) + (4L * b.IndexCap)));
+        }
     }
 
     private static (byte R, byte G, byte B) PttkRgb(PttkColor color)
@@ -14050,6 +14469,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         DeleteLine(gl, ref roadLines);
         DeleteLine(gl, ref offTrailLines);
         DeleteLine(gl, ref exposedLines);
+        DeleteLine(gl, ref cableLines);
+        // P0 pooling: DestroyGlPools biegnie NA KOŃCU Dispose (za pętlami orto) — finding weryfikacji 08-06:
+        // ResetStagingUpload niżej ODDAJE tekstury do puli, więc dren przed nimi osierocałby je na żywym kontekście.
+        for (int i = 0; i < uploadPboFence.Length; i++)
+        {
+            if (uploadPboFence[i] != 0)
+            {
+                gl.DeleteSync(uploadPboFence[i]);
+                uploadPboFence[i] = 0;
+            }
+        }
+
         GlTrack.DeleteFramebuffer(gl, msaaFbo);
         GlTrack.DeleteRenderbuffer(gl, msaaColorRb);
         GlTrack.DeleteRenderbuffer(gl, msaaDepthRb);
@@ -14159,7 +14590,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             if (t.Texture != 0)
             {
-                GlTrack.DeleteTexture(gl, t.Texture);
+                ReleaseOrthoTexture(gl, t.Texture); // przez pulę — dren niżej skasuje na żywym kontekście
                 t.Texture = 0;
             }
 
@@ -14169,7 +14600,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             if (t.Texture != 0)
             {
-                GlTrack.DeleteTexture(gl, t.Texture);
+                ReleaseOrthoTexture(gl, t.Texture);
                 t.Texture = 0;
             }
 
@@ -14177,6 +14608,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
         pendingOrthoRelease.Clear();
         orthoUploadQueue.Clear();
+        // P0 pooling: OSTATNI krok zwalniania zasobów pooled — wszystkie zwroty (kafle, linie, tekstury orto)
+        // są już w pulach, kontekst żyje, więc dren + DeleteBuffer/DeleteTexture jest poprawny i kompletny.
+        DestroyGlPools(gl);
         if (programReady)
         {
             gl.DeleteProgram(program);
