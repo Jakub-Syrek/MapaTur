@@ -53,6 +53,31 @@ internal static class GlTrack
         Interlocked.Exchange(ref pboFenceWaits, fenceWaits);
     }
 
+    // P0 gpuDed (08-08): skumulowane bajty uploadu per konsument — bisekcja pełzania commitu GPU.
+    private static long upDet1m;
+    private static long upDet05;
+    private static long upDet25;
+    private static long upOrtho;
+    private static long upMask;
+    private static long upMesh;
+
+    internal static long UpDet1m => Interlocked.Read(ref upDet1m);
+    internal static long UpDet05 => Interlocked.Read(ref upDet05);
+    internal static long UpDet25 => Interlocked.Read(ref upDet25);
+    internal static long UpOrtho => Interlocked.Read(ref upOrtho);
+    internal static long UpMask => Interlocked.Read(ref upMask);
+    internal static long UpMesh => Interlocked.Read(ref upMesh);
+
+    internal static void PublishUploadStats(long det1m, long det05, long det25, long ortho, long mask, long mesh)
+    {
+        Interlocked.Exchange(ref upDet1m, det1m);
+        Interlocked.Exchange(ref upDet05, det05);
+        Interlocked.Exchange(ref upDet25, det25);
+        Interlocked.Exchange(ref upOrtho, ortho);
+        Interlocked.Exchange(ref upMask, mask);
+        Interlocked.Exchange(ref upMesh, mesh);
+    }
+
     internal static long VaoAlive => Interlocked.Read(ref vaoAlive);
     internal static long FboAlive => Interlocked.Read(ref fboAlive);
     internal static long RboAlive => Interlocked.Read(ref rboAlive);

@@ -1,8 +1,8 @@
-# P0 sampler krzywej pamięci (odtworzony 2026-08-06 — wersja z 08-02 nie została zacommitowana).
-# Czyta %TEMP%\mapatur-status.json (pisany co 2 s z wątku tła apki) + zewnętrzne liczniki
-# (GPU Process Memory\Dedicated/Shared Usage, PrivateMemorySize64) i skleja do CSV.
-# Użycie:  .\bench-mem-sampler.ps1 -OutCsv dev\p0-pooling\bench-A.csv [-IntervalSec 6]
-# Kończy się sam, gdy proces MapaTur.App zniknie (bench F9 sam quituje po serii).
+# P0 memory-curve sampler (recreated 2026-08-06; the 08-02 version was never committed).
+# Reads %TEMP%\mapatur-status.json (written every 2 s from a background thread in the app)
+# plus external counters (GPU Process Memory Dedicated/Shared, PrivateMemorySize64) into a CSV.
+# Usage:  .\bench-mem-sampler.ps1 -OutCsv dev\p0-pooling\bench-A.csv [-IntervalSec 6]
+# Exits on its own when the MapaTur.App process disappears (bench F9 quits after the series).
 param(
     [Parameter(Mandatory = $true)][string]$OutCsv,
     [int]$IntervalSec = 6
@@ -12,16 +12,16 @@ $statusPath = Join-Path $env:TEMP 'mapatur-status.json'
 $dir = Split-Path -Parent $OutCsv
 if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force $dir | Out-Null }
 
-'ts,uptimeSec,wsMB,heapMB,privMB,gpuDedMB,gpuShMB,glTex,glBuf,glVboMB,glPoolMB,glPoolHit,glPoolMiss,pboWaits,renderFps' |
+'ts,uptimeSec,wsMB,heapMB,privMB,gpuDedMB,gpuShMB,glTex,glBuf,glVboMB,glPoolMB,glPoolHit,glPoolMiss,pboWaits,upDet05MB,upDet25MB,upOrthoMB,upMaskMB,upMeshMB,renderFps' |
     Set-Content -Path $OutCsv
 
-Write-Host "[sampler] czekam na proces MapaTur.App i $statusPath ..."
+Write-Host "[sampler] waiting for MapaTur.App process and $statusPath ..."
 while (-not (Get-Process -Name 'MapaTur.App' -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 2 }
 
 while ($true) {
     $proc = Get-Process -Name 'MapaTur.App' -ErrorAction SilentlyContinue
-    if (-not $proc) { Write-Host '[sampler] proces zniknal - koniec.'; break }
-    if ($proc.Count -gt 1) { Write-Warning "[sampler] $($proc.Count) instancji MapaTur.App! Pomiar skazony."; }
+    if (-not $proc) { Write-Host '[sampler] process gone - done.'; break }
+    if ($proc.Count -gt 1) { Write-Warning "[sampler] $($proc.Count) instances of MapaTur.App! Measurement tainted." }
     $p = $proc | Select-Object -First 1
 
     $s = $null
@@ -39,12 +39,14 @@ while ($true) {
         $gpuSh = [math]::Round($sh.Sum / 1MB, 0)
     } catch {}
 
-    $line = '{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11},{12},{13},{14}' -f `
+    $line = '{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11},{12},{13},{14},{15},{16},{17},{18},{19}' -f `
         (Get-Date -Format 'HH:mm:ss'),
         ($s.uptimeSec ?? ''), ($s.wsMB ?? [math]::Round($p.WorkingSet64 / 1MB)), ($s.heapMB ?? ''),
         ([math]::Round($p.PrivateMemorySize64 / 1MB)), $gpuDed, $gpuSh,
         ($s.glTex ?? ''), ($s.glBuf ?? ''), ($s.glVboMB ?? ''), ($s.glPoolMB ?? ''),
-        ($s.glPoolHit ?? ''), ($s.glPoolMiss ?? ''), ($s.pboWaits ?? ''), ($s.renderFps ?? '')
+        ($s.glPoolHit ?? ''), ($s.glPoolMiss ?? ''), ($s.pboWaits ?? ''),
+        ($s.upDet05MB ?? ''), ($s.upDet25MB ?? ''), ($s.upOrthoMB ?? ''), ($s.upMaskMB ?? ''), ($s.upMeshMB ?? ''),
+        ($s.renderFps ?? '')
     Add-Content -Path $OutCsv -Value $line
     Start-Sleep -Seconds $IntervalSec
 }

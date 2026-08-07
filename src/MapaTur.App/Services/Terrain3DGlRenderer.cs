@@ -4577,7 +4577,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             for (int lv = 0, px = 4096; px >= 1; lv++, px >>= 1)
             {
                 int bytes = MapaTur.Application.Terrain.Bc1Encoder.EncodedSize(px, px);
-                if (StageChunkInPbo(gl, chain, off, bytes))
+                if (StageChunkInPbo(gl, chain, off, bytes, UpDet1m))
                 {
                     gl.CompressedTexSubImage3D(TextureTarget.Texture2DArray, lv, 0, 0, det1mUploadCursor,
                         (uint)px, (uint)px, 1, (InternalFormat)GlCompressedRgbS3tcDxt1, (uint)bytes, (void*)0);
@@ -4626,6 +4626,25 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // 5–7 chunków w jednej klatce i ślepy „następny slot" trafiał w niezasygnalizowany fence → orphan
     // 24 MB = churn alokacji sterownika (901×24 MB ≈ 21 GB/sesję). Skan wybiera PIERWSZY wolny slot
     // z całego ringu; orphan zostaje tylko gdy wszystkie 12 są w locie.
+    // P0 gpuDed (08-08): liczniki wolumenu uploadu per konsument (bajty od startu) publikowane do
+    // status.json — bisekcja: który strumień bajtów koreluje z pełzaniem commitu GPU. Zliczane na
+    // WEJŚCIU StageChunkInPbo (tor PBO i fallback niosą te same bajty) + mesh w UploadTile.
+    private const int UpDet1m = 0;
+    private const int UpDet05 = 1;
+    private const int UpDet25 = 2;
+    private const int UpOrtho = 3;
+    private const int UpMask = 4;
+    private const int UpMesh = 5;
+    private readonly long[] uploadedByConsumer = new long[6];
+
+    // Kadencja IDXGIDevice3::Trim (0 = wyłączone). Trim każe sterownikowi oddać wewnętrzne
+    // tymczasowe alokacje — kandydat na pełzanie commitu GPU (patrz DxgiDriverTrim).
+    private static readonly int DxgiTrimSec =
+        int.TryParse(Environment.GetEnvironmentVariable("MAPATUR_DXGI_TRIM_SEC"), out int trimSec) ? trimSec : 30;
+
+    private long lastDxgiTrimMs;
+    private long dxgiTrimCount;
+
     private const int UploadPboRingDepth = 12;
     private readonly uint[] uploadPbo = new uint[UploadPboRingDepth];
     private int uploadPboIndex;
@@ -4665,8 +4684,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // Copies one chunk into the next ring PBO and leaves it BOUND as PIXEL_UNPACK, so the caller's
     // TexSubImage sources from PBO offset 0 (pass pixels = null) and MUST unbind afterwards. False = map
     // refused → caller uses the direct client-memory path (and we latch off to avoid per-frame map churn).
-    private unsafe bool StageChunkInPbo(GL gl, byte[] src, long srcOffset, int bytes)
+    private unsafe bool StageChunkInPbo(GL gl, byte[] src, long srcOffset, int bytes, int consumer)
     {
+        uploadedByConsumer[consumer] += bytes; // tor PBO i fallback klienta niosą te same bajty
         if (uploadPboBroken)
         {
             return false;
@@ -4868,7 +4888,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     int yoff = cell.UploadedRows * 4;
                     uint height = (uint)Math.Min(lPx - yoff, rows * 4);
                     long srcOff = lvOffset + ((long)cell.UploadedRows * rowBytesBlk);
-                    if (StageChunkInPbo(gl, bc1, srcOff, bytes))
+                    if (StageChunkInPbo(gl, bc1, srcOff, bytes, UpDet05))
                     {
                         gl.CompressedTexSubImage3D(TextureTarget.Texture2DArray, lv, 0, yoff, z,
                             (uint)lPx, height, 1, (InternalFormat)GlCompressedRgbS3tcDxt1, (uint)bytes, (void*)0);
@@ -4905,7 +4925,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     int rows = Math.Min(rowsPerChunk, lPx - cell.UploadedRows);
                     long srcOff = lvOffset + ((long)cell.UploadedRows * rowBytes);
                     int bytes = rows * rowBytes;
-                    if (StageChunkInPbo(gl, srcBuf, srcOff, bytes))
+                    if (StageChunkInPbo(gl, srcBuf, srcOff, bytes, UpDet05))
                     {
                         gl.TexSubImage3D(TextureTarget.Texture2DArray, lv, 0, cell.UploadedRows, z,
                             (uint)lPx, (uint)rows, 1, PixelFormat.Rgba, PixelType.UnsignedByte, (void*)0);
@@ -5547,7 +5567,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     // (pomiar B2: churn buforów sfalsyfikowany, kandydatem osadu został wolumen transferu).
                     // Teraz ten sam fence'owany ring PBO co det05/det1m; fixed zostaje jako fallback.
                     // Gate "pbo" na routing — MAPATUR_GL_POOL=0 musi wracać do ścieżki sprzed B3.
-                    if (GlPoolOn("pbo") && StageChunkInPbo(gl, bc1, srcOff, bytes))
+                    if (GlPoolOn("pbo") && StageChunkInPbo(gl, bc1, srcOff, bytes, UpDet25))
                     {
                         if (arr)
                         {
@@ -5602,7 +5622,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 {
                     int rows = Math.Min(rowsPerChunk, h - cell.UploadedRows);
                     int stripBytes = rows * rowBytes;
-                    if (GlPoolOn("pbo") && StageChunkInPbo(gl, rgba!, (long)cell.UploadedRows * rowBytes, stripBytes))
+                    if (GlPoolOn("pbo") && StageChunkInPbo(gl, rgba!, (long)cell.UploadedRows * rowBytes, stripBytes, UpDet25))
                     {
                         gl.TexSubImage2D(TextureTarget.Texture2D, 0, 0, cell.UploadedRows, (uint)w, (uint)rows,
                             PixelFormat.Rgba, PixelType.UnsignedByte, null);
@@ -5832,6 +5852,26 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             tilePool.Hits + linePool.Hits + orthoTexPool.Hits,
             tilePool.Misses + linePool.Misses + orthoTexPool.Misses,
             pboFenceWaits);
+        GlTrack.PublishUploadStats(
+            uploadedByConsumer[UpDet1m], uploadedByConsumer[UpDet05], uploadedByConsumer[UpDet25],
+            uploadedByConsumer[UpOrtho], uploadedByConsumer[UpMask], uploadedByConsumer[UpMesh]);
+
+#if WINDOWS
+        // P0 gpuDed: IDXGIDevice3::Trim na kadencji — każe sterownikowi oddać wewnętrzne tymczasowe
+        // alokacje (kandydat na pełzanie commitu GPU +0,5–0,8 GB/min lotu; bench rozstrzygnie).
+        if (DxgiTrimSec > 0 && nowFrameMs - lastDxgiTrimMs >= DxgiTrimSec * 1000L)
+        {
+            lastDxgiTrimMs = nowFrameMs;
+            if (DxgiDriverTrim.TryTrim())
+            {
+                dxgiTrimCount++;
+                if (dxgiTrimCount == 1 || dxgiTrimCount % 10 == 0)
+                {
+                    Log.Information("[Trim] IDXGIDevice3::Trim #{N}", dxgiTrimCount);
+                }
+            }
+        }
+#endif
 
         // Resizing the window (e.g. maximise) makes SKGLView recreate the GL context, which invalidates
         // every GPU object ID we cached (shader program, VAOs, VBOs). Detect that — the old program ID is
@@ -9053,7 +9093,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 // każdy kliencki TexSubImage2D to wewnętrzny staging ANGLE per wywołanie (kandydat osadu
                 // po falsyfikacji churnu buforów w B2). Fallback = dotychczasowa ścieżka.
                 // Gate "pbo" na routing — MAPATUR_GL_POOL=0 musi wracać do ścieżki sprzed B3.
-                if (GlPoolOn("pbo") && StageChunkInPbo(g, tile.Rgba, (long)tile.UploadedRows * rowBytes, stripBytes))
+                if (GlPoolOn("pbo") && StageChunkInPbo(g, tile.Rgba, (long)tile.UploadedRows * rowBytes, stripBytes, UpOrtho))
                 {
                     g.TexSubImage2D(
                         TextureTarget.Texture2D, 0, 0, tile.UploadedRows,
@@ -12063,6 +12103,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
 
         tileBuffers[tile] = buffers;
+        uploadedByConsumer[UpMesh] += tile.EstimatedGpuBytes;
         uploadTileDataMs += frameClock.ElapsedMilliseconds - tUp0;
         uploadTileDataCount++;
 
@@ -12584,7 +12625,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     // Maski to NAJWIĘKSZY kliencki wolumen w locie (~107 MB × ~37 rebuildów ≈ 4 GB/lot) — fix 08-02 zdjął
     // respecyfikację storage, ale transfer dalej szedł z klienta = wewnętrzny staging ANGLE per wywołanie.
     // Wołający ma zbindowaną docelową teksturę na aktywnej jednostce.
-    private unsafe void TexSubImage2DStrips(GL g, byte[] src, int width, int height, int bytesPerPixel, PixelFormat fmt)
+    private unsafe void TexSubImage2DStrips(GL g, byte[] src, int width, int height, int bytesPerPixel, PixelFormat fmt, int consumer)
     {
         EnsureUploadPbos(g, (nuint)OrthoUploadBytesPerChunk);
         int rowBytes = width * bytesPerPixel;
@@ -12596,7 +12637,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             int bytes = rows * rowBytes;
             // Gate "pbo" na ROUTING (2026-08-06 wieczór): bez niego MAPATUR_GL_POOL=0 nie przywracał
             // ścieżki klienta sprzed B3 — luka odwracalności wytknięta przy regresji cieni.
-            if (GlPoolOn("pbo") && StageChunkInPbo(g, src, (long)uploaded * rowBytes, bytes))
+            if (GlPoolOn("pbo") && StageChunkInPbo(g, src, (long)uploaded * rowBytes, bytes, consumer))
             {
                 g.TexSubImage2D(TextureTarget.Texture2D, 0, 0, uploaded, (uint)width, (uint)rows,
                     fmt, PixelType.UnsignedByte, null);
@@ -12621,7 +12662,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.ActiveTexture(TextureUnit.Texture5);
         EnsureImmutableMaskStorage(g, ref trailMaskTex, ref trailMaskTexW, ref trailMaskTexH,
             mask.Width, mask.Height, SizedInternalFormat.Rgba8);
-        TexSubImage2DStrips(g, mask.Rgba, mask.Width, mask.Height, 4, PixelFormat.Rgba);
+        TexSubImage2DStrips(g, mask.Rgba, mask.Width, mask.Height, 4, PixelFormat.Rgba, UpMask);
         // Mipmapped MIN filter: the 8.5 km window is heavily minified at its far edge; sampling the raw
         // level there made the reconstructed distance jump per pixel (fwidth explosion → fat fuzzy ribbons).
         // Averaged mips fade the distance-alpha smoothly instead, so far trails thin out and dissolve.
@@ -12640,7 +12681,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             EnsureImmutableMaskStorage(g, ref waterMaskTex, ref waterMaskTexW, ref waterMaskTexH,
                 mask.Width, mask.Height, SizedInternalFormat.R8);
             g.PixelStore(PixelStoreParameter.UnpackAlignment, 1); // tightly-packed single-channel rows
-            TexSubImage2DStrips(g, waterField, mask.Width, mask.Height, 1, PixelFormat.Red);
+            TexSubImage2DStrips(g, waterField, mask.Width, mask.Height, 1, PixelFormat.Red, UpMask);
             g.PixelStore(PixelStoreParameter.UnpackAlignment, 4);
             g.GenerateMipmap(TextureTarget.Texture2D); // same minification story as the RGBA mask above
             g.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
