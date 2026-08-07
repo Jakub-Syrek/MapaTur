@@ -5492,7 +5492,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     // z pamięci klienta każe ANGLE stagować chunk wewnętrznie przy każdym wywołaniu
                     // (pomiar B2: churn buforów sfalsyfikowany, kandydatem osadu został wolumen transferu).
                     // Teraz ten sam fence'owany ring PBO co det05/det1m; fixed zostaje jako fallback.
-                    if (StageChunkInPbo(gl, bc1, srcOff, bytes))
+                    // Gate "pbo" na routing — MAPATUR_GL_POOL=0 musi wracać do ścieżki sprzed B3.
+                    if (GlPoolOn("pbo") && StageChunkInPbo(gl, bc1, srcOff, bytes))
                     {
                         if (arr)
                         {
@@ -5547,7 +5548,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 {
                     int rows = Math.Min(rowsPerChunk, h - cell.UploadedRows);
                     int stripBytes = rows * rowBytes;
-                    if (StageChunkInPbo(gl, rgba!, (long)cell.UploadedRows * rowBytes, stripBytes))
+                    if (GlPoolOn("pbo") && StageChunkInPbo(gl, rgba!, (long)cell.UploadedRows * rowBytes, stripBytes))
                     {
                         gl.TexSubImage2D(TextureTarget.Texture2D, 0, 0, cell.UploadedRows, (uint)w, (uint)rows,
                             PixelFormat.Rgba, PixelType.UnsignedByte, null);
@@ -8997,7 +8998,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 // P0 B3 (08-06): paski bazy orto przez fence'owany ring PBO zamiast pamięci klienta —
                 // każdy kliencki TexSubImage2D to wewnętrzny staging ANGLE per wywołanie (kandydat osadu
                 // po falsyfikacji churnu buforów w B2). Fallback = dotychczasowa ścieżka.
-                if (StageChunkInPbo(g, tile.Rgba, (long)tile.UploadedRows * rowBytes, stripBytes))
+                // Gate "pbo" na routing — MAPATUR_GL_POOL=0 musi wracać do ścieżki sprzed B3.
+                if (GlPoolOn("pbo") && StageChunkInPbo(g, tile.Rgba, (long)tile.UploadedRows * rowBytes, stripBytes))
                 {
                     g.TexSubImage2D(
                         TextureTarget.Texture2D, 0, 0, tile.UploadedRows,
@@ -12523,7 +12525,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             int rows = Math.Min(rowsPerChunk, height - uploaded);
             int bytes = rows * rowBytes;
-            if (StageChunkInPbo(g, src, (long)uploaded * rowBytes, bytes))
+            // Gate "pbo" na ROUTING (2026-08-06 wieczór): bez niego MAPATUR_GL_POOL=0 nie przywracał
+            // ścieżki klienta sprzed B3 — luka odwracalności wytknięta przy regresji cieni.
+            if (GlPoolOn("pbo") && StageChunkInPbo(g, src, (long)uploaded * rowBytes, bytes))
             {
                 g.TexSubImage2D(TextureTarget.Texture2D, 0, 0, uploaded, (uint)width, (uint)rows,
                     fmt, PixelType.UnsignedByte, null);
