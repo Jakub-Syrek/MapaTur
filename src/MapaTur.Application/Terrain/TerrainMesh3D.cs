@@ -166,11 +166,28 @@ public sealed class TerrainMesh3D
     /// </summary>
     public void ReturnBuffersToPool()
     {
+        // Idempotencja (2026-08-07, regresja „płaskie cieniowanie"): drugi upload TEJ SAMEJ referencji
+        // kafla (utrata kontekstu → tileBuffers.Clear → re-upload całej listy) wołał Return drugi raz,
+        // a treść tych tablic mogła już należeć do innego kafla. Po fladze drugi Return jest no-opem;
+        // guard duplikatów w MeshBufferPool.Push domyka drugą połowę hazardu.
+        if (uploadBuffersReturned)
+        {
+            return;
+        }
+
+        uploadBuffersReturned = true;
         MeshBufferPool.Shared.Return(Normals);
         MeshBufferPool.Shared.Return(BaseColors);
         MeshBufferPool.Shared.Return(TexCoords);
         MeshBufferPool.Shared.Return(Detail);
     }
+
+    // Ustawiana raz na wątku GL (jedyny wołający ReturnBuffersToPool) — bez synchronizacji.
+    private bool uploadBuffersReturned;
+
+    /// <summary>False, gdy upload-only bufory (Normals/BaseColors/TexCoords/Detail) zostały już oddane
+    /// do puli — ich treść mogła zostać nadpisana i NIE wolno jej ponownie uploadować.</summary>
+    public bool HasUploadBuffers => !uploadBuffersReturned;
 
     /// <summary>
     /// Projects a geographic point + raw elevation into the mesh's world-space coordinate system

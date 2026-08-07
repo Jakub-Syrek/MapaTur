@@ -3249,8 +3249,21 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
         StringComparer.OrdinalIgnoreCase);
 
+    // Pula jednostek mesh kafli DOMYŚLNIE WYŁĄCZONA (2026-08-07, po regresji „płaskiego" cieniowania):
+    // pomiar B2 sfalsyfikował churn buforów mesh jako źródło wycieku (pula nie daje zysku na P0),
+    // a polowanie 08-06/07 wskazało ją jako nośnik objawu — zatruta jednostka (niedoszły/częściowy
+    // SubData normalnych pod presją pamięci) KRĄŻY w puli godzinami i skaża kolejne kafle, podczas gdy
+    // tor legacy ogranicza skażenie do jednego kafla do jego eksmisji. Reaktywacja do eksperymentów:
+    // MAPATUR_GL_POOL_TILES=1.
+    private static readonly bool GlPoolTilesOptIn =
+        Environment.GetEnvironmentVariable("MAPATUR_GL_POOL_TILES") == "1";
+
     private static bool GlPoolOn(string subsystem)
-        => GlPoolMasterEnabled && !GlPoolDisabledSubsystems.Contains(subsystem);
+        => GlPoolMasterEnabled
+            && !GlPoolDisabledSubsystems.Contains(subsystem)
+            && (subsystem != "tiles" || GlPoolTilesOptIn);
+
+    private int staleUploadTileCount;
 
     // Cap WOLNYCH jednostek mesh — ZMIERZONY, nie teoretyczny (bench B 08-06, dev/p0-pooling/bench-B-0806-1936.csv):
     // reload detalu zwalnia jednostki HURTEM (glVboMB bujało się 1,7↔6,6 GB w locie F9), więc pierwotne
@@ -11888,6 +11901,21 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
     private void UploadTile(GL g, TerrainMesh3D tile)
     {
+        // Instrumentacja (2026-08-07): re-upload kafla, którego upload-only tablice ODDANO już do puli
+        // (drugi upload tej samej referencji — dziś jedyna znana droga: utrata kontekstu → re-upload
+        // całej listy). Treść Normals/BaseColors/TexCoords/Detail może należeć do INNEGO kafla —
+        // to przedpotopowa ścieżka (sprzed poolingu GL), nie zmieniamy jej zachowania, ale ma krzyczeć
+        // w logu zamiast psuć cieniowanie po cichu. Właściwy fix = rebuild meshy po utracie kontekstu.
+        if (!tile.HasUploadBuffers)
+        {
+            staleUploadTileCount++;
+            if (staleUploadTileCount == 1 || staleUploadTileCount % 64 == 0)
+            {
+                Log.Warning("[GL3D] re-upload kafla ze ZWRÓCONYCH tablic CPU (#{N}) — normalne/UV mogą "
+                    + "należeć do innego kafla; źródło: context-loss re-upload", staleUploadTileCount);
+            }
+        }
+
         int vertexCount = tile.Vertices.Length;
 
         // H6 (2026-07-23): positions/normals upload ZERO-COPY straight from the mesh's Vector3[] — the layout

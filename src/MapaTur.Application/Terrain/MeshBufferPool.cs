@@ -131,8 +131,10 @@ public sealed class MeshBufferPool
                 return; // ponad budżet — oddajemy GC zamiast trzymać (patrz MaxPooledByteBytes)
             }
 
-            pooledByteBytes += buffer.Length;
-            Push(u8, buffer.Length, buffer);
+            if (Push(u8, buffer.Length, buffer))
+            {
+                pooledByteBytes += buffer.Length;
+            }
         }
     }
 
@@ -178,7 +180,7 @@ public sealed class MeshBufferPool
         }
     }
 
-    private static void Push<T>(Dictionary<int, Stack<T[]>> buckets, int length, T[] buffer)
+    private static bool Push<T>(Dictionary<int, Stack<T[]>> buckets, int length, T[] buffer)
     {
         if (!buckets.TryGetValue(length, out Stack<T[]>? s))
         {
@@ -186,9 +188,16 @@ public sealed class MeshBufferPool
             buckets[length] = s;
         }
 
-        if (s.Count < MaxPerBucket)
+        // Guard duplikatów (2026-08-07, regresja „płaskie cieniowanie"): podwójny Return tej samej
+        // tablicy (np. drugi UploadTile tej samej referencji kafla po utracie kontekstu) kładł ją w
+        // koszyku DWA razy — dwóch najemców pisało po jednej pamięci i nadpisywało sobie normalne/UV.
+        // Contains po referencji; koszyki są krótkie (typowo dziesiątki), wołane poza gorącą pętlą klatki.
+        if (s.Count >= MaxPerBucket || s.Contains(buffer))
         {
-            s.Push(buffer);
+            return false;
         }
+
+        s.Push(buffer);
+        return true;
     }
 }
