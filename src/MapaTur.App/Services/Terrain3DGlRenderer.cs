@@ -4621,11 +4621,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     //   • ring 6 (nie 3): chunki idą back-to-back w klatce, a GPU bywa 1–2 klatki w tyle — głębszy ring
     //     realnie łapie sygnalizację (koszt stały +72 MB systemowej pamięci PBO, raz na sesję);
     //   • pboWaits w status.json liczy ORPHANY-NA-MISS — miara, ile churnu zostało (0 = pełny reuse).
-    private readonly uint[] uploadPbo = new uint[6];
+    // B4 (08-07): ring 6→12 + skan wolnego slotu. Pomiar B3 (bench-B-0807-2233): ws PŁASKI (spirala
+    // śmierci przerwana), ale commit GPU rósł ~+0,7 GB/min przy pboWaits=901 — maski/det25 walą seriami
+    // 5–7 chunków w jednej klatce i ślepy „następny slot" trafiał w niezasygnalizowany fence → orphan
+    // 24 MB = churn alokacji sterownika (901×24 MB ≈ 21 GB/sesję). Skan wybiera PIERWSZY wolny slot
+    // z całego ringu; orphan zostaje tylko gdy wszystkie 12 są w locie.
+    private const int UploadPboRingDepth = 12;
+    private readonly uint[] uploadPbo = new uint[UploadPboRingDepth];
     private int uploadPboIndex;
     private nuint uploadPboSize;
     private bool uploadPboBroken; // MapBufferRange refused once → stay on the direct path (no per-frame retries)
-    private readonly nint[] uploadPboFence = new nint[6];
+    private readonly nint[] uploadPboFence = new nint[UploadPboRingDepth];
     private int uploadPboLastStaged = -1;
     private long pboFenceWaits; // = liczba orphanów-na-miss (nazwa pola w status.json: pboWaits)
 
@@ -4673,22 +4679,54 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             uploadPboFence[uploadPboLastStaged] = gl.FenceSync(SyncCondition.SyncGpuCommandsComplete, SyncBehaviorFlags.None);
         }
 
-        uploadPboIndex = (uploadPboIndex + 1) % uploadPbo.Length;
-        gl.BindBuffer(BufferTargetARB.PixelUnpackBuffer, uploadPbo[uploadPboIndex]);
-
         void* ptr;
         if (fenced)
         {
-            bool slotFree = true;
-            nint fence = uploadPboFence[uploadPboIndex];
-            if (fence != 0)
+            // B4: skan CAŁEGO ringu za pierwszym wolnym slotem (fence zasygnalizowany albo brak fence'a).
+            // fence==0 ⇒ slot nieużyty lub już rozliczony — wolny; wyjątek: lastStaged bez fence'a jest
+            // świeżo zestage'owany i NIE wolno go brać. Orphan dopiero, gdy wszystkie sloty w locie.
+            bool slotFree = false;
+            for (int step = 1; step <= uploadPbo.Length; step++)
             {
+                int idx = (uploadPboIndex + step) % uploadPbo.Length;
+                nint fence = uploadPboFence[idx];
+                if (fence == 0)
+                {
+                    if (idx == uploadPboLastStaged)
+                    {
+                        continue; // świeży, nieogrodzony — GPU mógł jeszcze nie skonsumować
+                    }
+
+                    uploadPboIndex = idx;
+                    slotFree = true;
+                    break;
+                }
+
                 // Timeout 0: sama kontrola sygnalizacji (+flush), ŻADNEGO czekania na wątku renderu.
                 GLEnum wait = gl.ClientWaitSync(fence, SyncObjectMask.Bit, 0);
-                slotFree = wait is GLEnum.AlreadySignaled or GLEnum.ConditionSatisfied;
-                gl.DeleteSync(fence);
-                uploadPboFence[uploadPboIndex] = 0;
+                if (wait is GLEnum.AlreadySignaled or GLEnum.ConditionSatisfied)
+                {
+                    gl.DeleteSync(fence);
+                    uploadPboFence[idx] = 0;
+                    uploadPboIndex = idx;
+                    slotFree = true;
+                    break;
+                }
             }
+
+            if (!slotFree)
+            {
+                // Wszystkie sloty w locie: bierz następny cyklicznie i orphanuj (tor legacy, zliczany).
+                uploadPboIndex = (uploadPboIndex + 1) % uploadPbo.Length;
+                nint fence = uploadPboFence[uploadPboIndex];
+                if (fence != 0)
+                {
+                    gl.DeleteSync(fence);
+                    uploadPboFence[uploadPboIndex] = 0;
+                }
+            }
+
+            gl.BindBuffer(BufferTargetARB.PixelUnpackBuffer, uploadPbo[uploadPboIndex]);
 
             if (!slotFree)
             {
@@ -4711,7 +4749,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         }
         else
         {
-            gl.BufferData(BufferTargetARB.PixelUnpackBuffer, uploadPboSize, null, BufferUsageARB.StreamDraw); // orphan (tor legacy)
+            // Tor legacy (pbo wyłączone env): prosty cykliczny ring z orphanem, jak przed 2026-08-06.
+            uploadPboIndex = (uploadPboIndex + 1) % uploadPbo.Length;
+            gl.BindBuffer(BufferTargetARB.PixelUnpackBuffer, uploadPbo[uploadPboIndex]);
+            gl.BufferData(BufferTargetARB.PixelUnpackBuffer, uploadPboSize, null, BufferUsageARB.StreamDraw); // orphan
             ptr = gl.MapBufferRange(
                 BufferTargetARB.PixelUnpackBuffer, 0, (nuint)bytes,
                 (uint)(MapBufferAccessMask.WriteBit | MapBufferAccessMask.InvalidateBufferBit));
