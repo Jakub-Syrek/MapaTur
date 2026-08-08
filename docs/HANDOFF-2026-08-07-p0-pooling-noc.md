@@ -54,6 +54,32 @@ rejonów (Rohacze/Kasprowy/Gierlach/wschód) na buildzie fix: czysty (dev/p0-sha
   context-loss). Sampler+bench: `scripts/bench-mem-sampler.ps1`, `bench-p0-pooling.ps1`,
   `bench-p0-shadow.ps1` (pwsh, NIE powershell 5.1 — parser padał na UTF-8 bez BOM).
 
+## DOPISEK 08-08 rano — runda „commit GPU" (zlecona przez usera): 3 falsyfikacje, pole zawężone
+
+Benche T1/T1-retry/LOWLAND (dev/p0-pooling, build 5a460e6/c77cd97 z licznikami uploadu per
+konsument w status.json — upDet05MB/upDet25MB/upOrthoMB/upMaskMB/upMeshMB):
+1. **IDXGIDevice3::Trim SFALSYFIKOWANY**: serwis DxgiDriverTrim (EGL→ID3D11Device ANGLE→QI;
+   UWAGA: IID z pamięci był błędny — E_NOINTERFACE; poprawny z dxgi1_3.h:2258 =
+   6007896c-3244-4afd-bf18-a6d3beda5023). 30 wywołań Trim co 30 s → nachylenie gpuDed
+   +911 MB/min (baseline B4 bez Trim: +789) — zero efektu. Kadencja env: MAPATUR_DXGI_TRIM_SEC
+   (domyślnie 30; do rozważenia wyłączenie skoro nie działa).
+2. **Wolumeny zmierzone (F9)**: mesh ~5,7 GB/min ≫ det05 ~2,1 ≫ maski ~1,5 ≫ det25 0,5 ≫ orto 0,2.
+3. **LOWLAND (orbita 51.0,20.0 — bez warstw detalu) SFALSYFIKOWAŁ hipotezę wolumenu**: uploady
+   ~zero (mesh 60 MB/min, det05/maski +0), ws płaski 10,6 GB — a gpuDed dalej +336 MB/min.
+   Pełzanie NIE zależy od uploadów ani alokacji buforów/tekstur (liczniki GlTrack stałe).
+4. **Hipoteza wiodąca po eliminacjach**: residuum ∝ liczbie DRAW CALLS / aktualizacji uniformów —
+   ANGLE tłumaczy glUniform na dynamiczne constant buffery D3D11 (MAP_DISCARD → rename backing
+   w sterowniku per draw). Pasuje do F9 (~800 przy dziesiątkach tys. draws/min) i nizin (336 przy
+   podobnym rzędzie draws/min z 300+ fps), do stałych liczników i do głuchoty na Trim.
+   Kierunki weryfikacji następnej rundy: (a) korelacja slope↔draws/min (licznik draw calls do
+   status.json — trywialny); (b) ANGLE feature-flags dot. buffer pool/discard; (c) test z czapą
+   FPS (timer 16→33 ms wstecz LUB vsync) — niziny przy 30 fps powinny zjechać ~10×, jeśli teoria
+   dobra; (d) redukcja per-draw uniformów w passie terenu (batching).
+5. **Pytanie o realną szkodliwość**: nocny (przypadkowo wielogodzinny) przebieg przeżył sen
+   maszyny + poranne loty; fps zdrowe, ws stabilny — commit to licznik COMMITTED, nie physical.
+   Zanim polowanie dalej: test 30 min + menu po lotach (kryterium taska #1) rozstrzygnie, czy
+   pełzanie w ogóle szkodzi użytkowo w realnym horyzoncie sesji.
+
 ## Kolejka następnej sesji (P0 wciąż otwarte przez gpuDed)
 
 1. **Werdykt wizualny usera** na buildzie `6262f73` (normalne użycie; degradacja wymagała
