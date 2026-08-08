@@ -953,7 +953,13 @@ public partial class Terrain3DView : ContentView
         // (~15,6 ms) do ticku co ~46,8 ms = 21,4 FPS, dokładnie obserwowane 21–23 FPS w spoczynku mimo
         // sumGpu 8–13 ms. Po memoizacji pokrycia det05 (88% wątku UI → 0%) klatka jest tania; 16 ms
         // kwantyzuje się do ~31 ms ⇒ ~32 FPS realnie, bez zmiany żadnego kosztu per klatkę.
-        animationTimer.Interval = TimeSpan.FromMilliseconds(OperatingSystem.IsWindows() ? 16 : 66);
+        // MAPATUR_FRAME_MS (2026-08-08, diagnostyka P0 gpuDed): override interwału timera renderu —
+        // dyskryminator „pełzanie commitu GPU ∝ liczbie klatek×draw" (niziny przy 300+ fps vs ~30 fps).
+        // Bez env: zachowanie bez zmian (16 ms desktop / 66 ms mobile).
+        int frameMs = int.TryParse(Environment.GetEnvironmentVariable("MAPATUR_FRAME_MS"), out int fMs) && fMs > 0
+            ? fMs
+            : (OperatingSystem.IsWindows() ? 16 : 66);
+        animationTimer.Interval = TimeSpan.FromMilliseconds(frameMs);
         animationTimer.Tick += OnAnimationTick;
         animationTimer.Start();
 
