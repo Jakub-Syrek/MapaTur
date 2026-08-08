@@ -162,7 +162,31 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform float uDebugTerrainView;\n" +   // DIAGNOSTIC: 0=final 1=albedo 2=baked-shadow mask 3=corrected albedo 4=lightSum
         "uniform float uRockStrength;\n" + // rock-material-on-steep blend strength; 0 = off (pure ortho)
         "uniform vec3 uFogColor;\n" +
-        "uniform float uFogDensity;\n" + // per-metre exponential; 0 = no aerial perspective
+        "uniform float uFogDensity;\n" + // per-metre exponential AT the reference height; 0 = no aerial perspective
+        "uniform float uFogRefZ;\n" +    // world-Z wysokości referencyjnej (metry × Pion) — tu gęstość = uFogDensity
+        "uniform float uFogInvH;\n" +    // 1/(H×Pion); <=0 = tor legacy (jednorodna mgła) — wyłącznik MAPATUR_HEIGHT_FOG=0
+        "uniform float uFogCamZ;\n" +    // STABILNY world-Z kamery (render-frame Z bywa re-kotwiczony — lekcja śniegu)
+        "uniform vec3 uFogSunColor;\n" + // tint in-scatter (Mie) przy patrzeniu pod słońce; w nocy == uFogColor
+        // Mgła WYSOKOŚCIOWA (task #4, 2026-08-08) — LUSTRO HeightFog.OpticalDepth
+        // (Application/Terrain/HeightFog.cs, testy HeightFogTests): ρ(z)=ρ0·exp(−(z−ref)·invH) z klapą ×3
+        // poniżej ref (kotliny nie toną w zupie); głębia optyczna analitycznie, kawałkami przez strefę
+        // klapy. Zmiany matematyki NAJPIERW w klasie C# z testami, potem przepisanie tego lustra.
+        "float fogOpticalDepth(float camZ, float fragZ, float dist){\n" +
+        "  if (uFogInvH <= 0.0) { return dist * uFogDensity; }\n" +
+        "  float a = min(camZ, fragZ);\n" +
+        "  float b = max(camZ, fragZ);\n" +
+        "  float dz = b - a;\n" +
+        "  if (dz < 0.001) { return dist * uFogDensity * min(3.0, exp(-(a - uFogRefZ) * uFogInvH)); }\n" +
+        "  float lenPerDz = dist / dz;\n" +
+        "  float zCap = uFogRefZ - (1.0986123 / uFogInvH);\n" +  // ref − H·ln(3): granica klapy
+        "  float depth = 0.0;\n" +
+        "  if (a < zCap) { depth += uFogDensity * 3.0 * (min(b, zCap) - a) * lenPerDz; }\n" +
+        "  if (b > zCap) {\n" +
+        "    float lo = max(a, zCap);\n" +
+        "    depth += uFogDensity * (exp(-(lo - uFogRefZ) * uFogInvH) - exp(-(b - uFogRefZ) * uFogInvH)) / uFogInvH * lenPerDz;\n" +
+        "  }\n" +
+        "  return depth;\n" +
+        "}\n" +
         "uniform vec3 uCameraPos;\n" +
         // Cascaded Shadow Maps (Krok 5 part 4): 3 cascade depth maps + their light view-projections + the
         // cascade split far-distances. uShadowStrength 0 = off (night / disabled), 1 = full.
@@ -1122,7 +1146,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    lit = mix(lit, min(snowLit, vec3(1.0)), snowMix);\n" +
         "  }\n" +
         "  float dist = length(vWorldPos - uCameraPos);\n" +
-        "  float fogAmount = 1.0 - exp(-dist * uFogDensity);\n" +
+        // task #4: głębia optyczna z wysokości STABILNYCH (vStableWorldPos.z + uFogCamZ) — doliny mgliste,
+        // granie czyste; in-scatter: patrząc pod słońce mgła przyjmuje jego barwę (mix niżej, fogCol).
+        "  float fogAmount = 1.0 - exp(-fogOpticalDepth(uFogCamZ, vStableWorldPos.z, dist));\n" +
+        "  vec3 fogViewDir = (vWorldPos - uCameraPos) / max(dist, 1.0);\n" +
+        "  float fogSunAmt = pow(max(dot(fogViewDir, uLightDir), 0.0), 8.0);\n" +
+        "  vec3 fogCol = mix(uFogColor, uFogSunColor, fogSunAmt);\n" +
         // Snow keeps NEAR detail crisp, but DISTANT snowfields pick up cool aerial perspective — they fade
         // into the horizon haze like the real range, instead of staying a hard white cut-out. Only a mild
         // reduction (was a near-full block), so close snow is still sharp while far snow reads as luminous distance.
@@ -1221,7 +1250,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "      lit = mix(lit, tc.rgb, coverage * uTrailStrength);\n" +
         "    }\n" +
         "  }\n" +
-        "  fragColor = vec4(mix(lit, uFogColor, fogAmount), 1.0);\n" +
+        "  fragColor = vec4(mix(lit, fogCol, fogAmount), 1.0);\n" + // fogCol = uFogColor + in-scatter (task #4)
         // DEBUG VIEWS (2026-07-11, user request F1–F5): isolate the baked-shadow pipeline stages so we can SEE
         // whether the cyan lives in the albedo or the lighting. 0=final, 1=albedo, 2=baked-shadow mask,
         // 3=corrected albedo, 4=lightSum. Pre-fog, pre-overlay so each stage is raw.
@@ -1926,6 +1955,26 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform vec3 uCameraPos;\n" +
         "uniform vec3 uFogColor;\n" +
         "uniform float uFogDensity;\n" +
+        "uniform float uFogRefZ;\n" +  // task #4: mgła wysokościowa — te same uniformy co teren
+        "uniform float uFogInvH;\n" +  // <=0 = tor legacy; geometria wstążek jest w STABILNEJ ramce świata,
+        // więc wysokości bierzemy wprost z vWorldPos.z/uCameraPos.z (inaczej niż teren, który
+        // potrzebuje vStableWorldPos). LUSTRO HeightFog.OpticalDepth — patrz komentarz w FS terenu.
+        "float fogOpticalDepth(float camZ, float fragZ, float dist){\n" +
+        "  if (uFogInvH <= 0.0) { return dist * uFogDensity; }\n" +
+        "  float a = min(camZ, fragZ);\n" +
+        "  float b = max(camZ, fragZ);\n" +
+        "  float dz = b - a;\n" +
+        "  if (dz < 0.001) { return dist * uFogDensity * min(3.0, exp(-(a - uFogRefZ) * uFogInvH)); }\n" +
+        "  float lenPerDz = dist / dz;\n" +
+        "  float zCap = uFogRefZ - (1.0986123 / uFogInvH);\n" +
+        "  float depth = 0.0;\n" +
+        "  if (a < zCap) { depth += uFogDensity * 3.0 * (min(b, zCap) - a) * lenPerDz; }\n" +
+        "  if (b > zCap) {\n" +
+        "    float lo = max(a, zCap);\n" +
+        "    depth += uFogDensity * (exp(-(lo - uFogRefZ) * uFogInvH) - exp(-(b - uFogRefZ) * uFogInvH)) / uFogInvH * lenPerDz;\n" +
+        "  }\n" +
+        "  return depth;\n" +
+        "}\n" +
         "uniform float uMaxDist;\n" + // hard cull radius (m) so the far trail network isn't drawn at the horizon
         "uniform float uGhostFade;\n" + // 1 = normal pass; <1 = the X-RAY pass (DepthFunc GREATER: only occluded fragments)
         "uniform sampler2D uSceneDepth;\n" + // scene depth blitted just before the ghost pass (see EnsureGhostDepthTarget)
@@ -1938,7 +1987,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // fade the last stretch toward the horizon haze so the cull edge isn't a hard line.
         "  if (dist > uMaxDist) { discard; }\n" +
         "  float edge = smoothstep(uMaxDist * 0.75, uMaxDist, dist);\n" +
-        "  float fog = max(1.0 - exp(-dist * uFogDensity), edge);\n" +
+        "  float fog = max(1.0 - exp(-fogOpticalDepth(uCameraPos.z, vWorldPos.z, dist)), edge);\n" + // task #4: mgła wysokościowa jak na terenie
         // Carry the per-vertex alpha through (opaque trails/roads upload a=255 → 1.0). The translucent dashed
         // route uploads a<255 so the trail it lies on shows through it; blending is enabled only for that draw.
         // uGhostFade dims the whole ribbon on the X-ray pass, so a trail buried inside a gully/behind a
@@ -2761,6 +2810,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     }
     private int terrainFogColorLocation = -1;
     private int terrainFogDensityLocation = -1;
+    private int terrainFogRefZLocation = -1;
+    private int terrainFogInvHLocation = -1;
+    private int terrainFogCamZLocation = -1;
+    private int terrainFogSunColorLocation = -1;
+
+    // task #4: wyłącznik mgły wysokościowej (0 = tor legacy przez uFogInvH<=0) — odwracalność A/B.
+    private static readonly bool HeightFogEnabled =
+        Environment.GetEnvironmentVariable("MAPATUR_HEIGHT_FOG") != "0";
     private int terrainCameraPosLocation = -1;
     private int terrainCloudAltitudeLocation = -1;
     private int terrainCloudNoiseScaleLocation = -1;
@@ -2996,6 +3053,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int lineHalfPxLocation = -1;
     private int lineFogColorLocation = -1;
     private int lineFogDensityLocation = -1;
+    private int lineFogRefZLocation = -1;
+    private int lineFogInvHLocation = -1;
     private int lineCameraPosLocation = -1;
     private int lineMaxDistLocation = -1;
     private int lineGhostFadeLocation = -1;
@@ -5994,6 +6053,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             slopePaletteLocation = -1;
             terrainFogColorLocation = -1;
             terrainFogDensityLocation = -1;
+            terrainFogRefZLocation = -1;
+            terrainFogInvHLocation = -1;
+            terrainFogCamZLocation = -1;
+            terrainFogSunColorLocation = -1;
+            lineFogRefZLocation = -1;
+            lineFogInvHLocation = -1;
             terrainCameraPosLocation = -1;
             terrainCloudAltitudeLocation = -1;
             terrainCloudNoiseScaleLocation = -1;
@@ -6809,6 +6874,19 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         gl.Uniform1(terrainFogDensityLocation, fogDensity);
         gl.Uniform3(terrainCameraPosLocation, cameraWorldPos.X, cameraWorldPos.Y, cameraWorldPos.Z);
 
+        // task #4: mgła wysokościowa — wysokości w world-Z (metry n.p.m. × Pion, wzorzec jak firn/biomy);
+        // stałe z jedynego źródła prawdy HeightFog (lustro w shaderze). uFogInvH<=0 = tor legacy.
+        float fogExag = lightFrame.VerticalExaggeration > 0f ? lightFrame.VerticalExaggeration : 1f;
+        float fogRefZ = (float)MapaTur.Application.Terrain.HeightFog.ReferenceAltitudeMeters * fogExag;
+        float fogInvH = HeightFogEnabled
+            ? 1f / ((float)MapaTur.Application.Terrain.HeightFog.ScaleHeightMeters * fogExag)
+            : 0f;
+        Vector3 fogSunColor = atmosphere?.FogSunColor ?? fogColor;
+        gl.Uniform1(terrainFogRefZLocation, fogRefZ);
+        gl.Uniform1(terrainFogInvHLocation, fogInvH);
+        gl.Uniform1(terrainFogCamZLocation, cameraWorldPos.Z);
+        gl.Uniform3(terrainFogSunColorLocation, fogSunColor.X, fogSunColor.Y, fogSunColor.Z);
+
         // ── Planar water reflection pre-pass ───────────────────────────────────────────────────────
         // Render the terrain MIRRORED about the lake plane into a half-res texture, clipping everything below
         // the waterline, then restore the scene framebuffer. The lake mesh samples this texture (screen-space,
@@ -7221,6 +7299,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // trails fade into the horizon haze instead of floating as bright lines over the hazed far terrain.
         gl.Uniform3(lineFogColorLocation, fogColor.X, fogColor.Y, fogColor.Z);
         gl.Uniform1(lineFogDensityLocation, fogDensity);
+        gl.Uniform1(lineFogRefZLocation, fogRefZ);   // task #4: wstążki z tą samą mgłą wysokościową co teren
+        gl.Uniform1(lineFogInvHLocation, fogInvH);
         gl.Uniform3(lineCameraPosLocation, cameraWorldPos.X, cameraWorldPos.Y, cameraWorldPos.Z);
         // Cull radius scales with zoom: close in, only nearby trails; zoomed out, reach farther — but never
         // the whole 27×42 km network, which is what floated + parallaxed at the horizon.
@@ -9750,6 +9830,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         biomePaletteLocation = g.GetUniformLocation(program, "uBiomePalette");
         terrainFogColorLocation = g.GetUniformLocation(program, "uFogColor");
         terrainFogDensityLocation = g.GetUniformLocation(program, "uFogDensity");
+        terrainFogRefZLocation = g.GetUniformLocation(program, "uFogRefZ");
+        terrainFogInvHLocation = g.GetUniformLocation(program, "uFogInvH");
+        terrainFogCamZLocation = g.GetUniformLocation(program, "uFogCamZ");
+        terrainFogSunColorLocation = g.GetUniformLocation(program, "uFogSunColor");
         terrainCameraPosLocation = g.GetUniformLocation(program, "uCameraPos");
         terrainCloudAltitudeLocation = g.GetUniformLocation(program, "uCloudAltitude");
         terrainCloudNoiseScaleLocation = g.GetUniformLocation(program, "uCloudNoiseScale");
@@ -10098,6 +10182,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         lineHalfPxLocation = g.GetUniformLocation(lineProgram, "uHalfPx");
         lineFogColorLocation = g.GetUniformLocation(lineProgram, "uFogColor");
         lineFogDensityLocation = g.GetUniformLocation(lineProgram, "uFogDensity");
+        lineFogRefZLocation = g.GetUniformLocation(lineProgram, "uFogRefZ");
+        lineFogInvHLocation = g.GetUniformLocation(lineProgram, "uFogInvH");
         lineCameraPosLocation = g.GetUniformLocation(lineProgram, "uCameraPos");
         lineMaxDistLocation = g.GetUniformLocation(lineProgram, "uMaxDist");
         lineGhostFadeLocation = g.GetUniformLocation(lineProgram, "uGhostFade");

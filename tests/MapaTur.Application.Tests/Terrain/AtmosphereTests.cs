@@ -180,6 +180,27 @@ public sealed class AtmosphereTests
     }
 
     [Fact]
+    public void FogSunColor_AtLowSun_IsWarmerThanFogColor()
+    {
+        // Task #4 (in-scatter): patrząc POD niskie słońce mgła ma nabierać jego barwy — tint musi być
+        // wyraźnie cieplejszy (R−B) od bazowego koloru mgły.
+        var atmo = new Atmosphere(timeOfDayHours: 19.8f);
+
+        float tintWarmth = atmo.FogSunColor.X - atmo.FogSunColor.Z;
+        float fogWarmth = atmo.FogColor.X - atmo.FogColor.Z;
+        tintWarmth.Should().BeGreaterThan(fogWarmth + 0.05f);
+    }
+
+    [Fact]
+    public void FogSunColor_AtNight_EqualsFogColor()
+    {
+        // W nocy tint == kolor mgły ⇒ mix w shaderze jest no-opem (zero nocnej łuny w mgle).
+        var atmo = new Atmosphere(timeOfDayHours: 0f);
+
+        atmo.FogSunColor.Should().Be(atmo.FogColor);
+    }
+
+    [Fact]
     public void FogDensity_AtSunriseAndSunset_IsHigherThanAtNoon()
     {
         // Aerial perspective is strongest at low sun angles (longer atmospheric path) — the

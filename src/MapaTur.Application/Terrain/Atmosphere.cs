@@ -70,6 +70,10 @@ public sealed class Atmosphere
     /// <summary>RGB tint that distant terrain blends toward through aerial perspective.</summary>
     public Vector3 FogColor { get; }
 
+    /// <summary>Tint mgły przy patrzeniu POD słońce (in-scatter Mie, task #4): shader miesza
+    /// uFogColor→uFogSunColor potęgą dot(view, sun). W nocy równy <see cref="FogColor"/> (mix = no-op).</summary>
+    public Vector3 FogSunColor { get; }
+
     /// <summary>Exponential fog density per metre of view depth. Higher = murkier distance.</summary>
     public float FogDensity { get; }
 
@@ -193,6 +197,12 @@ public sealed class Atmosphere
         const float fogMax = 0.000015f;
         FogDensity = fogMin + ((fogMax - fogMin) * warmth);
         FogColor = SkyHorizonColor;
+
+        // In-scatter kierunkowy (task #4): siła tintu rośnie przy niskim słońcu (warmth niesie już
+        // bramkę zmierzchu cywilnego, więc noc → 0 → FogSunColor == FogColor i mix w shaderze znika).
+        // W dzień delikatna składowa od dayness — nawet wysokie słońce lekko rozświetla mgłę od swojej strony.
+        float inscatterStrength = MathF.Min(1f, (0.25f * dayness) + (0.75f * warmth));
+        FogSunColor = Vector3.Lerp(FogColor, sunDay, inscatterStrength);
 
         // Forward-scatter glow ("poświata pod słońcem"): the warm bloom that swells around and under the
         // sun as its rays graze a longer atmospheric path near the horizon. Active only while the sun is
