@@ -5989,7 +5989,10 @@ public partial class Terrain3DView : ContentView
         }
 
         Camera.AzimuthRadians += (float)(degPerSec * dtSec * Math.PI / 180.0);
-        Canvas.InvalidateSurface();
+        // NIGDY nie InvalidateSurface synchronicznie z wnętrza painta: SKGLView na Windows wykonuje wtedy
+        // RenderFrame() od razu (paint w paincie) i przy klatkach >1 ms rekursja kończy się stack overflow
+        // 0xc00000fd — zmierzone 08-08 (4×APPCRASH, dump: OnPaintSurface×N aż do wyczerpania stosu).
+        Dispatcher.Dispatch(Canvas.InvalidateSurface);
     }
 
     private static readonly double harnessProcessStartMs = Environment.TickCount64;
