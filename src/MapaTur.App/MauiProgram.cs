@@ -61,13 +61,22 @@ public static class MauiProgram
 #if WINDOWS
         // Test-harness: MAPATUR_MAXIMIZE=1 startuje okno zmaksymalizowane, żeby sesja testowa
         // nie wymagała żadnego dotykania okna (por. HarnessDiag / MAPATUR_UI_SCRIPT).
-        if (Environment.GetEnvironmentVariable("MAPATUR_MAXIMIZE") == "1")
+        // Task #7: MAPATUR_RECORD_FRAME="4:5"|"9:16"|"WxH" — okno przycięte do kadru publikacji
+        // (GameBar nagrywa dokładnie ten prostokąt, mniej pikseli = płynniej). Wygrywa z MAXIMIZE.
+        string? recordFrame = Environment.GetEnvironmentVariable("MAPATUR_RECORD_FRAME");
+        if (!string.IsNullOrWhiteSpace(recordFrame) || Environment.GetEnvironmentVariable("MAPATUR_MAXIMIZE") == "1")
         {
             builder.ConfigureLifecycleEvents(events => events.AddWindows(windows => windows.OnWindowCreated(native =>
             {
                 nint hwnd = WinRT.Interop.WindowNative.GetWindowHandle(native);
                 Microsoft.UI.WindowId windowId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(hwnd);
                 var appWindow = Microsoft.UI.Windowing.AppWindow.GetFromWindowId(windowId);
+                if (!string.IsNullOrWhiteSpace(recordFrame)
+                    && TryApplyRecordFrame(appWindow, windowId, recordFrame))
+                {
+                    return;
+                }
+
                 (appWindow.Presenter as Microsoft.UI.Windowing.OverlappedPresenter)?.Maximize();
             })));
         }
@@ -90,6 +99,38 @@ public static class MauiProgram
     /// flips it to Verbose for in-field diagnostics without a rebuild.
     /// </summary>
     public static readonly Serilog.Core.LoggingLevelSwitch LogLevelSwitch = new(LogEventLevel.Information);
+
+#if WINDOWS
+    /// <summary>
+    /// Task #7: ustawia okno w kadr nagrywania (klient dokładnie wg RecordFramePlanner, wyśrodkowane
+    /// w obszarze roboczym monitora). Wspólne dla env MAPATUR_RECORD_FRAME (start) i F11 (cykl w locie).
+    /// Wymiary fizyczne px — AppWindow i GameBar mówią tym samym układem, DPI bez znaczenia.
+    /// </summary>
+    public static bool TryApplyRecordFrame(
+        Microsoft.UI.Windowing.AppWindow appWindow, Microsoft.UI.WindowId windowId, string spec)
+    {
+        var area = Microsoft.UI.Windowing.DisplayArea.GetFromWindowId(
+            windowId, Microsoft.UI.Windowing.DisplayAreaFallback.Nearest);
+        var work = area.WorkArea;
+        (int w, int h)? plan = MapaTur.Application.Diagnostics.RecordFramePlanner.Plan(spec, work.Width, work.Height);
+        if (plan is null)
+        {
+            Serilog.Log.Warning("[RecordFrame] spec {Spec} nieczytelny albo nie mieści się w {W}x{H} — ignoruję",
+                spec, work.Width, work.Height);
+            return false;
+        }
+
+        (appWindow.Presenter as Microsoft.UI.Windowing.OverlappedPresenter)?.Restore();
+        appWindow.ResizeClient(new Windows.Graphics.SizeInt32(plan.Value.w, plan.Value.h));
+        // Wyśrodkowanie po Resize (rozmiar OKNA = klient + ramka — bierzemy realny Size po zmianie).
+        appWindow.Move(new Windows.Graphics.PointInt32(
+            work.X + ((work.Width - appWindow.Size.Width) / 2),
+            work.Y + Math.Max(0, (work.Height - appWindow.Size.Height) / 2)));
+        Serilog.Log.Information("[RecordFrame] kadr {Spec} → klient {W}x{H} (obszar {AW}x{AH})",
+            spec, plan.Value.w, plan.Value.h, work.Width, work.Height);
+        return true;
+    }
+#endif
 
     private static void ConfigureSerilog()
     {

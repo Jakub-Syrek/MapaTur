@@ -6080,6 +6080,8 @@ public partial class Terrain3DView : ContentView
         }
 
         double nowMs = Environment.TickCount64; // recordClock tyka tylko przy nagrywaniu — tu potrzebny zawsze
+        Services.HarnessDiag.ClientWidth = e.Info.Width;   // task #7: weryfikacja kadru bez oczu
+        Services.HarnessDiag.ClientHeight = e.Info.Height;
         ServiceHarnessOrbit(nowMs);
         ServiceHarnessJumps();
         if (nowMs - harnessLastPoseMs >= 2000)
@@ -6124,6 +6126,41 @@ public partial class Terrain3DView : ContentView
             Serilog.Log.Warning(ex, "[Harness] zapis zrzutu nieudany");
         }
     }
+
+    // Task #7: cykl kadru nagrywania (F11): pełny (maximize) → 4:5 → 9:16 → pełny. Okno = dokładnie
+    // kadr publikacji (GameBar nagrywa ten prostokąt), mniej pikseli = płynniejszy ruch. Ta sama
+    // ścieżka co env MAPATUR_RECORD_FRAME przy starcie (MauiProgram.TryApplyRecordFrame).
+    private static readonly string?[] RecordFramePresets = { "4:5", "9:16", null };
+#pragma warning disable IDE0044 // pisane tylko w gałęzi #if WINDOWS — na innych TFM analizator widzi je jako stałe
+    private int recordFramePresetIndex = -1;
+#pragma warning restore IDE0044
+
+#if WINDOWS
+    private void CycleRecordFrame()
+    {
+        recordFramePresetIndex = (recordFramePresetIndex + 1) % RecordFramePresets.Length;
+        string? spec = RecordFramePresets[recordFramePresetIndex];
+        var mauiWindow = Microsoft.Maui.Controls.Application.Current?.Windows.FirstOrDefault();
+        if (mauiWindow?.Handler?.PlatformView is not Microsoft.UI.Xaml.Window winuiWindow)
+        {
+            return;
+        }
+
+        nint hwnd = WinRT.Interop.WindowNative.GetWindowHandle(winuiWindow);
+        Microsoft.UI.WindowId windowId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(hwnd);
+        var appWindow = Microsoft.UI.Windowing.AppWindow.GetFromWindowId(windowId);
+        if (spec is null || !MauiProgram.TryApplyRecordFrame(appWindow, windowId, spec))
+        {
+            (appWindow.Presenter as Microsoft.UI.Windowing.OverlappedPresenter)?.Maximize();
+            Serilog.Log.Information("[RecordFrame] kadr pełny (maximize)");
+        }
+    }
+#else
+    private void CycleRecordFrame()
+    {
+        // Kadr nagrywania to funkcja desktopowa (GameBar) — na mobile F11 i tak nie istnieje.
+    }
+#endif
 
     // Per-frame recording service: lazily starts the recording once the surface size is known, then
     // reads back the freshly-composited frame and feeds it to the encoder. No-op when not recording.
@@ -7384,6 +7421,11 @@ public partial class Terrain3DView : ContentView
                     e.Handled = true; return;
                 case Windows.System.VirtualKey.F10:
                     harnessShotRequested = true; // TEST HARNESS: zrzut biezacej klatki z poziomu apki
+                    e.Handled = true; return;
+                // F11 — task #7: cykl kadru nagrywania pelny ↔ 4:5 ↔ 9:16 (okno = dokladnie kadr
+                // publikacji; GameBar nagrywa ten prostokat, a mniej pikseli = plynniejszy ruch).
+                case Windows.System.VirtualKey.F11:
+                    CycleRecordFrame();
                     e.Handled = true; return;
                 // '7' — A/B tier det1m (krok 3): przełącza WYŁĄCZNIE uniform użycia — dane zostają rezydentne
                 // na GPU, więc porównanie panoramy nie jest skażone streamingiem (warunek testu).

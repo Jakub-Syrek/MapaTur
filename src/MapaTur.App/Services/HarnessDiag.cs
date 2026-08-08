@@ -47,6 +47,12 @@ public static class HarnessDiag
     /// <summary>Render-loop FPS (smoothedFps z Terrain3DView) — publikowane per klatkę, czytane przy zapisie statusu.</summary>
     public static double RenderFps { get; set; }
 
+    /// <summary>Rozmiar powierzchni GL w px (task #7: weryfikacja kadru nagrywania bez oczu/myszki).</summary>
+    public static int ClientWidth { get; set; }
+
+    /// <summary>Druga oś <see cref="ClientWidth"/>.</summary>
+    public static int ClientHeight { get; set; }
+
     /// <summary>
     /// Hooks the harness to the live page. Safe to call again after a soft restart (language switch
     /// rebuilds the page) — delegates are swapped, timers are started once per process.
@@ -149,6 +155,8 @@ public static class HarnessDiag
                 uiBeatAgeMs = lastUiBeatMs < 0 ? -1 : now - lastUiBeatMs,
                 uiWorstLagMs60s = Math.Max(worstUiLagMs, worstUiLagPrevMs),
                 renderFps = Math.Round(RenderFps, 1),
+                clientW = ClientWidth,
+                clientH = ClientHeight,
                 activeSection = readActiveSection?.Invoke() ?? -1,
                 heapMB = GC.GetTotalMemory(false) / (1024 * 1024),
                 wsMB = Environment.WorkingSet / (1024 * 1024),
