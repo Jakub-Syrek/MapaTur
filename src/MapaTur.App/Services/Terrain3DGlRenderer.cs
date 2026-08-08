@@ -4642,8 +4642,12 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private static readonly int DxgiTrimSec =
         int.TryParse(Environment.GetEnvironmentVariable("MAPATUR_DXGI_TRIM_SEC"), out int trimSec) ? trimSec : 30;
 
+    // Pisane wyłącznie w bloku #if WINDOWS (kadencja Trim) — na TFM Androida analizator widzi je
+    // jako niemutowane i żąda readonly (wzorzec pragma jak przy polach walk-mode w Terrain3DView).
+#pragma warning disable IDE0044
     private long lastDxgiTrimMs;
     private long dxgiTrimCount;
+#pragma warning restore IDE0044
 
     private const int UploadPboRingDepth = 12;
     private readonly uint[] uploadPbo = new uint[UploadPboRingDepth];
