@@ -126,4 +126,65 @@ public sealed class HosekSkyTests
         (double r, double g, double b) = state.Radiance(0.5, 0.5);
         double.IsFinite(r + g + b).Should().BeTrue();
     }
+
+    // ── Task #6: ambient hemisferyczny — całka irradiancji kopuły dla normalnej „w górę" ──
+    // E = ∫ L(θ,γ)·cosθ dω po górnej półkuli; azymut słońca bez znaczenia (symetria całki),
+    // więc sygnatura bierze tylko elewację. Chromatyczność idzie do uSkyAmbient (luminancja
+    // kotwiczona do legacy w rendererze — sam poziom jasności NIE jest kontraktem tej całki).
+
+    [Fact]
+    public void hemisphere_irradiance_is_positive_and_finite_across_elevations()
+    {
+        foreach (double elevDeg in new[] { 0.0, 4.0, 15.0, 40.0, 64.0, 90.0 })
+        {
+            HosekSkyState state = HosekSky.Create(T, Albedo, elevDeg * Math.PI / 180.0);
+            (double r, double g, double b) = HosekSky.HemisphereIrradiance(state, elevDeg * Math.PI / 180.0);
+            double.IsFinite(r + g + b).Should().BeTrue($"elev {elevDeg}");
+            r.Should().BeGreaterThan(0.0); g.Should().BeGreaterThan(0.0); b.Should().BeGreaterThan(0.0);
+        }
+    }
+
+    [Fact]
+    public void hemisphere_irradiance_matches_dense_riemann_reference()
+    {
+        // Siatka produkcyjna musi zgadzać się z gęstą sumą Riemanna (32×64, wagi cosθ·sinθ·ΔθΔφ)
+        // w granicach 2% na kanał — inaczej „ambient z kopuły" to inna kopuła niż ta na ekranie.
+        double elev = 30.0 * Math.PI / 180.0;
+        HosekSkyState state = HosekSky.Create(T, Albedo, elev);
+        var sun = (X: Math.Cos(elev), Z: Math.Sin(elev));
+
+        double[] dense = new double[3];
+        int nt = 32, np = 64;
+        for (int it = 0; it < nt; it++)
+        {
+            double theta = (it + 0.5) / nt * (Math.PI / 2.0);
+            for (int ip = 0; ip < np; ip++)
+            {
+                double phi = (ip + 0.5) / np * (2.0 * Math.PI);
+                double cosGamma = (Math.Sin(theta) * Math.Cos(phi) * sun.X) + (Math.Cos(theta) * sun.Z);
+                double gamma = Math.Acos(Math.Clamp(cosGamma, -1.0, 1.0));
+                (double r, double g, double b) = state.Radiance(theta, gamma);
+                double w = Math.Cos(theta) * Math.Sin(theta) * (Math.PI / 2.0 / nt) * (2.0 * Math.PI / np);
+                dense[0] += r * w; dense[1] += g * w; dense[2] += b * w;
+            }
+        }
+
+        (double pr, double pg, double pb) = HosekSky.HemisphereIrradiance(state, elev);
+        pr.Should().BeApproximately(dense[0], Math.Abs(dense[0]) * 0.02);
+        pg.Should().BeApproximately(dense[1], Math.Abs(dense[1]) * 0.02);
+        pb.Should().BeApproximately(dense[2], Math.Abs(dense[2]) * 0.02);
+    }
+
+    [Fact]
+    public void noon_ambient_is_bluer_than_sunset_ambient()
+    {
+        // Sedno taska #6: cień w południe dostaje chłodny (niebieskawy) fill, o zachodzie ciepły —
+        // ambient ma śledzić kopułę, którą user widzi na ekranie, a nie stałą mieszankę zenit+biel.
+        HosekSkyState noon = HosekSky.Create(T, Albedo, 60.0 * Math.PI / 180.0);
+        HosekSkyState dusk = HosekSky.Create(T, Albedo, 4.0 * Math.PI / 180.0);
+
+        (double rN, _, double bN) = HosekSky.HemisphereIrradiance(noon, 60.0 * Math.PI / 180.0);
+        (double rD, _, double bD) = HosekSky.HemisphereIrradiance(dusk, 4.0 * Math.PI / 180.0);
+        (bN / rN).Should().BeGreaterThan((bD / rD) * 1.15, "południe = chłodniejszy ambient niż zachód");
+    }
 }

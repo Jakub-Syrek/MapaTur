@@ -2932,6 +2932,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private const double HwSkyTurbidity = 3.0;
     private const double HwSkyAlbedo = 0.3;
 
+    // Task #6: ambient hemisferyczny z kopuły HW — chroma całki irradiancji (luminancja=1, jasność
+    // kotwiczy tor terenu do legacy) + blend nieba z bieżącej klatki (ambient śledzi ekranowe niebo,
+    // NIGDY pass cieni — inwariant rozdzielności kolor↔cień). Wyłącznik: MAPATUR_HW_AMBIENT=0.
+    private Vector3 hwAmbientChroma = Vector3.One;
+    private float hwSkyBlendFrame;
+    private static readonly bool HwAmbientEnabled =
+        Environment.GetEnvironmentVariable("MAPATUR_HW_AMBIENT") != "0";
+
     private static readonly bool HwSkyEnabled =
         Environment.GetEnvironmentVariable("MAPATUR_HW_SKY") != "0";
 
@@ -6666,6 +6674,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     double lumHw = (0.2126 * hr) + (0.7152 * hg) + (0.0722 * hb);
                     double lumLegacy = (0.2126 * zen.X) + (0.7152 * zen.Y) + (0.0722 * zen.Z);
                     hwSkyExposure = (float)(lumLegacy / Math.Max(lumHw, 1e-9));
+                    // Task #6: ambient z TEJ SAMEJ kopuły co niebo na ekranie (jeden system światła).
+                    // Chroma znormalizowana do luminancji 1 — jasność dokleja tor terenu (kotwica legacy).
+                    (double ar, double ag, double ab) = MapaTur.Application.Terrain.HosekSky.HemisphereIrradiance(hwSkyState, cookElev);
+                    double lumAmb = Math.Max((0.2126 * ar) + (0.7152 * ag) + (0.0722 * ab), 1e-9);
+                    hwAmbientChroma = new Vector3((float)(ar / lumAmb), (float)(ag / lumAmb), (float)(ab / lumAmb));
                 }
 
                 for (int i = 0; i < 9; i++)
@@ -6679,6 +6692,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 gl.Uniform1(skyHwExposureLocation, hwSkyExposure);
             }
 
+            hwSkyBlendFrame = hwBlend; // konsumuje blok uniformów terenu (ambient) w TEJ klatce
             gl.Uniform1(skyHwBlendLocation, hwBlend);
             gl.BindVertexArray(skyVao);
             gl.DrawArrays(PrimitiveType.Triangles, 0, 3);
@@ -6840,6 +6854,20 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             // Ambient fill = a bright, desaturated version of the zenith sky tint so shadowed
             // faces pick up a soft cool cast that contrasts with the warm sun.
             skyAmbient = Vector3.Lerp(atmosphere.SkyZenithColor, Vector3.One, 0.55f);
+            // Task #6: chromatyczność ambientu z kopuły HW (ta sama, którą widać na niebie), luminancja
+            // ZAKOTWICZONA do legacy — kontrast/jasność sceny bez zmian, zmienia się wyłącznie odcień
+            // wypełnienia cienia (chłodny w południe, ciepły o zachodzie). Ta sama rampa zmierzchu co
+            // niebo; przy MAPATUR_HW_SKY=0 lub MAPATUR_HW_AMBIENT=0 tor legacy co do bitu.
+            // Siła chromy 0.4: cień dostaje ~40% chromy skylightu, reszta = neutralny bounce od
+            // nasłonecznionego otoczenia (którego całka kopuły nie modeluje). Pełna chroma (1.0) dawała
+            // indygo: kwartyl cienia w południe RGB [15|26|47], saturacja 0.66 vs 0.37 legacy (pomiar
+            // 08-08, 15 par autoshotów); 0.4 celuje w ~0.48 — chłodno, ale granit zostaje granitem.
+            if (HwAmbientEnabled && hwSkyBlendFrame > 0f && hwSkyState is not null)
+            {
+                const float HwAmbientChromaStrength = 0.4f;
+                float lumLegacy = (0.2126f * skyAmbient.X) + (0.7152f * skyAmbient.Y) + (0.0722f * skyAmbient.Z);
+                skyAmbient = Vector3.Lerp(skyAmbient, hwAmbientChroma * lumLegacy, hwSkyBlendFrame * HwAmbientChromaStrength);
+            }
         }
         gl.Uniform3(sunColorLocation, sunCol.X, sunCol.Y, sunCol.Z);
         gl.Uniform3(skyAmbientLocation, skyAmbient.X, skyAmbient.Y, skyAmbient.Z);

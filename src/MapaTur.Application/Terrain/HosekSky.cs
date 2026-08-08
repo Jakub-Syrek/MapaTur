@@ -89,6 +89,40 @@ public static class HosekSky
         return new HosekSkyState(configs, radiance);
     }
 
+    /// <summary>
+    /// Task #6: ambient hemisferyczny — irradiancja kopuły dla normalnej „w górę":
+    /// E = ∫ L(θ,γ)·cosθ dω po górnej półkuli (reguła punktu środkowego 16×32; test pinuje zgodność
+    /// z gęstą sumą 32×64 w 2%). Azymut słońca nie wpływa na wynik (symetria całki), więc wystarczy
+    /// elewacja. Liczone TYLKO przy przegotowaniu stanu (co 0,1° elewacji) — nie per klatkę.
+    /// </summary>
+    public static (double R, double G, double B) HemisphereIrradiance(HosekSkyState state, double solarElevationRadians)
+    {
+        double elevation = Math.Clamp(solarElevationRadians, 0.0, Math.PI / 2.0);
+        double sunX = Math.Cos(elevation);
+        double sunZ = Math.Sin(elevation);
+
+        const int ThetaSteps = 16;
+        const int PhiSteps = 32;
+        double r = 0, g = 0, b = 0;
+        for (int it = 0; it < ThetaSteps; it++)
+        {
+            double theta = (it + 0.5) / ThetaSteps * (Math.PI / 2.0);
+            for (int ip = 0; ip < PhiSteps; ip++)
+            {
+                double phi = (ip + 0.5) / PhiSteps * (2.0 * Math.PI);
+                double cosGamma = (Math.Sin(theta) * Math.Cos(phi) * sunX) + (Math.Cos(theta) * sunZ);
+                double gamma = Math.Acos(Math.Clamp(cosGamma, -1.0, 1.0));
+                (double lr, double lg, double lb) = state.Radiance(theta, gamma);
+                double w = Math.Cos(theta) * Math.Sin(theta) * (Math.PI / 2.0 / ThetaSteps) * (2.0 * Math.PI / PhiSteps);
+                r += lr * w;
+                g += lg * w;
+                b += lb * w;
+            }
+        }
+
+        return (r, g, b);
+    }
+
     // Kwintyczny Bezier po t = (elewacja / (π/2))^(1/3) — wagi 1,5,10,10,5,1; stride 9 parametrów
     // na punkt kontrolny, 6 punktów na turbidity, 10 turbidities na albedo.
     private static double[] CookConfiguration(double[] dataset, double turbidity, double albedo, double elevation)
