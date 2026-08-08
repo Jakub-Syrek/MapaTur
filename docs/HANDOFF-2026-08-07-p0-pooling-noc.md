@@ -80,6 +80,20 @@ konsument w status.json — upDet05MB/upDet25MB/upOrthoMB/upMaskMB/upMeshMB):
    Zanim polowanie dalej: test 30 min + menu po lotach (kryterium taska #1) rozstrzygnie, czy
    pełzanie w ogóle szkodzi użytkowo w realnym horyzoncie sesji.
 
+## DOPISEK 08-08 ~10:00 — macierz domknięta + CRIT30: kryteria użytkowe SPEŁNIONE
+
+LOWFPS (niziny @21 fps): **statycznie gpuDed −0 MB/min (IDEALNIE płasko)**, orbita +649 (tryb
+continuous samo-invaliduje — fps 296 mimo FRAME_MS=33; env MAPATUR_FRAME_MS działa na timer
+główny, nie na pętle walk/dragon/orbit). WNIOSEK MACIERZY (8 przebiegów): wzrost commitu WYŁĄCZNIE
+przy ruchu kamery — ANGLE dedupuje niezmienione uniformy (statycznie zero CB-updates), przy ruchu
+brudne uniformy → MAP_DISCARD → rename backingów w sterowniku. Task #8 utworzony (batching/UBO).
+
+CRIT30 (16 lotów F9, 28,6 min, bench-CRIT30-0808-0917.csv): **ws 23,4→25,2 GB (+32 MB/min ≈ szum),
+menu po 28 min lotu: 47 ms i 0 ms (zero wisów), proces przeżył, fps 21–70**. Commit GPU: +0,9 GB/min
+bez plateau, koniec 31 GB committed — bez żadnej szkody użytkowej w oknie testu; przy staniu wzrost
+staje. Kryteria użytkowe taska #1 SPEŁNIONE pomiarem; sub-kryterium „commit D3D stabilny" NIE —
+przeniesione do taska #8 z zawężonym mechanizmem. Werdykt zamknięcia P0 = user.
+
 ## Kolejka następnej sesji (P0 wciąż otwarte przez gpuDed)
 
 1. **Werdykt wizualny usera** na buildzie `6262f73` (normalne użycie; degradacja wymagała
