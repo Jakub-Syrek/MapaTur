@@ -32,7 +32,9 @@ if ($Variant -eq 'A') { $env:MAPATUR_GL_POOL = '0' }
 # Keep-awake for the bench window (per-process API, not a system setting): the 08-07 T1 run was
 # contaminated by an overnight machine sleep mid-bench (uptime 584 -> 30769 s).
 Add-Type -Name Power -Namespace Win32 -MemberDefinition '[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint esFlags);'
-[Win32.Power]::SetThreadExecutionState(0x80000003) | Out-Null  # ES_CONTINUOUS|ES_SYSTEM_REQUIRED|ES_DISPLAY_REQUIRED
+# UWAGA: literal 0x80000003 w PS parsuje sie jako UJEMNY int32 i konwersja na uint pada
+# (MethodException, keep-awake nie dzialal) — stad dziesietnie: 2147483651 = ES_CONTINUOUS|SYSTEM|DISPLAY.
+[Win32.Power]::SetThreadExecutionState(2147483651) | Out-Null
 
 $app = Start-Process -FilePath $exe -PassThru
 Write-Host "[bench] MapaTur.App PID $($app.Id) started; sampler runs in this console."
@@ -43,5 +45,5 @@ Write-Host "[bench] MapaTur.App PID $($app.Id) started; sampler runs in this con
 Start-Sleep -Seconds 5
 Get-Process -Name 'MapaTur.App' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Get-Process -Name 'MapaTur.App' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-[Win32.Power]::SetThreadExecutionState(0x80000000) | Out-Null  # zdejmij keep-awake
+[Win32.Power]::SetThreadExecutionState(2147483648) | Out-Null  # ES_CONTINUOUS — zdejmij keep-awake
 Write-Host "[bench] variant $Variant done -> $csv"
