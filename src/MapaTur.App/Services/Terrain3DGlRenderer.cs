@@ -167,10 +167,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform float uFogInvH;\n" +    // 1/(H×Pion); <=0 = tor legacy (jednorodna mgła) — wyłącznik MAPATUR_HEIGHT_FOG=0
         "uniform float uFogCamZ;\n" +    // STABILNY world-Z kamery (render-frame Z bywa re-kotwiczony — lekcja śniegu)
         "uniform vec3 uFogSunColor;\n" + // tint in-scatter (Mie) przy patrzeniu pod słońce; w nocy == uFogColor
-        // Mgła WYSOKOŚCIOWA (task #4, 2026-08-08) — LUSTRO HeightFog.OpticalDepth
-        // (Application/Terrain/HeightFog.cs, testy HeightFogTests): ρ(z)=ρ0·exp(−(z−ref)·invH) z klapą ×3
-        // poniżej ref (kotliny nie toną w zupie); głębia optyczna analitycznie, kawałkami przez strefę
-        // klapy. Zmiany matematyki NAJPIERW w klasie C# z testami, potem przepisanie tego lustra.
+                                         // Mgła WYSOKOŚCIOWA (task #4, 2026-08-08) — LUSTRO HeightFog.OpticalDepth
+                                         // (Application/Terrain/HeightFog.cs, testy HeightFogTests): ρ(z)=ρ0·exp(−(z−ref)·invH) z klapą ×3
+                                         // poniżej ref (kotliny nie toną w zupie); głębia optyczna analitycznie, kawałkami przez strefę
+                                         // klapy. Zmiany matematyki NAJPIERW w klasie C# z testami, potem przepisanie tego lustra.
         "float fogOpticalDepth(float camZ, float fragZ, float dist){\n" +
         "  if (uFogInvH <= 0.0) { return dist * uFogDensity; }\n" +
         "  float a = min(camZ, fragZ);\n" +
@@ -1251,9 +1251,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "    }\n" +
         "  }\n" +
         "  fragColor = vec4(mix(lit, fogCol, fogAmount), 1.0);\n" + // fogCol = uFogColor + in-scatter (task #4)
-        // DEBUG VIEWS (2026-07-11, user request F1–F5): isolate the baked-shadow pipeline stages so we can SEE
-        // whether the cyan lives in the albedo or the lighting. 0=final, 1=albedo, 2=baked-shadow mask,
-        // 3=corrected albedo, 4=lightSum. Pre-fog, pre-overlay so each stage is raw.
+                                                                    // DEBUG VIEWS (2026-07-11, user request F1–F5): isolate the baked-shadow pipeline stages so we can SEE
+                                                                    // whether the cyan lives in the albedo or the lighting. 0=final, 1=albedo, 2=baked-shadow mask,
+                                                                    // 3=corrected albedo, 4=lightSum. Pre-fog, pre-overlay so each stage is raw.
         "  if (uDebugTerrainView > 0.5) {\n" +
         "    if (uDebugTerrainView < 1.5) { fragColor = vec4(base, 1.0); }\n" +                    // F2 albedo
         "    else if (uDebugTerrainView < 2.5) { fragColor = vec4(vec3(bsDark), 1.0); }\n" +       // F3 lowLuma sub-mask
@@ -1304,6 +1304,34 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform float uCloudDark;\n" +     // storm darkening, 1 = bright, <1 = darker
         "uniform float uSunGlowIntensity;\n" + // forward-scatter glow strength (swells near horizon, 0 at noon/night)
         "uniform float uSunGlowWidth;\n" +     // angular spread of the glow halo (wider near horizon)
+                                               // Task #5 (2026-08-08): niebo Hoska–Wilkiego. uHw0..uHw8 = parametry rozszerzonej formuły Pereza
+                                               // jako vec3 (R,G,B) ugotowane na CPU (HosekSky.Create — lustro ArHosekSkyModel.cc), uHwRad = norma
+                                               // radiancji, uHwExposure = kotwica ekspozycji (luminancja zenitu HW == luminancja uSkyZenith, żeby
+                                               // jasność zaakceptowanej palety została, a HW dodał ROZKŁAD: pas horyzontu, poświatę okołosłoneczną,
+                                               // gradient azymutalny). uHwBlend: 0 = tor legacy (2-kolorowy lerp, bit-identyczny), 1 = pełny HW;
+                                               // rampa zmierzchu na CPU (model obowiązuje dla słońca nad horyzontem). UWAGA indeksy referencji:
+                                               // człon zenitalny mnoży c7, anizotropia Mie w mianowniku to c8.
+        "uniform vec3 uHw0;\n" +
+        "uniform vec3 uHw1;\n" +
+        "uniform vec3 uHw2;\n" +
+        "uniform vec3 uHw3;\n" +
+        "uniform vec3 uHw4;\n" +
+        "uniform vec3 uHw5;\n" +
+        "uniform vec3 uHw6;\n" +
+        "uniform vec3 uHw7;\n" +
+        "uniform vec3 uHw8;\n" +
+        "uniform vec3 uHwRad;\n" +
+        "uniform float uHwExposure;\n" +
+        "uniform float uHwBlend;\n" +
+        "vec3 hwSky(float cosTheta, float gamma){\n" +
+        "  float cg = cos(gamma);\n" +
+        "  float rayM = cg * cg;\n" +
+        "  vec3 expM = exp(uHw4 * gamma);\n" +
+        "  vec3 mieM = (1.0 + rayM) / pow(vec3(1.0) + (uHw8 * uHw8) - (2.0 * uHw8 * cg), vec3(1.5));\n" +
+        "  vec3 zen = vec3(sqrt(max(cosTheta, 0.0)));\n" +
+        "  return (vec3(1.0) + uHw0 * exp(uHw1 / (cosTheta + 0.01)))\n" +
+        "       * (uHw2 + (uHw3 * expM) + (uHw5 * rayM) + (uHw6 * mieM) + (uHw7 * zen)) * uHwRad;\n" +
+        "}\n" +
         "out vec4 fragColor;\n" +
         // 2D value-noise + fractal Brownian motion. Hash-based, no texture lookups — costs ~5
         // sin() + ~40 lerps per cloud pixel. Adreno 830 chews through this without breaking a
@@ -1333,6 +1361,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // top of the screen". h in [-1,1]: +1 straight up, 0 at the horizon, -1 straight down.
         "  float h = viewDir.z;\n" +
         "  vec3 skyUp = mix(uSkyHorizon, uSkyZenith, pow(clamp(h, 0.0, 1.0), 0.45));\n" +
+        // Task #5: dzień = kopuła Hoska–Wilkiego (blend rampą zmierzchu z CPU); przy h<=0 cosTheta
+        // clampuje do 0, więc skyUp niesie kolor HW przy horyzoncie w TYM azymucie — skyDown niżej
+        // kotwiczy się na nim i szew na linii horyzontu nie istnieje (legacy: skyUp(h<=0)=uSkyHorizon,
+        // czyli stara semantyka zachowana co do bitu przy uHwBlend=0).
+        "  if (uHwBlend > 0.001) {\n" +
+        "    float hwGamma = acos(clamp(dot(viewDir, uSunDir), -1.0, 1.0));\n" +
+        // Podłoga 0.05 (~3° nad horyzontem) jak w HosekSkyState.Radiance: bez niej exp(k1/(cosθ+0.01))
+        // eksploduje i ostatni stopień ściska się do twardej krawędzi (zmierzone 08-08 o zachodzie).
+        "    vec3 hwCol = hwSky(clamp(h, 0.05, 1.0), hwGamma) * uHwExposure;\n" +
+        "    skyUp = mix(skyUp, min(hwCol, vec3(4.0)), uHwBlend);\n" +
+        "  }\n" +
         // Below horizon (looking down past the finite terrain edge / into a top-down view's corners):
         // distant land seen through aerial HAZE, not a flat grey void. The old flat uSkyHorizon*0.72
         // read as a dull grey wall filling most of the screen whenever the camera looked down at the
@@ -1340,7 +1379,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // deepen only gently further down, so the area beyond the terrain reads as luminous distance.
         // Cross-faded across the horizon line so there's no hard seam.
         "  float below = clamp(-h, 0.0, 1.0);\n" +            // 0 at the horizon, 1 straight down
-        "  vec3 skyDown = mix(uSkyHorizon, uSkyHorizon * 0.82, smoothstep(0.0, 0.5, below));\n" +
+        "  vec3 skyDown = mix(skyUp, skyUp * 0.82, smoothstep(0.0, 0.5, below));\n" + // kotwica = kolor horyzontu w tym azymucie (task #5; legacy: skyUp(h<=0)==uSkyHorizon)
         "  vec3 sky = mix(skyDown, skyUp, smoothstep(-0.12, 0.06, h));\n" +
         // CIRRUS REMOVED (2026-07-05, user): the procedural high wisps ("postrzępione wysokie") clashed with
         // the volumetric cumulus + sea-of-clouds look — the sky stays a clean gradient; ALL clouds now come
@@ -1957,8 +1996,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform float uFogDensity;\n" +
         "uniform float uFogRefZ;\n" +  // task #4: mgła wysokościowa — te same uniformy co teren
         "uniform float uFogInvH;\n" +  // <=0 = tor legacy; geometria wstążek jest w STABILNEJ ramce świata,
-        // więc wysokości bierzemy wprost z vWorldPos.z/uCameraPos.z (inaczej niż teren, który
-        // potrzebuje vStableWorldPos). LUSTRO HeightFog.OpticalDepth — patrz komentarz w FS terenu.
+                                       // więc wysokości bierzemy wprost z vWorldPos.z/uCameraPos.z (inaczej niż teren, który
+                                       // potrzebuje vStableWorldPos). LUSTRO HeightFog.OpticalDepth — patrz komentarz w FS terenu.
         "float fogOpticalDepth(float camZ, float fragZ, float dist){\n" +
         "  if (uFogInvH <= 0.0) { return dist * uFogDensity; }\n" +
         "  float a = min(camZ, fragZ);\n" +
@@ -1988,18 +2027,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  if (dist > uMaxDist) { discard; }\n" +
         "  float edge = smoothstep(uMaxDist * 0.75, uMaxDist, dist);\n" +
         "  float fog = max(1.0 - exp(-fogOpticalDepth(uCameraPos.z, vWorldPos.z, dist)), edge);\n" + // task #4: mgła wysokościowa jak na terenie
-        // Carry the per-vertex alpha through (opaque trails/roads upload a=255 → 1.0). The translucent dashed
-        // route uploads a<255 so the trail it lies on shows through it; blending is enabled only for that draw.
-        // uGhostFade dims the whole ribbon on the X-ray pass, so a trail buried inside a gully/behind a
-        // buttress still reads as a faint "behind rock" ghost instead of vanishing.
-        // ROCK-THICKNESS GATE (2026-07-03): DepthFunc(GREATER) alone cannot tell "3 m behind a rib" from
-        // "behind the whole massif" — every occluded trail bled through distant slopes as dotted twins
-        // ("jakby były dwa szlaki"). With the scene depth available we measure HOW FAR behind the visible
-        // surface the fragment lies, in metres: ghost full when buried < 25 m (żleb Kulczyńskiego: the trail
-        // sits just past the near wall), gone past 60 m (another slope entirely). Depth-buffer values invert
-        // through the ACTUAL projection mapping (System.Numerics D3D-style clip z in [0,1] → window depth in
-        // [0.5,1]): ndc = 2*D - 1, linear = f*n / (f - ndc*(f-n)) — exact for both samples, so the convention
-        // cancels out of neither (verified: D=0.5 → near, D=1 → far).
+                                                                                                     // Carry the per-vertex alpha through (opaque trails/roads upload a=255 → 1.0). The translucent dashed
+                                                                                                     // route uploads a<255 so the trail it lies on shows through it; blending is enabled only for that draw.
+                                                                                                     // uGhostFade dims the whole ribbon on the X-ray pass, so a trail buried inside a gully/behind a
+                                                                                                     // buttress still reads as a faint "behind rock" ghost instead of vanishing.
+                                                                                                     // ROCK-THICKNESS GATE (2026-07-03): DepthFunc(GREATER) alone cannot tell "3 m behind a rib" from
+                                                                                                     // "behind the whole massif" — every occluded trail bled through distant slopes as dotted twins
+                                                                                                     // ("jakby były dwa szlaki"). With the scene depth available we measure HOW FAR behind the visible
+                                                                                                     // surface the fragment lies, in metres: ghost full when buried < 25 m (żleb Kulczyńskiego: the trail
+                                                                                                     // sits just past the near wall), gone past 60 m (another slope entirely). Depth-buffer values invert
+                                                                                                     // through the ACTUAL projection mapping (System.Numerics D3D-style clip z in [0,1] → window depth in
+                                                                                                     // [0.5,1]): ndc = 2*D - 1, linear = f*n / (f - ndc*(f-n)) — exact for both samples, so the convention
+                                                                                                     // cancels out of neither (verified: D=0.5 → near, D=1 → far).
         "  float ghostGate = 1.0;\n" +
         "  if (uGhostFade < 0.999 && uSceneDepthOn > 0.5) {\n" +
         "    vec2 duv = gl_FragCoord.xy / vec2(textureSize(uSceneDepth, 0));\n" +
@@ -2879,6 +2918,22 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int skySunGlowWidthLocation = -1;
     private uint skyVao;
     private uint skyVbo;
+
+    // Task #5: niebo Hoska–Wilkiego — lokacje uniformów (uHw0..uHw8 + rad/exposure/blend), cache stanu
+    // (cook tylko przy zmianie elewacji o ≥0,1°; turbidity/albedo stałe v1: 3.0 / 0.3 — czyste alpejskie)
+    // i wyłącznik env MAPATUR_HW_SKY=0 (blend=0 ⇒ tor legacy bit-identyczny).
+    private readonly int[] skyHwConfigLocations = new int[9];
+    private int skyHwRadLocation = -1;
+    private int skyHwExposureLocation = -1;
+    private int skyHwBlendLocation = -1;
+    private MapaTur.Application.Terrain.HosekSkyState? hwSkyState;
+    private float hwSkyExposure;
+    private int hwSkyElevDeciDeg = int.MinValue;
+    private const double HwSkyTurbidity = 3.0;
+    private const double HwSkyAlbedo = 0.3;
+
+    private static readonly bool HwSkyEnabled =
+        Environment.GetEnvironmentVariable("MAPATUR_HW_SKY") != "0";
 
     // Night-sky star program: catalog stars drawn as point sprites in the sky pass (after the gradient).
     // The VBO holds (dir.xyz, magnitude) per above-horizon star and is re-uploaded only when the Julian-Date
@@ -6098,6 +6153,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             skyCloudDarkLocation = -1;
             skySunGlowIntensityLocation = -1;
             skySunGlowWidthLocation = -1;
+            Array.Fill(skyHwConfigLocations, -1);
+            skyHwRadLocation = -1;
+            skyHwExposureLocation = -1;
+            skyHwBlendLocation = -1;
             skyVao = 0;
             skyVbo = 0;
             starProgram = 0;
@@ -6587,6 +6646,40 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.Uniform1(skyCloudDarkLocation, stormDarken);
             gl.Uniform1(skySunGlowIntensityLocation, atmosphere.SunGlowIntensity);
             gl.Uniform1(skySunGlowWidthLocation, atmosphere.SunGlowWidth);
+
+            // Task #5: niebo HW. Cook (drogi CPU-owo względem klatki: Bezier ×4×10 parametrów) tylko przy
+            // zmianie elewacji o ≥0,1°; rampa zmierzchu -4°..+2° → blend 0..1 (model dzienny); ekspozycja
+            // kotwiczy luminancję zenitu HW do uSkyZenith zaakceptowanej palety (jasność zostaje, HW dodaje
+            // rozkład). Wyłącznik: MAPATUR_HW_SKY=0.
+            float sunElevRad = MathF.Asin(Math.Clamp(atmosphere.SunDirection.Z, -1f, 1f));
+            float sunElevDeg = sunElevRad * 180f / MathF.PI;
+            float hwBlend = HwSkyEnabled ? Math.Clamp((sunElevDeg + 4f) / 6f, 0f, 1f) : 0f;
+            if (hwBlend > 0f)
+            {
+                int deciDeg = (int)MathF.Round(MathF.Max(sunElevDeg, 0f) * 10f);
+                if (hwSkyState is null || deciDeg != hwSkyElevDeciDeg)
+                {
+                    hwSkyElevDeciDeg = deciDeg;
+                    double cookElev = Math.Max(sunElevRad, 0f);
+                    hwSkyState = MapaTur.Application.Terrain.HosekSky.Create(HwSkyTurbidity, HwSkyAlbedo, cookElev);
+                    (double hr, double hg, double hb) = hwSkyState.Radiance(0.0, (Math.PI / 2.0) - cookElev);
+                    double lumHw = (0.2126 * hr) + (0.7152 * hg) + (0.0722 * hb);
+                    double lumLegacy = (0.2126 * zen.X) + (0.7152 * zen.Y) + (0.0722 * zen.Z);
+                    hwSkyExposure = (float)(lumLegacy / Math.Max(lumHw, 1e-9));
+                }
+
+                for (int i = 0; i < 9; i++)
+                {
+                    Vector3 cfg = hwSkyState.ConfigVec3(i);
+                    gl.Uniform3(skyHwConfigLocations[i], cfg.X, cfg.Y, cfg.Z);
+                }
+
+                Vector3 rad = hwSkyState.RadianceVec3();
+                gl.Uniform3(skyHwRadLocation, rad.X, rad.Y, rad.Z);
+                gl.Uniform1(skyHwExposureLocation, hwSkyExposure);
+            }
+
+            gl.Uniform1(skyHwBlendLocation, hwBlend);
             gl.BindVertexArray(skyVao);
             gl.DrawArrays(PrimitiveType.Triangles, 0, 3);
             gl.BindVertexArray(0);
@@ -9947,6 +10040,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         skyCloudDarkLocation = g.GetUniformLocation(skyProgram, "uCloudDark");
         skySunGlowIntensityLocation = g.GetUniformLocation(skyProgram, "uSunGlowIntensity");
         skySunGlowWidthLocation = g.GetUniformLocation(skyProgram, "uSunGlowWidth");
+        for (int i = 0; i < 9; i++)
+        {
+            skyHwConfigLocations[i] = g.GetUniformLocation(skyProgram, "uHw" + i);
+        }
+
+        skyHwRadLocation = g.GetUniformLocation(skyProgram, "uHwRad");
+        skyHwExposureLocation = g.GetUniformLocation(skyProgram, "uHwExposure");
+        skyHwBlendLocation = g.GetUniformLocation(skyProgram, "uHwBlend");
 
         // Fullscreen triangle: 3 vertices, each xy in clip space, covering NDC [-1,1]^2 with one extra
         // vertex outside the rect so the rasteriser fills the full screen without re-clipping a quad.
