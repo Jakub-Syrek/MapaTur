@@ -20,11 +20,17 @@ namespace MapaTur.Application.Terrain;
 /// </summary>
 public sealed class Atmosphere
 {
-    // Tatra-summer-solstice constants. Peak elevation chosen so the noon ray is steep but
-    // not vertical — keeps the Lambert-shaded slopes interesting at the top of the day.
-    private const float PeakElevationRadians = 1.118f; // ≈ 64°
-    private const float SunriseHour = 6f;
-    private const float SunsetHour = 18f;
+    // Task #3 (2026-08-08): prawdziwa efemeryda zamiast sztucznego łuku sin 6–18. Pozycja słońca idzie
+    // przez TEN SAM rurociąg Meeusa co gwiazdy i księżyc (NightSky.SunForLocalDate) — jedna astronomia,
+    // jeden zegar (slider = godzina lokalna CET/CEST). Kotwica Tatr na stałe: słońce jest daleko, więc
+    // ±0,5° różnicy kotwicy sceny zmienia kierunek o <0,5° — gwiazdy używają dokładnej kotwicy, rozjazd
+    // niezauważalny. Stary jednoargumentowy ctor deleguje z datą PRZESILENIA LETNIEGO — stary łuk był
+    // strojony na letnie 64° kulminacji, więc dotychczasowi wołający dostają ten sam charakter dnia.
+    private const int ReferenceYear = 2026;
+    private const int ReferenceMonth = 6;
+    private const int ReferenceDay = 21;
+    private const double TatraLatitude = 49.23;
+    private const double TatraLongitude = 20.0;
 
     /// <summary>Input: time of day in hours, wrapped into [0,24).</summary>
     public float TimeOfDayHours { get; }
@@ -92,6 +98,20 @@ public sealed class Atmosphere
     /// blue-sky day with high-altitude wisps).
     /// </summary>
     public Atmosphere(float timeOfDayHours, float cloudCoverage = 0.35f, float wind = 0.3f, float snow = 0f, float storm = 0f)
+        : this(ReferenceYear, ReferenceMonth, ReferenceDay, timeOfDayHours, cloudCoverage, wind, snow, storm)
+    {
+    }
+
+    /// <summary>
+    /// Pełny konstruktor efemerydalny (task #3): data kalendarzowa + godzina lokalna (CET/CEST — ta sama
+    /// konwencja co gwiazdy/księżyc) + opcjonalna kotwica geograficzna. Realne godziny wschodu/zachodu w
+    /// sezonie, letnie wschody na NE, niskie zimowe słońce — cała reszta modelu (kolory/ambient/mgła/glow)
+    /// bez zmian: konsumuje elewację, teraz po prostu prawdziwą.
+    /// </summary>
+    public Atmosphere(
+        int year, int month, int day, float timeOfDayHours,
+        float cloudCoverage = 0.35f, float wind = 0.3f, float snow = 0f, float storm = 0f,
+        double latitudeDegrees = TatraLatitude, double longitudeDegrees = TatraLongitude)
     {
         TimeOfDayHours = WrapToDay(timeOfDayHours);
         CloudCoverage = Math.Clamp(cloudCoverage, 0f, 1f);
@@ -99,23 +119,11 @@ public sealed class Atmosphere
         SnowAmount = Math.Clamp(snow, 0f, 1f);
         Storm = Math.Clamp(storm, 0f, 1f);
 
-        // Sun arc: sin(π · t/12) shapes a half-cycle that peaks at noon and bottoms at midnight.
-        // Scaling by PeakElevationRadians gives a max of ~64° above the horizon during the day
-        // and a symmetric ~64° below at midnight, matching the visual look-and-feel users expect
-        // ("the sun's gone, it's dark") without modelling civil/astronomical twilight bands.
-        float dayPhase = MathF.PI * (TimeOfDayHours - SunriseHour) / (SunsetHour - SunriseHour);
-        float sunElevation = PeakElevationRadians * MathF.Sin(dayPhase);
-
-        // Azimuth: sweeps from east (90°) through south (180°) to west (270°) over the day.
-        // Outside the day band the value continues monotonically so SunDirection stays
-        // deterministic — the rendered sun simply sits below the horizon.
-        float sunAzimuth = (MathF.PI / 2f) + (MathF.PI * (TimeOfDayHours - SunriseHour) / (SunsetHour - SunriseHour));
-
-        float cosEl = MathF.Cos(sunElevation);
-        SunDirection = Vector3.Normalize(new Vector3(
-            cosEl * MathF.Sin(sunAzimuth),
-            cosEl * MathF.Cos(sunAzimuth),
-            MathF.Sin(sunElevation)));
+        // Prawdziwa pozycja słońca (Meeus ~0,01°) — wspólny rurociąg z gwiazdami i księżycem.
+        Vector3 sunDir = NightSky.SunForLocalDate(
+            year, month, day, TimeOfDayHours, latitudeDegrees, longitudeDegrees);
+        SunDirection = sunDir;
+        float sunElevation = MathF.Asin(Math.Clamp(sunDir.Z, -1f, 1f));
 
         // Visual presets are keyed on a 0..1 "altitude score" — saturating sin(elevation) so
         // the horizon-to-zenith transition feels physical without modelling true scattering.
@@ -125,6 +133,15 @@ public sealed class Atmosphere
         // day cycle (the warm sun colour, orange horizon and golden fog all key off this). Noon (~64°) stays
         // fully white — 64°/31° ≫ 1 ⇒ warmth 0 — so only the low-sun hours warm up, just for longer.
         float warmth = MathF.Max(0f, 1f - MathF.Abs(sunElevation / 0.55f));
+
+        // Bramka zmierzchu CYWILNEGO (task #3): sztuczny łuk schodził o północy do −64°, więc warmth
+        // gasła sama; realna letnia północ na 49°N to ledwie ~−17,7° i bez bramki horyzont świeciłby
+        // POMARAŃCZOWO całą czerwcową noc. Poświata po zachodzie wygasa liniowo do −6° (zmierzch
+        // cywilny) — fizyczny łuk zorzy wieczornej zostaje, noc jest nocą.
+        if (sunElevation < 0f)
+        {
+            warmth *= Math.Clamp(1f + (sunElevation / 0.105f), 0f, 1f);
+        }
 
         // Sky colours: cool blue at zenith during the day, warm orange at the horizon during
         // sunrise/sunset, deep blue (not black) across the dome at night. The daytime zenith

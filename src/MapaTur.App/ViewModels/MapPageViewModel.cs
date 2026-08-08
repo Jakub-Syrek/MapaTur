@@ -610,7 +610,20 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <see cref="Wind"/> and <see cref="Snow"/>. Recomputed whenever any change and bound straight
     /// into <c>Terrain3DView.Atmosphere</c>. Cheap to build so deriving per change is fine.
     /// </summary>
-    public Atmosphere Atmosphere => new((float)TimeOfDayHours, (float)Cloudiness, (float)Wind, (float)Snow, (float)Storm);
+    public Atmosphere Atmosphere
+    {
+        get
+        {
+            // Task #3 (2026-08-08): realna efemeryda — DZISIEJSZA data + slider godziny (CET/CEST).
+            // Ta sama oś czasu co gwiazdy/księżyc (renderer podaje im również dzisiejszą datę), więc
+            // słońce, zmierzch i niebo nocne są jednym zegarem. Film trasy celowo zostaje na dacie
+            // referencyjnej przesilenia (stary ctor) — kinowy łuk dnia ma działać w grudniu tak samo.
+            DateTime today = DateTime.Now;
+            return new Atmosphere(
+                today.Year, today.Month, today.Day, (float)TimeOfDayHours,
+                (float)Cloudiness, (float)Wind, (float)Snow, (float)Storm);
+        }
+    }
 
     partial void OnTimeOfDayHoursChanged(double value)
     {
@@ -2223,6 +2236,16 @@ public sealed partial class MapPageViewModel : ObservableObject
             // Clamp to [0,24); the Atmosphere also wraps, but a tampered value (e.g. negative)
             // could land the default-day visual on a midnight initial frame which is jarring.
             timeOfDayHours = Math.Clamp(savedTime, 0.0, 24.0);
+        }
+
+        // Harness (task #3): MAPATUR_TIME_HOURS wymusza startową godzinę slidera — A/B światła
+        // z autoshotami wymaga deterministycznej pory dnia (protokół ŚWIATŁO/CIEŃ/KOLOR).
+        if (double.TryParse(
+                Environment.GetEnvironmentVariable("MAPATUR_TIME_HOURS"),
+                System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture,
+                out double envHours))
+        {
+            timeOfDayHours = Math.Clamp(envHours, 0.0, 24.0);
         }
         if (settingsStore.Cloudiness is { } savedCloudiness)
         {

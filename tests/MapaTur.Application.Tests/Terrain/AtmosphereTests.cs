@@ -18,6 +18,36 @@ public sealed class AtmosphereTests
     private const float Tolerance = 0.01f;
 
     [Fact]
+    public void Ephemeris_WinterNoon_MatchesRealCulmination()
+    {
+        // Task #3: nowy ctor z datą — zima w południe ma NISKIE słońce (~17,4°), czego sztuczny
+        // łuk sin 6–18 nie umiał (zawsze grał letnie 64°). Uwaga na strefę: grudzień to CET (UTC+1),
+        // więc południe słoneczne na 20°E wypada ~11:42 lokalnie (latem w CEST ~12:42).
+        var atmo = new Atmosphere(2026, 12, 21, timeOfDayHours: 11.7f);
+
+        double elevDeg = Math.Asin(Math.Clamp(atmo.SunDirection.Z, -1f, 1f)) * 180.0 / Math.PI;
+        elevDeg.Should().BeApproximately(17.4, 1.2);
+    }
+
+    [Fact]
+    public void Ephemeris_SummerSunriseIsBeforeFive()
+    {
+        // Realny letni wschód ~4:34 CEST: o 4:00 słońce pod horyzontem, o 5:00 już nad.
+        new Atmosphere(2026, 6, 21, timeOfDayHours: 4f).SunDirection.Z.Should().BeLessThan(0f);
+        new Atmosphere(2026, 6, 21, timeOfDayHours: 5f).SunDirection.Z.Should().BeGreaterThan(0f);
+    }
+
+    [Fact]
+    public void LegacyCtor_DelegatesToSummerSolsticeEphemeris()
+    {
+        // Stary ctor (sam slider) = nowa ścieżka z datą przesilenia — jedna astronomia, zero rozjazdu.
+        var legacy = new Atmosphere(timeOfDayHours: 15f);
+        var explicitDate = new Atmosphere(2026, 6, 21, timeOfDayHours: 15f);
+
+        legacy.SunDirection.Should().Be(explicitDate.SunDirection);
+    }
+
+    [Fact]
     public void SunDirection_AtNoon_PointsUpAndSlightlySouth()
     {
         var atmo = new Atmosphere(timeOfDayHours: 12f);
@@ -61,21 +91,26 @@ public sealed class AtmosphereTests
     }
 
     [Fact]
-    public void SunDirection_AtSunrise_IsAtHorizonInTheEast()
+    public void SunDirection_AtSunrise_IsAtHorizonInTheNorthEast()
     {
-        var atmo = new Atmosphere(timeOfDayHours: 6f);
+        // Efemeryda (task #3): letni wschód to ~4:34 CEST na PÓŁNOCNYM wschodzie — stary pin „6:00,
+        // dokładnie na wschodzie" był artefaktem sztucznego łuku.
+        var atmo = new Atmosphere(timeOfDayHours: 4.6f);
 
-        atmo.SunDirection.X.Should().BeApproximately(1f, 0.05f, "+X is east, sunrise puts the sun there");
-        atmo.SunDirection.Z.Should().BeApproximately(0f, 0.05f, "elevation is zero at sunrise");
+        atmo.SunDirection.Z.Should().BeApproximately(0f, 0.05f, "elevation is ~zero at real sunrise");
+        atmo.SunDirection.X.Should().BeGreaterThan(0.5f, "+X is east — sunrise is on the eastern side");
+        atmo.SunDirection.Y.Should().BeGreaterThan(0.3f, "+Y is north — summer sunrise sits north-east");
     }
 
     [Fact]
-    public void SunDirection_AtSunset_IsAtHorizonInTheWest()
+    public void SunDirection_AtSunset_IsAtHorizonInTheNorthWest()
     {
-        var atmo = new Atmosphere(timeOfDayHours: 18f);
+        // Efemeryda: letni zachód ~20:52 CEST na północnym zachodzie.
+        var atmo = new Atmosphere(timeOfDayHours: 20.85f);
 
-        atmo.SunDirection.X.Should().BeApproximately(-1f, 0.05f, "-X is west, sunset puts the sun there");
-        atmo.SunDirection.Z.Should().BeApproximately(0f, 0.05f, "elevation is zero at sunset");
+        atmo.SunDirection.Z.Should().BeApproximately(0f, 0.05f, "elevation is ~zero at real sunset");
+        atmo.SunDirection.X.Should().BeLessThan(-0.5f, "-X is west — sunset is on the western side");
+        atmo.SunDirection.Y.Should().BeGreaterThan(0.3f, "+Y is north — summer sunset sits north-west");
     }
 
     [Fact]
@@ -100,7 +135,8 @@ public sealed class AtmosphereTests
     [Fact]
     public void SkyHorizonColor_AtSunset_IsWarmOrange()
     {
-        var atmo = new Atmosphere(timeOfDayHours: 18f);
+        // Efemeryda: „zachodowe" niskie słońce latem to ~20:20, nie 18:00 (o 18:00 realna elewacja ~21°).
+        var atmo = new Atmosphere(timeOfDayHours: 20.3f);
 
         // Warm tint test: R should clearly dominate B at the horizon during sunset.
         atmo.SkyHorizonColor.X.Should().BeGreaterThan(atmo.SkyHorizonColor.Z + 0.2f);
@@ -247,8 +283,9 @@ public sealed class AtmosphereTests
     public void BloomIntensity_AtGoldenHour_ExceedsNoon()
     {
         // Bright-region bleed is strongest when the low, intense sun and luminous horizon sky dominate
-        // the frame; a steep midday sun blooms far less.
-        var goldenHour = new Atmosphere(timeOfDayHours: 17f);
+        // the frame; a steep midday sun blooms far less. Efemeryda: latem golden hour to ~19:30+
+        // (o 17:00 realna elewacja ~34° — jeszcze pełny dzień).
+        var goldenHour = new Atmosphere(timeOfDayHours: 19.5f);
         var noon = new Atmosphere(timeOfDayHours: 12f);
 
         goldenHour.BloomIntensity.Should().BeGreaterThan(noon.BloomIntensity);

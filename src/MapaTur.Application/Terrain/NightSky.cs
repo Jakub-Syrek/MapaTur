@@ -58,6 +58,22 @@ public static class NightSky
     }
 
     /// <summary>
+    /// The Sun's world direction (X east, Y north, Z up) for a local wall-clock date/hour in the app's
+    /// region (Central European Time, DST-aware). Z &gt; 0 = above the horizon. This is THE day-cycle sun
+    /// (task #3, 2026-08-08): <see cref="Atmosphere"/> consumes it instead of the former fake sin arc, so
+    /// the day sun, the stars and the Moon's terminator all share one Meeus pipeline and one clock.
+    /// </summary>
+    public static Vector3 SunForLocalDate(
+        int year, int month, int day, double localHour, double latitudeDegrees, double longitudeDegrees)
+    {
+        double hourUtc = localHour - CentralEuropeanTime.UtcOffsetHours(year, month, day);
+        double julianDate = AstronomicalTime.JulianDate(year, month, day, hourUtc);
+        double lst = AstronomicalTime.LocalSiderealTimeHours(julianDate, longitudeDegrees);
+        (double ra, double dec) = SolarPosition.Equatorial(julianDate);
+        return CelestialCoordinates.EquatorialToWorld(ra, dec, lst, latitudeDegrees);
+    }
+
+    /// <summary>
     /// The Moon's world direction (X east, Y north, Z up), the Sun's world direction (used to orient the
     /// lit limb / terminator), and the illuminated fraction [0,1], for a local wall-clock date/hour in the
     /// app's region (Central European Time, DST-aware). Direction Z &gt; 0 means above the horizon. Composes
