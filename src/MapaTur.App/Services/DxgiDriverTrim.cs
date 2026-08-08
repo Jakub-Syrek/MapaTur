@@ -21,8 +21,9 @@ internal static unsafe class DxgiDriverTrim
     private const int EglDeviceExt = 0x322C;        // EGL_DEVICE_EXT (EGL_EXT_device_query)
     private const int EglD3D11DeviceAngle = 0x33A1; // EGL_D3D11_DEVICE_ANGLE (EGL_ANGLE_device_d3d)
 
-    // dxgi1_3.h: MIDL_INTERFACE("A8BE2AC4-199F-4946-B331-79599FB98DE7") IDXGIDevice3
-    private static readonly Guid IidDxgiDevice3 = new("A8BE2AC4-199F-4946-B331-79599FB98DE7");
+    // dxgi1_3.h:2258: DEFINE_GUID(IID_IDXGIDevice3, 0x6007896c, 0x3244, 0x4afd, ...) — zweryfikowane
+    // w lokalnym SDK 10.0.22621 po tym, jak GUID z pamięci dał E_NOINTERFACE (T1 08-07 23:45).
+    private static readonly Guid IidDxgiDevice3 = new("6007896c-3244-4afd-bf18-a6d3beda5023");
 
     [DllImport(EglLibName, EntryPoint = "eglGetProcAddress", CharSet = CharSet.Ansi)]
     private static extern nint EglGetProcAddress(string name);
