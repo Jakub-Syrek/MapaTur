@@ -1643,6 +1643,13 @@ public partial class Terrain3DView : ContentView
     /// <summary>Raised when any fly-through ends, so the host can release route-film pre-cache state.</summary>
     public event EventHandler? FlightEnded;
 
+    /// <summary>Context-loss (2026-08-09): renderer wykrył kafle z oddanymi tablicami CPU (nie do
+    /// ponownego wgrania) — host ma przebudować scenę LOD od źródła, bez ruszania kamery.</summary>
+    public event EventHandler? SceneRebuildNeeded;
+
+    // Debounce zleceń rebuildu (rebuild sceny trwa dłużej niż jedna klatka).
+    private long lastContextLossRebuildMs;
+
     // The atmosphere the renderer should use: the time-swept flight atmosphere while flying, else the
     // bound (slider-driven) one.
     private Atmosphere? EffectiveAtmosphere => flightActive && flightAtmosphere is not null ? flightAtmosphere : Atmosphere;
@@ -5949,6 +5956,11 @@ public partial class Terrain3DView : ContentView
     private static readonly string? HarnessJumps = Environment.GetEnvironmentVariable("MAPATUR_JUMPS");
     private int harnessJumpIndex;
 
+    // MAPATUR_CTXLOSS_SEC=n — symulacja utraty kontekstu GL o sekundzie n (test ścieżki odzysku).
+    private static readonly int HarnessCtxLossSec =
+        int.TryParse(Environment.GetEnvironmentVariable("MAPATUR_CTXLOSS_SEC"), out int cl) ? cl : 0;
+    private bool harnessCtxLossFired;
+
     private bool harnessChromeApplied;
     private bool harnessPoseApplied;
     private double harnessLastShotMs;
@@ -6082,6 +6094,16 @@ public partial class Terrain3DView : ContentView
         double nowMs = Environment.TickCount64; // recordClock tyka tylko przy nagrywaniu — tu potrzebny zawsze
         Services.HarnessDiag.ClientWidth = e.Info.Width;   // task #7: weryfikacja kadru bez oczu
         Services.HarnessDiag.ClientHeight = e.Info.Height;
+        // MAPATUR_CTXLOSS_SEC=n — o sekundzie n od startu procesu symuluje utratę kontekstu GL
+        // (deterministyczny test ścieżki odzysku; realnej utraty nie da się wywołać na żądanie).
+        if (HarnessCtxLossSec > 0 && !harnessCtxLossFired
+            && nowMs - harnessProcessStartMs >= HarnessCtxLossSec * 1000.0)
+        {
+            harnessCtxLossFired = true;
+            Serilog.Log.Warning("[Harness] symuluję utratę kontekstu GL (MAPATUR_CTXLOSS_SEC={Sec})", HarnessCtxLossSec);
+            glRenderer?.DebugForceContextLoss();
+        }
+
         ServiceHarnessOrbit(nowMs);
         ServiceHarnessJumps();
         if (nowMs - harnessLastPoseMs >= 2000)
@@ -8771,6 +8793,17 @@ public partial class Terrain3DView : ContentView
             double dbgPreRenderMs = dbgSwapPaintActive ? dbgPaintWatch.Elapsed.TotalMilliseconds : 0;
             long perfRenderT0 = System.Diagnostics.Stopwatch.GetTimestamp();
             uint terrainTextureId = glRenderer.Render(width, height, tiles, Camera, Trails, Raster, Route, Roads, EffectiveAtmosphere, forest, DetailElevation, ShowNightSky ? DateOnly.FromDateTime(DateTime.Now) : null, ExposedRoutes, ShowSauronTower, ShowEagles, AtmosphereEffectsEnabled, OffTrailTracks);
+            // Context-loss (2026-08-09): renderer pominął kafle z oddanymi tablicami CPU — poproś hosta
+            // o pełny rebuild sceny LOD od źródła (kamera zostaje). Debounce 120 s: rebuild trwa ~65 s
+            // (zmierzone), a STARE kafle podnoszą flagę przez cały ten czas — 30 s dawało drugi,
+            // zbędny rebuild tuż po pierwszym.
+            if (glRenderer.ConsumeMeshRebuildRequest()
+                && Environment.TickCount64 - lastContextLossRebuildMs > 120_000)
+            {
+                lastContextLossRebuildMs = Environment.TickCount64;
+                Serilog.Log.Warning("[GL3D] utrata kontekstu z oddanymi tablicami CPU — zlecam rebuild sceny LOD");
+                Dispatcher.Dispatch(() => SceneRebuildNeeded?.Invoke(this, EventArgs.Empty));
+            }
             if (dragonActive)
             {
                 dragonPaintRenderMax = Math.Max(dragonPaintRenderMax, PerfMs(perfRenderT0, System.Diagnostics.Stopwatch.GetTimestamp()));

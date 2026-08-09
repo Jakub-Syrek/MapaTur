@@ -48,6 +48,7 @@ public partial class MapPage : ContentPage
         viewModel.RouteFocusRequested += OnRouteFocusRequested;
         TerrainView.RecordingSaved += OnRecordingSaved;
         TerrainView.FlightEnded += (_, _) => viewModel.EndRouteFilm();
+        TerrainView.SceneRebuildNeeded += OnSceneRebuildNeeded;
         TerrainView.CameraFocusMoved += OnCameraFocusMoved;
         viewModel.PropertyChanged += OnViewModelPropertyChanged;
         viewModel.TerrainReframeRequested += OnTerrainReframeRequested;
@@ -364,6 +365,23 @@ public partial class MapPage : ContentPage
     // LOD Krok 4: the 3D view reports a snapshot of the camera pose as it roams the static base; forward it
     // so the VM raycasts the look-at point and streams the 1 m detail patch to the gaze (it gates the reload
     // on drift + cooldown). The base and camera framing don't change, so this never yanks the camera.
+    // Context-loss (2026-08-09): po rebuildzie sceny kamera STOI, a baked-stream przebudowuje pole
+    // bliskie tylko na tick kamery — bez ręcznego kopnięcia środek kadru zostaje dziurą (zmierzone:
+    // baza wróciła, near-field nie). Rebuild + jeden wymuszony tick focusa bieżącą kamerą.
+    private async void OnSceneRebuildNeeded(object? sender, EventArgs e)
+    {
+        try
+        {
+            await viewModel.RebuildSceneAfterContextLossAsync();
+            await viewModel.OnDetailFocusAsync(TerrainView.Camera, TerrainView.SurfacePixelHeight, TerrainView.SurfacePixelWidth);
+        }
+        catch (Exception ex)
+        {
+            // async-void handler: an escaping exception is a process-killing stowed exception (see OnTerrainTapped).
+            Serilog.Log.Error(ex, "Scene rebuild after context loss failed");
+        }
+    }
+
     private async void OnCameraFocusMoved(object? sender, Camera3D camera)
     {
         try

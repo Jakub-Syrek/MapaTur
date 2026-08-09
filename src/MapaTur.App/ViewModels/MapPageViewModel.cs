@@ -3611,6 +3611,23 @@ public sealed partial class MapPageViewModel : ObservableObject
     private Task LoadLodDemoAsync() => BuildLodSceneAsync(reframeCamera: true);
 
     /// <summary>
+    /// Context-loss (2026-08-09, „grafika źle wyświetla" po restarcie dema z trasy): utrata kontekstu GL
+    /// unieważnia VBO, a upload-only tablice CPU rezydentnych kafli wróciły już do puli — nie ma z czego
+    /// ich ponownie wgrać (renderer pomija je zamiast wgrywać treść innego kafla). Jedyna poprawna droga
+    /// to przebudowa meshy od źródła: ten sam pełny pipeline co przy starcie sceny, bez ruszania kamery.
+    /// </summary>
+    public async Task RebuildSceneAfterContextLossAsync()
+    {
+        if (IsBusy || !Is3DMode)
+        {
+            return; // scena właśnie się buduje (rebuild w toku) albo nie ma czego przebudowywać
+        }
+
+        logger.LogWarning("[GL3D] rebuild sceny LOD po utracie kontekstu (kamera zostaje)");
+        await BuildLodSceneAsync(reframeCamera: false).ConfigureAwait(true);
+    }
+
+    /// <summary>
     /// Builds THE Tatra scene: ring-LOD native base (FillPits + hole repair) + 1 m detail streaming +
     /// landmarks + lakes. Started automatically at the end of auto-load (the LOD pipeline IS the main
     /// experience — see <see cref="AutoStartLodPipeline"/>); the historical "LOD demo" entry point is

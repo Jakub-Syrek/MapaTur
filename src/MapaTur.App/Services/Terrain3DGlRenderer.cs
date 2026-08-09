@@ -3387,6 +3387,27 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
     private int staleUploadTileCount;
 
+    // Context-loss (2026-08-09): UploadTile trafił na kafel z ODDANYMI tablicami CPU — pominął go
+    // i podniósł tę flagę. Widok konsumuje ją po klatce i zleca pełny rebuild sceny LOD od źródła.
+    private bool meshRebuildNeeded;
+
+    /// <summary>Czyta i zeruje żądanie rebuildu meshy po utracie kontekstu (wołane z wątku painta).</summary>
+    public bool ConsumeMeshRebuildRequest()
+    {
+        bool needed = meshRebuildNeeded;
+        meshRebuildNeeded = false;
+        return needed;
+    }
+
+    // TEST HARNESS (MAPATUR_CTXLOSS_SEC): wymusza przejście detekcji utraty kontekstu na następnej
+    // klatce — prawdziwej utraty (maximize/driver) nie da się wywołać deterministycznie (zmierzone
+    // 08-09: maximize jej NIE robi), a ścieżka odzysku musi być testowalna. Stare obiekty GL zostają
+    // porzucone bez Delete (jak przy realnej utracie), więc używać TYLKO w biegu testowym.
+    private bool debugForceContextLoss;
+
+    /// <summary>Harness: symuluj utratę kontekstu GL na następnej klatce (patrz MAPATUR_CTXLOSS_SEC).</summary>
+    public void DebugForceContextLoss() => debugForceContextLoss = true;
+
     // Cap WOLNYCH jednostek mesh — ZMIERZONY, nie teoretyczny (bench B 08-06, dev/p0-pooling/bench-B-0806-1936.csv):
     // reload detalu zwalnia jednostki HURTEM (glVboMB bujało się 1,7↔6,6 GB w locie F9), więc pierwotne
     // 512 MB kasowało ~83% zwrotów i hit-rate spadł do 27,6% — churn alokacji trwał mimo puli. 4 GB
@@ -6003,8 +6024,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // every GPU object ID we cached (shader program, VAOs, VBOs). Detect that — the old program ID is
         // no longer a program in the fresh context — and rebuild from scratch (without deleting the stale
         // IDs, which belong to the dead context). Symptom of NOT handling this: only the sky clear shows.
-        if (programReady && !gl.IsProgram(program))
+        if (programReady && (debugForceContextLoss || !gl.IsProgram(program)))
         {
+            debugForceContextLoss = false;
             Log.Information("[GL3D] context lost (program {Program} no longer valid) — rebuilding GPU objects", program);
             tileBuffers.Clear();
             lastTiles = null;
@@ -12201,19 +12223,23 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
     private void UploadTile(GL g, TerrainMesh3D tile)
     {
-        // Instrumentacja (2026-08-07): re-upload kafla, którego upload-only tablice ODDANO już do puli
-        // (drugi upload tej samej referencji — dziś jedyna znana droga: utrata kontekstu → re-upload
-        // całej listy). Treść Normals/BaseColors/TexCoords/Detail może należeć do INNEGO kafla —
-        // to przedpotopowa ścieżka (sprzed poolingu GL), nie zmieniamy jej zachowania, ale ma krzyczeć
-        // w logu zamiast psuć cieniowanie po cichu. Właściwy fix = rebuild meshy po utracie kontekstu.
+        // Context-loss (2026-08-09, „grafika źle wyświetla" po restarcie dema z trasy): re-upload kafla,
+        // którego upload-only tablice ODDANO już do puli, wgrywał normalne/UV/kolory należące do INNEGO
+        // kafla (geometria zostaje — Vertices/Indices nie wracają do puli — więc psuło się cieniowanie
+        // i tekstury, nie bryła). Zamiast wgrywać śmieci: POMIŃ kafel i zgłoś pełny rebuild meshy od
+        // źródła (widok → MapPage → BuildLodSceneAsync(reframeCamera:false)); do czasu rebuildu kafel
+        // jest dziurą — jak przy normalnym streamingu startowym, a nie trwałą korupcją.
         if (!tile.HasUploadBuffers)
         {
             staleUploadTileCount++;
+            meshRebuildNeeded = true;
             if (staleUploadTileCount == 1 || staleUploadTileCount % 64 == 0)
             {
-                Log.Warning("[GL3D] re-upload kafla ze ZWRÓCONYCH tablic CPU (#{N}) — normalne/UV mogą "
-                    + "należeć do innego kafla; źródło: context-loss re-upload", staleUploadTileCount);
+                Log.Warning("[GL3D] kafel ze ZWRÓCONYMI tablicami CPU (#{N}) POMINIĘTY — zgłaszam rebuild "
+                    + "meshy po utracie kontekstu (zamiast wgrywać cudze normalne/UV)", staleUploadTileCount);
             }
+
+            return;
         }
 
         int vertexCount = tile.Vertices.Length;
