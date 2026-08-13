@@ -58,6 +58,10 @@ public sealed class Atmosphere
     /// <summary>RGB colour of the direct sunlight reaching the surface (Mie/Rayleigh tinted at low elevations).</summary>
     public Vector3 SunColor { get; }
 
+    /// <summary>Task #9: stan zaćmienia Słońca dla tej chwili (Obscuration=0 poza zaćmieniem) — pass
+    /// nieba rysuje z niego tarczę z „wgryzem", a SunColor/AmbientFactor są już przyciemnione.</summary>
+    public SolarEclipseState Eclipse { get; }
+
     /// <summary>RGB colour of the sky directly overhead.</summary>
     public Vector3 SkyZenithColor { get; }
 
@@ -185,6 +189,17 @@ public sealed class Atmosphere
         // Slope + cap raised (0.40/0.45 → 0.46/0.52) with the day gain above: brighter daylight fill so the
         // shadowed sides don't read as murk at noon, while sunset (~0.05) and night (~0.02) stay unchanged.
         AmbientFactor = Math.Clamp(0.05f + (0.46f * elevationSin), 0.02f, 0.52f);
+
+        // Task #9 (zaćmienie): stan z TEJ SAMEJ efemerydy i zegara co słońce/gwiazdy — poza zaćmieniem
+        // Obscuration=0 i cała zaakceptowana paleta zostaje co do bitu. W zaćmieniu światło bezpośrednie
+        // spada ~(1−0,85·obs) (przy obs 0,85 zostaje ~28%), rozproszone łagodniej (niebo świeci z całej
+        // kopuły, nie tylko z tarczy). Dysk z „wgryzem" rysuje pass nieba z tych kierunków/promieni.
+        Eclipse = NightSky.EclipseForLocalDate(year, month, day, TimeOfDayHours, latitudeDegrees, longitudeDegrees);
+        if (Eclipse.Obscuration > 0f)
+        {
+            SunColor *= 1f - (0.85f * Eclipse.Obscuration);
+            AmbientFactor *= 1f - (0.5f * Eclipse.Obscuration);
+        }
 
         // Fog: density spikes near the horizon (longer atmospheric path = more aerial
         // perspective), drops to a minimum at noon. Calibrated against the Tatra scene scale

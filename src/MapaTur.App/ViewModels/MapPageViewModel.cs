@@ -610,6 +610,15 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <see cref="Wind"/> and <see cref="Snow"/>. Recomputed whenever any change and bound straight
     /// into <c>Terrain3DView.Atmosphere</c>. Cheap to build so deriving per change is fine.
     /// </summary>
+    // Task #9: wymuszona data efemerydy (MAPATUR_DATE=RRRR-MM-DD) — deterministyczne A/B zaćmienia
+    // i podgląd przyszłych dat bez przestawiania zegara systemowego. Null = dzisiejsza data.
+    private static readonly DateTime? HarnessDateOverride =
+        DateTime.TryParseExact(
+            Environment.GetEnvironmentVariable("MAPATUR_DATE"), "yyyy-MM-dd",
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.None, out DateTime hd)
+            ? hd : null;
+
     public Atmosphere Atmosphere
     {
         get
@@ -618,7 +627,8 @@ public sealed partial class MapPageViewModel : ObservableObject
             // Ta sama oś czasu co gwiazdy/księżyc (renderer podaje im również dzisiejszą datę), więc
             // słońce, zmierzch i niebo nocne są jednym zegarem. Film trasy celowo zostaje na dacie
             // referencyjnej przesilenia (stary ctor) — kinowy łuk dnia ma działać w grudniu tak samo.
-            DateTime today = DateTime.Now;
+            // Task #9: MAPATUR_DATE=RRRR-MM-DD wymusza datę (harness/podgląd zaćmienia 2026-08-12).
+            DateTime today = HarnessDateOverride ?? DateTime.Now;
             return new Atmosphere(
                 today.Year, today.Month, today.Day, (float)TimeOfDayHours,
                 (float)Cloudiness, (float)Wind, (float)Snow, (float)Storm);
@@ -2246,6 +2256,16 @@ public sealed partial class MapPageViewModel : ObservableObject
                 out double envHours))
         {
             timeOfDayHours = Math.Clamp(envHours, 0.0, 24.0);
+        }
+
+        // Task #9: MAPATUR_CLOUDS wymusza startowe zachmurzenie — zrzuty zaćmienia wymagają czystego
+        // nieba przy tarczy (domyślne 0,35 stawia cumulusy dokładnie na azymucie zachodu).
+        if (double.TryParse(
+                Environment.GetEnvironmentVariable("MAPATUR_CLOUDS"),
+                System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture,
+                out double envClouds))
+        {
+            cloudiness = Math.Clamp(envClouds, 0.0, 1.0);
         }
         if (settingsStore.Cloudiness is { } savedCloudiness)
         {

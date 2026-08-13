@@ -94,4 +94,32 @@ public static class NightSky
 
         return new MoonSky(moonDir, sunDir, illuminated);
     }
+
+    /// <summary>
+    /// Task #9: stan zaćmienia Słońca dla lokalnej chwili zegara (CET/CEST) i obserwatora — kierunki
+    /// świata słońca i Księżyca (Księżyc TOPOCENTRYCZNIE — paralaksa decyduje o zaćmieniu), promienie
+    /// kątowe tarcz i obscurację. Poza zaćmieniem Obscuration=0 i tarcze są rozłączne — konsument może
+    /// wołać co przegotowanie stanu nieba bez warunków na datę.
+    /// </summary>
+    public static SolarEclipseState EclipseForLocalDate(
+        int year, int month, int day, double localHour, double latitudeDegrees, double longitudeDegrees)
+    {
+        double hourUtc = localHour - CentralEuropeanTime.UtcOffsetHours(year, month, day);
+        double julianDate = AstronomicalTime.JulianDate(year, month, day, hourUtc);
+        double lst = AstronomicalTime.LocalSiderealTimeHours(julianDate, longitudeDegrees);
+
+        (double sunRa, double sunDec) = SolarPosition.Equatorial(julianDate);
+        (double moonRa, double moonDec, double moonDist) =
+            LunarPosition.EquatorialTopocentric(julianDate, lst, latitudeDegrees);
+        Vector3 sunDir = CelestialCoordinates.EquatorialToWorld(sunRa, sunDec, lst, latitudeDegrees);
+        Vector3 moonDir = CelestialCoordinates.EquatorialToWorld(moonRa, moonDec, lst, latitudeDegrees);
+
+        double moonAng = Math.Asin(SolarEclipse.MoonRadiusEarthRadii / moonDist);
+        double sep = Math.Acos(Math.Clamp(Vector3.Dot(sunDir, moonDir), -1f, 1f));
+        double obscuration = SolarEclipse.ObscuredFraction(sep, SolarEclipse.SunAngularRadiusRadians, moonAng);
+
+        return new SolarEclipseState(
+            sunDir, moonDir,
+            (float)SolarEclipse.SunAngularRadiusRadians, (float)moonAng, (float)obscuration);
+    }
 }

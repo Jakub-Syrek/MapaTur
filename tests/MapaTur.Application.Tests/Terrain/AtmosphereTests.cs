@@ -345,4 +345,32 @@ public sealed class AtmosphereTests
             new Atmosphere(timeOfDayHours: hour).BloomThreshold.Should().BeInRange(0.5f, 1.0f);
         }
     }
+
+    // ── Task #9: zaćmienie 2026-08-12 przyciemnia światło; poza zaćmieniem NIC się nie zmienia ──
+
+    [Fact]
+    public void eclipse_dims_direct_sun_and_ambient_on_2026_08_12_sunset()
+    {
+        // 19:50 CEST: słońce ~1° nad horyzontem, obscuracja ~0,45 (skan: 19:50→0,47). Kontrola =
+        // ta sama godzina tydzień wcześniej (bez zaćmienia); baseline różni się elewacją o ~1°,
+        // stąd zapas w progu 0,75 (samo przyciemnienie to ×~0,6).
+        var eclipsed = new Atmosphere(2026, 8, 12, 19.83f);
+        var control = new Atmosphere(2026, 8, 5, 19.83f);
+
+        eclipsed.Eclipse.Obscuration.Should().BeInRange(0.30f, 0.70f);
+        control.Eclipse.Obscuration.Should().Be(0f);
+        eclipsed.SunColor.Length().Should().BeLessThan(control.SunColor.Length() * 0.75f);
+        eclipsed.AmbientFactor.Should().BeLessThan(control.AmbientFactor);
+    }
+
+    [Fact]
+    public void legacy_solstice_atmosphere_reports_no_eclipse()
+    {
+        // Konstruktor legacy (przesilenie 2026-06-21) — brak zaćmienia, Obscuration twarde 0,
+        // więc cała zaakceptowana paleta dnia zostaje co do bitu.
+        foreach (float hour in new[] { 6f, 12f, 19.5f })
+        {
+            new Atmosphere(timeOfDayHours: hour).Eclipse.Obscuration.Should().Be(0f);
+        }
+    }
 }

@@ -39,6 +39,45 @@ public static class LunarPosition
         return (ra / 15.0, dec);
     }
 
+    /// <summary>
+    /// Task #9 (zaćmienie): TOPOCENTRYCZNA rektascensja (h), deklinacja (°) i odległość (promienie
+    /// Ziemi) Księżyca dla obserwatora na szerokości <paramref name="latitudeDegrees"/> przy lokalnym
+    /// czasie gwiazdowym <paramref name="lstHours"/>. Paralaksa Księżyca sięga ~0,95° przy horyzoncie —
+    /// pozycja geocentryczna „gubi" zaćmienie o więcej niż średnicę tarczy. Wektorowo: pozycja
+    /// geocentryczna w promieniach Ziemi minus wektor obserwatora (ρ=1, szerokość geodezyjna — błąd
+    /// &lt;20″, pomijalny przy teorii ~1-2′).
+    /// </summary>
+    public static (double RaHours, double DecDegrees, double DistanceEarthRadii) EquatorialTopocentric(
+        double julianDate, double lstHours, double latitudeDegrees)
+    {
+        (double lon, double lat, double r) = EclipticSpherical(julianDate);
+        double d = julianDate - 2451543.5;
+        double ecl = 23.4393 - (3.563e-7 * d);
+
+        // Geocentryczny wektor Księżyca (promienie Ziemi): ekliptyczny → równikowy.
+        double xe = r * CosD(lon) * CosD(lat);
+        double ye = r * SinD(lon) * CosD(lat);
+        double ze = r * SinD(lat);
+        double xeq = xe;
+        double yeq = (ye * CosD(ecl)) - (ze * SinD(ecl));
+        double zeq = (ye * SinD(ecl)) + (ze * CosD(ecl));
+
+        // Wektor obserwatora w układzie równikowym: rektascensja zenitu = LST.
+        double lstDeg = lstHours * 15.0;
+        double xo = CosD(latitudeDegrees) * CosD(lstDeg);
+        double yo = CosD(latitudeDegrees) * SinD(lstDeg);
+        double zo = SinD(latitudeDegrees);
+
+        double xt = xeq - xo;
+        double yt = yeq - yo;
+        double zt = zeq - zo;
+        double rt = Math.Sqrt((xt * xt) + (yt * yt) + (zt * zt));
+
+        double ra = Norm360(Math.Atan2(yt, xt) * RadToDeg);
+        double dec = Math.Asin(zt / rt) * RadToDeg;
+        return (ra / 15.0, dec, rt);
+    }
+
     /// <summary>Illuminated fraction of the Moon's disc in [0,1]: 0 = new, 1 = full.</summary>
     public static double IlluminatedFraction(double julianDate)
     {
@@ -49,6 +88,15 @@ public static class LunarPosition
 
     /// <summary>Geocentric ecliptic longitude + latitude (degrees) with the main perturbations.</summary>
     public static (double LonDegrees, double LatDegrees) EclipticLonLat(double julianDate)
+    {
+        (double lon, double lat, _) = EclipticSpherical(julianDate);
+        return (lon, lat);
+    }
+
+    /// <summary>Geocentryczna długość + szerokość ekliptyczna (stopnie) i ODLEGŁOŚĆ (promienie Ziemi)
+    /// z głównymi perturbacjami (dla odległości: dwa człony Schlytera — bez nich promień kątowy tarczy
+    /// i paralaksa dryfują o ~1%).</summary>
+    public static (double LonDegrees, double LatDegrees, double DistanceEarthRadii) EclipticSpherical(double julianDate)
     {
         double d = julianDate - 2451543.5;
 
@@ -115,6 +163,9 @@ public static class LunarPosition
             + (0.033 * SinD(f + (2 * dd)))
             + (0.017 * SinD((2 * m) + f));
 
-        return (Norm360(lon), lat);
+        // Perturbacje odległości (promienie Ziemi) — Schlyter: dwa dominujące człony.
+        r += (-0.58 * CosD(m - (2 * dd))) - (0.46 * CosD(2 * dd));
+
+        return (Norm360(lon), lat, r);
     }
 }
