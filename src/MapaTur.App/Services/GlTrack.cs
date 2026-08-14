@@ -18,6 +18,21 @@ internal static class GlTrack
     private static long rboAlive;
     private static long vboBytes;
 
+    // Task #8 (08-14, po falsyfikacji „renamy CB ∝ draws"): pełzanie gpuDed okazało się ∝ CZASOWI
+    // przemiatania kamery (U/C: fps 301→22, draws/min ÷3, nachylenie 397→331 MB/min). Kandydat:
+    // CHURN obiektów (Gen+Delete per minuta) od kafli krążących przez pierścień — sterownik trzyma
+    // zwolnione alokacje w cache'u procesu. Licznik ALIVE tego nie widzi (Gen≈Delete ⇒ stała liczba
+    // żywych przy dowolnie wysokim churnie), stąd SKUMULOWANE zdarzenia utworzeń/zwolnień.
+    private static long texGenTotal;
+    private static long texDelTotal;
+    private static long bufGenTotal;
+    private static long bufDelTotal;
+
+    internal static long TexGenTotal => Interlocked.Read(ref texGenTotal);
+    internal static long TexDelTotal => Interlocked.Read(ref texDelTotal);
+    internal static long BufGenTotal => Interlocked.Read(ref bufGenTotal);
+    internal static long BufDelTotal => Interlocked.Read(ref bufDelTotal);
+
     internal static long TexAlive => Interlocked.Read(ref texAlive);
     internal static long BufAlive => Interlocked.Read(ref bufAlive);
 
@@ -53,6 +68,17 @@ internal static class GlTrack
         Interlocked.Exchange(ref pboFenceWaits, fenceWaits);
     }
 
+    // Task #8 (08-14): skumulowane draw calls — dyskryminator „pełzanie gpuDed ∝ renamy CB per draw".
+    // Macierz 08-08: wzrost commitu WYŁĄCZNIE przy ruchu kamery, głuchy na Trim i niezależny od
+    // uploadów/alokacji (LOWLAND: +336 MB/min przy ~0 uploadów). Licznik pozwala skorelować nachylenie
+    // gpuDed z draws/min wprost z CSV benchu. Inkrement pilnowany testem źródła
+    // (DrawCallInstrumentationTests): każde miejsce draw w rendererze MUSI być policzone.
+    private static long drawCalls;
+
+    internal static long Draws => Interlocked.Read(ref drawCalls);
+
+    internal static void CountDraw() => Interlocked.Increment(ref drawCalls);
+
     // P0 gpuDed (08-08): skumulowane bajty uploadu per konsument — bisekcja pełzania commitu GPU.
     private static long upDet1m;
     private static long upDet05;
@@ -85,6 +111,7 @@ internal static class GlTrack
     internal static uint GenTexture(GL g)
     {
         Interlocked.Increment(ref texAlive);
+        Interlocked.Increment(ref texGenTotal);
         return g.GenTexture();
     }
 
@@ -93,6 +120,7 @@ internal static class GlTrack
         if (id != 0)
         {
             Interlocked.Decrement(ref texAlive);
+            Interlocked.Increment(ref texDelTotal);
             g.DeleteTexture(id);
         }
     }
@@ -100,6 +128,7 @@ internal static class GlTrack
     internal static uint GenBuffer(GL g)
     {
         Interlocked.Increment(ref bufAlive);
+        Interlocked.Increment(ref bufGenTotal);
         return g.GenBuffer();
     }
 
@@ -108,6 +137,7 @@ internal static class GlTrack
         if (id != 0)
         {
             Interlocked.Decrement(ref bufAlive);
+            Interlocked.Increment(ref bufDelTotal);
             g.DeleteBuffer(id);
         }
     }

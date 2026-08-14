@@ -6779,6 +6779,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             }
 
             gl.BindVertexArray(skyVao);
+            GlTrack.CountDraw();
             gl.DrawArrays(PrimitiveType.Triangles, 0, 3);
             gl.BindVertexArray(0);
 
@@ -6806,6 +6807,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     gl.Uniform1(starNightFactorLocation, starNightFactor);
                     gl.Uniform1(starStarsOnLocation, 1f);
                     gl.BindVertexArray(starVao);
+                    GlTrack.CountDraw();
                     gl.DrawArrays(PrimitiveType.Points, 0, (uint)starCount);
                     gl.BindVertexArray(0);
                     gl.Disable(EnableCap.Blend);
@@ -6846,6 +6848,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     gl.Uniform1(moonIlluminatedLocation, moon.IlluminatedFraction);
                     gl.Uniform1(moonNightFactorLocation, starNightFactor);
                     gl.BindVertexArray(skyVao); // any bound VAO; the vertex shader uses uMoonDir, not attributes
+                    GlTrack.CountDraw();
                     gl.DrawArrays(PrimitiveType.Points, 0, 1);
                     gl.BindVertexArray(0);
                     gl.Disable(EnableCap.Blend);
@@ -7181,6 +7184,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     gl.Uniform1(useOrthoLocation, 0);
                 }
                 gl.BindVertexArray(entry.Value.Vao);
+                GlTrack.CountDraw();
                 gl.DrawElements(PrimitiveType.Triangles, (uint)entry.Value.IndexCount, DrawElementsType.UnsignedInt, (void*)0);
             }
 
@@ -7391,6 +7395,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             }
 
             gl.BindVertexArray(tile.Vao);
+            GlTrack.CountDraw();
             gl.DrawElements(PrimitiveType.Triangles, (uint)tile.IndexCount, DrawElementsType.UnsignedInt, (void*)0);
         }
         GpuEnd(gl); // Terrain
@@ -7437,6 +7442,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             {
                 gl.Uniform2(lakeCenterLocation, lake.Center.X, lake.Center.Y);
                 gl.Uniform1(lakeRadiusLocation, lake.Radius);
+                GlTrack.CountDraw();
                 gl.DrawArrays(PrimitiveType.Triangles, lake.VertexOffset, (uint)lake.VertexCount);
             }
             gl.Uniform1(debugPolyLocation, 0f);
@@ -7602,6 +7608,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.Uniform1(cloudDispScaleLocation, 1f / 2800f);
             gl.Uniform1(cloudDispAmpLocation, 70f + (340f * wind));
             gl.BindVertexArray(cloudVao);
+            GlTrack.CountDraw();
             gl.DrawElements(PrimitiveType.Triangles, (uint)cloudIndexCount, DrawElementsType.UnsignedInt, (void*)0);
             gl.BindVertexArray(0);
             gl.DepthMask(true);
@@ -8641,6 +8648,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             g.ActiveTexture(TextureUnit.Texture0);
             g.Uniform1(hazeTimeLoc, (float)(frameClock.ElapsedMilliseconds % 100_000) / 1000f);
             g.Uniform1(hazeStrengthLoc, HazeStrength);
+            GlTrack.CountDraw();
             g.DrawArrays(PrimitiveType.Triangles, 0, 3);
             sourceTex = hazeColorTex;
             if (!hazeStageLogged)
@@ -8665,6 +8673,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             g.BindTexture(TextureTarget.Texture2D, sourceTex);
             g.Uniform1(bloomBrightTexLoc, 0);
             g.Uniform1(bloomBrightThresholdLoc, bloomThreshold);
+            GlTrack.CountDraw();
             g.DrawArrays(PrimitiveType.Triangles, 0, 3);
 
             if (wantBloom)
@@ -8675,11 +8684,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 g.BindTexture(TextureTarget.Texture2D, bloomBrightTex);
                 g.Uniform1(bloomBlurTexLoc, 0);
                 g.Uniform2(bloomBlurDirLoc, 1f / bloomWidth, 0f);
+                GlTrack.CountDraw();
                 g.DrawArrays(PrimitiveType.Triangles, 0, 3);
 
                 g.BindFramebuffer(FramebufferTarget.Framebuffer, bloomFboA);
                 g.BindTexture(TextureTarget.Texture2D, bloomTexB);
                 g.Uniform2(bloomBlurDirLoc, 0f, 1f / bloomHeight);
+                GlTrack.CountDraw();
                 g.DrawArrays(PrimitiveType.Triangles, 0, 3);
             }
 
@@ -8691,6 +8702,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 g.BindTexture(TextureTarget.Texture2D, bloomBrightTex);
                 g.Uniform1(godrayTexLoc, 0);
                 g.Uniform2(godraySunUvLoc, sunUvX, sunUvY);
+                GlTrack.CountDraw();
                 g.DrawArrays(PrimitiveType.Triangles, 0, 3);
             }
 
@@ -8712,6 +8724,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             g.Uniform1(bloomCompTonemapLoc, TonemapStrengthEff);
             g.Uniform1(bloomCompExposureLoc, TonemapExposure);
             g.Uniform1(bloomCompGodrayIntensityLoc, wantGodray ? godrayIntensity : 0f);
+            GlTrack.CountDraw();
             g.DrawArrays(PrimitiveType.Triangles, 0, 3);
             g.BindTexture(TextureTarget.Texture2D, 0);
             g.ActiveTexture(TextureUnit.Texture1);
@@ -8741,6 +8754,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             g.Uniform1(postTexLocation, 0);
             g.Uniform1(postTonemapLoc, TonemapStrengthEff);
             g.Uniform1(postExposureLoc, TonemapExposure);
+            GlTrack.CountDraw();
             g.DrawArrays(PrimitiveType.Triangles, 0, 3);
             g.BindTexture(TextureTarget.Texture2D, 0);
 
@@ -8955,6 +8969,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 }
 
                 g.BindVertexArray(entry.Value.Vao);
+                GlTrack.CountDraw();
                 g.DrawElements(PrimitiveType.Triangles, (uint)entry.Value.IndexCount, DrawElementsType.UnsignedInt, (void*)0);
             }
             sliceNear = sliceFar;
@@ -11271,6 +11286,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         g.Disable(EnableCap.DepthTest); // the mask FBO has no depth — the gate lives in the shader
         g.BlendFunc(BlendingFactor.One, BlendingFactor.One); // heat sums like the fire it mirrors
+        GlTrack.CountDraw();
         g.DrawArrays(PrimitiveType.Triangles, 0, (uint)fireListVertexCount);
         hazeMaskValidThisFrame = true;
 
@@ -11319,6 +11335,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.BindBuffer(BufferTargetARB.ArrayBuffer, fireVbo);
         g.BufferData<float>(BufferTargetARB.ArrayBuffer, new ReadOnlySpan<float>(fireScratch, 0, floats), BufferUsageARB.DynamicDraw);
         fireListVertexCount = list.Count * 6; // the heat-mask pass re-draws exactly these vertices
+        GlTrack.CountDraw();
         g.DrawArrays(PrimitiveType.Triangles, 0, (uint)(list.Count * 6));
     }
 
@@ -11500,6 +11517,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.BindVertexArray(markerVao);
         g.BindBuffer(BufferTargetARB.ArrayBuffer, markerVbo);
         g.BufferData<float>(BufferTargetARB.ArrayBuffer, new ReadOnlySpan<float>(markerScratch, 0, floats), BufferUsageARB.DynamicDraw);
+        GlTrack.CountDraw();
         g.DrawArrays(PrimitiveType.Triangles, 0, (uint)(markers.Count * 6));
         g.BindVertexArray(0);
         g.Enable(EnableCap.DepthTest);
@@ -11618,6 +11636,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             climbImprintUploaded = buffer.Interleaved;
         }
 
+        GlTrack.CountDraw();
         g.DrawArrays(PrimitiveType.Triangles, 0, (uint)buffer.VertexCount);
         g.BindVertexArray(0);
     }
@@ -11915,6 +11934,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 g.BindVertexArray(gearRibbonVao);
                 g.BindBuffer(BufferTargetARB.ArrayBuffer, gearRibbonVbo);
                 g.BufferData<float>(BufferTargetARB.ArrayBuffer, new ReadOnlySpan<float>(gearScratch, 0, w), BufferUsageARB.DynamicDraw);
+                GlTrack.CountDraw();
                 g.DrawArrays(PrimitiveType.Triangles, 0, (uint)vertexCount);
             }
         }
@@ -11960,6 +11980,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             g.BindVertexArray(gearRingVao);
             g.BindBuffer(BufferTargetARB.ArrayBuffer, gearRingVbo);
             g.BufferData<float>(BufferTargetARB.ArrayBuffer, new ReadOnlySpan<float>(gearScratch, 0, w), BufferUsageARB.DynamicDraw);
+            GlTrack.CountDraw();
             g.DrawArrays(PrimitiveType.Triangles, 0, (uint)(rings.Count * 6));
         }
 
@@ -12168,6 +12189,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             g.BufferData<float>(BufferTargetARB.ArrayBuffer, new ReadOnlySpan<float>(dragonUvScratch, 0, n * 2), BufferUsageARB.DynamicDraw);
             g.BindBuffer(BufferTargetARB.ElementArrayBuffer, dragonEbo);
             g.BufferData<uint>(BufferTargetARB.ElementArrayBuffer, new ReadOnlySpan<uint>(p.Indices), BufferUsageARB.DynamicDraw);
+            GlTrack.CountDraw();
             g.DrawElements(PrimitiveType.Triangles, (uint)p.Indices.Length, DrawElementsType.UnsignedInt, (void*)0);
         }
     }
@@ -13727,6 +13749,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         g.Uniform1(lineHalfPxLocation, halfWidthPx);
         g.BindVertexArray(line.Vao);
+        GlTrack.CountDraw();
         g.DrawElements(PrimitiveType.Triangles, (uint)line.IndexCount, DrawElementsType.UnsignedInt, (void*)0);
     }
 
@@ -14253,6 +14276,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 mm[12] = mvp.M41; mm[13] = mvp.M42; mm[14] = mvp.M43; mm[15] = mvp.M44;
                 g.UniformMatrix4(forestMvpLocation, 1, false, mm);
                 g.Viewport(ix * ForestAtlasCell, jy * ForestAtlasCell, (uint)ForestAtlasCell, (uint)ForestAtlasCell);
+                GlTrack.CountDraw();
                 g.DrawArrays(PrimitiveType.Triangles, 0, (uint)forestVertexCount);
             }
         }
@@ -14430,6 +14454,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.Uniform1(cumulusCoverageLocation, coverage);
         g.Uniform1(cumulusMemberSeedLocation, memberSeed);
         g.BindVertexArray(cumulusVao);
+        GlTrack.CountDraw();
         g.DrawArraysInstanced(PrimitiveType.TriangleStrip, 0, 4, (uint)cumulusInstanceCount);
         g.BindVertexArray(0);
         g.Disable(EnableCap.PolygonOffsetFill);
@@ -14694,12 +14719,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.Uniform1(sauronEyePulseLocation, pulse);
         g.BindVertexArray(sauronVao);
         // Tower: opaque, depth-written (set up by the caller above).
+        GlTrack.CountDraw();
         g.DrawArrays(PrimitiveType.Triangles, 0, (uint)sauronTowerVertexCount);
         // Eye: ADDITIVE so it blazes and haloes regardless of the bloom pass; depth-tested (ridges/tower
         // occlude it) but no depth write so it doesn't carve a hole.
         g.Enable(EnableCap.Blend);
         g.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.One);
         g.DepthMask(false);
+        GlTrack.CountDraw();
         g.DrawArrays(PrimitiveType.Triangles, sauronTowerVertexCount, 6u);
         g.DepthMask(true);
         g.Disable(EnableCap.Blend);
@@ -14800,6 +14827,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.Uniform3(eagleCameraPosLocation, cam.X, cam.Y, cam.Z);
         g.Uniform1(eagleTimeLocation, timeSeconds);
         g.Uniform3(eagleColorLocation, 0.05f, 0.045f, 0.04f);
+        GlTrack.CountDraw();
         g.DrawArraysInstanced(PrimitiveType.TriangleStrip, 0, 4, (uint)eagleInstanceCount);
         g.BindVertexArray(0);
         g.DepthMask(true);
@@ -14890,6 +14918,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.Enable(EnableCap.SampleAlphaToCoverage);
         g.ColorMask(true, true, true, false);
         g.BindVertexArray(forestImpostorVao);
+        GlTrack.CountDraw();
         g.DrawArraysInstanced(PrimitiveType.TriangleStrip, 0, 4, (uint)forestInstanceCount);
         g.BindVertexArray(0);
         g.ColorMask(true, true, true, true);
@@ -14972,6 +15001,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.Uniform1(forestWindTimeLocation, weatherT);
 
         g.BindVertexArray(forestVao);
+        GlTrack.CountDraw();
         g.DrawArraysInstanced(PrimitiveType.Triangles, 0, (uint)forestVertexCount, (uint)forestInstanceCount);
         g.BindVertexArray(0);
     }

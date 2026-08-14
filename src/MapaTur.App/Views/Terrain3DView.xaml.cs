@@ -5949,6 +5949,14 @@ public partial class Terrain3DView : ContentView
     private static readonly string? HarnessOrbit = Environment.GetEnvironmentVariable("MAPATUR_ORBIT");
     private double harnessOrbitLastMs;
 
+    // Czapa FPS dla orbity harnessu (task #8, 08-14): LOWFPS 08-08 był NIEWAŻNY, bo orbita
+    // self-invalidowała się do 296 fps mimo MAPATUR_FRAME_MS=33 (env działał tylko na timer
+    // animacji). Przy aktywnym override orbita NIE dispatchuje własnego invalidate — kadencję
+    // klatek trzyma timer animacji, już przeskalowany przez ten sam env. Obrót jest liczony
+    // z realnego czasu (dtSec), więc tempo sweepa nie zależy od liczby klatek.
+    private static readonly bool HarnessFrameMsCapped =
+        int.TryParse(Environment.GetEnvironmentVariable("MAPATUR_FRAME_MS"), out int hfm) && hfm > 0;
+
     // MAPATUR_JUMPS="startSec:intervalSec:lat,lon|lat,lon|…" — skacze kamerą po DALEKICH lokalizacjach tą samą
     // ścieżką co teleport z wyszukiwarki miejsc. Wskazówka usera (08-02): „użyj lokalizacji by się przemieścić
     // daleko, wtedy się dociągają kafle i wtedy testuj menu, a nie kręcąc się w miejscu bo nic tak nie
@@ -6001,6 +6009,11 @@ public partial class Terrain3DView : ContentView
         }
 
         Camera.AzimuthRadians += (float)(degPerSec * dtSec * Math.PI / 180.0);
+        if (HarnessFrameMsCapped)
+        {
+            return;
+        }
+
         // NIGDY nie InvalidateSurface synchronicznie z wnętrza painta: SKGLView na Windows wykonuje wtedy
         // RenderFrame() od razu (paint w paincie) i przy klatkach >1 ms rekursja kończy się stack overflow
         // 0xc00000fd — zmierzone 08-08 (4×APPCRASH, dump: OnPaintSurface×N aż do wyczerpania stosu).

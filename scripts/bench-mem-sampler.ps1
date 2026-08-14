@@ -12,7 +12,7 @@ $statusPath = Join-Path $env:TEMP 'mapatur-status.json'
 $dir = Split-Path -Parent $OutCsv
 if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force $dir | Out-Null }
 
-'ts,uptimeSec,wsMB,heapMB,privMB,gpuDedMB,gpuShMB,glTex,glBuf,glVboMB,glPoolMB,glPoolHit,glPoolMiss,pboWaits,upDet05MB,upDet25MB,upOrthoMB,upMaskMB,upMeshMB,renderFps' |
+'ts,uptimeSec,wsMB,heapMB,privMB,gpuDedMB,gpuShMB,glTex,glBuf,glVboMB,glPoolMB,glPoolHit,glPoolMiss,pboWaits,draws,genTex,delTex,genBuf,delBuf,upDet05MB,upDet25MB,upOrthoMB,upMaskMB,upMeshMB,renderFps' |
     Set-Content -Path $OutCsv
 
 Write-Host "[sampler] waiting for MapaTur.App process and $statusPath ..."
@@ -39,12 +39,13 @@ while ($true) {
         $gpuSh = [math]::Round($sh.Sum / 1MB, 0)
     } catch {}
 
-    $line = '{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11},{12},{13},{14},{15},{16},{17},{18},{19}' -f `
+    $line = '{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11},{12},{13},{14},{15},{16},{17},{18},{19},{20},{21},{22},{23},{24}' -f `
         (Get-Date -Format 'HH:mm:ss'),
         ($s.uptimeSec ?? ''), ($s.wsMB ?? [math]::Round($p.WorkingSet64 / 1MB)), ($s.heapMB ?? ''),
         ([math]::Round($p.PrivateMemorySize64 / 1MB)), $gpuDed, $gpuSh,
         ($s.glTex ?? ''), ($s.glBuf ?? ''), ($s.glVboMB ?? ''), ($s.glPoolMB ?? ''),
-        ($s.glPoolHit ?? ''), ($s.glPoolMiss ?? ''), ($s.pboWaits ?? ''),
+        ($s.glPoolHit ?? ''), ($s.glPoolMiss ?? ''), ($s.pboWaits ?? ''), ($s.draws ?? ''),
+        ($s.genTex ?? ''), ($s.delTex ?? ''), ($s.genBuf ?? ''), ($s.delBuf ?? ''),
         ($s.upDet05MB ?? ''), ($s.upDet25MB ?? ''), ($s.upOrthoMB ?? ''), ($s.upMaskMB ?? ''), ($s.upMeshMB ?? ''),
         ($s.renderFps ?? '')
     Add-Content -Path $OutCsv -Value $line
