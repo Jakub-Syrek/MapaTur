@@ -364,6 +364,31 @@ public sealed class AtmosphereTests
     }
 
     [Fact]
+    public void sun_glow_and_inscatter_taper_below_two_degrees_elevation()
+    {
+        // Task #9 część 2: przy elewacji <2° tor „pod-słońce" (glow + in-scatter mgły) ma GASNĄĆ,
+        // nie rosnąć — inaczej przepala kadr do bieli i tarcza zachodu/zaćmienia nie czyta
+        // (zmierzone 08-13: 38% klatki >248 lum patrząc pod słońce przy ~1°). Przy ≥2° bez zmian
+        // (zaakceptowany golden hour). 2026-08-05 (bez zaćmienia): elewacja ~3° o 19:48, ~1° o 20:03
+        // (zmierzone tą efemerydą: 19:33 → 5,27°, spadek ~9,6°/h).
+        var at3deg = new Atmosphere(2026, 8, 5, 19.80f);
+        var at1deg = new Atmosphere(2026, 8, 5, 20.05f);
+
+        float elev3 = MathF.Asin(at3deg.SunDirection.Z) * 180f / MathF.PI;
+        float elev1 = MathF.Asin(at1deg.SunDirection.Z) * 180f / MathF.PI;
+        elev3.Should().BeInRange(2.2f, 4.0f, "kontrola sceny: punkt odniesienia NAD progiem 2°");
+        elev1.Should().BeInRange(0.4f, 1.9f, "kontrola sceny: punkt testowy POD progiem 2°");
+
+        // Glow: dotąd monotonicznie rósł ku horyzontowi — po zmianie przy 1° ma być SŁABSZY niż przy 3°.
+        at1deg.SunGlowIntensity.Should().BeLessThan(at3deg.SunGlowIntensity);
+
+        // In-scatter: odległość FogSunColor od FogColor (siła tintu) też maleje pod progiem.
+        float tint3 = (at3deg.FogSunColor - at3deg.FogColor).Length();
+        float tint1 = (at1deg.FogSunColor - at1deg.FogColor).Length();
+        tint1.Should().BeLessThan(tint3);
+    }
+
+    [Fact]
     public void legacy_solstice_atmosphere_reports_no_eclipse()
     {
         // Konstruktor legacy (przesilenie 2026-06-21) — brak zaćmienia, Obscuration twarde 0,

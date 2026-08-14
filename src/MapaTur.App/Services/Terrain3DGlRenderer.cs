@@ -1323,6 +1323,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform vec3 uHwRad;\n" +
         "uniform float uHwExposure;\n" +
         "uniform float uHwBlend;\n" +
+        // Task #9: zaćmienie — kierunek Księżyca (świat), promienie kątowe tarcz (rad), obscuracja [0,1].
+        "uniform vec3 uEclMoonDir;\n" +
+        "uniform float uEclSunR;\n" +
+        "uniform float uEclMoonR;\n" +
+        "uniform float uEclObs;\n" +
         "vec3 hwSky(float cosTheta, float gamma){\n" +
         "  float cg = cos(gamma);\n" +
         "  float rayM = cg * cg;\n" +
@@ -1400,6 +1405,24 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  float glowExp = mix(170.0, 100.0, clamp(uSunGlowWidth, 0.0, 1.0));\n" + // very tight forward-scatter glow so the Sun reads natural-sized
         "  float belowSun = clamp((uSunDir.z - viewDir.z) * 2.0 + 0.5, 0.0, 1.0);\n" +
         "  float glow = pow(max(sunDot, 0.0), glowExp) * uSunGlowIntensity * (0.7 + 0.6 * belowSun);\n" +
+        // Task #9 (zaćmienie): podczas zaćmienia rdzeń = tarcza w rozmiarze FIZYCZNYM (uEclSunR ~0,267°;
+        // legacy rdzeń ~0,57° — wgryz o realnym promieniu Księżyca nigdy by go nie domknął) z wyciętą
+        // maską tarczy Księżyca. Kierunki i promienie z efemerydy (Atmosphere.Eclipse) — sierp domyka
+        // się i wędruje jak na niebie. Halo gaszone z zakryciem; uSunColor już przyciemnione w Atmosphere.
+        "  if (uEclObs > 0.0005) {\n" +
+        "    float angSun = acos(clamp(sunDot, -1.0, 1.0));\n" +
+        "    float aa = 0.0007;\n" +
+        "    float discEcl = 1.0 - smoothstep(uEclSunR - aa, uEclSunR + aa, angSun);\n" +
+        "    float angMoon = acos(clamp(dot(viewDir, uEclMoonDir), -1.0, 1.0));\n" +
+        "    float moonCover = 1.0 - smoothstep(uEclMoonR - aa, uEclMoonR + aa, angMoon);\n" +
+        // Ekstynkcja przy horyzoncie (tylko gałąź zaćmienia): bez niej glow saturuje wielki obszar do
+        // bieli i wgryz nie ma prawa się przebić (zmierzone 08-13). Na referencji tarcza przy zachodzie
+        // jest przygaszona długą drogą w atmosferze — dopiero wtedy sierp CZYTA. Elewacja z uSunDir.z.
+        "    float ext = mix(0.18, 1.0, clamp(uSunDir.z * 12.0, 0.0, 1.0));\n" +
+        "    sunCore = discEcl * (1.0 - moonCover) * 2.2 * ext;\n" +
+        "    sunHalo *= (1.0 - (0.8 * moonCover)) * ext;\n" +
+        "    glow *= 0.25 + (0.75 * ext * ext);\n" +
+        "  }\n" +
         "  vec3 sun = uSunColor * (sunCore * 1.2 + sunHalo * 0.6 + glow * 0.5);\n" + // halo+glow weighted down so the saturated white blob stays small (Sun reads natural)
         "  fragColor = vec4(sky + sun, 1.0);\n" +
         "}\n";
@@ -2926,11 +2949,28 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int skyHwRadLocation = -1;
     private int skyHwExposureLocation = -1;
     private int skyHwBlendLocation = -1;
+    private int skyEclMoonDirLocation = -1;
+    private int skyEclSunRLocation = -1;
+    private int skyEclMoonRLocation = -1;
+    private int skyEclObsLocation = -1;
     private MapaTur.Application.Terrain.HosekSkyState? hwSkyState;
     private float hwSkyExposure;
     private int hwSkyElevDeciDeg = int.MinValue;
     private const double HwSkyTurbidity = 3.0;
     private const double HwSkyAlbedo = 0.3;
+
+    // Bisekcja artefaktów pod-słońce (08-13): MAPATUR_KILL_FX=glow,bloom,godray,inscatter — wyłącza
+    // pojedyncze efekty (kombinowalne po przecinku), żeby jednym biegiem wskazać winny pass.
+    private static readonly HashSet<string> KillFx = new(
+        (Environment.GetEnvironmentVariable("MAPATUR_KILL_FX") ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+        StringComparer.OrdinalIgnoreCase);
+
+    // Task #9: stała turbidity do A/B zamiast rampy elewacyjnej (MAPATUR_SKY_TURB=3.0 = wygląd sprzed #9).
+    private static readonly double? HwSkyTurbidityOverride =
+        double.TryParse(Environment.GetEnvironmentVariable("MAPATUR_SKY_TURB"),
+            System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double t)
+            ? t : null;
 
     // Task #6: ambient hemisferyczny z kopuły HW — chroma całki irradiancji (luminancja=1, jasność
     // kotwiczy tor terenu do legacy) + blend nieba z bieżącej klatki (ambient śledzi ekranowe niebo,
@@ -6187,6 +6227,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             skyHwRadLocation = -1;
             skyHwExposureLocation = -1;
             skyHwBlendLocation = -1;
+            skyEclMoonDirLocation = -1;
+            skyEclSunRLocation = -1;
+            skyEclMoonRLocation = -1;
+            skyEclObsLocation = -1;
             skyVao = 0;
             skyVbo = 0;
             starProgram = 0;
@@ -6674,7 +6718,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.Uniform2(skyCloudSeedLocation, cirrusSeed.X, cirrusSeed.Y);
             gl.Uniform2(skyCloudDriftLocation, windVec.X, windVec.Y);
             gl.Uniform1(skyCloudDarkLocation, stormDarken);
-            gl.Uniform1(skySunGlowIntensityLocation, atmosphere.SunGlowIntensity);
+            gl.Uniform1(skySunGlowIntensityLocation, KillFx.Contains("glow") ? 0f : atmosphere.SunGlowIntensity);
             gl.Uniform1(skySunGlowWidthLocation, atmosphere.SunGlowWidth);
 
             // Task #5: niebo HW. Cook (drogi CPU-owo względem klatki: Bezier ×4×10 parametrów) tylko przy
@@ -6691,7 +6735,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 {
                     hwSkyElevDeciDeg = deciDeg;
                     double cookElev = Math.Max(sunElevRad, 0f);
-                    hwSkyState = MapaTur.Application.Terrain.HosekSky.Create(HwSkyTurbidity, HwSkyAlbedo, cookElev);
+                    // Task #9, lekcja 08-13: rampa turbidity 3→6,5 przy niskim słońcu ROZWALAŁA kotwicę
+                    // ekspozycji (normalizacja po zenicie; przy wysokiej turbidity pas horyzontu jest
+                    // o rzędy jaśniejszy → klip do bieli wokół słońca, sierp i chmury toną w praniu).
+                    // Paleta zostaje na zaakceptowanej stałej 3,0; głębsza czerwień zachodu wróci jako
+                    // OSOBNA zmiana z kotwicą na energii kopuły (nie punkcie zenitu). Override do
+                    // eksperymentów: MAPATUR_SKY_TURB=<stała>.
+                    double turbidity = HwSkyTurbidityOverride ?? HwSkyTurbidity;
+                    hwSkyState = MapaTur.Application.Terrain.HosekSky.Create(turbidity, HwSkyAlbedo, cookElev);
                     (double hr, double hg, double hb) = hwSkyState.Radiance(0.0, (Math.PI / 2.0) - cookElev);
                     double lumHw = (0.2126 * hr) + (0.7152 * hg) + (0.0722 * hb);
                     double lumLegacy = (0.2126 * zen.X) + (0.7152 * zen.Y) + (0.0722 * zen.Z);
@@ -6716,6 +6767,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
             hwSkyBlendFrame = hwBlend; // konsumuje blok uniformów terenu (ambient) w TEJ klatce
             gl.Uniform1(skyHwBlendLocation, hwBlend);
+            // Task #9: zaćmienie — stan z Atmosphere (efemeryda topocentryczna); poza zaćmieniem
+            // uEclObs=0 i gałąź w shaderze jest martwa (zaakceptowany wygląd tarczy bez zmian).
+            MapaTur.Application.Terrain.SolarEclipseState ecl = atmosphere.Eclipse;
+            gl.Uniform1(skyEclObsLocation, ecl.Obscuration);
+            if (ecl.Obscuration > 0f)
+            {
+                gl.Uniform3(skyEclMoonDirLocation, ecl.MoonDirection.X, ecl.MoonDirection.Y, ecl.MoonDirection.Z);
+                gl.Uniform1(skyEclSunRLocation, ecl.SunAngularRadiusRadians);
+                gl.Uniform1(skyEclMoonRLocation, ecl.MoonAngularRadiusRadians);
+            }
+
             gl.BindVertexArray(skyVao);
             gl.DrawArrays(PrimitiveType.Triangles, 0, 3);
             gl.BindVertexArray(0);
@@ -7024,7 +7086,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         float fogInvH = HeightFogEnabled
             ? 1f / ((float)MapaTur.Application.Terrain.HeightFog.ScaleHeightMeters * fogExag)
             : 0f;
-        Vector3 fogSunColor = atmosphere?.FogSunColor ?? fogColor;
+        Vector3 fogSunColor = KillFx.Contains("inscatter") ? fogColor : (atmosphere?.FogSunColor ?? fogColor);
         gl.Uniform1(terrainFogRefZLocation, fogRefZ);
         gl.Uniform1(terrainFogInvHLocation, fogInvH);
         gl.Uniform1(terrainFogCamZLocation, cameraWorldPos.Z);
@@ -7653,6 +7715,17 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         float godrayIntensity = (animateAtmosphere && sunVisible && atmosphere is not null) ? atmosphere.SunGlowIntensity * 1.3f : 0f;
         float bloomIntensity = animateAtmosphere ? (atmosphere?.BloomIntensity ?? 0f) : 0f;
         float bloomThreshold = atmosphere?.BloomThreshold ?? 1f;
+        // Bisekcja artefaktów pod-słońce (08-13, „poziomice zamiast promieni"): MAPATUR_KILL_FX
+        // wyłącza pojedyncze efekty, żeby JEDNYM biegiem wskazać winny pass. Tylko diagnostyka.
+        if (KillFx.Contains("godray"))
+        {
+            godrayIntensity = 0f;
+        }
+
+        if (KillFx.Contains("bloom"))
+        {
+            bloomIntensity = 0f;
+        }
         // Dragon fire must glow — force bloom on (day OR night, where it's normally gated off). On the HDR
         // chain the white-hot core carries real > 1 energy, so it clears the atmosphere's own threshold
         // honestly; only the LDR fallback (core clamped at 1.0) still needs the threshold dropped under it.
@@ -10098,6 +10171,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         skyHwRadLocation = g.GetUniformLocation(skyProgram, "uHwRad");
         skyHwExposureLocation = g.GetUniformLocation(skyProgram, "uHwExposure");
         skyHwBlendLocation = g.GetUniformLocation(skyProgram, "uHwBlend");
+        skyEclMoonDirLocation = g.GetUniformLocation(skyProgram, "uEclMoonDir");
+        skyEclSunRLocation = g.GetUniformLocation(skyProgram, "uEclSunR");
+        skyEclMoonRLocation = g.GetUniformLocation(skyProgram, "uEclMoonR");
+        skyEclObsLocation = g.GetUniformLocation(skyProgram, "uEclObs");
 
         // Fullscreen triangle: 3 vertices, each xy in clip space, covering NDC [-1,1]^2 with one extra
         // vertex outside the rect so the rasteriser fills the full screen without re-clipping a quad.

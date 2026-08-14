@@ -216,7 +216,14 @@ public sealed class Atmosphere
         // In-scatter kierunkowy (task #4): siła tintu rośnie przy niskim słońcu (warmth niesie już
         // bramkę zmierzchu cywilnego, więc noc → 0 → FogSunColor == FogColor i mix w shaderze znika).
         // W dzień delikatna składowa od dayness — nawet wysokie słońce lekko rozświetla mgłę od swojej strony.
-        float inscatterStrength = MathF.Min(1f, (0.25f * dayness) + (0.75f * warmth));
+        // Task #9 część 2: taper toru „pod-słońce" poniżej 2° elewacji (kwadrat: 1°→25%, 0,5°→6%).
+        // Bez niego in-scatter + glow przepalały kadr do bieli patrząc pod słońce (zmierzone 08-13:
+        // 38% klatki >248 lum przy ~1°) i tarcza zachodu/zaćmienia nie miała prawa czytać. Przy ≥2°
+        // czynnik = 1 co do bitu — zaakceptowany golden hour (werdykty ~3-4°) nietknięty.
+        float lowSunVeil = sunElevation > 0f
+            ? MathF.Min(1f, (sunElevation / 0.0349f) * (sunElevation / 0.0349f))
+            : 1f;
+        float inscatterStrength = MathF.Min(1f, (0.25f * dayness) + (0.75f * warmth)) * lowSunVeil;
         FogSunColor = Vector3.Lerp(FogColor, sunDay, inscatterStrength);
 
         // Forward-scatter glow ("poświata pod słońcem"): the warm bloom that swells around and under the
@@ -227,7 +234,7 @@ public sealed class Atmosphere
         float horizonProximity = sunElevation > 0f
             ? Math.Clamp(1f - (sunElevation / glowMaxElevationRadians), 0f, 1f)
             : 0f;
-        SunGlowIntensity = horizonProximity;
+        SunGlowIntensity = horizonProximity * lowSunVeil; // taper <2° — patrz komentarz przy lowSunVeil
         SunGlowWidth = sunElevation > 0f ? 0.15f + (0.85f * horizonProximity) : 0f;
 
         // Bloom (screen-space bright-region bleed): strongest at golden hour (low intense sun + luminous
