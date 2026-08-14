@@ -863,6 +863,10 @@ Krok po kroku (wszystko OFFLINE, bez blokady; stan po = 65 691 kafli det25):
 #    rozmiar, dane nie doleciały). Usunięte + refetch bboxem pasa + dekod-weryfikacja 48/48.
 #    UWAGA: refetch łatki NADPISUJE manifest.json regionem łatki — przywrócić pełny region ręcznie.
 python testdata/maps/harmonize-sk-ortho.py --level sk25 --workers 10        # 2. ~15 min, q90 (jak sk05)
+#    Opcja --cols i0:i1 (dodana 08-04 przy rozszerzeniu Rohaczy): ogranicza APLIKACJĘ do zakresu
+#    kolumn, ale pole parametrów liczy się nadal z CAŁEJ warstwy — wycinek z własną statystyką
+#    dostałby szew na granicy (anti-patchwork §C.10). Używać przy dociąganiu podregionu do
+#    istniejącej, już zharmonizowanej warstwy.
 python testdata/maps/verify-harm-tone.py --level sk25                        # 3. smoke-test tonu
 python testdata/maps/repair-zbgis-watermarks.py --level sk25 --pilot ... # 4a. kalibracja na podglądzie
 python testdata/maps/repair-zbgis-watermarks.py --level sk25 --write         # 4b. znaki wodne

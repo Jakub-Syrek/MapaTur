@@ -127,6 +127,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--level", required=True, choices=list(LEVELS))
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--cols", help="ogranicz APLIKACJE do zakresu kolumn i0:i1 (pole liczone nadal GLOBALNIE "
+                                   "— anti-szew §C.10). Bez tego przetwarza cala warstwe.")
     ap.add_argument("--workers", type=int, default=8)
     a = ap.parse_args()
     lv = LEVELS[a.level]
@@ -143,6 +145,14 @@ def main() -> None:
                 if f.endswith(".webp"):
                     tiles.append((int(d), int(f[:-5])))
     tiles.sort()
+    # Aplikacja moze byc zawezona do wycinka (np. jeden masyw), ale POLE parametrow zostaje liczone
+    # z CALEJ warstwy — inaczej wycinek dostalby wlasna statystyke i na jego granicy powstalby szew
+    # (anti-patchwork §C.10). Dlatego filtr dziala TYLKO na liscie do zapisu, nizej.
+    apply_only = None
+    if a.cols:
+        lo, hi = (int(x) for x in a.cols.split(":"))
+        apply_only = (lo, hi)
+        print(f"aplikacja ograniczona do kolumn {lo}..{hi}; pole nadal z calej warstwy")
     if a.limit:
         tiles = tiles[: a.limit]
     cells: dict[tuple[int, int], list[tuple[int, int]]] = {}
@@ -245,6 +255,10 @@ def main() -> None:
 
     ok = skip = err = 0
     t1 = time.time()
+    to_write = tiles if apply_only is None else [ij for ij in tiles if apply_only[0] <= ij[0] <= apply_only[1]]
+    if apply_only is not None:
+        print(f"do zapisu {len(to_write)} z {len(tiles)} kafli (pole policzone z calosci)")
+    tiles = to_write
     with ThreadPoolExecutor(max_workers=a.workers) as ex:
         futs = [ex.submit(apply_tile, ij) for ij in tiles]
         for k, f in enumerate(as_completed(futs), 1):
