@@ -953,10 +953,13 @@ WYPEŁNIENIE — decyzja pilotem (NIE zmieniać bez nowego pilota):
   niezamaskowane, dopasowanie tonu offsetem średniej, szew wtapiany rampą 8 px; fallback median,
   gdy żaden kandydat nie jest legalny.
 
-## §14. det25 PL = DERYWACJA z det05 (box 5×5) — usunięcie nalotów WMS (2026-08-26, WYKONANE)
+## §14. det25 PL = DERYWACJA z det05 (box 5×5) — usunięcie nalotów WMS (2026-08-26, ODEBRANE)
 
 Realizacja stałej zasady „warstwy zgrubne DERYWUJEMY z detalu, nie pobieramy osobno". Werdykt
 usera 08-26: „A pełny" (pełna derywacja na pokryciu det05, nie łatka lokalna).
+**WERDYKT WIZUALNY USERA 08-26 (po bake, w apce): „jest ok, szew przy Zakopanem nie przeszkadza"
+— stan ODEBRANY, nie cofać (zasada 19).** Szew granicy pokrycia = świadomie zaakceptowany koszt;
+domknie go przyszły fetch det05 regionu C + re-run `--write`.
 
 **DIAGNOZA (pomiar 08-25, próbka alpejska PLAN-ALPY §10):** det25 PL z WMS StandardResolution
 zawiera płaski, mleczno-niebieski rocznik: nad doliną Rybiego Potoku (schronisko MO, obie tafle;
