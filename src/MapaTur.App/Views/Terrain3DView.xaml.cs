@@ -385,8 +385,10 @@ public partial class Terrain3DView : ContentView
 
     private void ApplyControlsVisibility(bool visible)
     {
-        AltitudePad.IsVisible = visible;
-        PanTiltPad.IsVisible = visible;
+        // Pady Skia dziedziczą tę samą bramkę widoczności co XAML-owe (walk/dragon/ustawienia).
+        skiaPadsVisible = visible;
+        AltitudePad.IsVisible = visible && !UseSkiaPads;
+        PanTiltPad.IsVisible = visible && !UseSkiaPads;
     }
 
     /// <summary>
@@ -941,6 +943,13 @@ public partial class Terrain3DView : ContentView
         videoRecorder = new FlythroughRecorder(VideoRecorderFactory.Create(), () => recordClock.Elapsed.Ticks / 10L);
 #if WINDOWS
         Canvas.HandlerChanged += OnCanvasHandlerChanged;
+        if (UseSkiaPads)
+        {
+            // Pady rysuje Skia w powierzchni GL — XAML-owe schowane od PIERWSZEJ klatki, żeby kompozytor
+            // WinUI nigdy nie zaczął produkować dla nich powierzchni (rampa ~7 GB w 30 s od startu sceny).
+            AltitudePad.IsVisible = false;
+            PanTiltPad.IsVisible = false;
+        }
 #endif
 
         animationTimer = Dispatcher.CreateTimer();
@@ -1335,6 +1344,38 @@ public partial class Terrain3DView : ContentView
     private Action? heldAction;
     private IDispatcherTimer? holdTimer;
 
+    // ── Pady Skia (task #8, 2026-08-26): na Windows XAML-owe AltitudePad/PanTiltPad nałożone na
+    // SwapChainPanel pompują powierzchnie kompozycji WinUI w dedicated VRAM (~90% pełzania gpuDed —
+    // ślad ETW VidMm + bieg CHROME=0, docs/HANDOFF-2026-08-26-task8-xaml-pady-werdykt.md), więc pady
+    // są rysowane Skią WEWNĄTRZ powierzchni GL, a XAML-owe zostają ukryte. MAPATUR_XAML_PADS=1 wraca
+    // do padów XAML (fallback / A/B pomiarowe). Inne platformy: XAML bez zmian (problemu nie mają).
+    private static readonly bool UseSkiaPads = OperatingSystem.IsWindows()
+        && Environment.GetEnvironmentVariable("MAPATUR_XAML_PADS") != "1";
+
+    private bool skiaPadsVisible = true;
+    private IReadOnlyList<CameraPadButton> skiaPadLayout = [];
+#pragma warning disable IDE0044 // pisane tylko w gałęzi #if WINDOWS (handlery wskaźnika) — na innych TFM analizator widzi je jako stałe
+    private CameraPadAction? skiaPadPressed;
+    private bool skiaPadPointerHeld;
+#pragma warning restore IDE0044
+
+    // Jedno źródło mapowania akcja→ruch kamery dla OBU frontendów padów (XAML i Skia).
+    private void StartPadAction(CameraPadAction action) => StartHold(action switch
+    {
+        CameraPadAction.Raise => () => controller.ApplyVertical(ButtonVerticalStep),
+        CameraPadAction.Lower => () => controller.ApplyVertical(-ButtonVerticalStep),
+        CameraPadAction.PanForward => () => controller.ApplyPan(0f, ButtonPanStep),
+        CameraPadAction.PanBack => () => controller.ApplyPan(0f, -ButtonPanStep),
+        CameraPadAction.PanLeft => () => controller.ApplyPan(-ButtonPanStep, 0f),
+        CameraPadAction.PanRight => () => controller.ApplyPan(ButtonPanStep, 0f),
+        CameraPadAction.RotateLeftSlow => () => controller.ApplyLookAround(-SlowRotateStep, 0f),
+        CameraPadAction.RotateRightSlow => () => controller.ApplyLookAround(SlowRotateStep, 0f),
+        CameraPadAction.LookUp => () => controller.ApplyLookAround(0f, -ButtonTiltStep),
+        CameraPadAction.LookDown => () => controller.ApplyLookAround(0f, ButtonTiltStep),
+        _ => () => { }
+        ,
+    });
+
     private void StartHold(Action mutate)
     {
         StopFlight(); // any manual camera control cancels an in-progress fly-through
@@ -1376,9 +1417,9 @@ public partial class Terrain3DView : ContentView
     // translate the camera.
     private const float SlowRotateStep = 5f;
 
-    private void OnRotateLeftSlowClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyLookAround(-SlowRotateStep, 0f));
+    private void OnRotateLeftSlowClicked(object? sender, EventArgs e) => StartPadAction(CameraPadAction.RotateLeftSlow);
 
-    private void OnRotateRightSlowClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyLookAround(SlowRotateStep, 0f));
+    private void OnRotateRightSlowClicked(object? sender, EventArgs e) => StartPadAction(CameraPadAction.RotateRightSlow);
 
     private void OnRotateLeftClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyOrbit(-ButtonOrbitStep, 0f));
 
@@ -1392,18 +1433,18 @@ public partial class Terrain3DView : ContentView
     //  • Look down at the terrain = tilt the gaze down (positive pitch step).
     // ApplyLookAround clamps to LookAroundMinPitchRadians..MaxPitch — wide enough to look well
     // above the horizon at the sky/clouds without the camera ever moving.
-    private void OnLookUpClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyLookAround(0f, -ButtonTiltStep));
+    private void OnLookUpClicked(object? sender, EventArgs e) => StartPadAction(CameraPadAction.LookUp);
 
-    private void OnLookDownClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyLookAround(0f, ButtonTiltStep));
+    private void OnLookDownClicked(object? sender, EventArgs e) => StartPadAction(CameraPadAction.LookDown);
 
     // Pan ▲ moves the focus forward (into the scene), ▼ pulls it back toward the camera.
-    private void OnPanUpClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyPan(0f, ButtonPanStep));
+    private void OnPanUpClicked(object? sender, EventArgs e) => StartPadAction(CameraPadAction.PanForward);
 
-    private void OnPanDownClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyPan(0f, -ButtonPanStep));
+    private void OnPanDownClicked(object? sender, EventArgs e) => StartPadAction(CameraPadAction.PanBack);
 
-    private void OnPanLeftClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyPan(-ButtonPanStep, 0f));
+    private void OnPanLeftClicked(object? sender, EventArgs e) => StartPadAction(CameraPadAction.PanLeft);
 
-    private void OnPanRightClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyPan(ButtonPanStep, 0f));
+    private void OnPanRightClicked(object? sender, EventArgs e) => StartPadAction(CameraPadAction.PanRight);
 
     private void OnZoomInClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyZoom(ButtonZoomFactor));
 
@@ -1413,9 +1454,9 @@ public partial class Terrain3DView : ContentView
     // regardless of camera pitch. The earlier tilt mapping was confusing — users expect "up"
     // to lift the camera straight up. ApplyVertical clamps Target.Z to [-2000, 8000] m so a
     // runaway click can't push the target off the mesh and turn the view into pure sky.
-    private void OnRaiseClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyVertical(ButtonVerticalStep));
+    private void OnRaiseClicked(object? sender, EventArgs e) => StartPadAction(CameraPadAction.Raise);
 
-    private void OnLowerClicked(object? sender, EventArgs e) => StartHold(() => controller.ApplyVertical(-ButtonVerticalStep));
+    private void OnLowerClicked(object? sender, EventArgs e) => StartPadAction(CameraPadAction.Lower);
 
     /// <summary>
     /// Points the camera at a world-space target from a given distance, preserving the current
@@ -1942,8 +1983,9 @@ public partial class Terrain3DView : ContentView
     // the screen. The host page hides its toolbar + sliders off the IsFlying bind.
     private void SetChromeVisible(bool visible)
     {
-        AltitudePad.IsVisible = visible;
-        PanTiltPad.IsVisible = visible;
+        skiaPadsVisible = visible;
+        AltitudePad.IsVisible = visible && !UseSkiaPads;
+        PanTiltPad.IsVisible = visible && !UseSkiaPads;
     }
 
     // Opens the route-film start gate: the start-area detail has built (or the safety cap elapsed), so start the
@@ -5878,6 +5920,7 @@ public partial class Terrain3DView : ContentView
             DrawClimbingRouteLabels(canvas, e.Info.Width, e.Info.Height);
             DrawClimbCalibrationLabels(canvas, e.Info.Width, e.Info.Height);
             DrawDragon(canvas, e.Info.Width, e.Info.Height);
+            DrawCameraPads(canvas, e.Info.Width, e.Info.Height);
             if (dragonActive)
             {
                 long perfT3 = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -5927,9 +5970,73 @@ public partial class Terrain3DView : ContentView
         DrawNightLights(canvas, projectedPois);
         DrawWalkViewmodel(canvas, e.Info.Width, e.Info.Height);
         DrawDragon(canvas, e.Info.Width, e.Info.Height);
+        DrawCameraPads(canvas, e.Info.Width, e.Info.Height);
         ServiceRecording(e);
         ServiceTestHarness(e, frame);
     }
+
+    // Rysuje pady kamery wprost w powierzchni Skia/GL (Windows; patrz komentarz przy UseSkiaPads).
+    // Odtwarza styl Cam3DButton: koło #C0202830 z obwódką #90FFFFFF, glif biały bold, spoczynkowa
+    // przezroczystość 0,35 „materializująca się" do 1,0 przy trzymaniu. Layout liczy czysta
+    // CameraPadOverlay (unit-testy geometrii i hit-testu).
+    private void DrawCameraPads(SKCanvas canvas, int widthPx, int heightPx)
+    {
+        if (!UseSkiaPads || !skiaPadsVisible)
+        {
+            return;
+        }
+
+        float scale = Canvas.Width > 0 ? (float)(widthPx / Canvas.Width) : 1f;
+        skiaPadLayout = CameraPadOverlay.Layout(widthPx, heightPx, scale);
+
+        padFillPaint ??= new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill };
+        padBorderPaint ??= new SKPaint { IsAntialias = true, Style = SKPaintStyle.Stroke };
+        padGlyphPaint ??= new SKPaint { IsAntialias = true };
+        padGlyphFont ??= new SKFont(SKTypeface.Default) { Embolden = true };
+        padBorderPaint.StrokeWidth = Math.Max(1f, scale);
+
+        foreach (CameraPadButton b in skiaPadLayout)
+        {
+            float opacity = b.Action == skiaPadPressed ? CameraPadOverlay.PressedOpacity : CameraPadOverlay.IdleOpacity;
+            float r = b.Size / 2f;
+            float cx = b.X + r;
+            float cy = b.Y + r;
+
+            padFillPaint.Color = new SKColor(0x20, 0x28, 0x30, (byte)(0xC0 * opacity));
+            padBorderPaint.Color = new SKColor(0xFF, 0xFF, 0xFF, (byte)(0x90 * opacity));
+            canvas.DrawCircle(cx, cy, r, padFillPaint);
+            canvas.DrawCircle(cx, cy, r - (padBorderPaint.StrokeWidth / 2f), padBorderPaint);
+
+            // Rozmiar fontu jak w XAML: 20 dla dużych, 15 dla małych (tilt), przeskalowany do px.
+            bool small = b.Size < CameraPadOverlay.ButtonDip * scale;
+            padGlyphFont.Size = (small ? 15f : 20f) * scale;
+            padGlyphPaint.Color = new SKColor(0xFF, 0xFF, 0xFF, (byte)(0xFF * opacity));
+
+            // Glify strzałek mogą leżeć poza fontem domyślnym — dobierz typeface per znak (cache).
+            int codepoint = char.ConvertToUtf32(b.Glyph, 0);
+            if (!padGlyphTypefaces.TryGetValue(codepoint, out SKTypeface? face))
+            {
+                face = SKFontManager.Default.MatchCharacter(codepoint) ?? SKTypeface.Default;
+                padGlyphTypefaces[codepoint] = face;
+            }
+
+            padGlyphFont.Typeface = face;
+            padGlyphFont.MeasureText(b.Glyph, out SKRect glyphBounds);
+            canvas.DrawText(
+                b.Glyph,
+                cx - glyphBounds.MidX,
+                cy - glyphBounds.MidY,
+                SKTextAlign.Left,
+                padGlyphFont,
+                padGlyphPaint);
+        }
+    }
+
+    private SKPaint? padFillPaint;
+    private SKPaint? padBorderPaint;
+    private SKPaint? padGlyphPaint;
+    private SKFont? padGlyphFont;
+    private readonly Dictionary<int, SKTypeface> padGlyphTypefaces = [];
 
     // ── TEST HARNESS (2026-07-24, na prośbę usera): deterministyczne testy bez rąk na klawiaturze ──
     // MAPATUR_START_POSE="tx;ty;tz;dist;az;pitch" — start w dokładnej pozie (format pinned-camera);
@@ -6129,6 +6236,9 @@ public partial class Terrain3DView : ContentView
         if (harnessLastShotMs == 0)
         {
             harnessLastShotMs = nowMs; // pierwsza fotka dopiero po pełnym interwale (nie ekran ładowania)
+            // Jednorazowa diagnostyka konfiguracji autoshota (2026-08-26: zrzuty przestały powstawać
+            // mimo ustawionych env — ta linia rozstrzyga, czy proces w ogóle je widzi).
+            Serilog.Log.Information("[Harness] autoshot cfg: dir={Dir} sec={Sec}", HarnessShotDir ?? "(null)", HarnessAutoshotSec);
         }
 
         bool due = HarnessAutoshotSec > 0 && nowMs - harnessLastShotMs >= HarnessAutoshotSec * 1000.0;
@@ -7175,6 +7285,24 @@ public partial class Terrain3DView : ContentView
 
         var props = e.GetCurrentPoint(element).Properties;
 
+        // Pady Skia: trafienie w przycisk pada konsumuje wciśnięcie (jak dawniej XAML-owy Button nad
+        // canvasem) — trzymanie jedzie przez ten sam StartHold/holdTimer, zwolnienie w PointerReleased.
+        if (UseSkiaPads && skiaPadsVisible && props.IsLeftButtonPressed && skiaPadLayout.Count > 0)
+        {
+            var padPoint = e.GetCurrentPoint(element).Position;
+            float padScale = Canvas.Width > 0 ? (float)(Canvas.CanvasSize.Width / Canvas.Width) : 1f;
+            if (CameraPadOverlay.HitTest(skiaPadLayout, (float)padPoint.X * padScale, (float)padPoint.Y * padScale) is { } padHit)
+            {
+                skiaPadPressed = padHit;
+                skiaPadPointerHeld = true;
+                StartPadAction(padHit);
+                element.CapturePointer(e.Pointer);
+                e.Handled = true;
+                Canvas.InvalidateSurface();
+                return;
+            }
+        }
+
         // Dragon flight: RIGHT-drag steers (yaw + pitch). Capture so the moves flow even off the canvas.
         if (dragonActive)
         {
@@ -7392,6 +7520,16 @@ public partial class Terrain3DView : ContentView
     {
         var released = (Microsoft.UI.Xaml.UIElement)sender;
         var relProps = e.GetCurrentPoint(released).Properties;
+
+        // Pad Skia trzymany: koniec trzymania = stop akcji ciągłej (odpowiednik XAML Released).
+        if (skiaPadPointerHeld && !relProps.IsLeftButtonPressed)
+        {
+            skiaPadPointerHeld = false;
+            skiaPadPressed = null;
+            OnPadReleased(sender, EventArgs.Empty);
+            released.ReleasePointerCapture(e.Pointer);
+            Canvas.InvalidateSurface();
+        }
 
         // Only drop the hold whose button actually came up (RMB = free-look; LMB is free since the
         // legacy ciupaga swing/hold retired with the hold-by-hold climbing takeover).
