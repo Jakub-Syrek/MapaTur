@@ -1,10 +1,8 @@
 <Project>
-
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
     <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
   </PropertyGroup>
-
   <ItemGroup>
     <!-- Map and geometry -->
     <PackageVersion Include="Mapsui" Version="5.0.2" />
@@ -12,21 +10,18 @@
     <PackageVersion Include="Mapsui.Nts" Version="5.0.2" />
     <PackageVersion Include="BruTile" Version="6.0.0" />
     <PackageVersion Include="BruTile.MbTiles" Version="6.0.0" />
+    <PackageVersion Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="3.2.6" />
     <PackageVersion Include="NetTopologySuite" Version="2.6.0" />
     <PackageVersion Include="SkiaSharp" Version="3.119.4" />
     <PackageVersion Include="SkiaSharp.Views.Maui.Controls" Version="3.119.4" />
-
     <!-- GPU 3D engine (Windows): raw OpenGL ES bindings rendered on the SKGLView context. -->
     <PackageVersion Include="Silk.NET.OpenGLES" Version="2.22.0" />
-
     <!-- glTF import + runtime animation for the ridden dragon (rigged/skinned model). MIT. -->
     <PackageVersion Include="SharpGLTF.Core" Version="1.0.6" />
     <PackageVersion Include="SharpGLTF.Runtime" Version="1.0.6" />
-
     <!-- Storage -->
     <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.0" />
     <PackageVersion Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
-
     <!-- DI / Logging / Config -->
     <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="10.0.0" />
     <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
@@ -35,21 +30,16 @@
     <PackageVersion Include="Serilog" Version="4.2.0" />
     <PackageVersion Include="Serilog.Extensions.Logging" Version="9.0.0" />
     <PackageVersion Include="Serilog.Sinks.File" Version="6.0.0" />
-
     <!-- Kompresja stron .opk (ARCHITEKTURA-STREAMING: .opk → zstd → chain-buffer) -->
     <PackageVersion Include="ZstdSharp.Port" Version="0.8.6" />
-
     <!-- MVVM -->
     <PackageVersion Include="CommunityToolkit.Mvvm" Version="8.4.0" />
-
     <!-- MAUI -->
     <PackageVersion Include="Microsoft.Maui.Controls" Version="$(MauiVersion)" />
     <PackageVersion Include="Microsoft.Extensions.Logging.Debug" Version="10.0.0" />
-
     <!-- Analyzers -->
     <PackageVersion Include="Microsoft.CodeAnalysis.NetAnalyzers" Version="9.0.0" />
     <PackageVersion Include="Roslynator.Analyzers" Version="4.12.10" />
-
     <!-- Test -->
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageVersion Include="xunit" Version="2.9.3" />
@@ -60,5 +50,4 @@
     <PackageVersion Include="coverlet.collector" Version="6.0.4" />
     <PackageVersion Include="coverlet.msbuild" Version="6.0.4" />
   </ItemGroup>
-
 </Project>
