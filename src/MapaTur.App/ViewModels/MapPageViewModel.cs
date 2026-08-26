@@ -39,10 +39,10 @@ namespace MapaTur.App.ViewModels;
 /// </summary>
 public sealed partial class MapPageViewModel : ObservableObject
 {
-    // Default starting viewport: Polish Tatras (Kasprowy Wierch region).
-    private const double DefaultCenterLongitude = 19.9819;
-    private const double DefaultCenterLatitude = 49.2326;
-    private const double DefaultResolution = 152.0; // ~ zoom level 10 in Spherical Mercator
+    // Default starting viewport z rejestru regionów (P-A): Kasprowy Wierch dla wpisu "tatry".
+    private static readonly double DefaultCenterLongitude = MapaTur.Domain.Regions.MountainRegions.Default.MapStart.Longitude;
+    private static readonly double DefaultCenterLatitude = MapaTur.Domain.Regions.MountainRegions.Default.MapStart.Latitude;
+    private static readonly double DefaultResolution = MapaTur.Domain.Regions.MountainRegions.Default.MapStart.Resolution; // ~ zoom level 10 in Spherical Mercator
 
     private readonly IFilePickerService filePicker;
     private readonly IFileSaverService fileSaver;
@@ -5712,8 +5712,7 @@ public sealed partial class MapPageViewModel : ObservableObject
     // The high Tatra massif + its trailhead parkings (Brzeziny, Kuźnice, Kiry, Palenica, Łysa Polana,
     // Štrbské, Tatranská Lomnica) on both sides of the border — the meaningful "around the Tatras" area
     // for a hiker, minus the foothill towns that turn a viewport download into thousands of features.
-    private static readonly MapBounds TatraCoreRegion = new(
-        new GeoPoint(49.08, 19.78), new GeoPoint(49.32, 20.35));
+    private static MapBounds TatraCoreRegion => MapaTur.Domain.Regions.MountainRegions.Default.PoiCoreBounds; // P-A: alias wpisu rejestru
 
     private MRect? GetCurrentExtent()
     {

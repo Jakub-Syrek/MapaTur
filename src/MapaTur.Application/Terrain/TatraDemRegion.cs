@@ -1,4 +1,5 @@
 using MapaTur.Domain.Geography;
+using MapaTur.Domain.Regions;
 
 namespace MapaTur.Application.Terrain;
 
@@ -12,16 +13,17 @@ namespace MapaTur.Application.Terrain;
 /// </summary>
 public static class TatraDemRegion
 {
+    // P-A (rejestr regionów): fasada nad wpisem "tatry" — wartości pinuje MountainRegionsTests,
+    // call-sites zostały nietknięte. Nowy kod czyta MountainRegions.Default.DemLoad wprost.
     /// <summary>High Tatra core (~3.1 × 2.7 km), south edge just north of the border.</summary>
-    public static MapBounds Bounds { get; } =
-        new(new GeoPoint(49.183, 20.050), new GeoPoint(49.207, 20.093));
+    public static MapBounds Bounds => MountainRegions.Tatry.DemLoad.Bounds;
 
     /// <summary>Tile budget. 76 × 256² ≈ 4.98 M ≤ the 5 M Android vertex cap ⇒ the renderer never decimates.</summary>
-    public const int MaxTiles = 76;
+    public static int MaxTiles => MountainRegions.Tatry.DemLoad.MaxTiles;
 
     /// <summary>Lowest fallback zoom if even it overflows the budget (a far coarser, smaller mesh).</summary>
-    public const int MinZoom = 11;
+    public static int MinZoom => MountainRegions.Tatry.DemLoad.MinZoom;
 
     /// <summary>Highest zoom; z16 ≈ 1.5 m/px at 49° N, the closest tier to GUGiK's native 1 m.</summary>
-    public const int MaxZoom = 16;
+    public static int MaxZoom => MountainRegions.Tatry.DemLoad.MaxZoom;
 }

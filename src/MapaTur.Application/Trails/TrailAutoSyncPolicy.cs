@@ -21,7 +21,7 @@ public static class TrailAutoSyncPolicy
     /// Region C = 19.50,49.10 → 20.40,49.40 — zasięg naszej mapy (ten sam box co cel „całe Tatry 5 cm").
     /// Jeden box zamiast kadru widoku: to kadry-wycinki gubiły łączniki (żleb, Rohacze).
     /// </summary>
-    public static readonly MapBounds TatraBounds = new(new GeoPoint(49.10, 19.50), new GeoPoint(49.40, 20.40));
+    public static MapBounds TatraBounds => Domain.Regions.MountainRegions.Tatry.TrailSyncBounds; // P-A: alias wpisu rejestru
 
     /// <summary>Czy przy tym starcie należy dociągnąć szlaki (nigdy nie było syncu / za stary / zegar cofnięty).</summary>
     public static bool ShouldSync(DateTime? lastSyncUtc, DateTime nowUtc)

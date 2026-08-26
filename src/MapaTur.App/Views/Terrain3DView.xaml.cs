@@ -9140,9 +9140,9 @@ public partial class Terrain3DView : ContentView
     private void SetupOrthoDetailStreaming(Services.Terrain3DGlRenderer renderer, IReadOnlyList<string>? basePaths)
     {
         string? demDir = basePaths is { Count: > 0 } ? System.IO.Path.GetDirectoryName(basePaths[0]) : null;
-        string? root = demDir is null ? null : System.IO.Path.Combine(demDir, "ortho-detail", "tatry");
+        string? root = demDir is null ? null : System.IO.Path.Combine(demDir, "ortho-detail", MapaTur.Domain.Regions.MountainRegions.Default.DetailLattice.PathSegment);
         string fallbackRoot = System.IO.Path.Combine(
-            Microsoft.Maui.Storage.FileSystem.AppDataDirectory, "dem", "ortho-detail", "tatry");
+            Microsoft.Maui.Storage.FileSystem.AppDataDirectory, "dem", "ortho-detail", MapaTur.Domain.Regions.MountainRegions.Default.DetailLattice.PathSegment);
         if (root is null || !System.IO.File.Exists(System.IO.Path.Combine(root, "opk", "det25", "index.bin")))
         {
             root = fallbackRoot;
@@ -9170,9 +9170,9 @@ public partial class Terrain3DView : ContentView
     private bool SetupDet05Streaming(Services.Terrain3DGlRenderer renderer, IReadOnlyList<string>? basePaths)
     {
         string? demDir = basePaths is { Count: > 0 } ? System.IO.Path.GetDirectoryName(basePaths[0]) : null;
-        string? root = demDir is null ? null : System.IO.Path.Combine(demDir, "ortho-detail", "tatry");
+        string? root = demDir is null ? null : System.IO.Path.Combine(demDir, "ortho-detail", MapaTur.Domain.Regions.MountainRegions.Default.DetailLattice.PathSegment);
         string fallbackRoot = System.IO.Path.Combine(
-            Microsoft.Maui.Storage.FileSystem.AppDataDirectory, "dem", "ortho-detail", "tatry");
+            Microsoft.Maui.Storage.FileSystem.AppDataDirectory, "dem", "ortho-detail", MapaTur.Domain.Regions.MountainRegions.Default.DetailLattice.PathSegment);
         if (root is null || !System.IO.File.Exists(System.IO.Path.Combine(root, "opk", "det05", "index.bin")))
         {
             root = fallbackRoot;

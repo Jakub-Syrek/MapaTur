@@ -10,10 +10,8 @@ namespace MapaTur.Domain.Trails;
 /// </summary>
 public static class KarpatRegions
 {
-    /// <summary>Polish + Slovak Tatry (Western + High).</summary>
-    public static MapBounds Tatry { get; } = new(
-        new GeoPoint(49.05, 19.55),
-        new GeoPoint(49.40, 20.30));
+    /// <summary>Polish + Slovak Tatry (Western + High). P-A: alias wpisu rejestru regionów.</summary>
+    public static MapBounds Tatry => Regions.MountainRegions.Tatry.TrailFilterBounds;
 
     /// <summary>Beskidy (Sląski + Żywiecki + Sądecki + Niski).</summary>
     public static MapBounds Beskidy { get; } = new(

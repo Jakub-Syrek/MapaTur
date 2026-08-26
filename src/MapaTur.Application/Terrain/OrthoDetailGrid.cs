@@ -21,14 +21,16 @@ namespace MapaTur.Application.Terrain;
 /// </summary>
 public sealed class OrthoDetailGrid
 {
+    // P-A (rejestr regionów): kotwice kraty sa danymi wpisu regionu — wartosci tatrzanskie pinuje
+    // MountainRegionsTests; duplikat kotwic w Terrain3DGlRenderer (~4565/4637) do unifikacji w P-A2.
     /// <summary>Lattice NW anchor longitude (west edge of the largest planned window, C). Matches the fetcher.</summary>
-    public const double GridLon0 = 19.50;
+    public static readonly double GridLon0 = Domain.Regions.MountainRegions.Default.DetailLattice.Lon0;
 
     /// <summary>Lattice NW anchor latitude (north edge). Matches the fetcher.</summary>
-    public const double GridLat0 = 49.40;
+    public static readonly double GridLat0 = Domain.Regions.MountainRegions.Default.DetailLattice.Lat0;
 
     /// <summary>Reference latitude that fixes the longitude pitch (tiles square in ground metres). Matches the fetcher.</summary>
-    public const double GridRefLat = 49.25;
+    public static readonly double GridRefLat = Domain.Regions.MountainRegions.Default.DetailLattice.RefLat;
 
     /// <summary>On-disk tile size in pixels.</summary>
     public const int TilePx = 512;

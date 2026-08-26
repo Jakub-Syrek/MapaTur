@@ -1,4 +1,5 @@
 using MapaTur.Domain.Geography;
+using MapaTur.Domain.Regions;
 
 namespace MapaTur.Application.Terrain;
 
@@ -11,16 +12,16 @@ namespace MapaTur.Application.Terrain;
 /// </summary>
 public static class TatraOfflineRegion
 {
+    // P-A (rejestr regionów): fasada nad wpisem "tatry" — wartości pinuje MountainRegionsTests.
     /// <summary>Whole Polish Tatras (~30 × 14 km), south edge at the border.</summary>
-    public static MapBounds Bounds { get; } =
-        new(new GeoPoint(49.17, 19.73), new GeoPoint(49.30, 20.15));
+    public static MapBounds Bounds => MountainRegions.Tatry.Offline.Bounds;
 
     /// <summary>Zoom for the offline pull; z16 ≈ 1.5 m/px at 49° N, the tier closest to GUGiK's native 1 m.</summary>
-    public const int DownloadZoom = 16;
+    public static int DownloadZoom => MountainRegions.Tatry.Offline.DownloadZoom;
 
     /// <summary>Rough on-disk size of one cached tile (256×256 float32 GeoTIFF) for a pre-download estimate.</summary>
-    public const long ApproxBytesPerTile = 256L * 256 * 4;
+    public static long ApproxBytesPerTile => MountainRegions.Tatry.Offline.ApproxBytesPerTile;
 
     /// <summary>Rough total download size in bytes for <paramref name="tileCount"/> tiles (UI warning).</summary>
-    public static long EstimatedBytes(int tileCount) => tileCount * ApproxBytesPerTile;
+    public static long EstimatedBytes(int tileCount) => MountainRegions.Tatry.Offline.EstimatedBytes(tileCount);
 }
