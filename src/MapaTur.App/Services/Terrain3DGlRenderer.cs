@@ -4591,7 +4591,6 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         var slices = new List<(int, int, byte[], ulong)>(idx.Cells.Count);
         int chainSize = MapaTur.Application.Terrain.Bc1MipChain.ByteSize(4096);
-        int level0 = MapaTur.Application.Terrain.Bc1Encoder.EncodedSize(4096, 4096);
         foreach (OrthoPackIndex.CellEntry c in idx.Cells)
         {
             using OrthoPagePack? pack = OrthoPagePack.Open(System.IO.Path.Combine(dir, $"{c.Ci}_{c.Cj}.opk"), 4096);
@@ -4601,35 +4600,18 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 continue;
             }
 
+            // Kompozycja przez Det1mChainComposer (2026-08-27): czytnik rozumie ogon kompaktowy L2↓
+            // (po migracji compact-tail) ORAZ legacy L1↓, a poziom 1 celi kafluje z mip1 stron —
+            // stara pętla zakładała wyłącznie L1↓ i po cichu odrzucała KAŻDĄ zmigrowaną celę
+            // (tailOk=false dla 87/87 → warstwa martwa bez logu).
             byte[] chain = new byte[chainSize];
-            ulong cov = 0;
-            bool tailOk = pack.TryReadPage(OrthoPagePack.TailPageId, out byte[] tail)
-                && tail.Length == chainSize - level0;
-            if (tailOk)
+            if (!MapaTur.Application.Terrain.Det1mChainComposer.TryCompose(pack, 4096, chain, out ulong cov))
             {
-                System.Buffer.BlockCopy(tail, 0, chain, level0, tail.Length);
+                Log.Warning("[Det1m] pakiet ({Pi},{Pj}) bez poprawnego ogona — pomijam (baza pokryje)", c.Ci, c.Cj);
+                continue;
             }
 
-            foreach (OrthoPagePack.Entry e in pack.Entries)
-            {
-                if (e.PageId == OrthoPagePack.TailPageId || !pack.TryReadPage(e.PageId, out byte[] page))
-                {
-                    continue; // strona zła/nieobecna → bit pokrycia zostaje 0 → shader pokazuje bazę
-                }
-
-                int lx = e.PageId / 8, ly = e.PageId % 8;
-                // Wklej mip0 strony (512² BC1 = 128×128 bloków) w level0 celi (1024×1024 bloków).
-                const int PageBlocks = 128, CellBlocks = 1024, RowBytes = PageBlocks * 8;
-                for (int row = 0; row < PageBlocks; row++)
-                {
-                    System.Buffer.BlockCopy(page, row * RowBytes, chain,
-                        (((((ly * PageBlocks) + row) * CellBlocks) + (lx * PageBlocks)) * 8), RowBytes);
-                }
-
-                cov |= 1UL << ((ly * 8) + lx);
-            }
-
-            if (cov != 0 && tailOk)
+            if (cov != 0)
             {
                 slices.Add((c.Ci, c.Cj, chain, cov));
             }
@@ -4637,6 +4619,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         if (slices.Count == 0)
         {
+            Log.Warning("[Det1m] {N} cel w indeksie, 0 zdatnych — warstwa wyłączona (baza pokrywa)", idx.Cells.Count);
             return null;
         }
 
@@ -4675,6 +4658,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             det1mLoaded = t.IsCompletedSuccessfully ? t.Result : null;
             if (det1mLoaded is null)
             {
+                if (t.Exception is not null)
+                {
+                    // 2026-08-27: fault taska ginął bezgłośnie — tak właśnie martwa warstwa det1m
+                    // przez tygodnie uchodziła za „działającą”. Każdy powód wyłączenia MUSI być w logu.
+                    Log.Error(t.Exception.GetBaseException(), "[Det1m] ładowanie padło wyjątkiem — warstwa wyłączona");
+                }
+
                 Det1mPackDir = null; // twardy fallback: warstwy nie ma, baza pokrywa — nie ponawiamy co klatkę
                 return;
             }
