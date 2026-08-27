@@ -29,4 +29,41 @@ public static class RegionFileSelection
 
         return first;
     }
+
+    /// <summary>
+    /// Filters ortho candidates for the active region: a file whose name starts with a REGISTERED
+    /// region id prefix ("{id}-") belongs to that region — other regions' files are excluded (the
+    /// first Zermatt light, 2026-08-27, draped the Tatra ortho set over Swiss terrain because the
+    /// sharpest-set contest was region-blind). Files matching NO registered region keep the historical
+    /// behaviour (custom-named installs stay draped).
+    /// </summary>
+    public static IReadOnlyList<string> FilterOrtho(
+        IEnumerable<string> candidates, string activeRegionId, IReadOnlyList<string> allRegionIds)
+    {
+        ArgumentNullException.ThrowIfNull(candidates);
+        ArgumentException.ThrowIfNullOrWhiteSpace(activeRegionId);
+        ArgumentNullException.ThrowIfNull(allRegionIds);
+
+        var kept = new List<string>();
+        foreach (string path in candidates)
+        {
+            string name = Path.GetFileName(path);
+            string? owner = null;
+            foreach (string id in allRegionIds)
+            {
+                if (name.StartsWith(id + "-", StringComparison.OrdinalIgnoreCase))
+                {
+                    owner = id;
+                    break;
+                }
+            }
+
+            if (owner is null || string.Equals(owner, activeRegionId, StringComparison.OrdinalIgnoreCase))
+            {
+                kept.Add(path);
+            }
+        }
+
+        return kept;
+    }
 }

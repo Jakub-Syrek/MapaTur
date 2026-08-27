@@ -100,7 +100,12 @@ public sealed class FileSystemMapAutoLoader : IMapAutoLoader
 
             if (orthoTexture is null)
             {
-                foreach (string path in EnumerateFilesSafe(root, "*.png").Concat(EnumerateFilesSafe(root, "*.jpg")))
+                // P-B: kandydaci orto filtrowani per-region (cudzy region odpada; nazwy „niczyje” zostaja).
+                IEnumerable<string> orthoCandidates = MapaTur.Application.Maps.RegionFileSelection.FilterOrtho(
+                    EnumerateFilesSafe(root, "*.png").Concat(EnumerateFilesSafe(root, "*.jpg")),
+                    MapaTur.Domain.Regions.MountainRegions.Default.Id,
+                    RegisteredRegionIds);
+                foreach (string path in orthoCandidates)
                 {
                     if (Path.GetFileName(path).Contains("ortho", StringComparison.OrdinalIgnoreCase))
                     {
@@ -130,6 +135,9 @@ public sealed class FileSystemMapAutoLoader : IMapAutoLoader
     // PNG header sniff; JPEG/unreadable falls back to file size) — NOT the first root probed. The offline
     // package flow extracts a mobile-resolution copy of the same set into maps/ (probed before dem/), which
     // used to silently shadow the full-resolution set and pixelate the 3D drape on desktop.
+    private static readonly IReadOnlyList<string> RegisteredRegionIds =
+        MapaTur.Domain.Regions.MountainRegions.All.Select(r => r.Id).ToList();
+
     private (IReadOnlyList<string> Paths, int Cols, int Rows) DiscoverOrthoTiles()
     {
         var pattern = new System.Text.RegularExpressions.Regex(
@@ -151,7 +159,10 @@ public sealed class FileSystemMapAutoLoader : IMapAutoLoader
             var byCell = new Dictionary<(int Row, int Col), string>();
             int maxRow = -1;
             int maxCol = -1;
-            foreach (string path in EnumerateFilesSafe(root, "*.png").Concat(EnumerateFilesSafe(root, "*.jpg")))
+            foreach (string path in MapaTur.Application.Maps.RegionFileSelection.FilterOrtho(
+                EnumerateFilesSafe(root, "*.png").Concat(EnumerateFilesSafe(root, "*.jpg")),
+                MapaTur.Domain.Regions.MountainRegions.Default.Id,
+                RegisteredRegionIds))
             {
                 var match = pattern.Match(Path.GetFileName(path));
                 if (!match.Success)

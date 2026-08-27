@@ -29,11 +29,50 @@ public static class MountainRegions
         DetailLattice: new RegionDetailLattice(Lon0: 19.50, Lat0: 49.40, RefLat: 49.25, PathSegment: "tatry"),
         DemCacheSubdir: "gugik");
 
-    /// <summary>The region the app boots into until region switching exists.</summary>
-    public static MountainRegion Default => Tatry;
+    /// <summary>
+    /// Zermatt/Matterhorn pilot (P-B, TILE-PRODUCTION-ALPY §A0): the window 7.58–7.88 E × 45.92–46.08 N
+    /// (~413 km²) fetched 2026-08-27 from swisstopo (DEM 0.5 m all-2024, ortho all-2023, vertical datum
+    /// measured orthometric — §A2). All five purpose-bboxes start IDENTICAL to the window (the Tatra
+    /// entry's five differing boxes grew historically; a new region starts from one). Data namespaces
+    /// are its own: <c>dem-cache/swisstopo</c>, detail pyramid segment <c>zermatt</c>, lattice anchored
+    /// at the window's NW corner with RefLat at its mid-latitude — never the Tatra lattice.
+    /// </summary>
+    public static MountainRegion Zermatt { get; } = CreateZermatt();
 
-    /// <summary>All registered regions, default first.</summary>
-    public static IReadOnlyList<MountainRegion> All { get; } = [Tatry];
+    /// <summary>The region the app boots into. Until product region switching lands (P-A3), the harness
+    /// env <c>MAPATUR_REGION</c> selects a non-default region for pilot runs; unknown/absent = Tatry.</summary>
+    public static MountainRegion Default { get; } =
+        ResolveDefault(Environment.GetEnvironmentVariable("MAPATUR_REGION")) ?? Tatry;
+
+    /// <summary>All registered regions, default-boot region first.</summary>
+    public static IReadOnlyList<MountainRegion> All { get; } = [Tatry, Zermatt];
+
+    /// <summary>Resolves the boot-region override value (case-insensitive id); null when unknown/absent.</summary>
+    public static MountainRegion? ResolveDefault(string? regionId)
+    {
+        if (string.IsNullOrWhiteSpace(regionId))
+        {
+            return null;
+        }
+
+        string id = regionId.Trim().ToLowerInvariant();
+        return id == Tatry.Id ? Tatry : id == Zermatt.Id ? Zermatt : null;
+    }
+
+    private static MountainRegion CreateZermatt()
+    {
+        var window = new MapBounds(new GeoPoint(45.92, 7.58), new GeoPoint(46.08, 7.88));
+        return new MountainRegion(
+            Id: "zermatt",
+            DemLoad: new RegionDemLoad(window, MaxTiles: 76, MinZoom: 11, MaxZoom: 16),
+            Offline: new RegionOfflineDownload(window, DownloadZoom: 16, ApproxBytesPerTile: 256L * 256 * 4),
+            TrailFilterBounds: window,
+            TrailSyncBounds: window,
+            PoiCoreBounds: window,
+            MapStart: new RegionMapStart(Latitude: 46.0207, Longitude: 7.7491, Resolution: 152.0),
+            DetailLattice: new RegionDetailLattice(Lon0: 7.58, Lat0: 46.08, RefLat: 46.0, PathSegment: "zermatt"),
+            DemCacheSubdir: "swisstopo");
+    }
 
     /// <summary>The region with the given <paramref name="id"/>, or null when unknown.</summary>
     public static MountainRegion? ById(string id)

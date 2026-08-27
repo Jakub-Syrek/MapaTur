@@ -43,4 +43,33 @@ public sealed class RegionFileSelectionTests
     {
         RegionFileSelection.PickDem([], "tatry").Should().BeNull();
     }
+
+    [Fact]
+    public void FilterOrtho_ExcludesOtherRegionsFiles()
+    {
+        // Zdrapowanie tatrzanskiego orto na Zermatt (pierwsze swiatlo P-B, 08-27) — pliki INNEGO
+        // zarejestrowanego regionu musza odpasc; brak wlasnych = brak orto (hipsometria), nie cudze.
+        string[] files = ["C:/m/tatry-ortho-r0-c0.png", "C:/m/tatry-ortho-r0-c1.png"];
+
+        RegionFileSelection.FilterOrtho(files, "zermatt", ["tatry", "zermatt"]).Should().BeEmpty();
+    }
+
+    [Fact]
+    public void FilterOrtho_KeepsActiveRegionsFiles()
+    {
+        string[] files = ["C:/m/tatry-ortho-r0-c0.png", "C:/m/zermatt-ortho-r0-c0.png"];
+
+        RegionFileSelection.FilterOrtho(files, "tatry", ["tatry", "zermatt"])
+            .Should().Equal("C:/m/tatry-ortho-r0-c0.png");
+    }
+
+    [Fact]
+    public void FilterOrtho_KeepsUnclaimedLegacyNames()
+    {
+        // Nazwa nienalezaca do zadnego zarejestrowanego regionu = stare zachowanie (custom instalacje).
+        string[] files = ["C:/m/moje-wlasne-ortho-r0-c0.png"];
+
+        RegionFileSelection.FilterOrtho(files, "zermatt", ["tatry", "zermatt"])
+            .Should().Equal("C:/m/moje-wlasne-ortho-r0-c0.png");
+    }
 }

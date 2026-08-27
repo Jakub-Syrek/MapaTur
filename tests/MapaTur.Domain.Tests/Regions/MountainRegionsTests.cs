@@ -94,12 +94,49 @@ public sealed class MountainRegionsTests
     public void ById_FindsTatryAndRejectsUnknown()
     {
         MountainRegions.ById("tatry").Should().BeSameAs(MountainRegions.Tatry);
-        MountainRegions.ById("zermatt").Should().BeNull();
+        MountainRegions.ById("zermatt").Should().BeSameAs(MountainRegions.Zermatt);
+        MountainRegions.ById("atlantyda").Should().BeNull();
     }
 
     [Fact]
-    public void All_ContainsOnlyTatryForNow()
+    public void All_ListsTatryFirstThenZermatt()
     {
-        MountainRegions.All.Should().ContainSingle().Which.Id.Should().Be("tatry");
+        MountainRegions.All.Select(r => r.Id).Should().Equal("tatry", "zermatt");
+    }
+
+    [Fact]
+    public void Zermatt_PinsPilotWindowAndOwnNamespaces()
+    {
+        MountainRegion z = MountainRegions.ById("zermatt")!;
+
+        // Okno pilota P-B (TILE-PRODUCTION-ALPY par.A0) — wszystkie bboxy celowo IDENTYCZNE na start
+        // (Tatry mialy piec roznych, bo narosly historycznie; Zermatt zaczyna od jednego okna).
+        var window = new MapBounds(new GeoPoint(45.92, 7.58), new GeoPoint(46.08, 7.88));
+        z.DemLoad.Bounds.Should().Be(window);
+        z.Offline.Bounds.Should().Be(window);
+        z.TrailFilterBounds.Should().Be(window);
+        z.TrailSyncBounds.Should().Be(window);
+        z.PoiCoreBounds.Should().Be(window);
+        // Wlasne przestrzenie nazw danych — NIGDY wspoldzielone z tatry:
+        z.DemCacheSubdir.Should().Be("swisstopo");
+        z.DetailLattice.PathSegment.Should().Be("zermatt");
+        // Kotwica kraty detali = NW naroznik okna, RefLat = srodek (wlasna krata, nie tatrzanska).
+        z.DetailLattice.Lon0.Should().Be(7.58);
+        z.DetailLattice.Lat0.Should().Be(46.08);
+        z.DetailLattice.RefLat.Should().Be(46.0);
+        // Start 2D: wies Zermatt.
+        z.MapStart.Latitude.Should().Be(46.0207);
+        z.MapStart.Longitude.Should().Be(7.7491);
+    }
+
+    [Fact]
+    public void Default_HonoursRegionEnvOverride()
+    {
+        // Harness P-B: MAPATUR_REGION=zermatt przelacza region bez UI (P-A3 dostarczy przelaczanie
+        // produktowe); nieznane id albo brak env = tatry (zero regresji).
+        MountainRegions.ResolveDefault("zermatt")!.Id.Should().Be("zermatt");
+        MountainRegions.ResolveDefault("TATRY")!.Id.Should().Be("tatry");
+        MountainRegions.ResolveDefault("atlantyda").Should().BeNull();
+        MountainRegions.ResolveDefault(null).Should().BeNull();
     }
 }
