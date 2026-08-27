@@ -571,6 +571,39 @@ public sealed class GugikNmtDemTileSourceTests : IDisposable
     private GugikNmtDemTileSource NewSource(StubHandler handler)
         => new(new HttpClient(handler), cacheDir);
 
+    [Fact]
+    public async Task GetTileAsync_CustomCoverage_GatesBySuppliedBoundsNotPoland()
+    {
+        // P-A2 (rejestr regionów): zasięg pokrycia jest własnością ŹRÓDŁA i parametrem konstruktora —
+        // źródło „szwajcarskie” musi odrzucać kafel warszawski bez żadnego callu HTTP, a przyjmować swój.
+        var handler = new StubHandler(_ => Ok(BuildTiff(2, 2, Quad)));
+        var swiss = new GugikNmtDemTileSource(
+            new HttpClient(handler), cacheDir, tileSize: 256,
+            coverage: new MapaTur.Domain.Geography.MapBounds(
+                new MapaTur.Domain.Geography.GeoPoint(45.8, 5.9), new MapaTur.Domain.Geography.GeoPoint(47.9, 10.5)));
+
+        DemRaster? warsaw = await swiss.GetTileAsync(InsidePoland);
+        // Kafel zuryski z10: lon ~8.4-8.8 (x=536), lat ~47.2-47.4 (y=358).
+        DemRaster? zurich = await swiss.GetTileAsync(new DemTileKey(10, 536, 358));
+
+        warsaw.Should().BeNull("Warszawa leży poza pokryciem źródła");
+        zurich.Should().NotBeNull();
+        handler.Calls.Should().ContainSingle("tylko kafel wewnątrz pokrycia wychodzi w sieć");
+    }
+
+    [Fact]
+    public async Task GetTileAsync_DefaultCoverage_StaysPoland()
+    {
+        // Bez parametru: dokładnie dotychczasowa bramka polska (zero regresji dla wpisu tatry).
+        var handler = new StubHandler(_ => Ok(BuildTiff(2, 2, Quad)));
+        var source = NewSource(handler);
+
+        DemRaster? outside = await source.GetTileAsync(OutsidePoland);
+
+        outside.Should().BeNull();
+        handler.Calls.Should().BeEmpty();
+    }
+
     private string ExpectedCachePath()
     {
         var inv = CultureInfo.InvariantCulture;

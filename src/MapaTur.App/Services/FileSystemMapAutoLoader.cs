@@ -80,11 +80,11 @@ public sealed class FileSystemMapAutoLoader : IMapAutoLoader
                 }
             }
 
-            foreach (string path in EnumerateFilesSafe(root, "*.dem"))
-            {
-                dem ??= path;
-                break;
-            }
+            // P-A2: wybór `.dem` per-region (preferuj {regionId}.dem, fallback = pierwszy — zachowanie
+            // historyczne dla instalacji z jednym regionem).
+            dem ??= MapaTur.Application.Maps.RegionFileSelection.PickDem(
+                EnumerateFilesSafe(root, "*.dem"),
+                MapaTur.Domain.Regions.MountainRegions.Default.Id);
 
             if (trailsData is null)
             {

@@ -309,10 +309,11 @@ public static class MauiProgram
             string cacheRoot = Path.Combine(FileSystem.AppDataDirectory, "dem-cache");
             // The cache can be SEEDED out-of-band (phone ↔ desktop tile copies), so log where this
             // process actually resolves it — a path mismatch here silently disables all 1 m detail.
-            Log.Information("GUGiK DEM cache root: {Root}", Path.Combine(cacheRoot, "gugik"));
+            string demCacheSubdir = MapaTur.Domain.Regions.MountainRegions.Default.DemCacheSubdir; // P-A2: alias wpisu "tatry" = "gugik"
+            Log.Information("GUGiK DEM cache root: {Root}", Path.Combine(cacheRoot, demCacheSubdir));
             return new GugikNmtDemTileSource(
                 httpFactory.CreateClient("dem-gugik"),
-                Path.Combine(cacheRoot, "gugik"),
+                Path.Combine(cacheRoot, demCacheSubdir),
                 tileSize: 256);
         });
         services.AddSingleton<IDemTileSource>(sp =>
@@ -364,7 +365,7 @@ public static class MauiProgram
             new FileInstalledPackageStore(Path.Combine(FileSystem.AppDataDirectory, "packages", "installed")));
         services.AddSingleton<IPackageContentExtractor>(_ =>
             new PackageContentExtractor(
-                Path.Combine(FileSystem.AppDataDirectory, "dem-cache", "gugik"),
+                Path.Combine(FileSystem.AppDataDirectory, "dem-cache", MapaTur.Domain.Regions.MountainRegions.Default.DemCacheSubdir),
                 Path.Combine(FileSystem.AppDataDirectory, "maps"),
                 Path.Combine(FileSystem.AppDataDirectory, "dem")));
         services.AddSingleton<IPackageCatalogSource>(sp =>

@@ -77,6 +77,11 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
     // Values are treated as immutable by all consumers (padding/upsampling only read them).
     private readonly MapaTur.Application.Terrain.LruCache<string, float[]> decodedGridCache = new(192);
 
+    private readonly double coverageWest;
+    private readonly double coverageEast;
+    private readonly double coverageSouth;
+    private readonly double coverageNorth;
+
     private readonly HttpClient httpClient;
     private readonly string cacheDirectory;
     private readonly string endpoint;
@@ -89,15 +94,24 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
     /// <param name="tileSize">Requested WCS grid width/height in pixels (default 256).</param>
     /// <param name="endpoint">WCS endpoint; defaults to <see cref="DefaultWcsEndpoint"/>.</param>
     /// <param name="coverageId">WCS coverage id; defaults to <see cref="DefaultCoverageId"/>.</param>
+    /// <param name="coverage">WGS84 extent the source claims to cover (region gate); null = the Poland default.</param>
     public GugikNmtDemTileSource(
         HttpClient httpClient,
         string cacheDirectory,
         int tileSize = 256,
         string? endpoint = null,
-        string? coverageId = null)
+        string? coverageId = null,
+        MapBounds? coverage = null)
     {
         ArgumentNullException.ThrowIfNull(httpClient);
         ArgumentException.ThrowIfNullOrWhiteSpace(cacheDirectory);
+
+        // P-A2 (rejestr regionów): zasięg pokrycia jest własnością ŹRÓDŁA (GUGiK pokrywa Polskę,
+        // swisstopo pokryje Szwajcarię) i można go podać parametrem; brak = dotychczasowy bbox Polski.
+        this.coverageWest = coverage?.SouthWest.Longitude ?? PolandWest;
+        this.coverageEast = coverage?.NorthEast.Longitude ?? PolandEast;
+        this.coverageSouth = coverage?.SouthWest.Latitude ?? PolandSouth;
+        this.coverageNorth = coverage?.NorthEast.Latitude ?? PolandNorth;
         if (tileSize < 2)
         {
             throw new ArgumentOutOfRangeException(nameof(tileSize), tileSize, "Tile size must be at least 2.");
@@ -119,7 +133,7 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
         var (west, south, east, north) = SlippyTileMath.TileBounds(key.X, key.Y, key.Zoom);
 
         // Region gate: GUGiK only covers Poland — bail out fast (no HTTP) elsewhere.
-        if (!IntersectsPoland(west, south, east, north))
+        if (!IntersectsCoverage(west, south, east, north))
         {
             return null;
         }
@@ -287,8 +301,9 @@ public sealed class GugikNmtDemTileSource : IDemTileSource
             this.cacheDirectory, key.Zoom.ToString(inv), key.X.ToString(inv), $"{key.Y.ToString(inv)}.tif");
     }
 
-    private static bool IntersectsPoland(double west, double south, double east, double north)
-        => !(east < PolandWest || west > PolandEast || north < PolandSouth || south > PolandNorth);
+    private bool IntersectsCoverage(double west, double south, double east, double north)
+        => !(east < this.coverageWest || west > this.coverageEast
+            || north < this.coverageSouth || south > this.coverageNorth);
 
     private static float[] SanitizeNoData(float[] samples)
     {
