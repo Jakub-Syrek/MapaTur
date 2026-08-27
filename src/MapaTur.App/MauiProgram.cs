@@ -311,10 +311,15 @@ public static class MauiProgram
             // process actually resolves it — a path mismatch here silently disables all 1 m detail.
             string demCacheSubdir = MapaTur.Domain.Regions.MountainRegions.Default.DemCacheSubdir; // P-A2: alias wpisu "tatry" = "gugik"
             Log.Information("GUGiK DEM cache root: {Root}", Path.Combine(cacheRoot, demCacheSubdir));
+            // P-B: dla regionu innego niz tatry zasieg zrodla = okno regionu (kafle spoza -> null ->
+            // composite spada na Terrarium); kafle W oknie serwuje seedowany cache dem-cache/{subdir},
+            // a rzadki miss odpytuje WCS GUGiK, ktory dla wspolrzednych CH grzecznie zawiedzie -> null.
+            var bootRegion = MapaTur.Domain.Regions.MountainRegions.Default;
             return new GugikNmtDemTileSource(
                 httpFactory.CreateClient("dem-gugik"),
                 Path.Combine(cacheRoot, demCacheSubdir),
-                tileSize: 256);
+                tileSize: 256,
+                coverage: bootRegion.Id == "tatry" ? null : bootRegion.DemLoad.Bounds);
         });
         services.AddSingleton<IDemTileSource>(sp =>
         {

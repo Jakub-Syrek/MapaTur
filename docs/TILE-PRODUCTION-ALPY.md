@@ -47,9 +47,23 @@ LN02 4477,5 → **różnica 0,16 m** ⇒ wysokości swissALTI3D są ORTOMETRYCZN
 elipsoidy (+~50 m w Valais). Wartości idą do pipeline'u BEZ korekty pionowej (jak GUGiK).
 Lekcja SK (INSPIRE = elipsoida +43 m) odrobiona pomiarem przed integracją, nie po.
 
-## §A3+ (DO ZROBIENIA, kolejno)
+## §A3. Baza LOD: `testdata/maps/generate-zermatt-dem.py` (2026-08-27)
 
-- Reprojekcja/warp EPSG:2056 → 3857 (bez korekty pionowej — §A2).
+`dem/zermatt.dem` (kontener DEM1 jak tatry.dem): mean-pool ×50 kafli LV95 → mozaika 25 m → bilinear
+na siatkę WGS84 774×595 @~30 m. Weryfikacja: max 4613 (grań Dufourspitze), NoData 10,3 % = włoska
+flanka poza pokryciem swisstopo (TODO: dociagnąć źródłem IT albo Terrarium). Kopia do AppData `dem/`.
+
+## §A4. Kafle z16 (3857): `testdata/maps/warp-swisstopo-z16.py` (2026-08-27)
+
+Drzewo `16/{x}/{y}.tif` w formacie cache GUGiK (256² float32 baseline uncompressed II-TIFF —
+dokładnie kształt `Float32GeoTiffDecoder`, zweryfikowane dekodem .NET; NoData=-32768): mozaika LV95
+1 m w RAM (pool ×2) → per kafel siatka środków pikseli 3857 → inv-Mercator → WGS84→LV95 → bilinear.
+z16@46°N ≈ 1,66 m/px (cache-tier jak GUGiK z16@49° = 1,5 m). Wynik: **2156 kafli / 548 MB**,
+kafel Matterhornu 34162/23321 max=4477,2 ✓. Seed: kopia `16/` do AppData `dem-cache/swisstopo/`.
+Runtime: `GugikNmtDemTileSource` z `coverage=okno regionu` (MauiProgram, region≠tatry) serwuje
+kafle z cache; miss → WCS GUGiK zawodzi dla CH → composite → Terrarium (gracefully).
+
+## §A5+ (DO ZROBIENIA, kolejno)
 - DEM: piramida baked `.bdt` (wzorzec `dem-cache/baked`) + `zermatt.dem` (baza ~30 m dla LOD).
 - Orto: baza + det25 wg kraty regionu (kotwice `zermatt` w rejestrze — NOWE pola wpisu, krata własna,
   NIE tatrzańska!) + prebake `.opk`.
