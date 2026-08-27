@@ -4562,8 +4562,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         det1mMinXyLoc = -1, det1mInvSizeLoc = -1, det1mGridDimLoc = -1, det1mSliceIdxLoc = -1,
         det1mDebugLoc = -1;
 
-    private const double Det25TileDlon = 512 * 0.25 / (111320.0 * 0.65935); // cos(49.25°) = 0.65935 — anchor 19.5/49.4 jak dane
-    private const double Det25TileDlat = 512 * 0.25 / 111320.0;
+    // P-A2 (2026-08-27): krata det25 z JEDNEGO źródła (OrthoDetailGrid ↔ rejestr regionów ↔ fetcher).
+    // Poprzednia lokalna stała używała 0.65935 z komentarzem "cos(49.25°)" — a to jest cos(48.75°);
+    // prawdziwy cos(49.25°) = 0.652756. Błąd ~1% dlon przesuwał treść det1m ~41 m na KOLUMNĘ pakietów
+    // (AABB siatki liczone z tej stałej, shader mapuje świat→UV liniowo przez to AABB), czyli przy
+    // pakietach rdzenia MO (pi≈9-10) całą warstwę ~0,4 km względem det25/bazy.
+    private static readonly OrthoDetailGrid Det25Lattice = new();
+    private static readonly double Det25TileDlon = Det25Lattice.Dlon;
+    private static readonly double Det25TileDlat = Det25Lattice.Dlat;
 
     private static Det1mLoad? LoadDet1mPacks(string dir)
     {
@@ -4636,10 +4642,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
         // Geo AABB siatki z mapowania kafli det25 (anchor 19.5/49.4 — spójny z pipeline'em danych):
         // pakiet = 32×32 kafli det25.
-        double lon0 = 19.5 + (piMin * 32 * Det25TileDlon);
-        double lon1 = 19.5 + ((piMax + 1) * 32 * Det25TileDlon);
-        double lat1 = 49.4 - (pjMin * 32 * Det25TileDlat);
-        double lat0 = 49.4 - ((pjMax + 1) * 32 * Det25TileDlat);
+        double lon0 = OrthoDetailGrid.GridLon0 + (piMin * 32 * Det25TileDlon);
+        double lon1 = OrthoDetailGrid.GridLon0 + ((piMax + 1) * 32 * Det25TileDlon);
+        double lat1 = OrthoDetailGrid.GridLat0 - (pjMin * 32 * Det25TileDlat);
+        double lat0 = OrthoDetailGrid.GridLat0 - ((pjMax + 1) * 32 * Det25TileDlat);
         var geo = new MapaTur.Domain.Geography.MapBounds(
             new MapaTur.Domain.Geography.GeoPoint(lat0, lon0),
             new MapaTur.Domain.Geography.GeoPoint(lat1, lon1));
