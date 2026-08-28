@@ -63,7 +63,18 @@ kafel Matterhornu 34162/23321 max=4477,2 ✓. Seed: kopia `16/` do AppData `dem-
 Runtime: `GugikNmtDemTileSource` z `coverage=okno regionu` (MauiProgram, region≠tatry) serwuje
 kafle z cache; miss → WCS GUGiK zawodzi dla CH → composite → Terrarium (gracefully).
 
-## §A5+ (DO ZROBIENIA, kolejno)
+## §A5. Baza orto: `testdata/maps/generate-zermatt-ortho.py` (2026-08-28)
+
+Set `dem/zermatt-ortho-r{R}-c{C}.png` — siatka 3×3 cel 8192² RGBA (row 0 = północ, cele dzielą
+krawędź linspace — konwencja tatrzańska), pokrycie = bounds zermatt.dem, ~0,8/0,72 m/px.
+Mozaika LV95 0,8 m (mean-pool ×8 SWISSIMAGE) → per cel WGS84→LV95 bilinear; NoData (włoska flanka)
+= alpha 0 (punch/nodata-rim renderera). Pokrycia: rzędy N 100 %, r2-c0 23,8 % (SW = Włochy).
+~1,2 GB / 9 plików; seed do AppData `dem/`. Auto-loader wykrywa set per-region (FilterOrtho).
+Bieg: drape działa, prawdziwe kolory. ⚠ OTWARTE: niebieski cień nalotu 2023 na ścianach N —
+audyt `audit-ortho-blue-cast.py` + de-blue (ORTO-CONTRACT hard rule) ZANIM warstwa będzie
+ogłoszona odebraną; sprawdzić też, czy runtime mode-1 de-blue obejmuje ten tor bazy.
+
+## §A6+ (DO ZROBIENIA, kolejno)
 - DEM: piramida baked `.bdt` (wzorzec `dem-cache/baked`) + `zermatt.dem` (baza ~30 m dla LOD).
 - Orto: baza + det25 wg kraty regionu (kotwice `zermatt` w rejestrze — NOWE pola wpisu, krata własna,
   NIE tatrzańska!) + prebake `.opk`.
