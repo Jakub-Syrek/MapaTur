@@ -3383,10 +3383,20 @@ public sealed partial class MapPageViewModel : ObservableObject
             return tatraGazetteer;
         }
 
+        // P-B: zasob szczytow per-region — wpis "tatry" trzyma historyczna nazwe pliku (tatrA-),
+        // kazdy inny region bundluje "{id}-osm-peaks.json" (zermatt: 115 nazwanych szczytow z Overpass).
+        var gazetteerRegion = MapaTur.Domain.Regions.MountainRegions.Default;
+        string peaksResource = gazetteerRegion.Id == "tatry"
+            ? "tatra-osm-peaks.json"
+            : $"{gazetteerRegion.Id}-osm-peaks.json";
+        IReadOnlyList<NamedSummit> curatedFallback = gazetteerRegion.Id == "tatry"
+            ? TatraSummits.All
+            : [];
+
         try
         {
             await using Stream stream = await Microsoft.Maui.Storage.FileSystem
-                .OpenAppPackageFileAsync("tatra-osm-peaks.json").ConfigureAwait(false);
+                .OpenAppPackageFileAsync(peaksResource).ConfigureAwait(false);
             using var buffer = new MemoryStream();
             await stream.CopyToAsync(buffer).ConfigureAwait(false);
 
@@ -3398,15 +3408,15 @@ public sealed partial class MapPageViewModel : ObservableObject
             // Opalone Wierchy, Furkaska, …). Range handles density; raise/lower this to taste.
             const double peakMinElevationMeters = 1300.0;
             IReadOnlyList<NamedSummit> osmSummits = SummitSources.Deduplicate(OsmPeakSummitMapper.ToSummits(peaks, peakMinElevationMeters));
-            tatraGazetteer = SummitSources.Combine(osmSummits, TatraSummits.All);
+            tatraGazetteer = SummitSources.Combine(osmSummits, curatedFallback);
             logger.LogInformation(
-                "Tatra gazetteer: {Osm} OSM peaks (named, ≥{Min:F0} m) + {Fallback} curated → {Total} summits",
-                osmSummits.Count, peakMinElevationMeters, TatraSummits.All.Count, tatraGazetteer.Count);
+                "Gazetteer ({Region}): {Osm} OSM peaks (named, ≥{Min:F0} m) + {Fallback} curated → {Total} summits",
+                gazetteerRegion.Id, osmSummits.Count, peakMinElevationMeters, curatedFallback.Count, tatraGazetteer.Count);
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
         {
-            logger.LogWarning(ex, "Bundled OSM peaks unavailable; using the curated TatraSummits gazetteer");
-            tatraGazetteer = TatraSummits.All;
+            logger.LogWarning(ex, "Bundled OSM peaks unavailable; using the curated fallback gazetteer");
+            tatraGazetteer = curatedFallback;
         }
 
         return tatraGazetteer;
