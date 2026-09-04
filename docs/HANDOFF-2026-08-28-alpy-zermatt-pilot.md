@@ -99,9 +99,10 @@ Do rozważenia: WER LocalDumps dla MapaTur.App.exe (HKLM — decyzja usera, usta
 
 ## Nie ruszać / konteksty
 
-- **Push**: ✅ ZROBIONY 08-28 (`5eedd01..fc593f3`). ZOSTAJE: gałąź `claude/quirky-morse-145976`
-  (det25 derywacja, ODEBRANA) — merge do main, pliki rozłączne z main (zmierzone), tylko §14
-  przenumerować. Podobnie 3 pozostałe gałęzie `claude/*` w worktree.
+- **Push**: ✅ ZROBIONY 08-28 (`5eedd01..fc593f3`). ✅ **Gałęzie zmergowane 09-04**: `quirky-morse`
+  (derywacja det25 = TILE-PRODUCTION §14) i `inspiring-yonath` (Rohacze = **§15**, przenumerowane z §14
+  przy merge, notka w sekcji); `dazzling-murdock` i `determined-pike` już były w main. Worktree i gałęzie
+  `claude/*` usunięte. NEXT z kolejki Alp: zoomy z13/z14 offline w VM z rejestru; orto IT — werdykt usera.
 - **Ogon porządkowy**: 4 pliki w drzewie roboczym różnią się TYLKO końcowym znakiem nowej linii
   (`DxgiDriverTrim.cs`, `TatraTrailheadParking.cs`, `IUnmarkedPathRepository.cs`,
   `OverpassUnmarkedPathQueryBuilder.cs`). Stan NA DYSKU jest zgodny z `.editorconfig`
