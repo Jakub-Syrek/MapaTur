@@ -67,4 +67,18 @@ public sealed record MountainRegion(
     MapBounds PoiCoreBounds,
     RegionMapStart MapStart,
     RegionDetailLattice DetailLattice,
-    string DemCacheSubdir);
+    string DemCacheSubdir)
+{
+    /// <summary>Registry id of the pre-registry region whose user state lives under the UNSCOPED keys.</summary>
+    private const string PreRegistryId = "tatry";
+
+    /// <summary>
+    /// Preferences key for per-region user state (saved camera, route stops). Tatry — entry #1, the
+    /// region the app shipped with before the registry — keeps the bare <paramref name="baseKey"/> so
+    /// existing user data is read bit-for-bit with zero migration; every other region gets
+    /// <c>baseKey.Id</c>, so switching regions (run-tatry.cmd / run-zermatt.cmd) never overwrites the
+    /// other region's last position or planned route.
+    /// </summary>
+    public string PreferenceKey(string baseKey) =>
+        Id == PreRegistryId ? baseKey : $"{baseKey}.{Id}";
+}

@@ -139,4 +139,26 @@ public sealed class MountainRegionsTests
         MountainRegions.ResolveDefault("atlantyda").Should().BeNull();
         MountainRegions.ResolveDefault(null).Should().BeNull();
     }
+
+    // Per-region user state (P-A3-lite, 2026-08-29, na prosbe usera: "rozdzielmy uruchamianie Alp i Tatr").
+    // Kamera i przystanki trasy sa stanem REGIONU: jeden wspolny klucz Preferences sprawial, ze
+    // Tatry -> Zermatt -> Tatry gubilo poze tatrzanska (nadpisana), a przystanki trasy z Tatr byly
+    // przeliczane po starcie na Zermacie. Tatry = wpis #1 zostaja na PRZEDREJESTROWYM kluczu
+    // (bit w bit, zero migracji danych usera); kazdy inny region dostaje sufiks ze swoim Id.
+
+    [Fact]
+    public void Tatry_PreferenceKey_IsUnscoped_PreRegistryPin()
+    {
+        MountainRegions.Tatry.PreferenceKey("Terrain3D.CameraState").Should().Be("Terrain3D.CameraState");
+        MountainRegions.Tatry.PreferenceKey("Terrain3D.RouteStops").Should().Be("Terrain3D.RouteStops");
+    }
+
+    [Fact]
+    public void Zermatt_PreferenceKey_IsSuffixedWithRegionId()
+    {
+        MountainRegion zermatt = MountainRegions.ById("zermatt")!;
+
+        zermatt.PreferenceKey("Terrain3D.CameraState").Should().Be("Terrain3D.CameraState.zermatt");
+        zermatt.PreferenceKey("Terrain3D.RouteStops").Should().Be("Terrain3D.RouteStops.zermatt");
+    }
 }

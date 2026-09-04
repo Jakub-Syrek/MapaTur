@@ -14,8 +14,12 @@ public sealed class MauiPreferences3DSettingsStore : I3DSettingsStore
     private const string StormKey = "Terrain3D.Storm";
     private const string ForestKey = "Terrain3D.Forest";
     private const string PeakLabelRadiusKey = "Terrain3D.PeakLabelRadius";
-    private const string CameraStateKey = "Terrain3D.CameraState";
-    private const string RouteStopsKey = "Terrain3D.RouteStops";
+    // Stan REGIONU (P-A3-lite, 2026-08-29): kamera i przystanki trasy pod kluczem per region —
+    // Tatry na przedrejestrowym kluczu (bit w bit), inne regiony z sufiksem Id. Patrz MountainRegion.PreferenceKey.
+    private static readonly string CameraStateKey =
+        MapaTur.Domain.Regions.MountainRegions.Default.PreferenceKey("Terrain3D.CameraState");
+    private static readonly string RouteStopsKey =
+        MapaTur.Domain.Regions.MountainRegions.Default.PreferenceKey("Terrain3D.RouteStops");
     private const string TrailsAutoSyncKey = "Trails.AutoSyncUtc";
     private const string LanguageKey = "App.Language";
     private const string FollowCameraKey = "App.FollowCamera";
