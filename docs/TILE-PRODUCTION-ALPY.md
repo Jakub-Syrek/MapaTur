@@ -181,7 +181,25 @@ informacyjny (derywacja nie node-aligned — jak w Tatrach). Piramida łącznie 
 z14 611, z13 177 (3,60 GiB). Skrypt kontrolny: `verify-zermatt-bdt.py` (sesyjny, wzór w scratchpadzie:
 licznik nowych `.bdt` per zoom + magic + rozmiar + test okna geograficznego).
 
-## §A8+ (DO ZROBIENIA, kolejno)
+## §A8. Włoska flanka bazy: `fill-zermatt-dem-terrarium.py` (2026-08-29)
+
+Okno Zermatt sięga za granicę CH; swissALTI3D kończy się na granicy → `zermatt.dem` miał **10,3 % NoData**
+(47 429/460 530 komórek, SW). Ścieżka bazy trzyma luki brzegowe jako dziury do nieba, a piramida baked
+backfilluje voidy z16 z tej bazy — dziura była widoczna na ekranie. Źródło wypełnienia = to samo, którego
+apka używa jako globalnego fallbacku: **AWS Terrarium z13** (~13 m/px; baza 30 m, bilinear). Datum:
+bias = mediana(swiss − terrarium) na pasie 1–6 komórek od voidu = **−3,93 m** (4396 komórek; resid p50
+11,5 m / p95 50,8 m — to różnica 30 m SRTM vs 25 m mozaika swiss na stromiznach, nie datum). Szew:
+feather 12 komórek (~360 m) od najbliższej ważnej komórki (lekcja checklisty §A.6: feather, nie twardy
+patch). Wynik: NoData → **0**, wypełnienie 1944–4327 m, 56 kafli Terrarium; obie kopie (mastery + AppData)
+bajt w bajt; backup `zermatt.dem.pre-terrarium.bak`. Po wypełnieniu **re-bake §A7** (piramida backfilluje
+z bazy). Ortho po stronie IT nadal alpha 0 (podkład renderera) — orto IT to osobna decyzja.
+
+```
+python testdata/maps/fill-zermatt-dem-terrarium.py dem/zermatt.dem "<AppData>/Data/dem/zermatt.dem"
+# potem §A7 (re-bake)
+```
+
+## §A9+ (DO ZROBIENIA, kolejno)
 - DEM: piramida baked `.bdt` (wzorzec `dem-cache/baked`) + `zermatt.dem` (baza ~30 m dla LOD).
 - Orto: baza + det25 wg kraty regionu (kotwice `zermatt` w rejestrze — NOWE pola wpisu, krata własna,
   NIE tatrzańska!) + prebake `.opk`.
