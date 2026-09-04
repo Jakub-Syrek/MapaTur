@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="MapaTur.App.Views.RegionChooserPage"
+             Title="MapaTur"
+             BackgroundColor="#101418">
+    <Grid RowDefinitions="*,Auto,Auto,*" ColumnDefinitions="*,Auto,*">
+        <VerticalStackLayout Grid.Row="1" Grid.Column="1" Spacing="14" WidthRequest="420">
+            <Label Text="MapaTur" FontSize="34" FontAttributes="Bold" TextColor="#F2F4F6" HorizontalOptions="Center" />
+            <Label Text="Wybierz region" FontSize="18" TextColor="#B8C0C8" HorizontalOptions="Center" Margin="0,0,0,10" />
+            <VerticalStackLayout x:Name="RegionButtons" Spacing="10" />
+            <Label x:Name="LastHint" FontSize="13" TextColor="#7E8A96" HorizontalOptions="Center" Margin="0,8,0,0" />
+        </VerticalStackLayout>
+        <Label Grid.Row="2" Grid.Column="1" Text="Wybór restartuje aplikację w danym regionie. Na telefonie region to zawsze Tatry."
+               FontSize="12" TextColor="#5C6772" HorizontalOptions="Center" Margin="0,18,0,0" />
+    </Grid>
+</ContentPage>

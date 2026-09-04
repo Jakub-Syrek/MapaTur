@@ -27,7 +27,8 @@ public static class MountainRegions
         PoiCoreBounds: new MapBounds(new GeoPoint(49.08, 19.78), new GeoPoint(49.32, 20.35)),
         MapStart: new RegionMapStart(Latitude: 49.2326, Longitude: 19.9819, Resolution: 152.0),
         DetailLattice: new RegionDetailLattice(Lon0: 19.50, Lat0: 49.40, RefLat: 49.25, PathSegment: "tatry"),
-        DemCacheSubdir: "gugik");
+        DemCacheSubdir: "gugik",
+        DisplayName: "Tatry");
 
     /// <summary>
     /// Zermatt/Matterhorn pilot (P-B, TILE-PRODUCTION-ALPY §A0): the window 7.58–7.88 E × 45.92–46.08 N
@@ -71,7 +72,8 @@ public static class MountainRegions
             PoiCoreBounds: window,
             MapStart: new RegionMapStart(Latitude: 46.0207, Longitude: 7.7491, Resolution: 152.0),
             DetailLattice: new RegionDetailLattice(Lon0: 7.58, Lat0: 46.08, RefLat: 46.0, PathSegment: "zermatt"),
-            DemCacheSubdir: "swisstopo");
+            DemCacheSubdir: "swisstopo",
+            DisplayName: "Alpy — Zermatt / Matterhorn");
     }
 
     /// <summary>The region with the given <paramref name="id"/>, or null when unknown.</summary>

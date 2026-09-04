@@ -153,6 +153,17 @@ public sealed class MountainRegionsTests
         MountainRegions.Tatry.PreferenceKey("Terrain3D.RouteStops").Should().Be("Terrain3D.RouteStops");
     }
 
+    // P-A3 (2026-09-04, prosba usera): panel wyboru regionu na desktopie pokazuje NAZWY z rejestru,
+    // nie Id; mobile nie ma wyboru (zawsze Tatry). Nazwa jest danymi wpisu, zeby UI nie mial mapy id->tekst.
+
+    [Fact]
+    public void EveryRegion_HasHumanDisplayName()
+    {
+        MountainRegions.Tatry.DisplayName.Should().Be("Tatry");
+        MountainRegions.Zermatt.DisplayName.Should().Be("Alpy — Zermatt / Matterhorn");
+        MountainRegions.All.Should().OnlyContain(r => !string.IsNullOrWhiteSpace(r.DisplayName));
+    }
+
     [Fact]
     public void Zermatt_PreferenceKey_IsSuffixedWithRegionId()
     {

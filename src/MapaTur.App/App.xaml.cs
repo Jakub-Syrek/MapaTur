@@ -27,6 +27,15 @@ public partial class App : Microsoft.Maui.Controls.Application
     /// <inheritdoc />
     protected override Window CreateWindow(IActivationState? activationState)
     {
+#if WINDOWS
+        // P-A3: na desktopie najpierw panel wyboru regionu (Tatry / Alpy), chyba że region już wybrano
+        // (launcher run-*.cmd albo restart z panelu ustawiają MAPATUR_REGION_CHOSEN=1). Mobile = zawsze
+        // Tatry, bez panelu. Patrz Views/RegionChooserPage.
+        if (Environment.GetEnvironmentVariable(Views.RegionChooserPage.ChosenEnvVar) != "1")
+        {
+            return new Window(new Views.RegionChooserPage());
+        }
+#endif
         return new Window(new AppShell());
     }
 

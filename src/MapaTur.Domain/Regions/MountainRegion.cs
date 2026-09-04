@@ -58,6 +58,7 @@ public sealed record RegionMapStart(double Latitude, double Longitude, double Re
 /// <param name="DetailLattice">Hi-res ortho detail lattice anchor + on-disk path segment.</param>
 /// <param name="DemCacheSubdir">Subdirectory of <c>dem-cache/</c> holding the region's raw DEM source tiles
 /// (legacy alias: <c>gugik</c> for Tatry — never migrate user data on disk).</param>
+/// <param name="DisplayName">Human name shown by the desktop region chooser (P-A3); data, not a UI map.</param>
 public sealed record MountainRegion(
     string Id,
     RegionDemLoad DemLoad,
@@ -67,7 +68,8 @@ public sealed record MountainRegion(
     MapBounds PoiCoreBounds,
     RegionMapStart MapStart,
     RegionDetailLattice DetailLattice,
-    string DemCacheSubdir)
+    string DemCacheSubdir,
+    string DisplayName = "")
 {
     /// <summary>Registry id of the pre-registry region whose user state lives under the UNSCOPED keys.</summary>
     private const string PreRegistryId = "tatry";

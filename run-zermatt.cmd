@@ -4,6 +4,7 @@ rem dem\zermatt.dem, dem\zermatt-ortho-r*-c*.png, dem-cache\swisstopo, ortho-det
 rem (recepty: docs/TILE-PRODUCTION-ALPY.md). Kamera i trasa zapisuja sie pod kluczami *.zermatt,
 rem niezaleznie od Tatr. Plik celowo w czystym ASCII (cmd + UTF-8 = smieci w komunikatach).
 set "MAPATUR_REGION=zermatt"
+set "MAPATUR_REGION_CHOSEN=1"
 set "EXE=%~dp0src\MapaTur.App\bin\Debug\net10.0-windows10.0.19041.0\win-x64\MapaTur.App.exe"
 if not exist "%EXE%" (
   echo Brak %EXE%
