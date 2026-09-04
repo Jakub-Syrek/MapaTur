@@ -219,7 +219,7 @@ python testdata/maps/fill-zermatt-ortho-esri.py dem/zermatt-ortho-r2-c0.png ... 
 Audyt blue-cast całej bazy po §A9: **mean 0,36/255, p95 0,61 → DISK-CORRECTED**, [fill] 0/9 (czarne wypełnienie zniknęło razem z alfą 0).
 Ograniczenie świadome: Esri to inny nalot (sezon/śnieg) niż SWISSIMAGE — gain wyrównuje ekspozycję, nie
 treść; granica może być czytelna jako zmiana charakteru zdjęcia, nie jako schodek tonu.
-Werdykt wizualny usera: ⏳.
+**Werdykt wizualny usera 2026-09-04: „jest ok" → §A9 ODEBRANE, NIE cofać.**
 
 ## §A10+ (DO ZROBIENIA, kolejno)
 - DEM: piramida baked `.bdt` (wzorzec `dem-cache/baked`) + `zermatt.dem` (baza ~30 m dla LOD).
