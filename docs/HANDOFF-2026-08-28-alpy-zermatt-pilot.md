@@ -78,6 +78,24 @@ vs 256 m w CH; 0 skoków >150 m w wypełnieniu). Naprawa doraźna: restart z pra
 strażnik w `TryApplyEnvPose`/`TryRestoreCamera` — cel poniżej terenu (albo poniżej min bazy) = odrzuć
 i auto-kadruj; dziś zła poza przechodzi i się utrwala.
 
+## P-A3 PANEL WYBORU REGIONU — ZROBIONE 09-04 (desktop), mobile = Tatry
+
+Na prośbę usera: `Views/RegionChooserPage` pokazuje się na desktopie przed mapą (bramka w `App.CreateWindow`,
+`#if WINDOWS`, pomijana gdy `MAPATUR_REGION_CHOSEN=1` — launchery i restart z panelu ją ustawiają). Wybór =
+restart procesu z `MAPATUR_REGION` (statyki `MountainRegions.Default`/`OrthoDetailGrid`/VM inicjalizują się przy
+ładowaniu typów, więc przełączanie w locie to przepisanie architektury — świadomie NIE). Nazwy z rejestru
+(`MountainRegion.DisplayName`). Harness: `MAPATUR_REGION_AUTOPICK=<id>` = klik bez myszki. Test 2 startów zielony.
+Mobile: bez panelu, zawsze Tatry.
+
+## CRASH 09-04 16:43 BEZ ŚLADU + wrapper kodu wyjścia
+
+Instancja Zermatt (PID 37952) zniknęła po 24,5 min: zero ERR/FTL w logu, zero wpisów WER/.NET Runtime/TDR,
+zero zrzutów; RAM 41 GB wolne z 64; ostatni stan heap 6,3 GB, WS 12,2 GB, kamera w locie 4472 m, tile-swap
+580 kafli. Bez artefaktu przyczyny NIE zgaduję. Od teraz instancje usera stawiane przez
+`%TEMP%\mapatur-run-wrapped.ps1` (Start-Process + WaitForExit) → `%TEMP%\mapatur-exitcodes.log` dostaje
+`ExitCode` (0xC0000005 = AV, 0xC000027B = XAML/WinRT, -1 = ubity). Następny crash = kod wyjścia w ręku.
+Do rozważenia: WER LocalDumps dla MapaTur.App.exe (HKLM — decyzja usera, ustawienie systemowe).
+
 ## Nie ruszać / konteksty
 
 - **Push**: ✅ ZROBIONY 08-28 (`5eedd01..fc593f3`). ZOSTAJE: gałąź `claude/quirky-morse-145976`
