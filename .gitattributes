@@ -38,3 +38,6 @@ data/*.exr     filter=lfs diff=lfs merge=lfs -text
 data/**/*.exr  filter=lfs diff=lfs merge=lfs -text
 data/*.hdr     filter=lfs diff=lfs merge=lfs -text
 data/**/*.hdr  filter=lfs diff=lfs merge=lfs -text
+
+# Launchery Windows: cmd czyta bajty w codepage OEM i najbezpieczniej z CRLF (2026-08-29)
+*.cmd text eol=crlf

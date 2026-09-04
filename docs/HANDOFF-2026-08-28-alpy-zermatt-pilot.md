@@ -55,8 +55,12 @@ composer+wskrzeszenie · 9437dbf P-A2 ścieżki/coverage/PickDem · 8571f48 P-B1
 2. **§A6 det25 dla Zermatt**: piramida WebP na WŁASNEJ kracie regionu (kotwice z rejestru:
    7.58/46.08/RefLat 46.0 — NIE tatrzańskie!) z SWISSIMAGE + prebake `.opk` OrthoBakiem; potem
    piramida baked `.bdt` DEM (recon parametryzacji `TatraBakeRunner`).
-3. **P-A3**: wpisy regionów z JSON + produktowe przełączanie (RegionContext) + **kamera-autosave
-   per-region** (poza z Tatr ląduje w świecie Zermatt — znany ogon) + stringi UI z nazwą regionu.
+3. **P-A3**: wpisy regionów z JSON + produktowe przełączanie (RegionContext) + stringi UI z nazwą
+   regionu. ✅ **P-A3-lite ZROBIONE 08-29** (na prośbę usera, commit 07fc2e5): `run-tatry.cmd` /
+   `run-zermatt.cmd` + `MountainRegion.PreferenceKey` (kamera i przystanki trasy per region; Tatry na
+   gołym kluczu bit w bit). Dowód: 3 starty przez launchery, poza Zermatt odtworzona co do cyfry po
+   sesji tatrzańskiej. Ogon „z Tatr ląduje w Zermacie" był w praktyce auto-kadrem (`TryRestoreCamera`
+   odrzuca obcy DemKey); realną stratą było GUBIENIE pozy drugiego regionu — to naprawione.
 4. Ogony mniejsze: włoska flanka NoData (dociągnąć źródłem IT albo Terrarium w generatorach);
    zoomy z13/z14 offline w VM z rejestru; det1m poza `OrthoVramBudgetBytes` (watch — ruszyć tylko
    przy dowodzie głodzenia); duplikaty §14 w TILE-PRODUCTION przy merge'u gałęzi quirky-morse.
