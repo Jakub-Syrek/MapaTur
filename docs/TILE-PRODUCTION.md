@@ -1005,3 +1005,146 @@ deshadow R4 naprawi kiedyś OBA poziomy jedną re-derywacją). **Docelowe domkni
 dokończenie fetchu det05 regionu C (§0-A: rocznik!) + ponowny `--write`** (narzędzie idempotentne —
 przeliczy tylko nowe komplety 25/25); ewentualna harmonizacja pasa WMS na północy = osobna decyzja
 usera (anti-patchwork §C.10: pole globalne, nie statystyki per-kafel).
+
+## §15. det05 — rozszerzenie na Tatry Zachodnie, wycinek 1: masyw Rohaczy (2026-08-02→04, WYKONANE; region C dalej OTWARTY)
+
+> Numeracja: na gałęzi `claude/inspiring-yonath-f55ac6` ta sekcja była §14; przy merge 2026-09-04
+> przenumerowana na §15, bo §14 zajęła derywacja det25 (gałąź quirky-morse, zmergowana wcześniej).
+
+Pierwsze wykonanie celu §0-B(1) po odkryciu 08-02, że det05 kończy się na kolumnie 851
+(lon 19.7998) i Tatry Zachodnie nie mają ANI JEDNEGO kafla 5 cm (Rohacze 19.7613 ≈ 3 km za
+krawędzią — user widział tam det25/bazę, „rozmyte coś"). Plan roboczy sesji:
+`dev/fetch-logs/PIPELINE-rohacze.md`; logi wszystkich kroków w `dev/fetch-logs/`; okno blokady
+i wynik bake'u: dziennik `C:\Repos\APP-LOCK.md` 08-04 ~23:00. Sekcja jest REKONSTRUKCJĄ z tych
+śladów (spisana 08-14) — kroki bez śladu są oznaczone wprost, niczego nie przeliczano na danych.
+
+**Bbox i różnica względem regionu C (obowiązek §0-B):** pobór celowany
+`19.70,49.17,19.85,49.25` (wg planu: masyw Rohaczy — Ostry, Płaczliwy, Baraniec, Żarska,
+Jamnicka; w praktyce też grzbiet Wołowiec–Rakoń–Grześ i górna Chochołowska po stronie SK).
+To **~1/6 szerokości regionu `C = 19.50,49.10,20.40,49.40`** — wycinek priorytetowy, nie
+domknięcie celu. Poza zakresem zostały m.in. Osobita (49.284 — na północ od bboxa) i dolna
+Chochołowska; strona PL bboxa (pas 19.75–19.80: dno Chochołowskiej, Grześ) to domena GUGiK —
+patrz „stan otwarty". Rocznik (krok 0 wg §11): mozaika ZBGIS „Ortofoto" = nalot **2024-07-31**
+(15 cm, najmniej cienia — wybór wg §0-A zamiast 2. cyklu 2021-09).
+
+```bash
+# 1a. sondy 08-02 ~20:00 (po 5 min, przerwane świadomie) — regionC-pl.log / regionC-sk.log:
+python testdata/maps/fetch-ortho-detail.py --region C --level det05    # PL: 2000 poz., ok=0
+#     (zachodni skraj = nodata GUGiK + strona SK) -> dociąg PL odłożony
+python testdata/maps/fetch-ortho-detail.py --region C --level sk05     # SK: ok=832 w 5000 poz.
+
+# 1b. główny fetch SK regionu C (BEZ --strip-km — §0-B!) — 08-02 21:20 -> 08-03 18:39,
+#     PRZERWANY, żeby priorytetowo dociągnąć Rohacze: 721 000/3 334 275 pozycji kraty,
+#     ok=283 165 kafli, exist=920, sk_side=436 909 (dla poziomu sk05 = pozycje po stronie PL
+#     wg maski Standard), err=6, partial=3589; ~21,3 h @ 9,4 kafla/s — sk05-regionC.log
+python testdata/maps/fetch-ortho-detail.py --region C --level sk05 --workers 8
+
+# 1c. fetch bboxa Rohaczy — 08-03 18:39 -> 22:12 (3,55 h @ 11,7 kafla/s) — sk05-rohacze.log:
+#     krata i 567..993 × j 652..1000 = 427×349 = 149 023 pozycji (log drukuje końce wyłączne
+#     „i 567..994 j 652..1001"); DONE ok=77 856, exist=17 407, sk_side=53 744 (36,4% bboxa =
+#     strona PL), nodata=0, err=16 (HTTP 404, m.in. kolumny 655–659 wiersza 965 — bez śladu
+#     refetchu), partial=32 (biel = śnieg/prześwietlenia — NIE wygaszać, analogia §11)
+python testdata/maps/fetch-ortho-detail.py --bbox 19.70,49.17,19.85,49.25 --level sk05
+#     ⚠ fetch łatki NADPISAŁ sk05/manifest.json regionem bboxa (pułapka z §12) i NIE został
+#     przywrócony — stan na 08-14 to wciąż "region": "19.70,49.17,19.85,49.25"
+#     (wartości --workers wg planu PIPELINE-rohacze.md; logi fetchu nie echo-ują argv)
+
+# 2. sanity — PEŁNY DEKOD-SKAN (lekcja §12 kr. 1); NOWE narzędzie scan-tiles-decoded.py
+#    (commit 9181f23, klasy ZERO/FLAT/BROKEN): kolumny 567..993 = 197 032 kafle,
+#    OK=197 032, zero uszkodzeń (pusty dev/fetch-logs/scan-decoded.txt = pusta lista złych)
+python testdata/maps/scan-tiles-decoded.py --root dem/ortho-detail/tatry/sk05 --cols 567:993
+
+# 3. harmonizacja tonu — NAJPIERW POMYŁKA: przebieg bez zawężenia ruszył aplikacją na CAŁE
+#    1 024 408 kafli sk05 (ETA ~8 h) — ubity po ~76 000 zapisów (harm-sk05.log); stąd flaga
+#    --cols (aplikacja wycinka, pole parametrów GLOBALNE — notka w §12, anti-szew §C.10)
+python testdata/maps/harmonize-sk-ortho.py --level sk05 --workers 10 --cols 567:993
+#    pole gain/off (q90) z CAŁEJ warstwy: 1 024 408 kafli -> 4278 cel p16 (409,6 m), cache
+#    sk05-harm/_harm_params.npz; do zapisu 197 032; DONE ok=136 153, skip=60 879 (wynik już
+#    istniał w sk05-harm — skip = plik wyjściowy istnieje), err=0; przebieg 00:16 -> 09:44,
+#    w tym ~8 h przestoju w fazie pola (między celą 100 a 150 — przyczyna nieustalona z logu),
+#    sama aplikacja ~50 min @ 44–49 kafli/s — harm-rohacze.log
+#    ⚠ verify-harm-tone.py: BRAK ŚLADU przebiegu dla Rohaczy (jeśli był, nie zostawił logu
+#    ani podglądu; odbiór tonu oparł się o autoshoty wieczorne i oko usera)
+
+# 4. znaki wodne na STAGINGU: backup starego katalogu (dev/fetch-logs/
+#    _watermarks-przed-rohaczami.json, 09:55), potem re-skan całego sk05-harm 10:06 -> 15:20:
+#    1735 surowych -> 1360 po dedup (wm-scan.log; szablony gku_nlc + rok2022)
+python testdata/maps/scan-sk05-watermarks.py
+#    naprawa (bez osobnego logu; ślady: sk05-harm/_wm-fixed.txt 19:52 — lista kumulatywna
+#    15 791 kafli, partii nie znakuje — oraz kontekst §13): 1352/1360 pozycji usunięte;
+#    kalibracja z §11/§12, nowego pilota BRAK (bez śladu). Pozostałość wyszła w APCE po
+#    integracji: 103 stemple tuż pod progiem skanu -> naprawione skanem REGIONALNYM det05
+#    następnego dnia (§13)
+python testdata/maps/repair-zbgis-watermarks.py --level sk05 --write
+
+# 5. straddlery granicy (19:53): det05/_sk-merged.txt po przebiegu = 8 kafli — granica
+#    państwowa w bboxie to tylko krótki odcinek grzbietu Wołowiec–Rakoń–Grześ
+python testdata/maps/merge-zbgis-into-partial-det05.py --level sk05 --write
+
+# 6. integracja do det05 (19:57): lista det05/_sk-pilot-added.txt (nazwa „pilot" historyczna;
+#    lista KUMULATYWNA wszystkich kafli SK w det05) = 874 233 wpisy; liczby „nowych z tego
+#    przebiegu" nie ma w śladach — przyrosty policzone z coverage/bake (kotwice niżej)
+python testdata/maps/integrate-sk05-into-det05.py --level sk05 --write
+
+# 7. osobnego przebiegu ALFA nie było (brak śladu; det05/_white-alpha.txt nietknięty od
+#    07-29): nodata->alfa robi format v4 przy bake'u (§9.1/§9.2), fetch miał nodata=0,
+#    partial=32 zostawione jako legalna treść (§11: „niczego nie wygaszać po bieli")
+
+# 8. coverage (19:58; backup starego: dev/fetch-logs/_coverage_p16-przed-rohaczami.txt):
+#    kafli na dysku 1 217 310, zakres i 0..2270, cele >=95% (243/256): 4468 z 4950
+#    dotkniętych (plik dla narzędzi data-side; runtime jest .opk-only — §12)
+python testdata/maps/build-det05-coverage.py --pitch 16
+
+# 9. OKNO APP-LOCK — sync do AppData (20:01, sync-rohacze.log): TYLKO kolumny 567..993 —
+#    427/427 kolumn w 1,1 min + _coverage_p16.txt (41 295 B);
+#    AppData det05: 1 004 201 (verify-full 07-31) -> 1 140 347 kafli (+136 146)
+
+# 10. bake przyrostowy det05 (20:04 -> 20:15, bake.log):
+dotnet run --project src/MapaTur.OrthoBake -c Release -- --layer det05 \
+  --src "C:\Users\jaqbs\AppData\Local\User Name\com.companyname.mapatur.app\Data\dem\ortho-detail\tatry\det05" \
+  --out "C:\Users\jaqbs\AppData\Local\User Name\com.companyname.mapatur.app\Data\dem\ortho-detail\tatry\opk\det05"
+#    1 140 347 kafli, 4644 pakiety (4 036 przed wg verify-full 07-31 -> +608); wypieczone 622
+#    + pominięte 4022 (przyrostowość po srcHash), kafli źle=0; stron 1 144 991 (= kafle +
+#    4644 taile); verify inline: TOC−taile = 1 140 347 = kafle źródłowe, próbka CRC 128/128;
+#    wyjście 124,09 GB (APP-LOCK: pakiety 109,1 -> 124,1 GB); czas 11,6 min
+#    ⚠ pełnego --verify-full dla 08-04 BRAK ŚLADU (tylko verify inline + próbka 128 CRC)
+#    ⚠ podsumowanie OrthoBake drukuje etykietę „det25" mimo warstwy det05 (ścieżki i grupy
+#    w tym samym logu mówią det05) — błąd komunikatu, nie warstwy
+```
+
+**Weryfikacja numeryczna (kotwice — wszystko z logów/list, zero przeliczeń na danych):**
+- **343 077 kafli PL (GUGiK, §10) + 874 233 z listy SK = 1 217 310 = DOKŁADNIE stan
+  coverage z kr. 8** — lista integracyjna jest bijektywna z drzewem det05;
+- dekod-skan **197 032** = „do zapisu" harmonizacji **197 032** — dwa niezależne zliczenia
+  zawartości kolumn 567..993;
+- AppData **+136 146** vs **136 153** zapisane przez harmonizację: 7 kafli mniej = kolizje
+  (istniejący GUGiK/merged zostaje, jak w §12) — wniosek z arytmetyki, nie z logu;
+- repo-det05 (1 217 310) − AppData (1 140 347) = **76 963 kafli poza kolumnami 567..993**
+  (coverage widzi zakres od i=0!) — zharmonizowane żniwo przerwanego fetchu regionu C, które
+  integracja wprowadziła do repo, a sync per-kolumny ŚWIADOMIE pominął. Repo ⊃ AppData:
+  pamiętać przy najbliższym pełnym syncu/bake'u (kafle „czekają" na wejście do apki).
+
+**Odbiór:** apka 21:45, autoshoty 21:46–22:28 → `dev/rohacze-shot/` (126 PNG); crash instancji
+usera 22:44 = APPCRASH w Microsoft.UI.Xaml.dll (niezwiązany z kaflami — dziennik APP-LOCK).
+Nowa zachodnia krawędź det05 w AppData: kolumna 567 → lon 19.6998 (Rohacze 19.7613 z ~4,5 km
+zapasu). Werdykt usera: 5 cm na Rohaczach JEST, ale widoczne stemple `© GKÚ, NLC` → stąd §13.
+
+**STAN OTWARTY po tej sesji (spisany 08-14):**
+1. **Region C SK niedokończony:** fetch przerwany na 721 000/3 334 275 pozycji — wznowić
+   `--region C --level sk05` (pomija to, co już na dysku; plan: PIPELINE-rohacze.md);
+2. **PL det05:** 32 120 brakujących kafli regionu C (pomiar 08-02, memory
+   goal-whole-tatras-5cm) bez śladu fetchu — w tym strona PL bboxa Rohaczy (53 744 pozycji
+   pominiętych maską w kroku 1c);
+3. **Osobita i dolna Chochołowska** poza bboxem; w skanie pasmowym (kr. 4) próbkowane pasma
+   j≈294–594 sk05-harm były puste — najpewniej nadal zero 5 cm w tym pasie;
+4. `sk05/manifest.json` z nadpisanym regionem łatki (kr. 1c) — przywrócić pełny region;
+5. **Derywacja §0-B(2) niewykonana:** det25/baza dla 19.70–19.80 nie powstały z tego 5 cm
+   (sk25 z §12 kończy się na 19.80) — za pierścieniem det05 przy Rohaczach nadal baza;
+6. 16 pozycji err (HTTP 404) w bboxie + 6 err przerwanego przebiegu regionu C — bez refetchu;
+7. pełny `--verify-full` po rozszerzeniu — nieodnotowany (inline TOC + próbka CRC tak).
+
+Rollbacki: `sk05/` surowe nietknięte · harmonizacja: rerun `--cols 567:993` (pole w
+`_harm_params.npz`) · znaki: `sk05-harm-prewm/` + `_wm-fixed.txt` · integracja/sync: listy
+kumulatywne NIE znakują partii — cofnięcie Rohaczy = usunięcie z det05 wpisów listy
+`_sk-pilot-added.txt` ∩ kolumny 567..993 + restore `_coverage_p16-przed-rohaczami.txt`
++ bake przyrostowy (przebuduje tylko dotknięte cele).
