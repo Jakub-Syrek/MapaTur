@@ -954,3 +954,54 @@ WYPEŁNIENIE — decyzja pilotem (NIE zmieniać bez nowego pilota):
   offset wybierany po niedopasowaniu mean+std lumy na pierścieniu, źródło musi być w całości
   niezamaskowane, dopasowanie tonu offsetem średniej, szew wtapiany rampą 8 px; fallback median,
   gdy żaden kandydat nie jest legalny.
+
+## §14. det25 PL = DERYWACJA z det05 (box 5×5) — usunięcie nalotów WMS (2026-08-26, ODEBRANE)
+
+Realizacja stałej zasady „warstwy zgrubne DERYWUJEMY z detalu, nie pobieramy osobno". Werdykt
+usera 08-26: „A pełny" (pełna derywacja na pokryciu det05, nie łatka lokalna).
+**WERDYKT WIZUALNY USERA 08-26 (po bake, w apce): „jest ok, szew przy Zakopanem nie przeszkadza"
+— stan ODEBRANY, nie cofać (zasada 19).** Szew granicy pokrycia = świadomie zaakceptowany koszt;
+domknie go przyszły fetch det05 regionu C + re-run `--write`.
+
+**DIAGNOZA (pomiar 08-25, próbka alpejska PLAN-ALPY §10):** det25 PL z WMS StandardResolution
+zawiera płaski, mleczno-niebieski rocznik: nad doliną Rybiego Potoku (schronisko MO, obie tafle;
+blob ~295 kafli / 4,8 km², lon 20.064–20.099, lat 49.176–49.221) lum ~57–75 przy normie 95–119,
+B−R +19…+34 przy normie −8…+7, światło bezkierunkowe (lit≈shadow). Ta sama sygnatura:
+Chochołowska/Kościeliska (~30 km²), Białka/Łysa Polana. **Detektor nalotu = lit-delta**: per-piksel
+det25 vs det05 zderywowany 5×5, różnica liczona TYLKO na pikselach oświetlonych w det05 (lum05>60)
+— naturalnie ciemny las/woda/cień jest ciemny w obu źródłach i się nie łapie; nalot = det25
+ciemniejszy o 16–34 lumy i bardziej niebieski o +27…+34 B−R na identycznej, oświetlonej treści.
+**Refetch martwy:** sonda GetMap 08-25 — 11/12 kafli bajtowo-tonalnie identycznych z naszymi
+(WMS nadal składa ten sam rocznik). Strona SK: delty ≈0 (sk25 i sk05 = ten sam ZBGIS) — sk25
+NIE wymaga derywacji i zostaje nietknięte.
+
+**RECEPTA (wykonana 08-26):**
+```
+python testdata/maps/derive-det25-from-det05.py --dry     # zasieg (log: kafle z kompletem 25/25)
+python testdata/maps/derive-det25-from-det05.py --write   # derywacja (backup + lista automatycznie)
+# potem OKNO APP-LOCK: robocopy det25 repo->AppData (/E /XO), bake przyrostowy:
+dotnet run --project src/MapaTur.OrthoBake -c Release -- --layer det25 --src <AppData>\det25 \
+  --out <AppData>\...\opk\det25 --det1m-out <AppData>\...\opk\det1m
+# verify-full det25 i det1m (--verify-full --out <opk\...>), apka -> werdykt usera
+```
+Kluczowe własności narzędzia (docstring ma pełny opis): wejście = det05 z **AppData** (zbiór
+zaakceptowany; repo-det05 ma ~77 tys. nieprzetworzonych kafli z fetchu regionu C — NIE wolno ich
+wciągać przed pipeline'em §11–13); zakres = istniejące kafle det25 spoza `_sk-pilot-added.txt`
+z kompletem 25/25 dzieci; NoData (czysta czerń) nie rozcieńcza średniej bloku; zapis WebP q90 m5;
+backup `det25-prewms/{i}/{j}.webp` („if absent" — pułapka §3.10); lista `det25/_wms-derived.txt`.
+Rollback: pliki z listy ← `det25-prewms/` + bake przyrostowy.
+
+**LICZBY WYKONANIA 08-26:** zakres 13 656 kafli PL (582 częściowe pominięte, SK 25 840 pominięte);
+derywacja 43 min / 0 błędów; weryfikacja: dekod 13 656/13 656 OK; rejestracja krat — lit-delta na
+dawnym nalocie med **−0,06 lumy / +1,3 B−R** (≈0, kraty zarejestrowane idealnie: dlon25=5·dlon05,
+wspólna kotwica); sync robocopy 13 657 plików / 1,02 GB / 15 s / 0 FAILED.
+
+**ZNANY KOSZT (zmierzony; werdykt wizualny usera w apce):** na granicy pokrycia det05 szew
+derived|WMS |dLum| med 14 / p90 50 (przed: med 1,9 — mozaika WMS była tam ciągła). Granica biegnie
+prostą linią przez rejon Zakopanego (lat ~49.30, lon 19.80–20.10) i zachód Chochołowskiej
+(lon ~19.80): na południe czysty rocznik det05 2021-09, na północ zostaje mleczno-niebieski WMS.
+Derywacja przenosi też do det25 wypalone cienie 2021 z det05 (spójne z pierścieniem 5 cm z bliska;
+deshadow R4 naprawi kiedyś OBA poziomy jedną re-derywacją). **Docelowe domknięcie szwu granicy =
+dokończenie fetchu det05 regionu C (§0-A: rocznik!) + ponowny `--write`** (narzędzie idempotentne —
+przeliczy tylko nowe komplety 25/25); ewentualna harmonizacja pasa WMS na północy = osobna decyzja
+usera (anti-patchwork §C.10: pole globalne, nie statystyki per-kafel).
