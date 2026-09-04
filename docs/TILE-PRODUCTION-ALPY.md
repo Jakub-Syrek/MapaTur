@@ -70,13 +70,97 @@ krawędź linspace — konwencja tatrzańska), pokrycie = bounds zermatt.dem, ~0
 Mozaika LV95 0,8 m (mean-pool ×8 SWISSIMAGE) → per cel WGS84→LV95 bilinear; NoData (włoska flanka)
 = alpha 0 (punch/nodata-rim renderera). Pokrycia: rzędy N 100 %, r2-c0 23,8 % (SW = Włochy).
 ~1,2 GB / 9 plików; seed do AppData `dem/`. Auto-loader wykrywa set per-region (FilterOrtho).
-Bieg: drape działa, prawdziwe kolory. ⚠ OTWARTE: niebieski cień nalotu 2023 na ścianach N —
-audyt `audit-ortho-blue-cast.py` + de-blue (ORTO-CONTRACT hard rule) ZANIM warstwa będzie
-ogłoszona odebraną; sprawdzić też, czy runtime mode-1 de-blue obejmuje ten tor bazy.
+Bieg: drape działa, prawdziwe kolory. Niebieski cień nalotu 2023 zdjęty w §A5b.
 
-## §A6+ (DO ZROBIENIA, kolejno)
+## §A5b. De-blue bazy: `testdata/maps/ortho-deblue-base-desat.py --passes 3` (2026-08-28)
+
+**Dlaczego data-side, nie w shaderze.** `deblueShadow()` w `Terrain3DGlRenderer` jest wołany WYŁĄCZNIE
+na kolorze warstw detalu (det25/det1m/det05/generic). Na bazie występuje tylko wewnątrz
+`deblueShadow(baseC)` przy liczeniu delty tonu — wynik nie trafia do wyjścia. **Baza nie ma ścieżki
+shaderowej**, więc twardą regułę „orto bez wypalonych cieni" spełnia się dla niej tylko na dysku
+(zgodne z TILE-PRODUCTION w. 441).
+
+**Prawo — decyzja usera 2026-08-28** (TILE-PRODUCTION w. 441 rezerwował ten wybór): **desaturacja
+jak w shaderze**, nie legacy §3.13. Port `deblueShadow()` linia w linię (zgodność z GLSL zweryfikowana
+na 5 przypadkach, max różnica 8e-8). Legacy `ortho-deblue-shadow.py` NIE nadaje się dla nowych baz:
+dokłada `G += 0.35·ex` (green-paint bug z rollbacku r1-c3), ma zaszytą kratę tatrzańską 4×2 i robi
+`convert("RGB")` — co skasowałoby alfę włoskiej flanki i wprost w bug czarnych trójkątów.
+
+**Zmierzone (próbka co 8 px, tylko piksele z kryciem):**
+
+| | surowe | po §A5b (3 passy) | referencja: baza Tatr (odebrana) |
+|---|---|---|---|
+| blue-excess w cieniu, mean | 7,78/255 (set) | **0,38–0,69** | 0,10–0,14 |
+| blue-excess, p95 | 33–37 | 3–5 | 0,0 |
+| nasycenie cienia | 0,299 | 0,153 | — |
+| nasycenie w świetle | 0,067 | 0,062 (nietknięte) | — |
+| luma cienia | 63,2 | 62,7 (bez wypłukania) | — |
+
+Dlaczego 3 passy: jeden zostawia ~15% castu, które `KB=0.85` trzyma z rozmysłem (worst kafel r1-c0:
+pass1 2,31 → pass2 1,03 → **pass3 0,68**); 3 to pierwsza wartość, przy której KAŻDY kafel schodzi pod
+próg audytu <1,0. Do 0,10 jak Tatry nie zejdzie i nie ma zejść — podłogę trzyma bramka lumy chroniąca
+zgniecioną czerń przed wzmacnianiem szumu chromy.
+
+⚠ **Baza istnieje w DWÓCH kopiach** — mastery generatora `<repo>/dem/` (gitignore) i seed w AppData.
+Poprawiać OBIE, inaczej następny re-seed cicho przywraca surowy cast. Cofnięcie: `--restore`
+(originały leżą obok jako `*.pre-deblue.bak`). **Werdykt wizualny usera 2026-08-28: „jest ok" →
+warstwa ODEBRANA** (apka 3D, region zermatt, poza 150 m pod Matterhornem, baza bez detalu na
+ekranie — det25/det05 `.opk` jeszcze nie istnieją, więc oceniana była wyłącznie baza). NIE cofać
+(zasada 19).
+
+## §A6. det25 Zermatt: `generate-zermatt-det25.py` + OrthoBake (2026-08-28)
+
+**Źródło NIE jest WMS-em** (jak tatrzański `fetch-ortho-detail.py`), tylko lokalne SWISSIMAGE dop10:
+`maps/swisstopo-zermatt/img10` — 420 kafli LV95, 19,5 GB, **natywne 10 cm**, rocznik 2023 jednolicie.
+det25 = 2,5× downsample (BOX = uśrednianie po polu) z tego samego nalotu co baza §A5 → zero skoku tonu
+i szwów baza↔detal. Zgodne z `derive-coarser-layers-from-detail`.
+
+**Krata = kotwice REGIONU**: Lon0 7.58, Lat0 46.08, RefLat 46.0 (wpis „zermatt"), NIE tatrzańskie
+19.50/49.40/49.25. Sprawdzone, że kodu nie trzeba ruszać: `OrthoDetailGrid` czyta kotwice z
+`MountainRegions.Default`, a to `ResolveDefault(MAPATUR_REGION) ?? Tatry` — przy `MAPATUR_REGION=zermatt`
+runtime i generator mówią o tej samej kracie. Wzory pitchu skopiowane 1:1 z fetchera.
+
+```
+python testdata/maps/generate-zermatt-det25.py            # 84,5 min
+dotnet run --project src/MapaTur.OrthoBake -c Release -- --layer det25 \
+  --src "<repo>/dem/ortho-detail/zermatt/det25" \
+  --out "<AppData>/Data/dem/ortho-detail/zermatt/opk/det25"
+dotnet run --project src/MapaTur.OrthoBake -c Release -- --verify-full --layer det25 --out "<...>/opk/det25"
+```
+
+**Zmierzone:** krata i 0..182 / j 0..140 = **25 480 kafli** planu → **22 835 zapisanych + 2 645 pustych**
+(brak źródła = brak pliku = widać bazę), średnie pokrycie 99,9%, **1,6 GB** WebP (q90, method 5 — jak
+fetcher). Bake: **373 pakiety, 23 208 stron** (22 835 kafli + 373 taile), kafli źle **0**, **2,70 GB**,
+1,2 min. `--verify-full`: **23 208/23 208 CRC OK, BAD=0, layoutBad=0, dupPageId=0, 0 plików poza indeksem.**
+
+**Rejestracja zweryfikowana przed pełnym biegiem** (błąd kraty przesunąłby całą warstwę): korelacja
+det25 vs odebrana baza na tym samym bboxie **0,945–0,982**, średnie RGB w granicach 2–4/255.
+Systematycznie wyższy niebieski w det25 = poprawnie, warstwa jest SUROWA.
+
+**det25 zostaje SUROWY** — audyt `mean 4,15/255, p95 17,5` → werdykt „RAW". To LEGALNE i zamierzone:
+det25 ma ścieżkę shaderową (`uOrthoDetailColorMode=1` → `deblueShadow()`), a baza §A5b dostała na dysku
+TO SAMO prawo, więc obie warstwy zgadzają się w cieniu. Dla porównania tatrzański det25 surowy: 4,75/15,8.
+**Nie de-bluować tej warstwy na dysku — byłaby to podwójna korekcja.**
+
+**Konwencja pokrycia (§9.1 TILE-PRODUCTION, historia czarnych trójkątów):** WebP **bez alfy**, brak
+pokrycia = **dokładne (0,0,0)**; piksele kryte mają podłogę 4/255. Podłoga jest po to, że WebP jest
+stratny — ale pomiar pokazał, że prawdziwym zjawiskiem przy granicy jest ringing DCT, nie kwantyzacja.
+Zweryfikowane porównaniem z maską pokrycia SPRZED zapisu: **0 pikseli krytych przeciekło do dokładnej
+czerni na 17,0 mln** (w tym kafel graniczny z 15,4% czerni).
+
+det1m dla Zermatt **świadomie pominięty**: baza regionu ma ~0,8 m/px, więc warstwa 1 m nic nie wnosi
+(inaczej niż w Tatrach, gdzie baza to ~2–3 m/px). Gdyby kiedyś była potrzebna — `--det1m-out` w tym
+samym bake'u.
+
+**Werdykt wizualny usera 2026-08-29: „jest ok" → det25 Zermatt ODEBRANY, NIE cofać (zasada 19).**
+Warunki: apka 3D, region zermatt, poza 150 m pod Matterhornem, strumień zbieżny (100/128 rezydentnych,
+28 pustych = brak pokrycia IT, queue 0), 0 błędów. Stan warstw Zermatt po tym werdykcie: baza §A5b
+(de-blue na dysku) + det25 §A6 (surowy, de-blue w shaderze) — obie zgodne w cieniu.
+
+## §A7+ (DO ZROBIENIA, kolejno)
 - DEM: piramida baked `.bdt` (wzorzec `dem-cache/baked`) + `zermatt.dem` (baza ~30 m dla LOD).
 - Orto: baza + det25 wg kraty regionu (kotwice `zermatt` w rejestrze — NOWE pola wpisu, krata własna,
   NIE tatrzańska!) + prebake `.opk`.
-- Audyt niebieskiego cienia (`audit-ortho-blue-cast.py`) i deblue PRZED pierwszym pokazaniem
-  (ORTO-CONTRACT: hard rule, na próbce 08-25 cień widoczny na ścianie N Matterhornu).
+- ~~Audyt niebieskiego cienia i de-blue~~ — ✅ WYKONANE dla BAZY w §A5b (08-28). Zostaje: powtórzyć
+  audyt po każdej NOWEJ warstwie Zermatt (det25 z §A6 idzie za ścieżką shaderową, więc surowa jest
+  legalna — ale audyt i tak uruchomić, żeby wiedzieć, w jakim stanie są dane).
