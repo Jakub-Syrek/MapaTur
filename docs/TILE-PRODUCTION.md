@@ -1148,3 +1148,40 @@ Rollbacki: `sk05/` surowe nietknięte · harmonizacja: rerun `--cols 567:993` (p
 kumulatywne NIE znakują partii — cofnięcie Rohaczy = usunięcie z det05 wpisów listy
 `_sk-pilot-added.txt` ∩ kolumny 567..993 + restore `_coverage_p16-przed-rohaczami.txt`
 + bake przyrostowy (przebuduje tylko dotknięte cele).
+
+
+## §16. det05 region C — sync „żniwa" przerwanego fetchu do AppData + bake przyrostowy (2026-09-04)
+
+Domknięcie punktu „repo ⊃ AppData" z §15: repo-det05 miało **1 344 460** kafli, AppData **1 140 347** —
+różnica **204 113** (bbox W,S,E,N `19.50, 49.1967, 20.15, 49.40`, kolumny 0..1839, wiersze 0..883; pasma
+kolumn 0..250 = zachodni skraj/Osobita, 700..1400 = pas północny), zero kafli tylko w AppData. To
+zharmonizowane i odznakowane (skan §15 kr. 4 obejmował całe sk05-harm) żniwo fetchu regionu C, które
+integracja wprowadziła do repo, a sync per-kolumny w §15 świadomie pominął.
+
+```bash
+# 0. lista różnic repo vs AppData (klucze (i,j) + bbox) — sesyjny skrypt, wzór w handoffie 09-04
+# 1. sync (okno APP-LOCK; kopiuje tylko brakujące, idempotentny) — dev/fetch-logs/sync-regionC-0904.log
+#    204 113 kafli / 6,44 GB w 4,2 min; po syncu AppData == repo (1 344 460)
+# 2. coverage (UWAGA na CLI: katalog jest ARGUMENTEM POZYCYJNYM, `--pitch` po nim):
+python testdata/maps/build-det05-coverage.py dem/ortho-detail/tatry/det05 --pitch 16
+#    zakres i 0..2270, j 0..1304; cele >=95%: 4998 (§15: 4468) z 5475 dotkniętych; kopia do AppData
+# 3. bake przyrostowy det05 (apka ZAMKNIĘTA; dev/fetch-logs/bake-det05-regionC-0904.log):
+dotnet run --project src/MapaTur.OrthoBake -c Release -- --layer det05 --src "<AD>\det05" --out "<AD>\opk\det05"
+#    1 344 460 kafli, 5475 pakietów (4644 -> +831); wypieczone 957 + pominięte 4518 (srcHash);
+#    stron 1 349 931; kafli źle=4 (dekod; OrthoBake NIE drukuje których — skan dekodu osobno);
+#    wyjście 143,47 GB (było 124,1); 15,8 min. Etykieta "det25" w podsumowaniu = znany błąd komunikatu.
+# 4. PEŁNA walidacja (§15 kr. 10 miała tylko próbkę) — dev/fetch-logs/verify-full-det05-0904.log:
+dotnet run --project src/MapaTur.OrthoBake -c Release -- --verify-full --layer det05 --out "<AD>\opk\det05"
+#    pakiety=5475, strony OK=1 349 931, BAD=0, layoutBad=0, dupPageId=0, pliki-poza-indeksem=0; 19,8 min
+# 5. skan znaków wodnych §13 na nowym obszarze (repo det05; dev/fetch-logs/wm-scan-regionC-0904.log):
+python testdata/maps/scan-det05-watermarks-region.py --lon0 19.50 --lon1 20.15 --lat0 49.19 --lat1 49.40 --thr 0.50
+#    (wynik + naprawa: patrz uzupełnienie niżej)
+# 6. wznowienie fetchu regionu C jako ODŁĄCZONY proces (dev/fetch-logs/fetch-regionC-resume.ps1):
+#    SK `--region C --level sk05 --workers 8`, potem PL `--level det05 --workers 6`; logi *-resume-*.log
+```
+
+**Kotwice:** 1 140 347 + 204 113 = 1 344 460 = kafle w bake; 1 344 460 − 4 (źle) + 5475 (taile) = 1 349 931
+stron = verify-full OK. Pakietów +831 = nowe grupy 16×16 dotknięte przez nowe kafle (957 wypieczonych
+= 831 nowych + 126 istniejących z nowymi kaflami).
+
+**⚠ Werdykt wizualny usera na nowy obszar (zachód/Osobita/pas północny): do zebrania.**
