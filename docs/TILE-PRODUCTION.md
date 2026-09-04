@@ -1184,4 +1184,10 @@ python testdata/maps/scan-det05-watermarks-region.py --lon0 19.50 --lon1 20.15 -
 stron = verify-full OK. Pakietów +831 = nowe grupy 16×16 dotknięte przez nowe kafle (957 wypieczonych
 = 831 nowych + 126 istniejących z nowymi kaflami).
 
+**4 kafle „źle" z bake'u = pliki 0-bajtowe** (`det05/271/266..269.webp`, NW: lon 19,596 / lat 49,338) —
+pozostałość przerwanego fetchu; skan dekodu 204 113 nowych kafli (PIL, `dev/fetch-logs/decode-scan-new-0904.log`)
+znalazł dokładnie te 4. Fetcher już traktuje 0 B jak brak (`fetch-ortho-detail.py:217` — `exists and getsize > 0`),
+więc PL-fetch regionu C je odtworzy; mimo to przeniesione do kwarantanny `dev/fetch-logs/quarantine-0904/{repo,appdata}/`
+(obie kopie), żeby bake i integracja nie widziały pustych plików; grupa 16/16 wejdzie w następny przyrostowy bake.
+
 **⚠ Werdykt wizualny usera na nowy obszar (zachód/Osobita/pas północny): do zebrania.**
