@@ -68,5 +68,5 @@ wzorowa (397/424 i 331/333). ws płaski w obu wariantach — ring PBO trzyma (P0
 
 - Werdykt #9 = user; po nim push całości (5 commitów) jedną bramką.
 - dev/t8-draws — dowody pomiarowe, nie kasować (jak dev/p0-pooling).
-- Rekonstrukcja §14 TILE-PRODUCTION (Rohacze) — działa w OSOBNEJ sesji usera (chip); nie dublować.
+- Rekonstrukcja §15 TILE-PRODUCTION (Rohacze; na gałęzi była §14) — działa w OSOBNEJ sesji usera (chip); nie dublować.
 - sk25/det05 ODEBRANE, RMP3 ZAMROŻONE — bez zmian.
