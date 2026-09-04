@@ -3449,9 +3449,9 @@ public sealed partial class MapPageViewModel : ObservableObject
             // High Tatra core around Morskie Oko (see TatraDemRegion): the budget is sized so the planner
             // picks z16 (≈1.5 m/px, near GUGiK's native 1 m) over the largest area whose native-resolution
             // mosaic still fits under the Android mesh vertex cap — maximum detail without decimation.
-            MapBounds bounds = TatraDemRegion.Bounds;
+            MapBounds bounds = MapaTur.Domain.Regions.MountainRegions.Default.DemLoad.Bounds;
             int zoom = DemTilePlanner.ChooseZoomForBudget(
-                bounds, TatraDemRegion.MaxTiles, TatraDemRegion.MinZoom, TatraDemRegion.MaxZoom);
+                bounds, MapaTur.Domain.Regions.MountainRegions.Default.DemLoad.MaxTiles, MapaTur.Domain.Regions.MountainRegions.Default.DemLoad.MinZoom, MapaTur.Domain.Regions.MountainRegions.Default.DemLoad.MaxZoom);
             long plannedTiles = DemTilePlanner.TileCount(bounds, zoom);
             logger.LogInformation("GUGiK region load start: z{Zoom}, {Tiles} tiles planned", zoom, plannedTiles);
 
@@ -3531,7 +3531,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             IsBusy = true;
             StatusMessage = Localization.AppStrings.StatusDownloadingTatraOffline;
-            logger.LogInformation("Offline Tatra download start: base z{Base}+z14+detail z{Detail}", LodBaseZoom, TatraOfflineRegion.DownloadZoom);
+            logger.LogInformation("Offline download start ({Region}): base z{Base}+z14+detail z{Detail}", MapaTur.Domain.Regions.MountainRegions.Default.Id, LodBaseZoom, MapaTur.Domain.Regions.MountainRegions.Default.Offline.DownloadZoom);
 
             var progress = new Progress<OfflineDownloadProgress>(p =>
             {
@@ -3543,13 +3543,15 @@ public sealed partial class MapPageViewModel : ObservableObject
             // Download the SMOOTH base zooms (z13/z14) over the whole region AND the 1 m detail (z16). The wide
             // z13 is what lets the LOD base load cache-only (offline, smooth, wide — no online fetch, no loading
             // stripes); z16 is the near-field 1 m. Coarse→fine so the base is usable first.
-            int[] zooms = { LodBaseZoom, 14, TatraOfflineRegion.DownloadZoom };
+            // P-A (09-04): bounds/zoom z WPISU REGIONU (MountainRegions.Default), nie z fasady tatrzanskiej —
+            // na Zermacie fasada pobieralaby Tatry. Dla Tatr identyczne (fasada == wpis #1).
+            int[] zooms = { LodBaseZoom, 14, MapaTur.Domain.Regions.MountainRegions.Default.Offline.DownloadZoom };
             int totDownloaded = 0, totCached = 0, totFailed = 0, totTotal = 0;
             foreach (int z in zooms)
             {
                 StatusMessage = Fmt(Localization.AppStrings.StatusDownloadingTatraOfflineZoomFormat, z);
                 OfflineDownloadResult r = await offlineDownloader.DownloadAsync(
-                    TatraOfflineRegion.Bounds, z, progress).ConfigureAwait(true);
+                    MapaTur.Domain.Regions.MountainRegions.Default.Offline.Bounds, z, progress).ConfigureAwait(true);
                 totDownloaded += r.Downloaded; totCached += r.AlreadyCached; totFailed += r.Failed; totTotal += r.Total;
                 logger.LogInformation(
                     "Offline z{Zoom}: {Downloaded} new, {Cached} cached, {Failed} skipped of {Total}",
@@ -3691,8 +3693,8 @@ public sealed partial class MapPageViewModel : ObservableObject
             LoadProgress = 0.3;
 
             var center = new GeoPoint(
-                (TatraDemRegion.Bounds.NorthEast.Latitude + TatraDemRegion.Bounds.SouthWest.Latitude) / 2.0,
-                (TatraDemRegion.Bounds.NorthEast.Longitude + TatraDemRegion.Bounds.SouthWest.Longitude) / 2.0);
+                (MapaTur.Domain.Regions.MountainRegions.Default.DemLoad.Bounds.NorthEast.Latitude + MapaTur.Domain.Regions.MountainRegions.Default.DemLoad.Bounds.SouthWest.Latitude) / 2.0,
+                (MapaTur.Domain.Regions.MountainRegions.Default.DemLoad.Bounds.NorthEast.Longitude + MapaTur.Domain.Regions.MountainRegions.Default.DemLoad.Bounds.SouthWest.Longitude) / 2.0);
 
             // Base: wide, STATIC. z13 (~6 m/px over ~6 km, ~1 M verts < the 5 M cap so it's never decimated) —
             // bumped from z12 (~12 m) because z12 SHAVED the sharp summit apexes, so distant peaks read blunter

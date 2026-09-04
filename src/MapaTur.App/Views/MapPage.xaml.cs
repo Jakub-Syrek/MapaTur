@@ -417,8 +417,9 @@ public partial class MapPage : ContentPage
     {
         viewModel.ActiveSection = 0; // close the panel so the status line is visible
 
-        long tiles = DemTilePlanner.TileCount(TatraOfflineRegion.Bounds, TatraOfflineRegion.DownloadZoom);
-        int megabytes = (int)(TatraOfflineRegion.EstimatedBytes((int)tiles) / (1024 * 1024));
+        MapaTur.Domain.Regions.RegionOfflineDownload offline = MapaTur.Domain.Regions.MountainRegions.Default.Offline; // P-A: wpis regionu, nie fasada Tatr
+        long tiles = DemTilePlanner.TileCount(offline.Bounds, offline.DownloadZoom);
+        int megabytes = (int)(offline.EstimatedBytes((int)tiles) / (1024 * 1024));
 
         bool onWifi = Connectivity.Current.ConnectionProfiles.Contains(ConnectionProfile.WiFi);
         if (!onWifi)

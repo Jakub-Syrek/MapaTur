@@ -102,7 +102,9 @@ Do rozważenia: WER LocalDumps dla MapaTur.App.exe (HKLM — decyzja usera, usta
 - **Push**: ✅ ZROBIONY 08-28 (`5eedd01..fc593f3`). ✅ **Gałęzie zmergowane 09-04**: `quirky-morse`
   (derywacja det25 = TILE-PRODUCTION §14) i `inspiring-yonath` (Rohacze = **§15**, przenumerowane z §14
   przy merge, notka w sekcji); `dazzling-murdock` i `determined-pike` już były w main. Worktree i gałęzie
-  `claude/*` usunięte. NEXT z kolejki Alp: zoomy z13/z14 offline w VM z rejestru; orto IT — werdykt usera.
+  `claude/*` usunięte. ✅ **Zoomy/bounds offline i „załaduj teren" z REJESTRU (09-04)**: w VM i MapPage 11 użyć fasad
+  `TatraDemRegion`/`TatraOfflineRegion` zamienione na `MountainRegions.Default.DemLoad/Offline` — na Zermacie
+  „pobierz offline" pobierało Tatry; dla Tatr bit w bit (fasada == wpis #1). NEXT: orto IT — werdykt usera.
 - **Ogon porządkowy**: 4 pliki w drzewie roboczym różnią się TYLKO końcowym znakiem nowej linii
   (`DxgiDriverTrim.cs`, `TatraTrailheadParking.cs`, `IUnmarkedPathRepository.cs`,
   `OverpassUnmarkedPathQueryBuilder.cs`). Stan NA DYSKU jest zgodny z `.editorconfig`
