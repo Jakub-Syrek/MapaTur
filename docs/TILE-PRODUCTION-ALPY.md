@@ -157,7 +157,31 @@ Warunki: apka 3D, region zermatt, poza 150 m pod Matterhornem, strumień zbieżn
 28 pustych = brak pokrycia IT, queue 0), 0 błędów. Stan warstw Zermatt po tym werdykcie: baza §A5b
 (de-blue na dysku) + det25 §A6 (surowy, de-blue w shaderze) — obie zgodne w cieniu.
 
-## §A7+ (DO ZROBIENIA, kolejno)
+## §A7. Piramida baked `.bdt` Zermatt (z16→z13) — `TatraBakeRunner` z env regionu (2026-08-29)
+
+Ten sam runner co Tatry (TILE-PRODUCTION §2.4), **wspólny korzeń `dem-cache/baked`** — kafle XYZ 3857 obu
+regionów nie kolidują (Zermatt lon 7,6 vs Tatry lon 20), a `BakedTileAvailabilityIndex` skanuje wszystko
+na starcie. Runner dostał dwie poprawki region-aware (bez zmian dla Tatr — bit w bit): bramka pokrycia
+źródła jak w `MauiProgram` (`coverage: region.Id == "tatry" ? null : region.DemLoad.Bounds`) i domyślne
+bounds z `MountainRegions.Default.Offline.Bounds`. **Bez `MAPATUR_REGION=zermatt` bake kończy się na
+0 kafli po 0,3 s** (źródło odrzuca wszystko spoza okna Polski) — zmierzone, stąd poprawka.
+
+```powershell
+$env:MAPATUR_REGION="zermatt"; $env:MAPATUR_BAKE_TATRA="1"
+$env:MAPATUR_GUGIK_CACHE="<AppData>\Data\dem-cache\swisstopo"
+$env:MAPATUR_BAKE_BOUNDS="45.92,7.58,46.08,7.88"          # S,W,N,E = okno regionu
+$env:MAPATUR_BASE_DEM="<AppData>\Data\dem\zermatt.dem"    # backfill voidów (włoska flanka)
+dotnet test tests/MapaTur.Infrastructure.Tests --filter FullyQualifiedName~TatraBakeRunner -c Release --nologo
+```
+
+**Zmierzone:** 2937 kafli / 929,7 MiB w **32 s** — z16 **2156** (= komplet źródła `swisstopo/16`, każdy
+262 209 B = header+heights+DetailNone), z15 570, z14 161, z13 50 (524 353 B, z detail). 100% magic `BDT2`.
+Weryfikacja runnera: 12/12 szwów z16 bit-identycznych, rastry z13–15 poprawne; profil brzegowy z13–15
+informacyjny (derywacja nie node-aligned — jak w Tatrach). Piramida łącznie po bake'u: z16 8633, z15 2258,
+z14 611, z13 177 (3,60 GiB). Skrypt kontrolny: `verify-zermatt-bdt.py` (sesyjny, wzór w scratchpadzie:
+licznik nowych `.bdt` per zoom + magic + rozmiar + test okna geograficznego).
+
+## §A8+ (DO ZROBIENIA, kolejno)
 - DEM: piramida baked `.bdt` (wzorzec `dem-cache/baked`) + `zermatt.dem` (baza ~30 m dla LOD).
 - Orto: baza + det25 wg kraty regionu (kotwice `zermatt` w rejestrze — NOWE pola wpisu, krata własna,
   NIE tatrzańska!) + prebake `.opk`.

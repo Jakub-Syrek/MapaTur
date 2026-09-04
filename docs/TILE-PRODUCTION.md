@@ -100,6 +100,8 @@ Wynik wykonania: 1746 kafli, ~105 mln px wypełnionych. Bpv vs Kronstadt różni
 rodzina bałtycka) — skok na łączeniu pomijalny.
 
 ### 2.4 Re-bake piramidy (po KAŻDEJ zmianie w gugik\16)
+> Od 2026-08-29 runner jest region-aware: `MAPATUR_REGION=<id>` przełącza bramkę pokrycia źródła i domyślne
+> bounds (Tatry bez env = bit w bit jak dotąd). Bake innego regionu: TILE-PRODUCTION-ALPY §A7.
 ```powershell
 $env:MAPATUR_BAKE_TATRA="1"
 $env:MAPATUR_BAKE_BOUNDS="49.05,19.45,49.40,20.45"

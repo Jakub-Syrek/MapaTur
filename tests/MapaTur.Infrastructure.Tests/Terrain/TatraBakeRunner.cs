@@ -75,7 +75,13 @@ public sealed class TatraBakeRunner
         // makes the bake fully offline-deterministic over the real cached coverage. The app's OfflineRegionDownloader
         // uses this exact source type to populate that cache, so we bake from precisely the tiles the app produced.
         using var offlineHttp = new HttpClient(new OfflineHandler());
-        var source = new GugikNmtDemTileSource(offlineHttp, cacheRoot, tileSize: 256);
+        // Region gate jak w MauiProgram (P-B3): Tatry = domyslne okno Polski (bit w bit), inny region
+        // (MAPATUR_REGION, np. zermatt) = jego okno DemLoad - bez tego zrodlo odrzuca kazdy kafel spoza PL
+        // i bake konczy sie na 0 kafli po 0,3 s (zmierzone 2026-08-29 przy pierwszym bake Zermatt).
+        MapaTur.Domain.Regions.MountainRegion region = MapaTur.Domain.Regions.MountainRegions.Default;
+        var source = new GugikNmtDemTileSource(
+            offlineHttp, cacheRoot, tileSize: 256,
+            coverage: region.Id == "tatry" ? null : region.DemLoad.Bounds);
 
         // Load the SAME coarse base the app loads (tatry.dem) and hand it to the baker so the finest tiles'
         // NoData voids — out-of-coverage holes punched by HoleBelow plus watercourse/border voids — are
@@ -399,7 +405,8 @@ public sealed class TatraBakeRunner
     {
         if (string.IsNullOrWhiteSpace(csv))
         {
-            return TatraOfflineRegion.Bounds; // full Polish Tatra footprint
+            // Pelny footprint offline REGIONU (Tatry: identyczne z dawnym TatraOfflineRegion.Bounds).
+            return MapaTur.Domain.Regions.MountainRegions.Default.Offline.Bounds;
         }
 
         string[] parts = csv.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
