@@ -199,7 +199,29 @@ python testdata/maps/fill-zermatt-dem-terrarium.py dem/zermatt.dem "<AppData>/Da
 # potem §A7 (re-bake)
 ```
 
-## §A9+ (DO ZROBIENIA, kolejno)
+## §A9. Włoska flanka BAZY ORTO: `fill-zermatt-ortho-esri.py` (2026-09-04)
+
+Po §A8 po stronie IT jest geometria, ale baza orto miała tam alfa 0 → podkład renderera. **61,4 mln px /
+~55 km²** (r2-c0 76,2 %, r2-c1 14,4 %, r2-c2 0,9 %, r1-c0 0,1 %). Źródło: **Esri World Imagery z17**
+(~0,83 m/px ≈ baza 0,8 m) — ten sam serwis co globalny podkład 2D (`OnlineOrthoBaseLayer`), cache
+`testdata/maps/.dem-cache/esri-tiles/17` (jak `fetch-esri-z16-tiles.py`). Przeciw szwowi CH↔IT:
+(1) **gain per kanał** = mediana(swiss/esri) na pasie 64 px krytych pikseli przy granicy alfy —
+zmierzone **0,82–0,87** (Esri jaśniejszy od SWISSIMAGE 2023), klamra [0,6; 1,6]; (2) **de-blue prawem B ×3**
+na wypełnieniu (hard rule — Esri jest surowy; piksele CH nietknięte, zweryfikowane bajt w bajt);
+(3) **feather 48 px** od najbliższego krytego piksela; alfa → 255.
+
+```
+python testdata/maps/fill-zermatt-ortho-esri.py dem/zermatt-ortho-r2-c0.png ... "<AppData>/.../zermatt-ortho-r2-c0.png" ...
+```
+
+**Zmierzone:** r2-c0 51,1 mln px (1240 kafli), r2-c1 9,6 mln (780), r2-c2 0,6 mln (240), r1-c0 45 tys. (24);
+**0 px bez kafla**; alfa-0 w całej bazie → **0**; obie kopie identyczne; backup `.pre-esri.bak`.
+Audyt blue-cast całej bazy po §A9: **mean 0,36/255, p95 0,61 → DISK-CORRECTED**, [fill] 0/9 (czarne wypełnienie zniknęło razem z alfą 0).
+Ograniczenie świadome: Esri to inny nalot (sezon/śnieg) niż SWISSIMAGE — gain wyrównuje ekspozycję, nie
+treść; granica może być czytelna jako zmiana charakteru zdjęcia, nie jako schodek tonu.
+Werdykt wizualny usera: ⏳.
+
+## §A10+ (DO ZROBIENIA, kolejno)
 - DEM: piramida baked `.bdt` (wzorzec `dem-cache/baked`) + `zermatt.dem` (baza ~30 m dla LOD).
 - Orto: baza + det25 wg kraty regionu (kotwice `zermatt` w rejestrze — NOWE pola wpisu, krata własna,
   NIE tatrzańska!) + prebake `.opk`.
