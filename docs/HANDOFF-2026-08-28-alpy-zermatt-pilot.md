@@ -6,6 +6,10 @@ Plan-matka: [`PLAN-ALPY.md`](PLAN-ALPY.md). Recepty danych Alp: [`TILE-PRODUCTIO
 
 ## Stan w jednym akapicie
 
+**AKTUALIZACJA 2026-08-28 wieczorem: werdykt #9 ODEBRANY („zaćmienie wygląda dobrze") i main
+JEST JUŻ NA `origin` — `5eedd01..fc593f3`, 20 commitów, bramki zielone (format 4/4, testy
+2268/2268, 0 błędów).** Poniższy akapit opisuje stan sprzed pusha.
+
 Na lokalnym main leży **22 commity bez pusha** (push po werdykcie usera dla taska #9 — zaćmienie,
 build c609189, wciąż otwarty). Task #8 (pełzanie commit GPU) DOMKNIĘTY: przyczyną były pady XAML nad
 SwapChainPanelem → pady rysuje Skia (+30,5 vs +397 MB/min). Martwa od migracji compact-tail warstwa
@@ -25,6 +29,11 @@ composer+wskrzeszenie · 9437dbf P-A2 ścieżki/coverage/PickDem · 8571f48 P-B1
 
 - Pady Skia: „pady wyglądają ok". det1m po hotfixie czerni: „jest ok". Próbka Zermatt/sufit 25 cm:
   zaakceptowane. Kryteria: task #8 zamknięty POMIAREM +30,5 MB/min (kryterium usera: po naprawie).
+- **Task #9 (zaćmienie) 2026-08-28 ~17:45: „zaćmienie wygląda dobrze" → ODEBRANY, NIE cofać.**
+  Warunki werdyktu: build `bin\Debug` z 08-28 10:11 (= `main`, zawiera `c609189`), `MAPATUR_DATE=
+  2026-08-12` + `MAPATUR_TIME_HOURS=19.83` (19:50 CEST — słońce ~1°, czyli POD progiem 2° gdzie
+  działa nowy taper; obscuracja ~0,47), poza usera Dolinka za Mnichem 49.1803/20.0459 z 241 m,
+  pitch ~9° (prawie poziomo w horyzont). Oglądane ~54 min, 0 WRN / 0 ERR, brak APPCRASH.
 
 ## PILOT ZERMATT — jak uruchomić i co gdzie leży
 
@@ -55,8 +64,18 @@ composer+wskrzeszenie · 9437dbf P-A2 ścieżki/coverage/PickDem · 8571f48 P-B1
 
 ## Nie ruszać / konteksty
 
-- **Push**: po werdykcie #9, jedną bramką; gałąź `claude/quirky-morse-145976` (det25 derywacja,
-  ODEBRANA) merge'ować razem — pliki rozłączne z main (zmierzone), tylko §14 przenumerować.
+- **Push**: ✅ ZROBIONY 08-28 (`5eedd01..fc593f3`). ZOSTAJE: gałąź `claude/quirky-morse-145976`
+  (det25 derywacja, ODEBRANA) — merge do main, pliki rozłączne z main (zmierzone), tylko §14
+  przenumerować. Podobnie 3 pozostałe gałęzie `claude/*` w worktree.
+- **Ogon porządkowy**: 4 pliki w drzewie roboczym różnią się TYLKO końcowym znakiem nowej linii
+  (`DxgiDriverTrim.cs`, `TatraTrailheadParking.cs`, `IUnmarkedPathRepository.cs`,
+  `OverpassUnmarkedPathQueryBuilder.cs`). Stan NA DYSKU jest zgodny z `.editorconfig`
+  (`insert_final_newline = false`) — to te same stragglery co commit `fd4ee09`, który zrobił
+  dokładnie tę korektę w 4 INNYCH plikach. Do domknięcia jednym `style(format)` commitem.
+- **Bug harnessu (znaleziony 08-28, NIE naprawiony)**: `MAPATUR_CLOUDS` jest martwy, gdy istnieje
+  zapisane ustawienie zachmurzenia — env jest przypisywany PRZED `settingsStore.Cloudiness`
+  (`MapPageViewModel.cs` ~2261), więc zapis wygrywa. `MAPATUR_TIME_HOURS` ma kolejność odwrotną
+  (env wygrywa) — i tak ma być. Fix = przenieść blok env pod blok zapisu.
 - Zasada 20 (APP-LOCK) działała przez całą sesję; C2C 054–059 wysłane (Codex poinformowany o padach,
   det1m i formacie paczek). Standing consent na zamykanie apki do build/test — po rundzie stawiać
   z powrotem (user siedział na Zermacie!).
