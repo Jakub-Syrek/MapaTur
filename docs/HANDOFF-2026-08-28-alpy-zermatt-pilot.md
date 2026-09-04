@@ -74,9 +74,10 @@ Po §A8 user zgłosił ścianę na cały ekran. Pomiar: cel kamery z logu `targe
 zaklampowane → tz 358) i ta poza zapisała się pod kluczem `.zermatt`, po czym była odtwarzana przy
 każdym starcie. Wypełnienie Terrarium ściany NIE wprowadziło (max skok sąsiadów w strefie IT/szwu 112 m
 vs 256 m w CH; 0 skoków >150 m w wypełnieniu). Naprawa doraźna: restart z prawdziwą pozą Matterhorn
-(`-4769.342;-3585.5508;3953.9727;150;-1.116051;0.42999932`) → nadpisała zapis. **DO ZROBIENIA:**
-strażnik w `TryApplyEnvPose`/`TryRestoreCamera` — cel poniżej terenu (albo poniżej min bazy) = odrzuć
-i auto-kadruj; dziś zła poza przechodzi i się utrwala.
+(`-4769.342;-3585.5508;3953.9727;150;-1.116051;0.42999932`) → nadpisała zapis. **✅ STRAŻNIK ZROBIONY 09-04:**
+`CameraPoseGuard.IsTargetPlausible` (koperta [min−150, max+3000] m z ramki) wpięty w pinned / env /
+zapis CameraState; odrzucenie = log `[CameraGuard]` + auto-kadr. Dowód: start z z=358 → odrzucone, cel 2273 m.
+Panel wyboru regionu: werdykt usera 09-04 „panel jest ok".
 
 ## P-A3 PANEL WYBORU REGIONU — ZROBIONE 09-04 (desktop), mobile = Tatry
 
