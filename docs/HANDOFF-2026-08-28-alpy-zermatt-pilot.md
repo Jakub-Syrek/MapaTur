@@ -97,6 +97,18 @@ zero zrzutów; RAM 41 GB wolne z 64; ostatni stan heap 6,3 GB, WS 12,2 GB, kamer
 `ExitCode` (0xC0000005 = AV, 0xC000027B = XAML/WinRT, -1 = ubity). Następny crash = kod wyjścia w ręku.
 Do rozważenia: WER LocalDumps dla MapaTur.App.exe (HKLM — decyzja usera, ustawienie systemowe).
 
+## CRASH 09-04 22:06 — ZŁAPANY: APPCRASH w Microsoft.UI.Xaml.dll (0xC0000005)
+
+Wrapper `%TEMP%\mapatur-exitcodes.log`: instancja TATRY (PID 25484) `ExitCode=0xC0000005` po 97 s. Event 1000:
+`Faulting module Microsoft.UI.Xaml.dll 3.1.7.0` (WindowsAppRuntime 1.7_7000.785.2325.0), offset `0x940ffd`,
+WER bucket 1237354870902912982; zrzut `.tmp.dmp` WER już WYCZYŚCIŁ zanim go złapałem — został `Report.wer` (sygnatura, `dev/crash/20260904-2206-Report.wer`). Żeby mieć pełny zrzut następnym razem: WER LocalDumps (HKLM) — decyzja usera. Kontekst z logu (ostatnie 2 s): masowy
+streaming det05/det25 po starcie (opk-read 200–400 ms, full-ready 2,4–3,1 s), `[UiBeat] wątek UI zamulony 1218 ms`,
+`frame gap 1186 ms (gen2 +1, heap 3,4 GB, pendingUploads=111)`. **Ta sama sygnatura co crash 08-04 22:44 (§15
+TILE-PRODUCTION: „APPCRASH w Microsoft.UI.Xaml.dll")** i klasa 0xC000027B z memory GameBar. Crash 16:43 na
+Zermacie (bez śladu) najpewniej ta sama rodzina. Hipoteza do ZMIERZENIA, nie do wdrożenia: XAML ginie przy
+głodzeniu wątku UI (>1 s) w czasie streamingu — kandydaci: zdjąć pracę z wątku UI w torze uploadów,
+albo XAML overlay/SwapChainPanel podczas stalli. Repro 2 uruchomione tuż po (wynik w exitcodes.log).
+
 ## Nie ruszać / konteksty
 
 - **Push**: ✅ ZROBIONY 08-28 (`5eedd01..fc593f3`). ✅ **Gałęzie zmergowane 09-04**: `quirky-morse`
