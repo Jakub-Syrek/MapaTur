@@ -1221,7 +1221,23 @@ public partial class Terrain3DView : ContentView
 
     // Applies the debug pinned camera verbatim (no pitch clamp — reproduce the exact pose). Returns false when
     // unset / unparseable so the caller falls back to restore/auto-frame.
-    private bool TryApplyPinnedCamera()
+    // Strażnik pozy (2026-09-04, po „ścianie przed oczyma"): poza spoza żywej interakcji (zapis, env,
+    // pinned) z celem pod terenem albo w kosmosie jest ODRZUCANA — wywołujący auto-kadruje. Bez tego
+    // śmieciowa poza zapisywała się i wracała przy każdym starcie (cel z=360 m, min bazy 1424 m).
+    private static bool PoseTargetPlausible(TerrainMesh3D frame, float tz, string source)
+    {
+        if (MapaTur.Application.Terrain.CameraPoseGuard.IsTargetPlausible(tz, frame.MinElevationZ, frame.MaxElevationZ))
+        {
+            return true;
+        }
+
+        Serilog.Log.Warning(
+            "[CameraGuard] poza z {Source} ODRZUCONA: cel z={Tz:F0} m poza kopertą bazy [{Min:F0}, {Max:F0}] m — auto-kadr",
+            source, tz, frame.MinElevationZ, frame.MaxElevationZ);
+        return false;
+    }
+
+    private bool TryApplyPinnedCamera(TerrainMesh3D frame)
     {
         if (string.IsNullOrEmpty(DebugPinnedCamera))
         {
@@ -1240,7 +1256,8 @@ public partial class Terrain3DView : ContentView
             && float.TryParse(parts[2], System.Globalization.NumberStyles.Float, ci, out float tz)
             && float.TryParse(parts[3], System.Globalization.NumberStyles.Float, ci, out float dist)
             && float.TryParse(parts[4], System.Globalization.NumberStyles.Float, ci, out float az)
-            && float.TryParse(parts[5], System.Globalization.NumberStyles.Float, ci, out float pitch))
+            && float.TryParse(parts[5], System.Globalization.NumberStyles.Float, ci, out float pitch)
+            && PoseTargetPlausible(frame, tz, "pinned"))
         {
             Camera.Target = new Vector3(tx, ty, tz);
             Camera.Distance = dist;
@@ -1271,7 +1288,8 @@ public partial class Terrain3DView : ContentView
             && float.TryParse(parts[3], System.Globalization.NumberStyles.Float, ci, out float tz)
             && float.TryParse(parts[4], System.Globalization.NumberStyles.Float, ci, out float dist)
             && float.TryParse(parts[5], System.Globalization.NumberStyles.Float, ci, out float az)
-            && float.TryParse(parts[6], System.Globalization.NumberStyles.Float, ci, out float pitch))
+            && float.TryParse(parts[6], System.Globalization.NumberStyles.Float, ci, out float pitch)
+            && PoseTargetPlausible(frame, tz, "zapis CameraState"))
         {
             Camera.Target = new Vector3(tx, ty, tz);
             Camera.Distance = dist;
@@ -5553,7 +5571,7 @@ public partial class Terrain3DView : ContentView
 
         // A debug pinned camera (roughness-LOD tuning) wins over everything so redeploys reproduce one view;
         // otherwise restore the camera saved for this DEM; if none (or a different region), auto-frame.
-        if (!TryApplyPinnedCamera() && !TryApplyEnvPose() && !TryRestoreCamera(frame))
+        if (!TryApplyPinnedCamera(frame) && !TryApplyEnvPose(frame) && !TryRestoreCamera(frame))
         {
             Camera.Target = Vector3.Zero;
             Camera.Distance = Math.Max(frame.HorizontalExtent * 2.5f, 5_000f);
@@ -6174,7 +6192,7 @@ public partial class Terrain3DView : ContentView
             "harness", new Domain.Geography.GeoPoint(lat, lon), Domain.Routing.WaypointKind.Peak));
     }
 
-    private bool TryApplyEnvPose()
+    private bool TryApplyEnvPose(TerrainMesh3D frame)
     {
         if (harnessPoseApplied || string.IsNullOrEmpty(HarnessStartPose))
         {
@@ -6189,7 +6207,8 @@ public partial class Terrain3DView : ContentView
             && float.TryParse(parts[2], System.Globalization.NumberStyles.Float, ci, out float tz)
             && float.TryParse(parts[3], System.Globalization.NumberStyles.Float, ci, out float dist)
             && float.TryParse(parts[4], System.Globalization.NumberStyles.Float, ci, out float az)
-            && float.TryParse(parts[5], System.Globalization.NumberStyles.Float, ci, out float pitch))
+            && float.TryParse(parts[5], System.Globalization.NumberStyles.Float, ci, out float pitch)
+            && PoseTargetPlausible(frame, tz, "MAPATUR_START_POSE"))
         {
             Camera.Target = new Vector3(tx, ty, tz);
             Camera.Distance = dist;
