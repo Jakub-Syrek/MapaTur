@@ -66,6 +66,18 @@ composer+wskrzeszenie · 9437dbf P-A2 ścieżki/coverage/PickDem · 8571f48 P-B1
    przy dowodzie głodzenia); duplikaty §14 w TILE-PRODUCTION przy merge'u gałęzi quirky-morse.
 5. Tatrzańskie zaległości bez zmian (region C 5 cm, instalka ~132 GB, deshadow, słońce).
 
+## ⚠ OGON 08-29 wieczór: „ściana przed oczyma" = poza kamery POD ZIEMIĄ, nie teren
+
+Po §A8 user zgłosił ścianę na cały ekran. Pomiar: cel kamery z logu `target z = 360 m`, a min bazy
+`zermatt.dem` = 1424 m → cel pod terenem, kamera z 3076 m patrzy w dół przez przekrój terenu.
+Źródło: `MAPATUR_START_POSE` przy teście launcherów zastosował się CZĘŚCIOWO (tx/az weszły, ty/tz/dist
+zaklampowane → tz 358) i ta poza zapisała się pod kluczem `.zermatt`, po czym była odtwarzana przy
+każdym starcie. Wypełnienie Terrarium ściany NIE wprowadziło (max skok sąsiadów w strefie IT/szwu 112 m
+vs 256 m w CH; 0 skoków >150 m w wypełnieniu). Naprawa doraźna: restart z prawdziwą pozą Matterhorn
+(`-4769.342;-3585.5508;3953.9727;150;-1.116051;0.42999932`) → nadpisała zapis. **DO ZROBIENIA:**
+strażnik w `TryApplyEnvPose`/`TryRestoreCamera` — cel poniżej terenu (albo poniżej min bazy) = odrzuć
+i auto-kadruj; dziś zła poza przechodzi i się utrwala.
+
 ## Nie ruszać / konteksty
 
 - **Push**: ✅ ZROBIONY 08-28 (`5eedd01..fc593f3`). ZOSTAJE: gałąź `claude/quirky-morse-145976`
