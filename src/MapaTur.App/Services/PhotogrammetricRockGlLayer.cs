@@ -170,6 +170,35 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
 
     public bool HasDrawablePages => drawableKeys.Count > 0;
 
+    /// <summary>
+    /// Pilot "kolor z orto" (2026-09-05): when set, pages are NOT drawn by this layer's own program. They are
+    /// uploaded in the TERRAIN tile layout (<see cref="ScannedRockPageTerrainRepacker"/>) and the renderer draws
+    /// them inside its terrain pass (and the CSM caster pass) with the terrain program - so the page surface
+    /// gets the ortho colour chain (base cell + det25/det05 arrays, de-blue, tone law), lighting, shadows and fog
+    /// exactly like a tile. The scan albedo, the ghost-depth replacement and the isolated shaders stay unused.
+    /// </summary>
+    public bool TerrainShaded { get; set; }
+
+    /// <summary>Resolves the base-ortho cell (index + world AABB) containing a world point; null = not known yet.</summary>
+    public Func<Vector3, OrthoCellRef?>? OrthoCellResolver { get; set; }
+
+    /// <summary>Drawable pages in terrain layout for the renderer's own tile loops (empty unless <see cref="TerrainShaded"/>).</summary>
+    public IEnumerable<TerrainShadedPage> TerrainShadedPages()
+    {
+        if (!TerrainShaded)
+        {
+            yield break;
+        }
+
+        foreach (ScannedRockPageKey key in drawableKeys)
+        {
+            if (gpuPages.TryGetValue(key, out GpuPage? page) && page.TerrainLayout)
+            {
+                yield return new TerrainShadedPage(page.Vao, page.IndexCount, page.OrthoTileIndex, page.WorldMin, page.WorldMin + page.WorldExtent);
+            }
+        }
+    }
+
     public void Configure(string? newRoot, long newMaxResidentBytes)
     {
         string? normalized = string.IsNullOrWhiteSpace(newRoot)
@@ -309,7 +338,7 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
         uint sceneDepthTexture,
         float maximumDistanceMeters)
     {
-        if (drawableKeys.Count == 0)
+        if (drawableKeys.Count == 0 || TerrainShaded)
         {
             return;
         }
@@ -399,7 +428,7 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
 
     public void DrawShadow(GL g, Matrix4x4 lightViewProjection)
     {
-        if (drawableKeys.Count == 0)
+        if (drawableKeys.Count == 0 || TerrainShaded)
         {
             return;
         }
@@ -526,6 +555,16 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
             var key = new ScannedRockPageKey(page.PageX, page.PageY, page.Lod);
             if (gpuPages.ContainsKey(key) || uploaded >= GeometryUploadsPerFrame)
             {
+                continue;
+            }
+
+            if (TerrainShaded)
+            {
+                if (TryUploadTerrainLayout(g, page, key))
+                {
+                    uploaded++;
+                }
+
                 continue;
             }
 
@@ -837,6 +876,96 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
         g.DeleteVertexArray(page.Vao);
         g.DeleteBuffer(page.VertexBuffer);
         g.DeleteBuffer(page.IndexBuffer);
+        if (page.ExtraBuffers is not null)
+        {
+            foreach (uint buffer in page.ExtraBuffers)
+            {
+                g.DeleteBuffer(buffer);
+            }
+        }
+    }
+
+    // Pilot "kolor z orto": strona w layoucie kafla terenu - piec VBO per atrybut (pos f3, color rgba8 z AO w
+    // alfie, normal f3, tex f2 = UV komorki orto bazowej, detail f1 = 0) + EBO uint, dokladnie jak UploadTile
+    // w Terrain3DGlRenderer (ten sam VAO-layout, wiec ten sam program i te same uniformy). Brak komorki orto
+    // (resolver == null) = strona czeka na nastepna klatke, nie jest liczona jako upload.
+    private bool TryUploadTerrainLayout(GL g, ScannedRockMeshPage page, ScannedRockPageKey key)
+    {
+        Vector3 centre = page.WorldMin + (page.WorldExtent * 0.5f);
+        OrthoCellRef? cell = OrthoCellResolver?.Invoke(centre);
+        if (cell is null)
+        {
+            return false;
+        }
+
+        TerrainVertexPack pack;
+        try
+        {
+            pack = ScannedRockPageTerrainRepacker.Repack(page, cell.Value.Min, cell.Value.Max);
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+
+        int vertexCount = pack.Positions.Length;
+        byte[] rgba = new byte[vertexCount * 4];
+        for (int i = 0; i < vertexCount; i++)
+        {
+            uint argb = pack.Colors[i];
+            rgba[(i * 4) + 0] = (byte)((argb >> 16) & 0xFF);
+            rgba[(i * 4) + 1] = (byte)((argb >> 8) & 0xFF);
+            rgba[(i * 4) + 2] = (byte)(argb & 0xFF);
+            rgba[(i * 4) + 3] = (byte)((argb >> 24) & 0xFF);
+        }
+
+        ReadOnlySpan<float> positions = System.Runtime.InteropServices.MemoryMarshal.Cast<Vector3, float>(pack.Positions.AsSpan());
+        ReadOnlySpan<float> normals = System.Runtime.InteropServices.MemoryMarshal.Cast<Vector3, float>(pack.Normals.AsSpan());
+
+        uint vao = g.GenVertexArray();
+        g.BindVertexArray(vao);
+        uint positionVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, positionVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(positions.Length * sizeof(float)), positions, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(0);
+        g.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
+        uint colorVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, colorVbo);
+        g.BufferData<byte>(BufferTargetARB.ArrayBuffer, (nuint)rgba.Length, rgba, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(1);
+        g.VertexAttribPointer(1, 4, VertexAttribPointerType.UnsignedByte, true, 4, (void*)0);
+        uint normalVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, normalVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(normals.Length * sizeof(float)), normals, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(2);
+        g.VertexAttribPointer(2, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), (void*)0);
+        uint texVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, texVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(pack.TexCoords.Length * sizeof(float)), pack.TexCoords, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(3);
+        g.VertexAttribPointer(3, 2, VertexAttribPointerType.Float, false, 2 * sizeof(float), (void*)0);
+        uint detailVbo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ArrayBuffer, detailVbo);
+        g.BufferData<float>(BufferTargetARB.ArrayBuffer, (nuint)(pack.Detail.Length * sizeof(float)), pack.Detail, BufferUsageARB.StaticDraw);
+        g.EnableVertexAttribArray(4);
+        g.VertexAttribPointer(4, 1, VertexAttribPointerType.Float, false, sizeof(float), (void*)0);
+        uint ebo = g.GenBuffer();
+        g.BindBuffer(BufferTargetARB.ElementArrayBuffer, ebo);
+        g.BufferData<uint>(BufferTargetARB.ElementArrayBuffer, (nuint)(pack.Indices.Length * sizeof(uint)), pack.Indices, BufferUsageARB.StaticDraw);
+        g.BindVertexArray(0);
+
+        gpuPages[key] = new GpuPage(
+            vao,
+            positionVbo,
+            ebo,
+            pack.Indices.Length,
+            page.WorldMin,
+            page.WorldExtent,
+            page.MaterialPageId,
+            TerrainLayout: true,
+            OrthoTileIndex: cell.Value.Index,
+            ExtraBuffers: [colorVbo, normalVbo, texVbo, detailVbo]);
+        return true;
     }
 
     private sealed record GpuPage(
@@ -846,7 +975,16 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
         int IndexCount,
         Vector3 WorldMin,
         Vector3 WorldExtent,
-        ushort MaterialPageId);
+        ushort MaterialPageId,
+        bool TerrainLayout = false,
+        int OrthoTileIndex = -1,
+        uint[]? ExtraBuffers = null);
 
     private sealed record GpuMaterial(uint Texture);
 }
+
+/// <summary>Base-ortho cell reference for <see cref="PhotogrammetricRockGlLayer.OrthoCellResolver"/>.</summary>
+internal readonly record struct OrthoCellRef(int Index, Vector3 Min, Vector3 Max);
+
+/// <summary>One RMP2 page uploaded in the terrain tile layout, ready for the renderer's tile loops.</summary>
+internal readonly record struct TerrainShadedPage(uint Vao, int IndexCount, int OrthoTileIndex, Vector3 WorldMin, Vector3 WorldMax);

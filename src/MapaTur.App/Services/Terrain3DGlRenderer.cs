@@ -2719,6 +2719,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     }
     private int slopeModeLocation = -1;
     private int rockStrengthLocation = -1;
+    private bool rockTerrainShadedLogged;
     private int slopePaletteLocation = -1;
     private int biomeModeLocation = -1;
     private int biomeScreeSlopeLocation = -1;
@@ -3494,10 +3495,32 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
 
     public bool HasHybridTerrainConfiguration => hybridTerrain.IsConfigured;
 
-    public void SetPhotogrammetricRockRoot(string? root) =>
+    public void SetPhotogrammetricRockRoot(string? root)
+    {
+        // Pilot "kolor z orto" (2026-09-05): domyslnie strony RMP2 rysuje program TERENU (kolor z orto 5 cm,
+        // cienie, mgla jak kafel); MAPATUR_ROCK_RMP2_SHADING=scan = stary tor Codexa (albedo skanu, ghost-depth).
+        photogrammetricRock.TerrainShaded =
+            !string.Equals(Environment.GetEnvironmentVariable("MAPATUR_ROCK_RMP2_SHADING"), "scan", StringComparison.OrdinalIgnoreCase);
+        photogrammetricRock.OrthoCellResolver = ResolveOrthoCellForPoint;
         photogrammetricRock.Configure(
             root,
             Math.Clamp(OrthoVramBudgetBytes / 32, 128L << 20, 512L << 20));
+    }
+
+    // Komorka orto bazowej (indeks kafla orto + AABB swiata) zawierajaca punkt - z tej samej mapy, ktora
+    // EnsureOrthoCellBounds buduje dla kafli terenu; null = jeszcze nie znana (strona czeka na nastepna klatke).
+    private OrthoCellRef? ResolveOrthoCellForPoint(Vector3 p)
+    {
+        foreach (KeyValuePair<int, (Vector3 Min, Vector3 Max)> cell in orthoCellBounds)
+        {
+            if (p.X >= cell.Value.Min.X && p.X <= cell.Value.Max.X && p.Y >= cell.Value.Min.Y && p.Y <= cell.Value.Max.Y)
+            {
+                return new OrthoCellRef(cell.Key, cell.Value.Min, cell.Value.Max);
+            }
+        }
+
+        return null;
+    }
 
     public void SetHybridTerrainRoot(string? root) =>
         hybridTerrain.Configure(
@@ -6878,7 +6901,70 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             gl.DrawElements(PrimitiveType.Triangles, (uint)tile.IndexCount, DrawElementsType.UnsignedInt, (void*)0);
         }
 
-        if (PhotogrammetricRockEnabled)
+        if (PhotogrammetricRockEnabled && photogrammetricRock.TerrainShaded)
+        {
+            // Pilot "kolor z orto": strony RMP2 w layoucie kafla, ten sam program i uniformy co teren.
+            // Polygon offset ciagnie strone minimalnie ku kamerze, zeby przy reliefie ~0 nie walczyla o glebokosc
+            // z wlasnym DEM-em; granit proceduralny (rockW) wylaczony na stronach - relief jest prawdziwy.
+            int rockPagesDrawn = 0;
+            gl.Uniform1(rockStrengthLocation, 0f);
+            gl.Enable(EnableCap.PolygonOffsetFill);
+            gl.PolygonOffset(-1f, -2f);
+            foreach (TerrainShadedPage page in photogrammetricRock.TerrainShadedPages())
+            {
+                if (!frustumCullOff
+                    && !MapaTur.Application.Terrain.FrustumCuller.IsAabbVisible(mvp, page.WorldMin, page.WorldMax))
+                {
+                    continue;
+                }
+
+                if (lastIsBaseSkin != 0f)
+                {
+                    gl.Uniform1(isBaseSkinLocation, 0f);
+                    lastIsBaseSkin = 0f;
+                }
+
+                OrthoTile? pot = anyOrtho && (uint)page.OrthoTileIndex < (uint)orthoTiles.Count && orthoTiles[page.OrthoTileIndex].Texture != 0
+                    ? orthoTiles[page.OrthoTileIndex]
+                    : null;
+                if (pot is not null)
+                {
+                    if (pot.Texture != boundTexture)
+                    {
+                        gl.BindTexture(TextureTarget.Texture2D, pot.Texture);
+                        boundTexture = pot.Texture;
+                    }
+
+                    gl.Uniform2(orthoTexelLocation, pot.Width > 0 ? 1f / pot.Width : 0f, pot.Height > 0 ? 1f / pot.Height : 0f);
+                    gl.Uniform1(sharpenLocation, OrthoSharpenStrength);
+                    gl.Uniform1(useOrthoLocation, 1);
+                    gl.Uniform1(orthoGlobalFadeLocation, OrthoGlobalFade);
+                }
+                else
+                {
+                    gl.Uniform1(useOrthoLocation, 0);
+                }
+
+                BindDet25ForTile(gl, tiles[0], tiles[0]); // sciezka tablicowa ignoruje kafel - lookup per piksel po XY swiata
+                if (det05StreamOn)
+                {
+                    BindDet05ForTile(gl, tiles[0], tiles[0]);
+                }
+
+                gl.BindVertexArray(page.Vao);
+                gl.DrawElements(PrimitiveType.Triangles, (uint)page.IndexCount, DrawElementsType.UnsignedInt, (void*)0);
+                rockPagesDrawn++;
+            }
+
+            gl.Disable(EnableCap.PolygonOffsetFill);
+            gl.Uniform1(rockStrengthLocation, RockStrength);
+            if (rockPagesDrawn > 0 && !rockTerrainShadedLogged)
+            {
+                rockTerrainShadedLogged = true;
+                Log.Information("[RockRMP2] terrain-shaded: {Pages} stron narysowanych programem terenu (kolor z orto)", rockPagesDrawn);
+            }
+        }
+        else if (PhotogrammetricRockEnabled)
         {
             uint rockSceneDepthTexture = 0;
             uint rockSceneFbo = useMsaa ? msaaFbo : presentFbo;
@@ -8415,7 +8501,32 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 g.DrawElements(PrimitiveType.Triangles, (uint)entry.Value.IndexCount, DrawElementsType.UnsignedInt, (void*)0);
             }
 
-            if (PhotogrammetricRockEnabled
+            if (PhotogrammetricRockEnabled && photogrammetricRock.TerrainShaded
+                && photogrammetricRock.ShouldDrawShadowDetail(
+                    sliceFar,
+                    camera.FieldOfViewYRadians,
+                    ShadowMapSize,
+                    minimumReliefTexels: 1.25f))
+            {
+                // Pilot "kolor z orto": strony w layoucie kafla = ten sam program glebokosci co teren (atrybut 0).
+                if (lastShadowIsBase != 0f)
+                {
+                    g.Uniform1(shadowIsBaseSkinLoc, 0f);
+                    lastShadowIsBase = 0f;
+                }
+
+                foreach (TerrainShadedPage page in photogrammetricRock.TerrainShadedPages())
+                {
+                    if (!FrustumCuller.IsAabbVisible(lightVp, page.WorldMin, page.WorldMax))
+                    {
+                        continue;
+                    }
+
+                    g.BindVertexArray(page.Vao);
+                    g.DrawElements(PrimitiveType.Triangles, (uint)page.IndexCount, DrawElementsType.UnsignedInt, (void*)0);
+                }
+            }
+            else if (PhotogrammetricRockEnabled
                 && photogrammetricRock.ShouldDrawShadowDetail(
                     sliceFar,
                     camera.FieldOfViewYRadians,
