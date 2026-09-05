@@ -76,7 +76,9 @@ public sealed class ScannedRockPageTerrainRepackerTests
         pack.Positions.Should().HaveCount(3);
         pack.Positions[0].Should().BeEquivalentTo(new Vector3(1200f, -1500f, 1800.5f), o => o.WithStrictOrdering().Using<float>(c => c.Subject.Should().BeApproximately(c.Expectation, 32f / ushort.MaxValue)).WhenTypeIs<float>());
         pack.Positions[2].Z.Should().BeApproximately(1803f, 4f / ushort.MaxValue);
-        pack.Indices.Should().Equal(0u, 1u, 2u);
+        // Winding strony jest zgodny z jej (wewnętrzną) normalną, więc razem z odwróceniem normalnej odwracamy
+        // kolejność wierzchołków — konwencja kafla terenu = CCW patrząc z zewnątrz.
+        pack.Indices.Should().Equal(0u, 2u, 1u);
     }
 
     [Fact]
@@ -91,9 +93,12 @@ public sealed class ScannedRockPageTerrainRepackerTests
 
         TerrainVertexPack pack = ScannedRockPageTerrainRepacker.Repack(page, CellMin, CellMax);
 
-        Vector3.Dot(pack.Normals[0], up).Should().BeGreaterThan(0.9999f);
-        Vector3.Dot(pack.Normals[1], slanted).Should().BeGreaterThan(0.999f);
-        Vector3.Dot(pack.Normals[2], overhang).Should().BeGreaterThan(0.999f);
+        // Strony RMP2 niosą normalne DO WNĘTRZA bryły (pomiar 09-05 na 155 stronach ściany Rysów: 94 % ma z<0,
+        // dot z normalną geometryczną wg windingu = 0,91) — tor Codexa tak je oświetlał. Program terenu wymaga
+        // normalnej NA ZEWNĄTRZ (shN.z = „do góry" steruje podłogą nieba i śniegiem), więc repacker je ODWRACA.
+        Vector3.Dot(pack.Normals[0], -up).Should().BeGreaterThan(0.9999f);
+        Vector3.Dot(pack.Normals[1], -slanted).Should().BeGreaterThan(0.999f);
+        Vector3.Dot(pack.Normals[2], -overhang).Should().BeGreaterThan(0.999f);
     }
 
     [Fact]

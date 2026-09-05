@@ -63,7 +63,9 @@ public static class ScannedRockPageTerrainRepacker
             // GL normalizes a signed short attribute as max(s/32767, -1) — same here.
             float ex = MathF.Max(BinaryPrimitives.ReadInt16LittleEndian(data.Slice(o + 6, 2)) / (float)short.MaxValue, -1f);
             float ey = MathF.Max(BinaryPrimitives.ReadInt16LittleEndian(data.Slice(o + 8, 2)) / (float)short.MaxValue, -1f);
-            normals[i] = OctDecode(ex, ey);
+            // Strony RMP2 niosą normalne DO WNĘTRZA bryły (pomiar 09-05: 94 % z<0 na ścianie Rysów, zgodne z
+            // windingiem) — program terenu potrzebuje normalnej NA ZEWNĄTRZ, więc odwracamy (i winding niżej).
+            normals[i] = -OctDecode(ex, ey);
 
             byte ao = data[o + 14];
             colors[i] = 0x00FFFFFFu | ((uint)ao << 24);
@@ -73,10 +75,13 @@ public static class ScannedRockPageTerrainRepacker
             detail[i] = 0f;
         }
 
+        // Odwrócenie windingu (CW→CCW z zewnątrz) w parze z odwróceniem normalnej — kafle terenu są CCW.
         var indices = new uint[page.IndexCount];
-        for (int i = 0; i < indices.Length; i++)
+        for (int i = 0; i + 2 < indices.Length; i += 3)
         {
             indices[i] = page.Indices[i];
+            indices[i + 1] = page.Indices[i + 2];
+            indices[i + 2] = page.Indices[i + 1];
         }
 
         return new TerrainVertexPack(positions, colors, normals, tex, detail, indices);
