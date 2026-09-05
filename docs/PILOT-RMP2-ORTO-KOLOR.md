@@ -108,4 +108,29 @@ kodu, 09-05 12:xx; weryfikacja adwersarialna nie doszła do skutku — limit ses
 - Pierwsza próba bramki (`ac49823`) dodała 17. sampler do fragment shadera → `link failed: texture image units
   count exceeds MAX_TEXTURE_IMAGE_UNITS(16)` (ANGLE). Fix `f70b77a`: głębia sceny czytana przez `uReflectionTex`.
 
+## Po lifcie cienia (09-05 16:07, commit `774c6f0`) — cień DEM-u to NIE była przyczyna
+
+| kadr | piksele stron: luma off→terrain | ratio p25/p50/p75 | <0,6× | sat off→terrain |
+|---|---|---|---|---|
+| bramka głębi (15:58) | 43,2→33,0 (0,76) | 0,19/0,47/1,28 | 61,7 % | 0,35→0,47 |
+| + lift cienia 4 m (16:07) | 43,1→34,5 (0,80) | 0,20/0,48/1,34 | 60,3 % | 0,35→0,46 |
+
+Lift zmienił rozkład o ~1 pkt — ściemnienie nie pochodzi z mapy cieni. Diagnoza z kodu i obrazu:
+- na DEM-ie strome ściany (>45–60°) maluje GRANIT v7 (`rockW = smoothstep(45,60,slope)·uRockStrength`,
+  `base = mix(base, rockCol, rockW)`), więc kadr „bez skał" na ścianie Rysów w ogóle NIE pokazuje orto;
+- strony mają `uRockStrength=0` → pokazują SUROWE orto: zdjęcie z góry na pionowej ścianie rozciąga się w
+  pionowe smugi (ściana 200 m wysoka to w rzucie kilka metrów tekstury), a ton to wypieczony cień nalotu 2021
+  (ciemny, niebieski — stąd sat ↑ i bimodalny rozkład 0,2/1,3 = cień/światło w zdjęciu). Grań na pierwszym
+  planie (łagodniejsza) wygląda dobrze: płaty śniegu, rzeźba, kolor z orto.
+
+**Wniosek pilota:** tor techniczny działa (434/434 stron, 0 bez tekstury, bramka głębi, 0 błędów GL), ale
+„kolor z orto" na ścianach pionowych nie ma czego pokazać — to ograniczenie DANYCH (rzut z góry + cień 2021),
+nie renderera. Do decyzji usera:
+- A. hybryda jak na DEM-ie: orto do ~50° nachylenia, powyżej materiał skalny (granit v7 lub albedo skanu
+  odbarwione) — z prawdziwym reliefem stron; „wielokąty" = komórki granitu v7 wracają na stromiznach;
+- B. tint: kolor orto jako niskoczęstotliwościowy ton (średnia per strona/plama) × neutralne albedo skalne
+  wysokiej częstotliwości — bez smug, lokalny kolor z fotki; cień 2021 wraca jako ciemny tint dopóki nie ma
+  deshadow (R4);
+- C. zamrozić do czasu deshadow R4 (nie rozwiązuje smug).
+
 ## Werdykt usera: ⏳ (kadry ON/OFF z pozy Rysy 150 m)
