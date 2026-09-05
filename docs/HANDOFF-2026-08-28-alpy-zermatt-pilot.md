@@ -131,8 +131,11 @@ v7 (rockW >45–60°). Opcje A/B/C w `MapaTur-rock-material/docs/PILOT-RMP2-ORTO
 Pilot nie ma `MAPATUR_DATE`/`MAPATUR_TIME_HOURS` (słońce stałe, A/B uczciwe co do piksela: 0,00 % zmian off↔off).
 Tatry w tle 09-05: fetch regionu C padł 12:57 (2 519 500/3 334 275) → wznowiony 16:07 (pwsh 15812, odłączony);
 skan znaków wodnych det05 region C: 387 surowych → 304 po dedup (`det05/_watermarks-region.json`), naprawa
-`--level det05 --write` uruchomiona 16:07 (`dev/fetch-logs/wm-repair-regionC-0905.log`) → potem sync do AppData
-+ bake przyrostowy + verify-full (pod blokadą, apka zamknięta).
+`--level det05 --write` 16:07–16:18: 304/304 naprawione, 1049 kafli dotkniętych (1 klucz 566/118 = dziura);
+sync 1048 kafli do AppData + bake przyrostowy 16:20–16:28 (284 pakiety wypieczone, kafli źle=0, 6,9 min) pod
+blokadą, instancja usera przywrócona (PID 1684); verify-full read-only od 16:28 (pwsh 30480,
+`dev/fetch-logs/verify-full-det05-wm-0905.log`) ⏳; sweep wizualny pasa 49.19–49.40 = werdykt usera ⏳.
+Recepta: TILE-PRODUCTION §16 uzupełnienie 09-05.
 
 ## Nie ruszać / konteksty
 
