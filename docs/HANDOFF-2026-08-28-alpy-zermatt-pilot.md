@@ -139,9 +139,14 @@ USER ~21:20 „leć ten batching pilot" → BATCHING ZROBIONY 21:33 (`1646c4a`, 
 grupy 4×4 komórek per komórka orto, 434 strony → 48 grup (1 VAO/draw), grupa brudna = strony pojedynczo do
 przebudowy (≤2/klatkę). POMIAR CZYSTY 21:41–21:44 (jedna sesja, Rysy 150 m): CPU +1,4 ms (było +10,9), shadow
 +0,9, terrain +1,3 ms; `GPU released 434 pages/48 groups` po OFF. Pierwsza próba pomiaru zanieczyszczona (ktoś ruszał
-kamerą na DELL + zwis logowania po 21:36:07 przy dociąganiu det05, bez WER). Przegląd adwersarialny diffu (workflow)
-w toku → poprawki. Otwarte przed wdrożeniem: rebase na main, upload poza UI, protokół 2 sceny cold+warm, artefakt
-12,4 GiB/podzbiór, lokalizacja tekstów, rebuild-storm w locie.
+kamerą na DELL + zwis logowania po 21:36:07 przy dociąganiu det05, bez WER). PRZEGLĄD ADWERSARIALNY (13 wniosków,
+7 potwierdzonych, 3 obalone) → `e07bf71`: NotifyContextLost z renderera (HIGH: martwe nazwy GL po resize —
+wada od bd20321), debounce 12 klatek + budżet 16 stron + priorytet widoczności (TDD 5 testów; 54 przebudowy na
+48 grup zamiast do 16/grupę), alias grup 1-elementowych, cache jednostek. POMIAR PO POPRAWKACH 21:54–21:57: CPU
++2,1 ms, terrain +1,3 ms, cień w szumie; `GPU released 434/48`. Otwarte przed wdrożeniem: rebase na main (97+
+commitów), upload/repack poza UI, zwalnianie buforów stron po scaleniu (2× VRAM), księgowanie terrainPacks,
+pooling scalania, protokół 2 sceny cold+warm, artefakt 12,4 GiB/podzbiór, lokalizacja tekstów przełącznika.
+Gałąź `rmp2/ortho-color` @ 6895455 (docs: `PILOT-RMP2-ORTO-KOLOR.md`).
 Pilot nie ma `MAPATUR_DATE`/`MAPATUR_TIME_HOURS` (słońce stałe, A/B uczciwe co do piksela: 0,00 % zmian off↔off).
 Tatry w tle 09-05: fetch regionu C padł 12:57 (2 519 500/3 334 275) → wznowiony 16:07 (pwsh 15812, odłączony);
 skan znaków wodnych det05 region C: 387 surowych → 304 po dedup (`det05/_watermarks-region.json`), naprawa
