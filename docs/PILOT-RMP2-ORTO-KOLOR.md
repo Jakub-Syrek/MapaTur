@@ -155,3 +155,26 @@ przy 391 stronach w kadrze; p90 cienia rośnie do 12 ms (skoki = uploady 2 stron
 Batching (1 VAO na komórkę/LOD zamiast strony) i upload poza wątkiem UI to znane pominięcia pilota. Pomiar
 pełny (2 sceny, cold+warm, więcej próbek) — po przełączniku.
 
+### Przełącznik + pomiar ON→OFF w JEDNEJ sesji (09-05 20:36, commit `f2045c8`, `MAPATUR_ROCK_RMP2_TOGGLE_SEC=70`)
+
+Przełącznik „Skały fotogrametryczne" w menu premium obok „Skały" (VM `PhotogrammetricRocksOn`, persystowany;
+view `PhotogrammetricRocksEnabled`; renderer: przejście true→false → `RequestGpuRelease()` → strony i materiały
+GPU kasowane przy najbliższym PrepareFrame; CPU-rezydentne strony zostają, ponowne ON = re-upload bez dysku).
+Env `MAPATUR_ROCK_RMP2=0` = OFF od startu. Kadry: `rysy-150m-przelacznik-on-off.png` (37,4 % kadru różnicy).
+
+| pass | ON (391 stron; 4 próbki, 20:38:34–43) p50 / p90 | OFF (12 próbek, 20:38:4x–39:34) p50 / p90 | Δ p50 |
+|---|---|---|---|
+| shadow | 8,50 / 9,94 | 6,76 / 8,16 | +1,7 ms |
+| terrain | 10,80 / 11,18 | 7,46 / 8,08 | +3,3 ms |
+| refl | 2,03 / 2,57 | 6,93 / 9,38 | −4,9 ms (⚠ powtarza się w obu pomiarach; niewyjaśnione — pass odbić
+  nie rysuje stron; do sprawdzenia czy ghostDepthFrameValid=false po stronach nie zmienia ścieżki odbić) |
+| sumGpu | 21,20 / 23,10 | 21,09 / 23,10 | ±0 (przez refl) |
+| **sumCpu** | **16,75 / 17,83** | **5,85 / 6,28** | **+10,9 ms** (391 stron × 3 passy = 1173 draw calli + bindy per strona) |
+
+Wcześniejszy pomiar między sesjami (16:0x) dał GPU +1,4/+1,4 ms i CPU +4,5 ms — rozrzut 2× między przebiegami
+(znana cecha: jeden pomiar to za mało). WNIOSEK: koszt GPU stron to +3–5 ms w passach shadow+terrain przy
+391 stronach; koszt CPU +5–11 ms na klatkę jest DYSKWALIFIKUJĄCY bez batchingu (wątek UI = renderer).
+Warunek wdrożenia: batching stron (1 VAO/draw na grupę komórek lub LOD, uniformy raz na pass) i upload poza
+wątkiem UI; potem pomiar wg protokołu (2 sceny, cold+warm). Zwolnienie GPU po OFF: bez śladu w logu (do dodania
+log w ReleaseGpu) — nie potwierdzone pomiarem.
+
