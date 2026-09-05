@@ -127,7 +127,14 @@ WERDYKT USERA 12:xx („wielokąty dalej widoczne, jednolicie szare") → diagno
 `f70b77a` `774c6f0`): bramka głębi 4 m (2 passy, jak tor skanu; 17. sampler = link fail na ANGLE → głębia przez
 `uReflectionTex`), log residency, lift cienia. Wynik 16:07: 391/434 stron w kadrze, 37 % kadru nadpisane, ALE
 kolor z orto na pionowej ścianie = pionowe smugi + cień 2021 (60 % pikseli <0,6× DEM-u); DEM ukrywa to granitem
-v7 (rockW >45–60°). Opcje A/B/C w `MapaTur-rock-material/docs/PILOT-RMP2-ORTO-KOLOR.md` — DECYZJA USERA ⏳.
+v7 (rockW >45–60°). WERDYKT USERA ~20:30 na zoomie: „to jest dużo lepsze: ale to miałoby sens gdyby było
+wyłączalne do tej opcji co jest teraz o ile obciążałoby to mocno kartę" → wygląd ODEBRANY, warunki: przełącznik
++ pomiar. ZROBIONE 20:36 (`f2045c8`): przełącznik „Skały fotogrametryczne" (menu premium obok „Skały", OFF =
+granit v7 + zwolnienie stron GPU), env `MAPATUR_ROCK_RMP2=0`, hook `MAPATUR_ROCK_RMP2_TOGGLE_SEC` (ON→OFF w jednej
+sesji). POMIAR Rysy 150 m, 391 stron: GPU shadow +1,7 ms, terrain +3,3 ms (16:0x: +1,4/+1,4), CPU sumCpu
+5,9→16,8 ms (+11; 16:0x: +4,5) = 1173 draw calli/klatkę bez batchingu → WARUNEK WDROŻENIA: batching stron +
+upload poza wątkiem UI, potem protokół 2 sceny cold+warm. Zagadka: pass refl tańszy przy stronach ON (2,0 vs
+6,9 ms) — niewyjaśnione. Szczegóły: `MapaTur-rock-material/docs/PILOT-RMP2-ORTO-KOLOR.md`.
 Pilot nie ma `MAPATUR_DATE`/`MAPATUR_TIME_HOURS` (słońce stałe, A/B uczciwe co do piksela: 0,00 % zmian off↔off).
 Tatry w tle 09-05: fetch regionu C padł 12:57 (2 519 500/3 334 275) → wznowiony 16:07 (pwsh 15812, odłączony);
 skan znaków wodnych det05 region C: 387 surowych → 304 po dedup (`det05/_watermarks-region.json`), naprawa
