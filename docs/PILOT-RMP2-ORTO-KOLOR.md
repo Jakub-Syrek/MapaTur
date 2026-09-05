@@ -72,4 +72,26 @@ błędów GL, 5/5 testów repackera.
 Ton ściany wrócił do ±8 % bazy (reszta różnicy = prawdziwy relief: samo-cień i n·l mikro-rzeźby zamiast
 płaskiego granitu). Kadry: `scratchpad/rocks/rysy-150m-ab-{full,zoom}.png` (sesja 09-05).
 
+## Werdykt usera po kadrze 11:51 (09-05): „wielokąty dalej widoczne, jednolicie szare"
+
+Cytat: „wciąż te duże wielokąty które zastępują skałę są jednolicie szare więc nie wiem o jakim kolorze z orto
+mówisz... jest dużo ciemniej miejscami ale wielokąty wciąż widoczne wyraźnie". Diagnoza (3 niezależnych czytelników
+kodu, 09-05 12:xx; weryfikacja adwersarialna nie doszła do skutku — limit sesji):
+
+1. **Kontrakt głębi (główna przyczyna).** Strony rysowane po kaflach zwykłym testem LEQUAL + polygon offset
+   (ułamek jednostki głębi); DEM z LiDAR-u i skan różnią się o metry → gdzie DEM jest bliżej, wygrywa i pokazuje
+   granit v7 („wielokąty"). Tor skanu Codexa omijał to `DepthFunc(Always)` + porównaniem z głębią sceny
+   (tolerancja 4 m za terenem). Stąd 18,6 % zmienionych pikseli. **Fix `ac49823`:** pass 1 = tylko głębia
+   (Always + bramka `uPageDepthOn`/`uPageSceneDepth` w shaderze terenu + polygon offset +1), pass 2 = kolor
+   (Less) — strona wygrywa z własnym DEM-em, najbliższa strona z dalszymi; głębia sceny z `ResolveSceneDepthToGhost`,
+   unit 1 pożyczony jak w torze skanu (16 unitów ANGLE zajętych).
+2. **Liczba stron w kadrze była nieznana** — log tylko raz (4 strony na starcie). Dodane: `[RockRMP2] residency:`
+   (drawable/gpu/cpu/desired/inFlight/loaded/failed/MB) i `[RockRMP2] terrain-shaded: N stron w kadrze (M bez
+   tekstury orto)` przy zmianie liczby (nie częściej niż co 60 klatek, nie rzadziej niż co 600).
+3. **Strona bez tekstury orto = biały wierzchołek × światło = jednolita szarość.** Resolver komórki brał też
+   unię `-1` (kafle poza pokryciem) — teraz pomijana; licznik „bez tekstury" w logu.
+4. Layout VAO i konwencja UV strona↔kafel: zweryfikowane, IDENTYCZNE (nie przyczyna). Znane pominięcie: AABB
+   komórki orto = unia kafli rezydentnych (na południowej krawędzi pokrycia przesuwa UV bazy o ≤ 1,2–9,6 %);
+   det25/det05 liczą po XY świata, więc przy 150 m nie ma to wpływu na kolor ściany.
+
 ## Werdykt usera: ⏳ (kadry ON/OFF z pozy Rysy 150 m)
