@@ -47,4 +47,18 @@ błędów GL, 5/5 testów repackera.
 - budżet RMP2 (~0,4 GiB) nie jest księgowany w ledgerze orto; przełącznik „Skały" nie zwalnia stron GPU;
 - gałąź 97 commitów za main (22 w rendererze) — merge dopiero po werdykcie wizualnym i pomiarach.
 
+## Znaleziska z pierwszego A/B (09-05 11:39–11:44, poza Rysy 150 m)
+
+- Pierwszy kadr toru „kolor z orto" wyszedł CIEMNY (ściana luma 40 vs 53 bez skał, sat 0,39 vs 0,33 — ton
+  podłogi nieba). Diagnoza Z DANYCH, nie z obrazka: AO stron = 1,0 na wszystkich 6,27 M wierzchołkach pilota
+  (nie ono); normalne stron: 94 % ma z<0 na 155 stronach ściany, dot z normalną geometryczną wg windingu 0,91
+  → strony RMP2 niosą normalne DO WNĘTRZA bryły z windingiem CW (tor Codexa tak je oświetlał). Program terenu
+  liczy z nich `shN.z` (podłoga nieba, śnieg) i n·l → ściana „nocna". Fix `54e9913`: repacker odwraca
+  normalną i winding (TDD: testy oczekują −n i (0,2,1)).
+- Tryb `scan` (tor Codexa) zmienił pozę kamery mimo `MAPATUR_START_POSE` (cel 10060→10116, az 1,78→2,18,
+  pitch 0,35→0,07) — kadr scan z tej serii NIE jest porównywalny; przyczyna nieznana (kolizja kamery z
+  ghost-depth?), do sprawdzenia tylko jeśli tor scan będzie potrzebny.
+- Harness: apka renderuje pierwszą klatkę po ~45–60 s (det05), autoshot liczy od pierwszej klatki — okno
+  czekania ≥ 240 s, `MAPATUR_AUTOSHOT_SEC=60`.
+
 ## Werdykt usera: ⏳ (kadry ON/OFF z pozy Rysy 150 m)
