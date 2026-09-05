@@ -123,6 +123,16 @@ ZNALEZISKO Z DANYCH: strony RMP2 niosą normalne DO WNĘTRZA bryły + winding CW
 ściany Rysów) — pierwszy kadr był „nocny" (luma 40 vs 53); fix `54e9913` (repacker odwraca normalną i winding,
 TDD) → luma 48,8 vs 52,8. Liczby i procedura: `MapaTur-rock-material/docs/PILOT-RMP2-ORTO-KOLOR.md`.
 Po pilocie: instancja usera (Tatry, main) przywrócona na DELL, APP-LOCK WOLNE.
+WERDYKT USERA 12:xx („wielokąty dalej widoczne, jednolicie szare") → diagnoza+3 fixy na gałęzi (`ac49823`
+`f70b77a` `774c6f0`): bramka głębi 4 m (2 passy, jak tor skanu; 17. sampler = link fail na ANGLE → głębia przez
+`uReflectionTex`), log residency, lift cienia. Wynik 16:07: 391/434 stron w kadrze, 37 % kadru nadpisane, ALE
+kolor z orto na pionowej ścianie = pionowe smugi + cień 2021 (60 % pikseli <0,6× DEM-u); DEM ukrywa to granitem
+v7 (rockW >45–60°). Opcje A/B/C w `MapaTur-rock-material/docs/PILOT-RMP2-ORTO-KOLOR.md` — DECYZJA USERA ⏳.
+Pilot nie ma `MAPATUR_DATE`/`MAPATUR_TIME_HOURS` (słońce stałe, A/B uczciwe co do piksela: 0,00 % zmian off↔off).
+Tatry w tle 09-05: fetch regionu C padł 12:57 (2 519 500/3 334 275) → wznowiony 16:07 (pwsh 15812, odłączony);
+skan znaków wodnych det05 region C: 387 surowych → 304 po dedup (`det05/_watermarks-region.json`), naprawa
+`--level det05 --write` uruchomiona 16:07 (`dev/fetch-logs/wm-repair-regionC-0905.log`) → potem sync do AppData
++ bake przyrostowy + verify-full (pod blokadą, apka zamknięta).
 
 ## Nie ruszać / konteksty
 
