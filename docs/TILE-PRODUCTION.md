@@ -1209,7 +1209,9 @@ python testdata/maps/repair-zbgis-watermarks.py --level det05 --write
 dotnet run --project src/MapaTur.OrthoBake -c Release -- --layer det05 --src "<AD>\det05" --out "<AD>\opk\det05"
 #     5475 pakietów: 284 wypieczonych (srcHash) + 5191 pominiętych; stron 1 349 931; kafli źle=0; 6,9 min;
 #     próbka crc OK=128 BAD=0; wyjście 143,47 GB (bez zmian objętości — te same pakiety)
-# 5e. verify-full (read-only, przy otwartej apce; dev/fetch-logs/verify-full-det05-wm-0905.log): ⏳ wynik niżej
+# 5e. verify-full (read-only, przy otwartej apce; dev/fetch-logs/verify-full-det05-wm-0905.log):
+dotnet run --project src/MapaTur.OrthoBake -c Release -- --verify-full --layer det05 --out "<AD>\opk\det05"
+#     pakiety=5475, strony OK=1 349 931, BAD=0, layoutBad=0, dupPageId=0, pliki-poza-indeksem=0; 15,8 min (16:28–16:44)
 # 5f. sweep wizualny (zasada 4): naprawione kafle leżą w pasie 49.19–49.40 (północ regionu C, Osobita–Czerwone
 #     Wierchy–Kasprowy); werdykt usera ⏳
 ```

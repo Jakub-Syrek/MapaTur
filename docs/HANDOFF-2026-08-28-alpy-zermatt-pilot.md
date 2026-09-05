@@ -133,8 +133,9 @@ Tatry w tle 09-05: fetch regionu C padł 12:57 (2 519 500/3 334 275) → wznowio
 skan znaków wodnych det05 region C: 387 surowych → 304 po dedup (`det05/_watermarks-region.json`), naprawa
 `--level det05 --write` 16:07–16:18: 304/304 naprawione, 1049 kafli dotkniętych (1 klucz 566/118 = dziura);
 sync 1048 kafli do AppData + bake przyrostowy 16:20–16:28 (284 pakiety wypieczone, kafli źle=0, 6,9 min) pod
-blokadą, instancja usera przywrócona (PID 1684); verify-full read-only od 16:28 (pwsh 30480,
-`dev/fetch-logs/verify-full-det05-wm-0905.log`) ⏳; sweep wizualny pasa 49.19–49.40 = werdykt usera ⏳.
+blokadą, instancja usera przywrócona (PID 1684); verify-full 16:28–16:44: pakiety=5475, strony OK=1 349 931,
+BAD=0, layoutBad=0, dupPageId=0 (`dev/fetch-logs/verify-full-det05-wm-0905.log`) ✅; sweep wizualny pasa
+49.19–49.40 (Osobita–Czerwone Wierchy–Kasprowy) = werdykt usera ⏳.
 Recepta: TILE-PRODUCTION §16 uzupełnienie 09-05.
 
 ## Nie ruszać / konteksty
