@@ -469,6 +469,22 @@ public partial class Terrain3DView : ContentView
     }
 
     /// <summary>
+    /// Premium menu "Skały fotogrametryczne" (pilot RMP2 „kolor z orto"): strony skanu rysowane programem terenu.
+    /// False = dzisiejszy widok (granit v7 na DEM); renderer zwalnia strony GPU przy przejściu true→false.
+    /// Env MAPATUR_ROCK_RMP2=0 wymusza OFF (harness), MAPATUR_ROCK_RMP2_TOGGLE_SEC=n wyłącza po n s od pierwszej
+    /// klatki (pomiar ON→OFF w jednej sesji).
+    /// </summary>
+    public static readonly BindableProperty PhotogrammetricRocksEnabledProperty = BindableProperty.Create(
+        nameof(PhotogrammetricRocksEnabled), typeof(bool), typeof(Terrain3DView), true,
+        propertyChanged: (b, o, n) => ((Terrain3DView)b).Canvas.InvalidateSurface());
+
+    public bool PhotogrammetricRocksEnabled
+    {
+        get => (bool)GetValue(PhotogrammetricRocksEnabledProperty);
+        set => SetValue(PhotogrammetricRocksEnabledProperty, value);
+    }
+
+    /// <summary>
     /// Whether the base albedo is painted by elevation-zone biomes (premium menu "Biomy"): meadow/hala low,
     /// scree/piargi mid, snow/ice high — from elevation + slope + aspect. Off by default (an A/B material mode).
     /// </summary>
@@ -5933,6 +5949,11 @@ public partial class Terrain3DView : ContentView
     private double harnessLastShotMs;
     private double harnessLastPoseMs;
     private volatile bool harnessShotRequested;
+    private static readonly bool HarnessRmp2EnvOn = Environment.GetEnvironmentVariable("MAPATUR_ROCK_RMP2") != "0";
+    private static readonly int HarnessRmp2ToggleSec =
+        int.TryParse(Environment.GetEnvironmentVariable("MAPATUR_ROCK_RMP2_TOGGLE_SEC"), out int t) ? t : 0;
+    private double harnessFirstFrameMs;
+    private bool harnessRmp2Toggled;
 
     private bool TryApplyEnvPose()
     {
@@ -5983,6 +6004,14 @@ public partial class Terrain3DView : ContentView
         if (harnessLastShotMs == 0)
         {
             harnessLastShotMs = nowMs; // pierwsza fotka dopiero po pełnym interwale (nie ekran ładowania)
+            harnessFirstFrameMs = nowMs;
+        }
+
+        if (HarnessRmp2ToggleSec > 0 && !harnessRmp2Toggled && nowMs - harnessFirstFrameMs >= HarnessRmp2ToggleSec * 1000.0)
+        {
+            harnessRmp2Toggled = true;
+            PhotogrammetricRocksEnabled = false;
+            Serilog.Log.Information("[Harness] skały RMP2 wyłączone po {Sec} s od pierwszej klatki (MAPATUR_ROCK_RMP2_TOGGLE_SEC)", HarnessRmp2ToggleSec);
         }
 
         bool due = HarnessAutoshotSec > 0 && nowMs - harnessLastShotMs >= HarnessAutoshotSec * 1000.0;
@@ -8509,7 +8538,7 @@ public partial class Terrain3DView : ContentView
             glRenderer.SetHybridTerrainRoot(ResolveHybridTerrainRoot());
             glRenderer.HybridTerrainEnabled = RockMaterialEnabled;
             glRenderer.SetPhotogrammetricRockRoot(ResolvePhotogrammetricRockRoot());
-            glRenderer.PhotogrammetricRockEnabled = RockMaterialEnabled;
+            glRenderer.PhotogrammetricRockEnabled = RockMaterialEnabled && PhotogrammetricRocksEnabled && HarnessRmp2EnvOn;
             glRenderer.OrthoEnabled = ShowOrtho; // premium menu "Ortofoto" toggle (textures stay resident)
             // "2D map" mode fade: 1 = full ortho (normal 3D), 0 = pure hypsometric (top-down map view).
             float mapT = mapMode.Blend;

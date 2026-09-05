@@ -63,6 +63,7 @@
                              ControlsVisible="{Binding ChromeVisible}"
                              SlopeMapEnabled="{Binding SlopeMapMode}"
                              RockMaterialEnabled="{Binding RockMaterialOn}"
+                             PhotogrammetricRocksEnabled="{Binding PhotogrammetricRocksOn}"
                              BiomeMaterialEnabled="{Binding BiomeMaterialOn}"
                              MsaaEnabled="{Binding AntiAliasingOn}"
                              DebugEnabled="{Binding ShowDebugOverlay}"
@@ -591,6 +592,14 @@
                             <Label Text="{x:Static loc:AppStrings.ToggleRockHint}" Style="{StaticResource GlassCaption}" FontSize="10" />
                         </VerticalStackLayout>
                         <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding RockMaterialOn}" />
+                    </Grid>
+                    <!-- Pilot RMP2 „kolor z orto" (2026-09-05): teksty literalne do czasu merge'u (AppStrings) -->
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8" IsEnabled="{Binding RockMaterialOn}">
+                        <VerticalStackLayout Grid.Column="0" Spacing="0">
+                            <Label Text="Skały fotogrametryczne" Style="{StaticResource GlassLabel}" />
+                            <Label Text="Strony skanu z kolorem z orto zamiast granitu (pilot); OFF = dzisiejszy widok" Style="{StaticResource GlassCaption}" FontSize="10" />
+                        </VerticalStackLayout>
+                        <Switch Grid.Column="1" Style="{StaticResource GlassSwitch}" IsToggled="{Binding PhotogrammetricRocksOn}" />
                     </Grid>
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                         <VerticalStackLayout Grid.Column="0" Spacing="0">

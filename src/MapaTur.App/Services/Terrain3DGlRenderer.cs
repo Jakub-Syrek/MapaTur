@@ -3517,7 +3517,23 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     public float RockStrength { get; set; } = 1f;
 
     /// <summary>Enables prebaked RMP2 geometry when a catalog is present; missing/not-ready pages stay DEM.</summary>
-    public bool PhotogrammetricRockEnabled { get; set; } = true;
+    private bool photogrammetricRockEnabled = true;
+
+    /// <summary>Strony RMP2 (pilot „kolor z orto"): false = warstwa nieaktywna; przejście true→false zwalnia
+    /// strony i materiały GPU przy najbliższym PrepareFrame (przełącznik ma oddawać VRAM, nie tylko chować).</summary>
+    public bool PhotogrammetricRockEnabled
+    {
+        get => photogrammetricRockEnabled;
+        set
+        {
+            if (photogrammetricRockEnabled && !value)
+            {
+                photogrammetricRock.RequestGpuRelease();
+            }
+
+            photogrammetricRockEnabled = value;
+        }
+    }
 
     /// <summary>
     /// Enables unified RMP3 replacement geometry. Turning it off is a hard switch: streaming is stopped and

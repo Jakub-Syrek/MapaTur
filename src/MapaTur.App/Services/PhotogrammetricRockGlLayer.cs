@@ -232,6 +232,14 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
         gpuReleasePending = true;
     }
 
+    /// <summary>Zwolnij strony/materiały GPU przy najbliższym PrepareFrame (przełącznik „Skały fotogrametryczne” OFF);
+    /// CPU-rezydentne strony zostają w managerze — ponowne włączenie = ponowny upload, bez czytania dysku.</summary>
+    public void RequestGpuRelease()
+    {
+        gpuReleasePending = true;
+        drawableLogged = false;
+    }
+
     public void PrepareFrame(GL g, Camera3D camera, int viewportWidth, int viewportHeight, bool enabled)
     {
         HandleGpuReset(g);

@@ -1505,6 +1505,13 @@ public sealed partial class MapPageViewModel : ObservableObject
     /// <summary>Premium menu "Skały": blend a rock material onto steep faces where the top-down ortho smears.</summary>
     [ObservableProperty] private bool rockMaterialOn = true;
 
+    /// <summary>
+    /// Premium menu "Skały fotogrametryczne" (pilot RMP2 „kolor z orto", 2026-09-05): strony skanu rysowane programem
+    /// terenu zamiast granitu v7 na stromiznach. OFF = dzisiejszy widok (granit v7 na DEM) i zwolnienie stron GPU.
+    /// Werdykt usera: „dużo lepsze, ale musi być wyłączalne do tej opcji co jest teraz".
+    /// </summary>
+    [ObservableProperty] private bool photogrammetricRocksOn = true;
+
     /// <summary>Premium menu "Biomy": paint the base albedo by elevation-zone biomes (hala/piargi/skała/śnieg/lód).</summary>
     [ObservableProperty] private bool biomeMaterialOn;
 
@@ -2221,6 +2228,7 @@ public sealed partial class MapPageViewModel : ObservableObject
         {
             [nameof(ShowOrtho)] = (() => ShowOrtho, v => ShowOrtho = v),
             [nameof(RockMaterialOn)] = (() => RockMaterialOn, v => RockMaterialOn = v),
+            [nameof(PhotogrammetricRocksOn)] = (() => PhotogrammetricRocksOn, v => PhotogrammetricRocksOn = v),
             [nameof(BiomeMaterialOn)] = (() => BiomeMaterialOn, v => BiomeMaterialOn = v),
             [nameof(SlopeMapMode)] = (() => SlopeMapMode, v => SlopeMapMode = v),
             [nameof(ShowTrails)] = (() => ShowTrails, v => ShowTrails = v),
