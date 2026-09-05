@@ -111,7 +111,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Strona leżąca ≤ uPageMaxBehind m ZA zapisaną głębią sceny (DEM) przechodzi i nadpisuje głębię (pass 1),
         // dalej za terenem (zasłonięta granią) — discard. 0 = bramka wyłączona (kafle terenu).
         "uniform float uPageDepthOn;\n" +
-        "uniform sampler2D uPageSceneDepth;\n" +
+        // (bez nowego samplera: 16 unitów ANGLE = limit MAX_TEXTURE_IMAGE_UNITS, link padał; głębia sceny
+        //  czytana przez uReflectionTex — na czas pass 1 unit 1 trzyma ghostDepthTex, jak w torze skanu)
         "uniform vec2 uPageDepthNearFar;\n" +
         "uniform float uPageMaxBehind;\n" +
         "uniform vec2 uOrthoMinXY;\n" +     // ortho coverage AABB (world XY about the scene anchor) — beyond it the UV clamps
@@ -667,9 +668,9 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "void main(){\n" +
         // Bramka głębi stron RMP2 (pilot „kolor z orto"): patrz uPageDepthOn. Linearizacja jak w torze skanu.
         "  if (uPageDepthOn > 0.5) {\n" +
-        "    vec2 pduv = gl_FragCoord.xy / vec2(textureSize(uPageSceneDepth, 0));\n" +
+        "    vec2 pduv = gl_FragCoord.xy / vec2(textureSize(uReflectionTex, 0));\n" +
         "    float pn = uPageDepthNearFar.x; float pf = uPageDepthNearFar.y;\n" +
-        "    float pNdcS = texture(uPageSceneDepth, pduv).r * 2.0 - 1.0;\n" +
+        "    float pNdcS = texture(uReflectionTex, pduv).r * 2.0 - 1.0;\n" +
         "    float pNdcR = gl_FragCoord.z * 2.0 - 1.0;\n" +
         "    float pLinS = (pf * pn) / (pf - (pNdcS * (pf - pn)));\n" +
         "    float pLinR = (pf * pn) / (pf - (pNdcR * (pf - pn)));\n" +
@@ -2305,7 +2306,6 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int orthoSamplerLocation = -1;
     private int useOrthoLocation = -1;
     private int pageDepthOnLocation = -1;
-    private int pageSceneDepthLocation = -1;
     private int pageDepthNearFarLocation = -1;
     private int pageMaxBehindLocation = -1;
     private const float RockPageMaxBehindMeters = 4f; // jak tor skanu Codexa (maxBehindTerrain 4 m)
@@ -5712,7 +5712,6 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             orthoSamplerLocation = -1;
             useOrthoLocation = -1;
             pageDepthOnLocation = -1;
-            pageSceneDepthLocation = -1;
             pageDepthNearFarLocation = -1;
             pageMaxBehindLocation = -1;
             orthoGlobalFadeLocation = -1;
@@ -9575,7 +9574,6 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         orthoGlobalFadeLocation = g.GetUniformLocation(program, "uOrthoGlobalFade");
         orthoTexelLocation = g.GetUniformLocation(program, "uOrthoTexel");
         pageDepthOnLocation = g.GetUniformLocation(program, "uPageDepthOn");
-        pageSceneDepthLocation = g.GetUniformLocation(program, "uPageSceneDepth");
         pageDepthNearFarLocation = g.GetUniformLocation(program, "uPageDepthNearFar");
         pageMaxBehindLocation = g.GetUniformLocation(program, "uPageMaxBehind");
         slopeModeLocation = g.GetUniformLocation(program, "uSlopeMode");
@@ -9717,7 +9715,6 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.Uniform1(det05ArrSamplerLocation, 12);
         g.Uniform1(det05ArrBSamplerLocation, 13);
         g.Uniform1(det05ArrCSamplerLocation, 7);
-        g.Uniform1(pageSceneDepthLocation, 1); // pożyczony unit odbicia (16 unitów ANGLE zajętych) — jak tor skanu
         g.Uniform1(pageDepthOnLocation, 0f);
         g.Uniform1(det1mSamplerLoc, 14);
         g.Uniform1(det1mCovLoc, 15);
