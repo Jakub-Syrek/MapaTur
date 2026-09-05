@@ -140,3 +140,18 @@ obciążałoby to mocno kartę". Czyli: wygląd ODEBRANY (opcje A/B/C wyżej nie
 1. przełącznik w apce: skały RMP2 (kolor z orto) ↔ dzisiejszy widok (granit v7 na DEM), z uwolnieniem stron GPU;
 2. pomiar obciążenia GPU ON vs OFF w tej samej pozie (`[PassTimes]` shadow/terrain/sumGpu + CPU) — liczby niżej.
 
+### Koszt GPU/CPU z logów istniejących runów (ta sama poza Rysy 150 m, ten sam build, okno 1904×992, stan ustalony = 11 próbek `[PassTimes]`)
+
+| pass | OFF 16:02 (granit v7) p50 / p90 | ON 16:07 (391 stron) p50 / p90 | Δ p50 |
+|---|---|---|---|
+| shadow | 4,53 / 5,74 ms | 5,95 / 12,11 ms | +1,4 ms (p90 +6,4) |
+| terrain | 5,60 / 5,62 ms | 6,99 / 7,02 ms | +1,4 ms |
+| refl | 4,69 / 4,83 ms | 1,15 / 1,17 ms | −3,5 ms (⚠ nie od stron — pass odbić pomija strony; inny stan jeziora/odbicia w tej klatce, do wyjaśnienia) |
+| sumGpu | 14,80 / 15,17 ms | 14,13 / 20,28 ms | p50 −0,7 (przez refl), p90 +5,1 |
+| CPU sumCpu | 4,2 ms (sh 1,9, tr 0,9) | 8,7 ms (sh 3,3, tr 3,1) | +4,5 ms (391 draw calli × 3 passy, bez batchingu) |
+
+Wniosek wstępny: strony kosztują ~+2,8 ms GPU w passach shadow+terrain (+19 % sumGpu) i ~+4,5 ms CPU na klatkę
+przy 391 stronach w kadrze; p90 cienia rośnie do 12 ms (skoki = uploady 2 stron/klatkę na wątku UI w tym oknie).
+Batching (1 VAO na komórkę/LOD zamiast strony) i upload poza wątkiem UI to znane pominięcia pilota. Pomiar
+pełny (2 sceny, cold+warm, więcej próbek) — po przełączniku.
+
