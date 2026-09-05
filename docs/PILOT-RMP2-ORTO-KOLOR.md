@@ -94,4 +94,18 @@ kodu, 09-05 12:xx; weryfikacja adwersarialna nie doszła do skutku — limit ses
    komórki orto = unia kafli rezydentnych (na południowej krawędzi pokrycia przesuwa UV bazy o ≤ 1,2–9,6 %);
    det25/det05 liczą po XY świata, więc przy 150 m nie ma to wpływu na kolor ściany.
 
+## Wynik po bramce głębi (09-05 15:58, jeden run weryfikacyjny, poza Rysy 150 m)
+
+- Streaming: `residency: drawable=434 gpu=434 cpu=434 desired=434` po ~12 s od katalogu (2 strony/klatkę);
+  `terrain-shaded: 391 stron w kadrze (0 bez tekstury orto), bramka glebi=true`. Zero błędów GL.
+- Maska zmian vs kadr bez skał: 37,2 % kadru (wcześniej 18,6 %), w wycinku ściany 55,7 % — strony pokrywają całą
+  ścianę Rysów i grań na pierwszym planie; komórki granitu v7 znikły z obszaru stron (`rysy-150m-maska-stron.png`).
+- Kadr referencyjny bez skał powtórzony o 16:02: identyczny z 11:41 co do piksela (0,00 % zmian) → słońce w tej
+  gałęzi NIE idzie za zegarem (main ma `MAPATUR_DATE`/`MAPATUR_TIME_HOURS`, pilot ich nie ma) — A/B jest uczciwe.
+- Na pikselach stron: luma 33,0 vs 43,2 (ratio 0,76), rozkład ratio BIMODALNY (p25 0,19 / p50 0,47 / p75 1,28),
+  61,7 % pikseli ciemniejszych niż 0,6×, saturacja 0,35→0,47 (niebieskie ambient). To nie zmiana albedo, tylko
+  CIEŃ: DEM dalej siedzi w mapie cieni, a strona leży do 4 m za nim → DEM zacienia własną stronę (acne w skali metrów).
+- Pierwsza próba bramki (`ac49823`) dodała 17. sampler do fragment shadera → `link failed: texture image units
+  count exceeds MAX_TEXTURE_IMAGE_UNITS(16)` (ANGLE). Fix `f70b77a`: głębia sceny czytana przez `uReflectionTex`.
+
 ## Werdykt usera: ⏳ (kadry ON/OFF z pozy Rysy 150 m)
