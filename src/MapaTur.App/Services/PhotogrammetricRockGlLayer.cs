@@ -134,6 +134,24 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
     private readonly HashSet<ScannedRockPageKey> drawableKeys = [];
     private readonly HashSet<ScannedRockPageKey> deferredDeletes = [];
 
+    // Batching stron „kolor z orto" (2026-09-05, „leć ten batching pilot"): pomiar ON→OFF dał CPU +11 ms/klatkę
+    // (391 stron × 3 passy). Strony tej samej komórki orto i kwadratu GroupCells×GroupCells komórek są scalane
+    // w jeden VAO/draw (ScannedRockPageBatcher, TDD); grupa brudna rysuje strony pojedynczo do przebudowy.
+    // terrainPacks = paczki CPU stron GPU-rezydentnych (do scalania; ~230 KB/strona). MAPATUR_ROCK_RMP2_GROUP = bok grupy.
+    private readonly Dictionary<ScannedRockPageKey, TerrainVertexPack> terrainPacks = [];
+    private readonly ScannedRockPageBatchTracker batches = new(GroupCellsFromEnv());
+    private readonly Dictionary<ScannedRockGroupKey, GpuGroup> gpuGroups = [];
+    private readonly List<ScannedRockPageStub> batchStubs = [];
+    private const int GroupRebuildsPerFrame = 2;
+
+    /// <summary>Jednostki rysowania z ostatniego PrepareFrame: zbudowane grupy vs strony pojedyncze (do logu/pomiaru).</summary>
+    public int LastGroupUnits { get; private set; }
+
+    public int LastSingleUnits { get; private set; }
+
+    private static int GroupCellsFromEnv() =>
+        int.TryParse(Environment.GetEnvironmentVariable("MAPATUR_ROCK_RMP2_GROUP"), out int n) && n >= 1 ? n : 4;
+
     private string? root;
     private long maxResidentBytes;
     private Task<ScannedRockPageCatalog>? catalogTask;
@@ -186,16 +204,33 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
     public Func<Vector3, OrthoCellRef?>? OrthoCellResolver { get; set; }
 
     /// <summary>Drawable pages in terrain layout for the renderer's own tile loops (empty unless <see cref="TerrainShaded"/>).</summary>
+    /// <summary>Jednostki rysowania programem terenu: zbudowane grupy w całości, strony grup brudnych pojedynczo.</summary>
     public IEnumerable<TerrainShadedPage> TerrainShadedPages()
     {
-        if (!TerrainShaded)
+        if (!TerrainShaded || drawableKeys.Count == 0)
         {
             yield break;
         }
 
-        foreach (ScannedRockPageKey key in drawableKeys)
+        foreach (ScannedRockDrawUnit unit in batches.DrawUnits())
         {
-            if (gpuPages.TryGetValue(key, out GpuPage? page) && page.TerrainLayout)
+            if (unit.Group is { } gk)
+            {
+                if (gpuGroups.TryGetValue(gk, out GpuGroup? grp))
+                {
+                    yield return new TerrainShadedPage(grp.Vao, grp.IndexCount, grp.OrthoTileIndex, grp.WorldMin, grp.WorldMax);
+                    continue;
+                }
+
+                foreach (ScannedRockPageKey key in batches.MembersOf(gk))
+                {
+                    if (gpuPages.TryGetValue(key, out GpuPage? member) && member.TerrainLayout)
+                    {
+                        yield return new TerrainShadedPage(member.Vao, member.IndexCount, member.OrthoTileIndex, member.WorldMin, member.WorldMin + member.WorldExtent);
+                    }
+                }
+            }
+            else if (unit.Page is { } pk && gpuPages.TryGetValue(pk, out GpuPage? page) && page.TerrainLayout)
             {
                 yield return new TerrainShadedPage(page.Vao, page.IndexCount, page.OrthoTileIndex, page.WorldMin, page.WorldMin + page.WorldExtent);
             }
@@ -252,6 +287,7 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
         if (!enabled || root is null || catalogTask is null)
         {
             drawableKeys.Clear();
+            UpdateBatches(g);
             return;
         }
 
@@ -354,6 +390,7 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
         }
 
         DeleteReplacedPages(g, update.DesiredKeys);
+        UpdateBatches(g);
     }
 
     public void DrawMain(
@@ -746,6 +783,7 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
                 DeletePage(g, page);
             }
 
+            terrainPacks.Remove(stale);
             drawableKeys.Remove(stale);
             deferredDeletes.Remove(stale);
         }
@@ -768,6 +806,10 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
         gpuMaterials.Clear();
         drawableKeys.Clear();
         deferredDeletes.Clear();
+        gpuGroups.Clear(); // kontekst utracony — bez DeleteBuffer
+        terrainPacks.Clear();
+        batches.Clear();
+        batches.TakeRemoved();
         s3tcProbed = false;
         s3tcSupported = false;
         drawableLogged = false;
@@ -875,9 +917,9 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
 
     private void ReleaseGpu(GL g)
     {
-        if (gpuPages.Count > 0 || gpuMaterials.Count > 0)
+        if (gpuPages.Count > 0 || gpuMaterials.Count > 0 || gpuGroups.Count > 0)
         {
-            Log.Information("[RockRMP2] GPU released: {Pages} pages, {Materials} materials (przełącznik OFF / reset)", gpuPages.Count, gpuMaterials.Count);
+            Log.Information("[RockRMP2] GPU released: {Pages} pages, {Groups} groups, {Materials} materials (przełącznik OFF / reset)", gpuPages.Count, gpuGroups.Count, gpuMaterials.Count);
         }
 
         foreach (GpuPage page in gpuPages.Values)
@@ -894,6 +936,15 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
         gpuMaterials.Clear();
         drawableKeys.Clear();
         deferredDeletes.Clear();
+        foreach (GpuGroup grp in gpuGroups.Values)
+        {
+            DeleteGroupBuffers(g, grp);
+        }
+
+        gpuGroups.Clear();
+        terrainPacks.Clear();
+        batches.Clear();
+        batches.TakeRemoved();
         if (program != 0)
         {
             g.DeleteProgram(program);
@@ -907,43 +958,101 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
         }
     }
 
-    private static void DeletePage(GL g, GpuPage page)
+    // Batching: skład grup ze stron rysowalnych (jedna strona na komórkę), budżet przebudów na klatkę, bufory scalone.
+    private void UpdateBatches(GL g)
     {
-        g.DeleteVertexArray(page.Vao);
-        g.DeleteBuffer(page.VertexBuffer);
-        g.DeleteBuffer(page.IndexBuffer);
-        if (page.ExtraBuffers is not null)
+        batchStubs.Clear();
+        if (TerrainShaded)
         {
-            foreach (uint buffer in page.ExtraBuffers)
+            foreach (ScannedRockPageKey key in drawableKeys)
             {
-                g.DeleteBuffer(buffer);
+                if (gpuPages.TryGetValue(key, out GpuPage? page) && page.TerrainLayout)
+                {
+                    batchStubs.Add(new ScannedRockPageStub(key, page.OrthoTileIndex, page.WorldMin, page.WorldMin + page.WorldExtent));
+                }
             }
+        }
+
+        if (batchStubs.Count == 0 && gpuGroups.Count == 0 && batches.Groups.Count == 0)
+        {
+            LastGroupUnits = 0;
+            LastSingleUnits = 0;
+            return;
+        }
+
+        batches.Update(batchStubs);
+        foreach (ScannedRockGroupKey gk in batches.TakeRemoved())
+        {
+            DeleteGroup(g, gk);
+        }
+
+        foreach (ScannedRockGroupKey gk in batches.TakeDirty(GroupRebuildsPerFrame))
+        {
+            DeleteGroup(g, gk);
+            var packs = new List<TerrainVertexPack>();
+            foreach (ScannedRockPageKey key in batches.MembersOf(gk))
+            {
+                if (terrainPacks.TryGetValue(key, out TerrainVertexPack? pack))
+                {
+                    packs.Add(pack);
+                }
+            }
+
+            if (packs.Count == 0)
+            {
+                continue; // zostaje brudna → strony pojedynczo, wróci w następnej klatce
+            }
+
+            TerrainVertexPack merged = packs.Count == 1 ? packs[0] : ScannedRockPageBatcher.Merge(packs);
+            (uint vao, uint positionVbo, uint ebo, uint[] extra) = UploadTerrainLayout(g, merged);
+            (Vector3 min, Vector3 max) = batches.BoundsOf(gk);
+            uint[] buffers = new uint[extra.Length + 1];
+            buffers[0] = positionVbo;
+            Array.Copy(extra, 0, buffers, 1, extra.Length);
+            gpuGroups[gk] = new GpuGroup(vao, ebo, buffers, merged.Indices.Length, gk.OrthoTileIndex, min, max);
+            batches.MarkBuilt(gk);
+        }
+
+        int groups = 0;
+        int singles = 0;
+        foreach (ScannedRockDrawUnit unit in batches.DrawUnits())
+        {
+            if (unit.Group is not null)
+            {
+                groups++;
+            }
+            else
+            {
+                singles++;
+            }
+        }
+
+        LastGroupUnits = groups;
+        LastSingleUnits = singles;
+    }
+
+    private void DeleteGroup(GL g, ScannedRockGroupKey gk)
+    {
+        if (gpuGroups.Remove(gk, out GpuGroup? grp))
+        {
+            DeleteGroupBuffers(g, grp);
         }
     }
 
-    // Pilot "kolor z orto": strona w layoucie kafla terenu - piec VBO per atrybut (pos f3, color rgba8 z AO w
-    // alfie, normal f3, tex f2 = UV komorki orto bazowej, detail f1 = 0) + EBO uint, dokladnie jak UploadTile
-    // w Terrain3DGlRenderer (ten sam VAO-layout, wiec ten sam program i te same uniformy). Brak komorki orto
-    // (resolver == null) = strona czeka na nastepna klatke, nie jest liczona jako upload.
-    private bool TryUploadTerrainLayout(GL g, ScannedRockMeshPage page, ScannedRockPageKey key)
+    private static void DeleteGroupBuffers(GL g, GpuGroup grp)
     {
-        Vector3 centre = page.WorldMin + (page.WorldExtent * 0.5f);
-        OrthoCellRef? cell = OrthoCellResolver?.Invoke(centre);
-        if (cell is null)
+        g.DeleteVertexArray(grp.Vao);
+        g.DeleteBuffer(grp.IndexBuffer);
+        foreach (uint buffer in grp.Buffers)
         {
-            return false;
+            g.DeleteBuffer(buffer);
         }
+    }
 
-        TerrainVertexPack pack;
-        try
-        {
-            pack = ScannedRockPageTerrainRepacker.Repack(page, cell.Value.Min, cell.Value.Max);
-        }
-        catch (ArgumentException)
-        {
-            return false;
-        }
-
+    // Layout kafla terenu: piec VBO per atrybut (pos f3, color rgba8 z AO w alfie, normal f3, tex f2, detail f1)
+    // + EBO uint — dokladnie jak UploadTile w Terrain3DGlRenderer (ten sam program, te same uniformy).
+    private static (uint Vao, uint PositionVbo, uint Ebo, uint[] Extra) UploadTerrainLayout(GL g, TerrainVertexPack pack)
+    {
         int vertexCount = pack.Positions.Length;
         byte[] rgba = new byte[vertexCount * 4];
         for (int i = 0; i < vertexCount; i++)
@@ -989,7 +1098,48 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
         g.BindBuffer(BufferTargetARB.ElementArrayBuffer, ebo);
         g.BufferData<uint>(BufferTargetARB.ElementArrayBuffer, (nuint)(pack.Indices.Length * sizeof(uint)), pack.Indices, BufferUsageARB.StaticDraw);
         g.BindVertexArray(0);
+        return (vao, positionVbo, ebo, [colorVbo, normalVbo, texVbo, detailVbo]);
+    }
 
+    private static void DeletePage(GL g, GpuPage page)
+    {
+        g.DeleteVertexArray(page.Vao);
+        g.DeleteBuffer(page.VertexBuffer);
+        g.DeleteBuffer(page.IndexBuffer);
+        if (page.ExtraBuffers is not null)
+        {
+            foreach (uint buffer in page.ExtraBuffers)
+            {
+                g.DeleteBuffer(buffer);
+            }
+        }
+    }
+
+    // Pilot "kolor z orto": strona w layoucie kafla terenu - piec VBO per atrybut (pos f3, color rgba8 z AO w
+    // alfie, normal f3, tex f2 = UV komorki orto bazowej, detail f1 = 0) + EBO uint, dokladnie jak UploadTile
+    // w Terrain3DGlRenderer (ten sam VAO-layout, wiec ten sam program i te same uniformy). Brak komorki orto
+    // (resolver == null) = strona czeka na nastepna klatke, nie jest liczona jako upload.
+    private bool TryUploadTerrainLayout(GL g, ScannedRockMeshPage page, ScannedRockPageKey key)
+    {
+        Vector3 centre = page.WorldMin + (page.WorldExtent * 0.5f);
+        OrthoCellRef? cell = OrthoCellResolver?.Invoke(centre);
+        if (cell is null)
+        {
+            return false;
+        }
+
+        TerrainVertexPack pack;
+        try
+        {
+            pack = ScannedRockPageTerrainRepacker.Repack(page, cell.Value.Min, cell.Value.Max);
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+
+        (uint vao, uint positionVbo, uint ebo, uint[] extra) = UploadTerrainLayout(g, pack);
+        terrainPacks[key] = pack; // do scalania w grupy (batching)
         gpuPages[key] = new GpuPage(
             vao,
             positionVbo,
@@ -1000,7 +1150,7 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
             page.MaterialPageId,
             TerrainLayout: true,
             OrthoTileIndex: cell.Value.Index,
-            ExtraBuffers: [colorVbo, normalVbo, texVbo, detailVbo]);
+            ExtraBuffers: extra);
         return true;
     }
 
@@ -1017,6 +1167,9 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
         uint[]? ExtraBuffers = null);
 
     private sealed record GpuMaterial(uint Texture);
+
+    /// <summary>Scalona grupa stron (batching): jeden VAO/draw; Buffers = pos + [color, normal, tex, detail].</summary>
+    private sealed record GpuGroup(uint Vao, uint IndexBuffer, uint[] Buffers, int IndexCount, int OrthoTileIndex, Vector3 WorldMin, Vector3 WorldMax);
 }
 
 /// <summary>Base-ortho cell reference for <see cref="PhotogrammetricRockGlLayer.OrthoCellResolver"/>.</summary>

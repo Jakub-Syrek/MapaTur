@@ -7078,8 +7078,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 rockPagesDrawnLast = rockPagesDrawn;
                 rockPageLogLastFrame = rockPageLogFrame;
                 Log.Information(
-                    "[RockRMP2] terrain-shaded: {Pages} stron w kadrze ({NoOrtho} bez tekstury orto), bramka glebi={Gate}",
-                    rockPagesDrawn, rockPagesNoOrtho, rockDepthGate);
+                    "[RockRMP2] terrain-shaded: {Pages} jednostek w kadrze ({NoOrtho} bez tekstury orto), bramka glebi={Gate}; batching: {Groups} grup + {Singles} stron pojedynczo",
+                    rockPagesDrawn, rockPagesNoOrtho, rockDepthGate, photogrammetricRock.LastGroupUnits, photogrammetricRock.LastSingleUnits);
             }
         }
         else if (PhotogrammetricRockEnabled)
