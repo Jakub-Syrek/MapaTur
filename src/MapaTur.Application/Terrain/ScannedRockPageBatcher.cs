@@ -74,14 +74,20 @@ public static class ScannedRockPageBatcher
 
 /// <summary>
 /// Śledzi skład grup na podstawie ZESTAWU RYSOWALNYCH stron (jedna strona na komórkę, wybrany LOD) klatka po klatce:
-/// zmiana składu grupy = grupa brudna → rysowana pojedynczymi stronami, aż warstwa GL ją przebuduje (budżet
-/// przebudów na klatkę przez TakeDirty) i oznaczy MarkBuilt. Grupy bez stron znikają i są zgłaszane do sprzątania GPU.
+/// zmiana składu = grupa brudna → rysowana pojedynczymi stronami, aż warstwa GL ją przebuduje i oznaczy MarkBuilt.
+/// Przegląd 09-05: przebudowa dopiero po USTANIU zmian (minAgeFrames — podczas dociągania 2 stron/klatkę grupa 16 stron
+/// scalała się do 16 razy), budżet w STRONACH (nie grupach), priorytet = widoczne grupy, potem najstarsze zmiany.
+/// Grupy bez stron znikają i są zgłaszane do sprzątania GPU. Bez alokacji per klatka przy niezmienionym składzie.
 /// </summary>
 public sealed class ScannedRockPageBatchTracker
 {
     private readonly int groupCells;
     private readonly Dictionary<ScannedRockGroupKey, Group> groups = new();
+    private readonly Dictionary<ScannedRockGroupKey, List<ScannedRockPageStub>> wanted = new();
     private readonly List<ScannedRockGroupKey> removed = new();
+    private readonly List<ScannedRockGroupKey> scratchKeys = new();
+    private readonly List<(ScannedRockGroupKey Key, bool Visible, int Changed, int Pages)> candidates = new();
+    private int frameCounter;
 
     public ScannedRockPageBatchTracker(int groupCells)
     {
@@ -93,10 +99,17 @@ public sealed class ScannedRockPageBatchTracker
 
     public IReadOnlyCollection<ScannedRockGroupKey> Groups => groups.Keys;
 
-    public void Update(IReadOnlyList<ScannedRockPageStub> drawable)
+    public void Update(IReadOnlyList<ScannedRockPageStub> drawable) => Update(drawable, ++frameCounter);
+
+    public void Update(IReadOnlyList<ScannedRockPageStub> drawable, int frame)
     {
         ArgumentNullException.ThrowIfNull(drawable);
-        var wanted = new Dictionary<ScannedRockGroupKey, List<ScannedRockPageStub>>();
+        frameCounter = frame;
+        foreach (List<ScannedRockPageStub> list in wanted.Values)
+        {
+            list.Clear();
+        }
+
         foreach (ScannedRockPageStub stub in drawable)
         {
             ScannedRockGroupKey gk = ScannedRockPageBatcher.GroupKeyFor(stub.Key, stub.OrthoTileIndex, groupCells);
@@ -109,26 +122,37 @@ public sealed class ScannedRockPageBatchTracker
             list.Add(stub);
         }
 
-        foreach (ScannedRockGroupKey gk in groups.Keys.ToList())
+        scratchKeys.Clear();
+        foreach (ScannedRockGroupKey gk in groups.Keys)
         {
-            if (!wanted.ContainsKey(gk))
+            if (!wanted.TryGetValue(gk, out List<ScannedRockPageStub>? list) || list.Count == 0)
             {
-                groups.Remove(gk);
-                removed.Add(gk);
+                scratchKeys.Add(gk);
             }
+        }
+
+        foreach (ScannedRockGroupKey gk in scratchKeys)
+        {
+            groups.Remove(gk);
+            removed.Add(gk);
         }
 
         foreach ((ScannedRockGroupKey gk, List<ScannedRockPageStub> stubs) in wanted)
         {
+            if (stubs.Count == 0)
+            {
+                continue;
+            }
+
             if (!groups.TryGetValue(gk, out Group? group))
             {
-                groups[gk] = new Group(stubs);
+                groups[gk] = new Group(stubs, frame);
                 continue;
             }
 
             if (!group.SameMembers(stubs))
             {
-                group.Replace(stubs);
+                group.Replace(stubs, frame);
             }
         }
     }
@@ -136,11 +160,13 @@ public sealed class ScannedRockPageBatchTracker
     public IReadOnlyList<ScannedRockPageKey> MembersOf(ScannedRockGroupKey key) =>
         groups.TryGetValue(key, out Group? g) ? g.Keys : Array.Empty<ScannedRockPageKey>();
 
+    public int MemberCount(ScannedRockGroupKey key) => groups.TryGetValue(key, out Group? g) ? g.Stubs.Count : 0;
+
     public bool IsDirty(ScannedRockGroupKey key) => groups.TryGetValue(key, out Group? g) && g.Dirty;
 
     public bool IsBuilt(ScannedRockGroupKey key) => groups.TryGetValue(key, out Group? g) && g.Built && !g.Dirty;
 
-    /// <summary>Do `max` brudnych grup do przebudowy (flaga zostaje do MarkBuilt — nieudana przebudowa wraca w następnej klatce).</summary>
+    /// <summary>Do `max` brudnych grup (kolejność słownikowa, bez debounce) — flaga zostaje do MarkBuilt.</summary>
     public IReadOnlyList<ScannedRockGroupKey> TakeDirty(int max)
     {
         var result = new List<ScannedRockGroupKey>();
@@ -155,6 +181,51 @@ public sealed class ScannedRockPageBatchTracker
             {
                 result.Add(gk);
             }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Brudne grupy do przebudowy: tylko te, których skład nie zmienił się od ≥ minAgeFrames klatek (debounce),
+    /// najpierw widoczne (isVisible), w obrębie tego najstarsza zmiana pierwsza; budżet liczony w STRONACH członków
+    /// (maxPages), ale zawsze ≥ 1 grupa. Flaga brudna zostaje do MarkBuilt.
+    /// </summary>
+    public IReadOnlyList<ScannedRockGroupKey> TakeDirty(int maxPages, int minAgeFrames, int frame, Func<ScannedRockGroupKey, bool>? isVisible = null)
+    {
+        candidates.Clear();
+        foreach ((ScannedRockGroupKey gk, Group g) in groups)
+        {
+            if (!g.Dirty || frame - g.LastChangedFrame < minAgeFrames)
+            {
+                continue;
+            }
+
+            candidates.Add((gk, isVisible?.Invoke(gk) ?? true, g.LastChangedFrame, g.Stubs.Count));
+        }
+
+        if (candidates.Count == 0)
+        {
+            return Array.Empty<ScannedRockGroupKey>();
+        }
+
+        candidates.Sort(static (a, b) =>
+        {
+            int v = b.Visible.CompareTo(a.Visible); // widoczne (true) przed niewidocznymi
+            return v != 0 ? v : a.Changed.CompareTo(b.Changed);
+        });
+
+        var result = new List<ScannedRockGroupKey>();
+        int pages = 0;
+        foreach ((ScannedRockGroupKey key, bool _, int _, int count) in candidates)
+        {
+            if (result.Count > 0 && pages + count > maxPages)
+            {
+                break;
+            }
+
+            result.Add(key);
+            pages += count;
         }
 
         return result;
@@ -226,28 +297,33 @@ public sealed class ScannedRockPageBatchTracker
         }
 
         groups.Clear();
+        foreach (List<ScannedRockPageStub> list in wanted.Values)
+        {
+            list.Clear();
+        }
     }
 
     private sealed class Group
     {
-        private HashSet<ScannedRockPageKey> keySet;
+        private readonly HashSet<ScannedRockPageKey> keySet = new();
 
-        public Group(List<ScannedRockPageStub> stubs)
+        public Group(List<ScannedRockPageStub> stubs, int frame)
         {
-            Stubs = stubs;
-            keySet = new HashSet<ScannedRockPageKey>(stubs.Select(s => s.Key));
-            Keys = stubs.Select(s => s.Key).ToArray();
-            Dirty = true;
+            Stubs = new List<ScannedRockPageStub>(stubs.Count);
+            Keys = Array.Empty<ScannedRockPageKey>();
+            Replace(stubs, frame);
             Built = false;
         }
 
-        public List<ScannedRockPageStub> Stubs { get; private set; }
+        public List<ScannedRockPageStub> Stubs { get; }
 
         public ScannedRockPageKey[] Keys { get; private set; }
 
         public bool Dirty { get; set; }
 
         public bool Built { get; set; }
+
+        public int LastChangedFrame { get; private set; }
 
         public bool SameMembers(List<ScannedRockPageStub> stubs)
         {
@@ -267,12 +343,21 @@ public sealed class ScannedRockPageBatchTracker
             return true;
         }
 
-        public void Replace(List<ScannedRockPageStub> stubs)
+        public void Replace(List<ScannedRockPageStub> stubs, int frame)
         {
-            Stubs = stubs;
-            keySet = new HashSet<ScannedRockPageKey>(stubs.Select(s => s.Key));
-            Keys = stubs.Select(s => s.Key).ToArray();
+            Stubs.Clear();
+            Stubs.AddRange(stubs);
+            keySet.Clear();
+            var keys = new ScannedRockPageKey[stubs.Count];
+            for (int i = 0; i < stubs.Count; i++)
+            {
+                keys[i] = stubs[i].Key;
+                keySet.Add(stubs[i].Key);
+            }
+
+            Keys = keys;
             Dirty = true;
+            LastChangedFrame = frame;
         }
     }
 }

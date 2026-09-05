@@ -142,7 +142,14 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
     private readonly ScannedRockPageBatchTracker batches = new(GroupCellsFromEnv());
     private readonly Dictionary<ScannedRockGroupKey, GpuGroup> gpuGroups = [];
     private readonly List<ScannedRockPageStub> batchStubs = [];
-    private const int GroupRebuildsPerFrame = 2;
+    private const int GroupRebuildMaxPagesPerFrame = 16; // budżet przebudów w STRONACH (≈1 pełna grupa 4×4)
+    private const int GroupSettleFrames = 12;            // debounce: grupa scalana dopiero, gdy skład nie zmienia się ~12 klatek
+    private readonly List<TerrainShadedPage> unitCache = [];
+    private int batchFrame;
+    private bool contextLostPending;
+
+    /// <summary>Skumulowana liczba przebudów (uploadów) grup — miara „rebuild storm” w logu.</summary>
+    public int LastRebuilds { get; private set; }
 
     /// <summary>Jednostki rysowania z ostatniego PrepareFrame: zbudowane grupy vs strony pojedyncze (do logu/pomiaru).</summary>
     public int LastGroupUnits { get; private set; }
@@ -204,38 +211,9 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
     public Func<Vector3, OrthoCellRef?>? OrthoCellResolver { get; set; }
 
     /// <summary>Drawable pages in terrain layout for the renderer's own tile loops (empty unless <see cref="TerrainShaded"/>).</summary>
-    /// <summary>Jednostki rysowania programem terenu: zbudowane grupy w całości, strony grup brudnych pojedynczo.</summary>
-    public IEnumerable<TerrainShadedPage> TerrainShadedPages()
-    {
-        if (!TerrainShaded || drawableKeys.Count == 0)
-        {
-            yield break;
-        }
-
-        foreach (ScannedRockDrawUnit unit in batches.DrawUnits())
-        {
-            if (unit.Group is { } gk)
-            {
-                if (gpuGroups.TryGetValue(gk, out GpuGroup? grp))
-                {
-                    yield return new TerrainShadedPage(grp.Vao, grp.IndexCount, grp.OrthoTileIndex, grp.WorldMin, grp.WorldMax);
-                    continue;
-                }
-
-                foreach (ScannedRockPageKey key in batches.MembersOf(gk))
-                {
-                    if (gpuPages.TryGetValue(key, out GpuPage? member) && member.TerrainLayout)
-                    {
-                        yield return new TerrainShadedPage(member.Vao, member.IndexCount, member.OrthoTileIndex, member.WorldMin, member.WorldMin + member.WorldExtent);
-                    }
-                }
-            }
-            else if (unit.Page is { } pk && gpuPages.TryGetValue(pk, out GpuPage? page) && page.TerrainLayout)
-            {
-                yield return new TerrainShadedPage(page.Vao, page.IndexCount, page.OrthoTileIndex, page.WorldMin, page.WorldMin + page.WorldExtent);
-            }
-        }
-    }
+    /// <summary>Jednostki rysowania programem terenu (cache z ostatniego PrepareFrame; renderer woła 3× na klatkę).</summary>
+    public IReadOnlyList<TerrainShadedPage> TerrainShadedPages() =>
+        TerrainShaded && drawableKeys.Count > 0 ? unitCache : Array.Empty<TerrainShadedPage>();
 
     public void Configure(string? newRoot, long newMaxResidentBytes)
     {
@@ -287,7 +265,7 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
         if (!enabled || root is null || catalogTask is null)
         {
             drawableKeys.Clear();
-            UpdateBatches(g);
+            UpdateBatches(g, null, 1f);
             return;
         }
 
@@ -390,7 +368,7 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
         }
 
         DeleteReplacedPages(g, update.DesiredKeys);
-        UpdateBatches(g);
+        UpdateBatches(g, camera, viewportWidth / (float)Math.Max(1, viewportHeight));
     }
 
     public void DrawMain(
@@ -793,13 +771,27 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
         gpuPages.TryGetValue(key, out GpuPage? page)
         && gpuMaterials.ContainsKey(page.MaterialPageId);
 
+    /// <summary>
+    /// Renderer wykrył utratę kontekstu GL (resize/maximize odtwarza kontekst SKGLView). W trybie terrain-shaded
+    /// warstwa nie linkuje własnego programu, więc HandleGpuReset nie miał po czym poznać utraty (przegląd 09-05:
+    /// stare nazwy VAO/VBO stron i grup byłyby rysowane i KASOWANE w nowym kontekście — trafiając w kafle terenu).
+    /// Reset bez wywołań GL; stan CPU-rezydentny zostaje, strony wracają przez normalny upload.
+    /// </summary>
+    public void NotifyContextLost() => contextLostPending = true;
+
     private void HandleGpuReset(GL g)
     {
-        if (program == 0 || g.IsProgram(program))
+        bool programDead = program != 0 && !g.IsProgram(program);
+        if (!contextLostPending && !programDead)
         {
             return;
         }
 
+        Log.Information("[RockRMP2] context lost — porzucam {Pages} stron, {Groups} grup, {Materials} materiałów bez kasowania (stare nazwy GL)", gpuPages.Count, gpuGroups.Count, gpuMaterials.Count);
+        contextLostPending = false;
+        unitCache.Clear();
+        LastGroupUnits = 0;
+        LastSingleUnits = 0;
         program = 0;
         shadowProgram = 0;
         gpuPages.Clear();
@@ -945,6 +937,7 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
         terrainPacks.Clear();
         batches.Clear();
         batches.TakeRemoved();
+        unitCache.Clear();
         if (program != 0)
         {
             g.DeleteProgram(program);
@@ -959,8 +952,9 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
     }
 
     // Batching: skład grup ze stron rysowalnych (jedna strona na komórkę), budżet przebudów na klatkę, bufory scalone.
-    private void UpdateBatches(GL g)
+    private void UpdateBatches(GL g, Camera3D? camera, float aspect)
     {
+        batchFrame++;
         batchStubs.Clear();
         if (TerrainShaded)
         {
@@ -975,22 +969,37 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
 
         if (batchStubs.Count == 0 && gpuGroups.Count == 0 && batches.Groups.Count == 0)
         {
+            unitCache.Clear();
             LastGroupUnits = 0;
             LastSingleUnits = 0;
             return;
         }
 
-        batches.Update(batchStubs);
+        batches.Update(batchStubs, batchFrame);
         foreach (ScannedRockGroupKey gk in batches.TakeRemoved())
         {
             DeleteGroup(g, gk);
         }
 
-        foreach (ScannedRockGroupKey gk in batches.TakeDirty(GroupRebuildsPerFrame))
+        Matrix4x4? vp = camera?.BuildViewProjection(aspect);
+        Func<ScannedRockGroupKey, bool>? visible = vp is { } m
+            ? gk => { (Vector3 min, Vector3 max) = batches.BoundsOf(gk); return FrustumCuller.IsAabbVisible(m, min, max); }
+            : null;
+        foreach (ScannedRockGroupKey gk in batches.TakeDirty(GroupRebuildMaxPagesPerFrame, GroupSettleFrames, batchFrame, visible))
         {
             DeleteGroup(g, gk);
-            var packs = new List<TerrainVertexPack>();
-            foreach (ScannedRockPageKey key in batches.MembersOf(gk))
+            IReadOnlyList<ScannedRockPageKey> members = batches.MembersOf(gk);
+            (Vector3 gmin, Vector3 gmax) = batches.BoundsOf(gk);
+            if (members.Count == 1 && gpuPages.TryGetValue(members[0], out GpuPage? single) && single.TerrainLayout)
+            {
+                // Grupa jednoelementowa: alias VAO strony, bez drugiej kopii w VRAM (przegląd 09-05).
+                gpuGroups[gk] = new GpuGroup(single.Vao, 0, [], single.IndexCount, gk.OrthoTileIndex, gmin, gmax, Owning: false);
+                batches.MarkBuilt(gk);
+                continue;
+            }
+
+            var packs = new List<TerrainVertexPack>(members.Count);
+            foreach (ScannedRockPageKey key in members)
             {
                 if (terrainPacks.TryGetValue(key, out TerrainVertexPack? pack))
                 {
@@ -998,31 +1007,47 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
                 }
             }
 
-            if (packs.Count == 0)
+            if (packs.Count != members.Count)
             {
-                continue; // zostaje brudna → strony pojedynczo, wróci w następnej klatce
+                continue; // niekompletna — zostaje brudna (strony pojedynczo), wróci w następnej klatce
             }
 
-            TerrainVertexPack merged = packs.Count == 1 ? packs[0] : ScannedRockPageBatcher.Merge(packs);
+            TerrainVertexPack merged = ScannedRockPageBatcher.Merge(packs);
             (uint vao, uint positionVbo, uint ebo, uint[] extra) = UploadTerrainLayout(g, merged);
-            (Vector3 min, Vector3 max) = batches.BoundsOf(gk);
             uint[] buffers = new uint[extra.Length + 1];
             buffers[0] = positionVbo;
             Array.Copy(extra, 0, buffers, 1, extra.Length);
-            gpuGroups[gk] = new GpuGroup(vao, ebo, buffers, merged.Indices.Length, gk.OrthoTileIndex, min, max);
+            gpuGroups[gk] = new GpuGroup(vao, ebo, buffers, merged.Indices.Length, gk.OrthoTileIndex, gmin, gmax);
             batches.MarkBuilt(gk);
+            LastRebuilds++;
         }
 
+        unitCache.Clear();
         int groups = 0;
         int singles = 0;
         foreach (ScannedRockDrawUnit unit in batches.DrawUnits())
         {
-            if (unit.Group is not null)
+            if (unit.Group is { } gk)
             {
-                groups++;
+                if (gpuGroups.TryGetValue(gk, out GpuGroup? grp))
+                {
+                    unitCache.Add(new TerrainShadedPage(grp.Vao, grp.IndexCount, grp.OrthoTileIndex, grp.WorldMin, grp.WorldMax));
+                    groups++;
+                    continue;
+                }
+
+                foreach (ScannedRockPageKey key in batches.MembersOf(gk))
+                {
+                    if (gpuPages.TryGetValue(key, out GpuPage? member) && member.TerrainLayout)
+                    {
+                        unitCache.Add(new TerrainShadedPage(member.Vao, member.IndexCount, member.OrthoTileIndex, member.WorldMin, member.WorldMin + member.WorldExtent));
+                        singles++;
+                    }
+                }
             }
-            else
+            else if (unit.Page is { } pk && gpuPages.TryGetValue(pk, out GpuPage? page) && page.TerrainLayout)
             {
+                unitCache.Add(new TerrainShadedPage(page.Vao, page.IndexCount, page.OrthoTileIndex, page.WorldMin, page.WorldMin + page.WorldExtent));
                 singles++;
             }
         }
@@ -1041,6 +1066,11 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
 
     private static void DeleteGroupBuffers(GL g, GpuGroup grp)
     {
+        if (!grp.Owning)
+        {
+            return; // alias VAO strony — bufory należą do GpuPage
+        }
+
         g.DeleteVertexArray(grp.Vao);
         g.DeleteBuffer(grp.IndexBuffer);
         foreach (uint buffer in grp.Buffers)
@@ -1169,7 +1199,7 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
     private sealed record GpuMaterial(uint Texture);
 
     /// <summary>Scalona grupa stron (batching): jeden VAO/draw; Buffers = pos + [color, normal, tex, detail].</summary>
-    private sealed record GpuGroup(uint Vao, uint IndexBuffer, uint[] Buffers, int IndexCount, int OrthoTileIndex, Vector3 WorldMin, Vector3 WorldMax);
+    private sealed record GpuGroup(uint Vao, uint IndexBuffer, uint[] Buffers, int IndexCount, int OrthoTileIndex, Vector3 WorldMin, Vector3 WorldMax, bool Owning = true);
 }
 
 /// <summary>Base-ortho cell reference for <see cref="PhotogrammetricRockGlLayer.OrthoCellResolver"/>.</summary>

@@ -5680,6 +5680,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         {
             Log.Information("[GL3D] context lost (program {Program} no longer valid) — rebuilding GPU objects", program);
             tileBuffers.Clear();
+            photogrammetricRock.NotifyContextLost(); // strony/grupy RMP2 maja nazwy z martwego kontekstu (przeglad 09-05)
             lastTiles = null;
             trailLines = null;
             lastTrails = null;
@@ -7078,8 +7079,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 rockPagesDrawnLast = rockPagesDrawn;
                 rockPageLogLastFrame = rockPageLogFrame;
                 Log.Information(
-                    "[RockRMP2] terrain-shaded: {Pages} jednostek w kadrze ({NoOrtho} bez tekstury orto), bramka glebi={Gate}; batching: {Groups} grup + {Singles} stron pojedynczo",
-                    rockPagesDrawn, rockPagesNoOrtho, rockDepthGate, photogrammetricRock.LastGroupUnits, photogrammetricRock.LastSingleUnits);
+                    "[RockRMP2] terrain-shaded: {Pages} jednostek w kadrze ({NoOrtho} bez tekstury orto), bramka glebi={Gate}; batching: {Groups} grup + {Singles} stron pojedynczo, przebudow lacznie={Rebuilds}",
+                    rockPagesDrawn, rockPagesNoOrtho, rockDepthGate, photogrammetricRock.LastGroupUnits, photogrammetricRock.LastSingleUnits, photogrammetricRock.LastRebuilds);
             }
         }
         else if (PhotogrammetricRockEnabled)
