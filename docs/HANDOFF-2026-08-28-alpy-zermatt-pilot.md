@@ -118,7 +118,11 @@ bez nowych uniformów. Env: `MAPATUR_ROCK_RMP2_ROOT` (pilot Rysy 0,28 GiB, poza 
 `MAPATUR_ROCK_RMP2_SHADING=terrain|scan`. Dowód 11:07: `GPU ready 4 drawable/434 desired` → `terrain-shaded: 4 stron`,
 0 błędów GL. Pełny opis: `MapaTur-rock-material/docs/PILOT-RMP2-ORTO-KOLOR.md`. Commity `bd20321`, `d41a5a3`
 (gałąź na origin). Gałąź NIE jest zrebase'owana na main (97 commitów za) — pilot ma pokazać wygląd.
-Kadry A/B (orto-kolor / bez skał / tor Codexa) z pozy Rysy 150 m: `scratchpad/rocks/` sesji 09-05; werdykt usera ⏳.
+Kadry A/B (orto-kolor / bez skał) z pozy Rysy 150 m wysłane userowi 09-05 11:55; werdykt usera ⏳.
+ZNALEZISKO Z DANYCH: strony RMP2 niosą normalne DO WNĘTRZA bryły + winding CW (94 % z<0 na 155 stronach
+ściany Rysów) — pierwszy kadr był „nocny" (luma 40 vs 53); fix `54e9913` (repacker odwraca normalną i winding,
+TDD) → luma 48,8 vs 52,8. Liczby i procedura: `MapaTur-rock-material/docs/PILOT-RMP2-ORTO-KOLOR.md`.
+Po pilocie: instancja usera (Tatry, main) przywrócona na DELL, APP-LOCK WOLNE.
 
 ## Nie ruszać / konteksty
 
