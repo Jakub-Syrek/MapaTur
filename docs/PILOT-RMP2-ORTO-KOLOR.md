@@ -133,4 +133,10 @@ nie renderera. Do decyzji usera:
   deshadow (R4);
 - C. zamrozić do czasu deshadow R4 (nie rozwiązuje smug).
 
-## Werdykt usera: ⏳ (kadry ON/OFF z pozy Rysy 150 m)
+## Werdykt usera (09-05 ~16:50, kadr zoom Rysy 150 m po fixie głębi i cienia): ✅ Z WARUNKAMI
+
+Cytat: „to jest dużo lepsze: ale to miałoby sens gdyby było wyłączalne do tej opcji co jest teraz o ile
+obciążałoby to mocno kartę". Czyli: wygląd ODEBRANY (opcje A/B/C wyżej nieaktualne), warunki wdrożenia:
+1. przełącznik w apce: skały RMP2 (kolor z orto) ↔ dzisiejszy widok (granit v7 na DEM), z uwolnieniem stron GPU;
+2. pomiar obciążenia GPU ON vs OFF w tej samej pozie (`[PassTimes]` shadow/terrain/sumGpu + CPU) — liczby niżej.
+
