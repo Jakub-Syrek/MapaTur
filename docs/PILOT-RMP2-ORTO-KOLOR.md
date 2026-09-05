@@ -178,3 +178,36 @@ Warunek wdrożenia: batching stron (1 VAO/draw na grupę komórek lub LOD, unifo
 wątkiem UI; potem pomiar wg protokołu (2 sceny, cold+warm). Zwolnienie GPU po OFF: bez śladu w logu (do dodania
 log w ReleaseGpu) — nie potwierdzone pomiarem.
 
+### Batching (09-05 21:33, commit `1646c4a`, „leć ten batching pilot")
+
+Mechanizm: `ScannedRockPageBatcher` (Application, TDD 11 testów) — klucz grupy = (komórka orto, ⌊PageX/4⌋, ⌊PageY/4⌋);
+tracker składu ze zbioru rysowalnych stron (1 strona/komórkę, wybrany LOD) co klatkę: zmiana składu → grupa brudna →
+strony pojedynczo, aż warstwa GL ją przebuduje (≤2 przebudowy/klatkę: Merge paczek CPU + jeden VAO); grupy bez stron
+kasowane. `TerrainShadedPages()` zwraca jednostki (grupy albo strony) — renderer bez zmian (3 passy jak dotąd).
+Koszt pamięci: paczki CPU stron (~230 KB/strona rezydentna) + bufory grup obok VAO stron (2× GPU, ~30 MB w pilocie).
+
+Pomiar w JEDNEJ sesji, poza Rysy 150 m, bez ingerencji (21:41–21:44; 434/434 stron → 48 grup, 43 jednostki w kadrze,
+0 pojedynczych; `GPU released: 434 pages, 48 groups` po OFF = zwolnienie potwierdzone):
+
+| pass | ON batching (4 próbki) p50 / p90 | OFF (11 próbek) p50 / p90 | Δ p50 | Δ p50 PRZED batchingiem (20:38) |
+|---|---|---|---|---|
+| shadow | 6,78 / 6,86 | 5,86 / 6,56 | +0,9 ms | +1,7 ms |
+| terrain | 6,90 / 7,07 | 5,61 / 5,66 | +1,3 ms | +3,3 ms |
+| refl | 1,14 / 1,25 | 6,82 / 7,61 | −5,7 ms (⚠ patrz niżej) | −4,9 ms |
+| sumGpu | 14,69 / 15,04 | 18,42 / 20,03 | −3,7 ms | ±0 |
+| **sumCpu** | **7,20 / 7,83** | **5,80 / 6,10** | **+1,4 ms** | **+10,9 ms** |
+
+Wniosek: batching sprowadził koszt CPU z +10,9 do +1,4 ms/klatkę (1173 → ~130 draw calli), GPU +2,2 ms w passach
+shadow+terrain. Pass `refl` „tańszy" przy ON to najpewniej artefakt pomiaru: timery GPU mierzą czas między znacznikami
+ŁĄCZNIE z bąblami, gdy GPU czeka na CPU — przy OFF (lżejszy CPU) GPU stoi w passie odbić; nie zweryfikowane, ale
+powtarzalne w 3 sesjach. Wiarygodny sygnał kosztu = shadow/terrain oraz sumCpu.
+Pierwsza próba pomiaru (21:33) była zanieczyszczona: ktoś ruszał kamerą testowej instancji (poza w kadrze ≠ zadana,
+desired 434→494) i dwa razy przełączył skały, a po 21:36:07 apka przestała logować (2m46s ciszy do kill; bez WER/Event
+Log) — zwis wątku UI przy dociąganiu det05 (odczyty 4 s; równolegle fetch regionu C na dysku) na gałęzi sprzed
+napraw streamingu z main. Do obserwacji po rebase.
+
+Otwarte przed wdrożeniem: (1) rebase na main (97+ commitów; główne kolizje w Terrain3DGlRenderer), (2) upload/repack
+poza wątkiem UI (p90 cienia w streamingu), (3) protokół 2 sceny cold+warm w exe z AppData, (4) pełny artefakt
+(12,4 GiB) lub podzbiór stromizn, (5) lokalizacja tekstów przełącznika (AppStrings), (6) rebuild-storm przy locie
+(grupa 4×4 przebudowywana przy każdej zmianie LOD jednej komórki — zmierzyć w locie F7/F8).
+
