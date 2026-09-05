@@ -61,4 +61,15 @@ błędów GL, 5/5 testów repackera.
 - Harness: apka renderuje pierwszą klatkę po ~45–60 s (det05), autoshot liczy od pierwszej klatki — okno
   czekania ≥ 240 s, `MAPATUR_AUTOSHOT_SEC=60`.
 
+## Wynik po fixie normalnych (09-05 11:51, jeden run weryfikacyjny)
+
+| kadr | ściana: luma | ściana: sat | zmienione piksele vs bez skał |
+|---|---|---|---|
+| bez skał (main, granit v7) | 52,8 | 0,325 | — |
+| RMP2 + kolor z orto, przed fixem | 40,3 | 0,394 | 22,8 % |
+| RMP2 + kolor z orto, po fixie | 48,8 | 0,353 | 18,6 % |
+
+Ton ściany wrócił do ±8 % bazy (reszta różnicy = prawdziwy relief: samo-cień i n·l mikro-rzeźby zamiast
+płaskiego granitu). Kadry: `scratchpad/rocks/rysy-150m-ab-{full,zoom}.png` (sesja 09-05).
+
 ## Werdykt usera: ⏳ (kadry ON/OFF z pozy Rysy 150 m)
