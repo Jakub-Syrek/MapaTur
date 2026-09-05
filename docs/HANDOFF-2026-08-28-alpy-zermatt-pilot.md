@@ -109,6 +109,17 @@ Zermacie (bez śladu) najpewniej ta sama rodzina. Hipoteza do ZMIERZENIA, nie do
 głodzeniu wątku UI (>1 s) w czasie streamingu — kandydaci: zdjąć pracę z wątku UI w torze uploadów,
 albo XAML overlay/SwapChainPanel podczas stalli. Repro 2 uruchomione tuż po (wynik w exitcodes.log).
 
+## PILOT RMP2 „KOLOR Z ORTO" — 09-05 (gałąź `rmp2/ortho-color`, worktree `C:\Repos\MapaTur-rock-material`)
+
+Na prośbę usera po analizie skał Codexa (dossier + 3 sędziów, 09-04): geometria RMP2 jest dobra, wadą było albedo
+z jednego skanu. Pilot: strony RMP2 przepakowane do LAYOUTU KAFLA (`ScannedRockPageTerrainRepacker`, TDD 5/5)
+i rysowane PROGRAMEM TERENU w pętli kafli + w passie cieni → kolor z orto 5 cm, de-blue, ton, CSM, mgła
+bez nowych uniformów. Env: `MAPATUR_ROCK_RMP2_ROOT` (pilot Rysy 0,28 GiB, poza AppData),
+`MAPATUR_ROCK_RMP2_SHADING=terrain|scan`. Dowód 11:07: `GPU ready 4 drawable/434 desired` → `terrain-shaded: 4 stron`,
+0 błędów GL. Pełny opis: `MapaTur-rock-material/docs/PILOT-RMP2-ORTO-KOLOR.md`. Commity `bd20321`, `d41a5a3`
+(gałąź na origin). Gałąź NIE jest zrebase'owana na main (97 commitów za) — pilot ma pokazać wygląd.
+Kadry A/B (orto-kolor / bez skał / tor Codexa) z pozy Rysy 150 m: `scratchpad/rocks/` sesji 09-05; werdykt usera ⏳.
+
 ## Nie ruszać / konteksty
 
 - **Push**: ✅ ZROBIONY 08-28 (`5eedd01..fc593f3`). ✅ **Gałęzie zmergowane 09-04**: `quirky-morse`
