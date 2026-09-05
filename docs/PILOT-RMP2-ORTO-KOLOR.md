@@ -211,3 +211,29 @@ poza wątkiem UI (p90 cienia w streamingu), (3) protokół 2 sceny cold+warm w e
 (12,4 GiB) lub podzbiór stromizn, (5) lokalizacja tekstów przełącznika (AppStrings), (6) rebuild-storm przy locie
 (grupa 4×4 przebudowywana przy każdej zmianie LOD jednej komórki — zmierzyć w locie F7/F8).
 
+### Przegląd adwersarialny batchingu (09-05 ~21:50; 3 czytelników × wymiar, 13 wniosków, każdy z obalaczem)
+
+Potwierdzone (7) → poprawione w `e07bf71`:
+1. **HIGH — utrata kontekstu GL** (resize/maximize odtwarza kontekst SKGLView): `HandleGpuReset` warstwy sprawdzał
+   własny program, którego w trybie terrain-shaded nigdy nie linkuje → martwy kod; stare nazwy VAO/VBO stron i grup
+   byłyby rysowane i KASOWANE w nowym kontekście (trafiając w świeże kafle terenu). Fix: `NotifyContextLost()`
+   wołane z gałęzi utraty kontekstu renderera (obok `tileBuffers.Clear()`), reset bez wywołań GL + log.
+   (Wada istniała od pilota `bd20321`; batching zwiększał promień rażenia.)
+2. **HIGH — rebuild storm**: grupa scalana w TEJ SAMEJ klatce po każdej zmianie składu (przy dociąganiu 2 stron/klatkę
+   grupa 16 stron scalała się do 16×). Fix: debounce 12 klatek od ostatniej zmiany składu (do tego czasu strony
+   pojedynczo — poprawność bez zmian), budżet w STRONACH (16/klatkę), priorytet: widoczne grupy, potem najstarsze.
+3. **HIGH — alokacje LOH per przebudowa** (Merge + staging rgba ~2,5 MB/grupę): zredukowane liczbą przebudów (2);
+   pooling buforów scalania — OTWARTE.
+4. **MEDIUM — 2× VRAM**: VAO strony żyje obok bufora grupy; grupy jednoelementowe uploadowały duplikat. Fix: grupa
+   1-elementowa = alias VAO strony (bez uploadu, `Owning=false`); zwalnianie buforów stron po scaleniu (rysowanie
+   członków brudnej grupy jako podzakresów starego bufora) — OTWARTE (~28 MB w pilocie, istotne przy pełnym artefakcie).
+5. **MEDIUM — terrainPacks** (kopia CPU 2× rozmiaru strony, nieksięgowana; ~30 MB w pilocie): OTWARTE — scalać
+   z rezydentnych stron managera streamingu zamiast trzymać paczki.
+6. **MEDIUM — alokacje per klatka w trackerze** i 5× enumeracja DrawUnits na klatkę: fix — słownik/listy trwałe
+   (Clear zamiast new), cache jednostek budowany raz w PrepareFrame (`TerrainShadedPages()` zwraca listę).
+7. **MEDIUM — kolejność słownikowa/budżet w grupach**: fix jak w 2.
+
+Obalone (3): retencja stron na ścieżce wyłączonej (odzwierciedla wcześniejszą politykę), „grupa z podzbioru członków"
+(nieosiągalne — paczka i strona GPU zawsze razem), „oscylacja TakeDirty" (opóźnienie, nie głodzenie). Pomiar po
+poprawkach — niżej.
+
