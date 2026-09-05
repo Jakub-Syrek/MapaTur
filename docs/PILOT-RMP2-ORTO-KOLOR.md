@@ -237,3 +237,18 @@ Obalone (3): retencja stron na ścieżce wyłączonej (odzwierciedla wcześniejs
 (nieosiągalne — paczka i strona GPU zawsze razem), „oscylacja TakeDirty" (opóźnienie, nie głodzenie). Pomiar po
 poprawkach — niżej.
 
+### Pomiar po poprawkach z przeglądu (09-05 21:54–21:57, commit `e07bf71`, jedna sesja, poza Rysy 150 m, bez ingerencji)
+
+| pass | ON (48 grup, 43 jednostki w kadrze, 0 pojedynczych; 4 próbki) p50 | OFF (12 próbek) p50 | Δ |
+|---|---|---|---|
+| shadow | 4,36 | 4,55 | −0,2 ms (szum) |
+| terrain | 6,86 | 5,58 | +1,3 ms |
+| refl | 1,12 | 4,89 | (artefakt timera, jak wyżej) |
+| sumGpu | 12,16 | 15,07 | −2,9 (przez refl) |
+| **sumCpu** | **5,80** | **3,70** | **+2,1 ms** |
+
+Faza dociągania: 434 stron → 48 grup w ~15 s przy **54 przebudowach łącznie** (≈1,1 na grupę; bez debounce byłoby
+do 16 na grupę). Po OFF: `GPU released: 434 pages, 48 groups`. Rozrzut między sesjami (OFF CPU 5,8 vs 3,7 ms)
+potwierdza, że liczy się Δ w tej samej sesji: koszt stron na CPU = +1,4…+2,1 ms, GPU +1,3 ms w passie terenu
+(cień w granicach szumu). Kadr ON/OFF: `rysy-150m-przelacznik-on-off.png`.
+
