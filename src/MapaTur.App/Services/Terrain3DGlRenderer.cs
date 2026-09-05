@@ -115,6 +115,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         //  czytana przez uReflectionTex — na czas pass 1 unit 1 trzyma ghostDepthTex, jak w torze skanu)
         "uniform vec2 uPageDepthNearFar;\n" +
         "uniform float uPageMaxBehind;\n" +
+        // Strony RMP2 leżą do uPageMaxBehind m ZA DEM-em, a DEM dalej siedzi w mapie cieni → zacieniał własną
+        // stronę (pomiar 09-05: 62 % pikseli stron < 0,6× jasności, rozkład bimodalny). Odbiornik cienia stron
+        // przesuwany wzdłuż normalnej o tyle samo (normal-offset): DEM przed stroną przestaje ją zacieniać; cienie
+        // krótsze niż lift giną (świadome pominięcie pilota). 0 = kafle terenu bez zmian.
+        "uniform float uPageShadowLift;\n" +
         "uniform vec2 uOrthoMinXY;\n" +     // ortho coverage AABB (world XY about the scene anchor) — beyond it the UV clamps
         "uniform vec2 uOrthoMaxXY;\n" +
         "uniform float uOrthoBlendMeters;\n" + // soft fade ortho→hypsometric at the coverage edge; 0 = no cull (pure ortho)
@@ -652,6 +657,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "}\n" +
         "float csmShadow(float viewDist, vec3 worldPos, float ndotl){\n" +
         "  if (uShadowStrength < 0.001) return 1.0;\n" +
+        "  if (uPageShadowLift > 0.0) { worldPos += normalize(vNormal) * uPageShadowLift; }\n" +
         // Per-pixel disc rotation from interleaved gradient noise — stable per screen position.
         "  float ang = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))) * 6.2831853;\n" +
         "  vec2 rot = vec2(cos(ang), sin(ang));\n" +
@@ -2308,6 +2314,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int pageDepthOnLocation = -1;
     private int pageDepthNearFarLocation = -1;
     private int pageMaxBehindLocation = -1;
+    private int pageShadowLiftLocation = -1;
     private const float RockPageMaxBehindMeters = 4f; // jak tor skanu Codexa (maxBehindTerrain 4 m)
     private readonly List<TerrainShadedPage> rockPagesVisible = new();
     private int rockPagesDrawnLast = -1;
@@ -5714,6 +5721,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             pageDepthOnLocation = -1;
             pageDepthNearFarLocation = -1;
             pageMaxBehindLocation = -1;
+            pageShadowLiftLocation = -1;
             orthoGlobalFadeLocation = -1;
             orthoTexelLocation = -1;
             sharpenLocation = -1;
@@ -7008,6 +7016,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     gl.PolygonOffset(-1f, -2f);
                 }
 
+                gl.Uniform1(pageShadowLiftLocation, RockPageMaxBehindMeters); // normal-offset odbiornika cienia (patrz shader)
                 foreach (TerrainShadedPage page in rockPagesVisible)
                 {
                     OrthoTile? pot = anyOrtho && (uint)page.OrthoTileIndex < (uint)orthoTiles.Count && orthoTiles[page.OrthoTileIndex].Texture != 0
@@ -7042,6 +7051,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     gl.Disable(EnableCap.PolygonOffsetFill);
                 }
 
+                gl.Uniform1(pageShadowLiftLocation, 0f);
                 gl.Uniform1(rockStrengthLocation, RockStrength);
             }
 
@@ -9576,6 +9586,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         pageDepthOnLocation = g.GetUniformLocation(program, "uPageDepthOn");
         pageDepthNearFarLocation = g.GetUniformLocation(program, "uPageDepthNearFar");
         pageMaxBehindLocation = g.GetUniformLocation(program, "uPageMaxBehind");
+        pageShadowLiftLocation = g.GetUniformLocation(program, "uPageShadowLift");
         slopeModeLocation = g.GetUniformLocation(program, "uSlopeMode");
         slopePaletteLocation = g.GetUniformLocation(program, "uSlopePalette");
         sharpenLocation = g.GetUniformLocation(program, "uSharpen");
@@ -9716,6 +9727,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.Uniform1(det05ArrBSamplerLocation, 13);
         g.Uniform1(det05ArrCSamplerLocation, 7);
         g.Uniform1(pageDepthOnLocation, 0f);
+        g.Uniform1(pageShadowLiftLocation, 0f);
         g.Uniform1(det1mSamplerLoc, 14);
         g.Uniform1(det1mCovLoc, 15);
         g.UseProgram(0);
