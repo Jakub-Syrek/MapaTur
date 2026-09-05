@@ -135,6 +135,13 @@ sesji). POMIAR Rysy 150 m, 391 stron: GPU shadow +1,7 ms, terrain +3,3 ms (16:0x
 5,9→16,8 ms (+11; 16:0x: +4,5) = 1173 draw calli/klatkę bez batchingu → WARUNEK WDROŻENIA: batching stron +
 upload poza wątkiem UI, potem protokół 2 sceny cold+warm. Zagadka: pass refl tańszy przy stronach ON (2,0 vs
 6,9 ms) — niewyjaśnione. Szczegóły: `MapaTur-rock-material/docs/PILOT-RMP2-ORTO-KOLOR.md`.
+USER ~21:20 „leć ten batching pilot" → BATCHING ZROBIONY 21:33 (`1646c4a`, TDD 11 testów `ScannedRockPageBatcher`):
+grupy 4×4 komórek per komórka orto, 434 strony → 48 grup (1 VAO/draw), grupa brudna = strony pojedynczo do
+przebudowy (≤2/klatkę). POMIAR CZYSTY 21:41–21:44 (jedna sesja, Rysy 150 m): CPU +1,4 ms (było +10,9), shadow
++0,9, terrain +1,3 ms; `GPU released 434 pages/48 groups` po OFF. Pierwsza próba pomiaru zanieczyszczona (ktoś ruszał
+kamerą na DELL + zwis logowania po 21:36:07 przy dociąganiu det05, bez WER). Przegląd adwersarialny diffu (workflow)
+w toku → poprawki. Otwarte przed wdrożeniem: rebase na main, upload poza UI, protokół 2 sceny cold+warm, artefakt
+12,4 GiB/podzbiór, lokalizacja tekstów, rebuild-storm w locie.
 Pilot nie ma `MAPATUR_DATE`/`MAPATUR_TIME_HOURS` (słońce stałe, A/B uczciwe co do piksela: 0,00 % zmian off↔off).
 Tatry w tle 09-05: fetch regionu C padł 12:57 (2 519 500/3 334 275) → wznowiony 16:07 (pwsh 15812, odłączony);
 skan znaków wodnych det05 region C: 387 surowych → 304 po dedup (`det05/_watermarks-region.json`), naprawa
