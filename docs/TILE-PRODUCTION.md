@@ -1191,3 +1191,25 @@ więc PL-fetch regionu C je odtworzy; mimo to przeniesione do kwarantanny `dev/f
 (obie kopie), żeby bake i integracja nie widziały pustych plików; grupa 16/16 wejdzie w następny przyrostowy bake.
 
 **⚠ Werdykt wizualny usera na nowy obszar (zachód/Osobita/pas północny): do zebrania.**
+
+### §16 uzupełnienie (2026-09-05): znaki wodne na nowym obszarze regionu C — skan → naprawa → sync → bake
+
+```
+# 5a. skan §13 (repo det05, pas 49.19–49.40 × 19.50–20.15, thr 0.50; dev/fetch-logs/wm-scan-regionC-0904.log):
+#     387 surowych trafień → 304 po dedup → det05/_watermarks-region.json (klucze threshold/region/hits)
+# 5b. naprawa (repo det05; backup det05-prewm; dev/fetch-logs/wm-repair-regionC-0905.log; ~11 min):
+python testdata/maps/repair-zbgis-watermarks.py --level det05 --write
+#     304/304 naprawionych, kafli dotkniętych 1049 (median-fill 7×7, mozaika 6×3 jak sk05); lista _wm-fixed.txt
+#     339 → 1388 wpisów; różnica vs snapshot 09-04 = dev/fetch-logs/_wm-fixed-regionC-0905-nowe.txt (1049)
+#     UWAGA: 1 klucz z listy (566/118) nie ma pliku ani w det05, ani w det05-prewm — dziura pokrycia wpisana
+#     przez naprawę jako „dotknięty sąsiad”; nic do skopiowania (AppData == repo).
+# 5c. sync repo→AppData TYLKO tych kafli (okno APP-LOCK, apka zamknięta; kopia atomowa .tmp→replace):
+#     skrypt sesyjny copy-wm-fixed-to-appdata.py: 1048 skopiowanych, 0 identycznych, 1 brak (566/118); 15 s
+# 5d. bake przyrostowy det05 (apka ZAMKNIĘTA; dev/fetch-logs/bake-det05-wm-0905.log):
+dotnet run --project src/MapaTur.OrthoBake -c Release -- --layer det05 --src "<AD>\det05" --out "<AD>\opk\det05"
+#     5475 pakietów: 284 wypieczonych (srcHash) + 5191 pominiętych; stron 1 349 931; kafli źle=0; 6,9 min;
+#     próbka crc OK=128 BAD=0; wyjście 143,47 GB (bez zmian objętości — te same pakiety)
+# 5e. verify-full (read-only, przy otwartej apce; dev/fetch-logs/verify-full-det05-wm-0905.log): ⏳ wynik niżej
+# 5f. sweep wizualny (zasada 4): naprawione kafle leżą w pasie 49.19–49.40 (północ regionu C, Osobita–Czerwone
+#     Wierchy–Kasprowy); werdykt usera ⏳
+```
