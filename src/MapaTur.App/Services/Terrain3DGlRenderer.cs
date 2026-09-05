@@ -107,6 +107,13 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "uniform int uUseOrtho;\n" +
         "uniform float uOrthoGlobalFade;\n" +  // 1 = full ortho, 0 = hypsometric ("2D map" mode fade)
         "uniform vec2 uOrthoTexel;\n" + // (1/width, 1/height) of the bound ortho texture
+        // Pilot RMP2 „kolor z orto" (2026-09-05): bramka głębi TYLKO dla stron skał — jak w torze skanu Codexa.
+        // Strona leżąca ≤ uPageMaxBehind m ZA zapisaną głębią sceny (DEM) przechodzi i nadpisuje głębię (pass 1),
+        // dalej za terenem (zasłonięta granią) — discard. 0 = bramka wyłączona (kafle terenu).
+        "uniform float uPageDepthOn;\n" +
+        "uniform sampler2D uPageSceneDepth;\n" +
+        "uniform vec2 uPageDepthNearFar;\n" +
+        "uniform float uPageMaxBehind;\n" +
         "uniform vec2 uOrthoMinXY;\n" +     // ortho coverage AABB (world XY about the scene anchor) — beyond it the UV clamps
         "uniform vec2 uOrthoMaxXY;\n" +
         "uniform float uOrthoBlendMeters;\n" + // soft fade ortho→hypsometric at the coverage edge; 0 = no cull (pure ortho)
@@ -658,6 +665,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  return mix(1.0, lit, uShadowStrength);\n" +
         "}\n" +
         "void main(){\n" +
+        // Bramka głębi stron RMP2 (pilot „kolor z orto"): patrz uPageDepthOn. Linearizacja jak w torze skanu.
+        "  if (uPageDepthOn > 0.5) {\n" +
+        "    vec2 pduv = gl_FragCoord.xy / vec2(textureSize(uPageSceneDepth, 0));\n" +
+        "    float pn = uPageDepthNearFar.x; float pf = uPageDepthNearFar.y;\n" +
+        "    float pNdcS = texture(uPageSceneDepth, pduv).r * 2.0 - 1.0;\n" +
+        "    float pNdcR = gl_FragCoord.z * 2.0 - 1.0;\n" +
+        "    float pLinS = (pf * pn) / (pf - (pNdcS * (pf - pn)));\n" +
+        "    float pLinR = (pf * pn) / (pf - (pNdcR * (pf - pn)));\n" +
+        "    if (pLinR - pLinS > uPageMaxBehind) { discard; }\n" +
+        "  }\n" +
         // Reflection pre-pass: we're rendering the terrain MIRRORED about the lake plane into the reflection
         // texture. Discard anything below the waterline so only the above-water peaks end up in the reflection.
         "  if (uReflectionPass > 0.5 && vWorldPos.z < uWaterClipZ) { discard; }\n" +
@@ -2287,6 +2304,15 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int skyAmbientLocation = -1;
     private int orthoSamplerLocation = -1;
     private int useOrthoLocation = -1;
+    private int pageDepthOnLocation = -1;
+    private int pageSceneDepthLocation = -1;
+    private int pageDepthNearFarLocation = -1;
+    private int pageMaxBehindLocation = -1;
+    private const float RockPageMaxBehindMeters = 4f; // jak tor skanu Codexa (maxBehindTerrain 4 m)
+    private readonly List<TerrainShadedPage> rockPagesVisible = new();
+    private int rockPagesDrawnLast = -1;
+    private int rockPageLogFrame;
+    private int rockPageLogLastFrame = -600;
     private int orthoGlobalFadeLocation = -1;
     private int orthoTexelLocation = -1;
     private int sharpenLocation = -1;
@@ -2719,7 +2745,6 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     }
     private int slopeModeLocation = -1;
     private int rockStrengthLocation = -1;
-    private bool rockTerrainShadedLogged;
     private int slopePaletteLocation = -1;
     private int biomeModeLocation = -1;
     private int biomeScreeSlopeLocation = -1;
@@ -3513,6 +3538,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     {
         foreach (KeyValuePair<int, (Vector3 Min, Vector3 Max)> cell in orthoCellBounds)
         {
+            if (cell.Key < 0)
+            {
+                continue; // -1 = unia kafli POZA pokryciem orto (bez tekstury) - strona bylaby biala
+            }
+
             if (p.X >= cell.Value.Min.X && p.X <= cell.Value.Max.X && p.Y >= cell.Value.Min.Y && p.Y <= cell.Value.Max.Y)
             {
                 return new OrthoCellRef(cell.Key, cell.Value.Min, cell.Value.Max);
@@ -5681,6 +5711,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             skyAmbientLocation = -1;
             orthoSamplerLocation = -1;
             useOrthoLocation = -1;
+            pageDepthOnLocation = -1;
+            pageSceneDepthLocation = -1;
+            pageDepthNearFarLocation = -1;
+            pageMaxBehindLocation = -1;
             orthoGlobalFadeLocation = -1;
             orthoTexelLocation = -1;
             sharpenLocation = -1;
@@ -6904,45 +6938,34 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         if (PhotogrammetricRockEnabled && photogrammetricRock.TerrainShaded)
         {
             // Pilot "kolor z orto": strony RMP2 w layoucie kafla, ten sam program i uniformy co teren.
-            // Polygon offset ciagnie strone minimalnie ku kamerze, zeby przy reliefie ~0 nie walczyla o glebokosc
-            // z wlasnym DEM-em; granit proceduralny (rockW) wylaczony na stronach - relief jest prawdziwy.
-            int rockPagesDrawn = 0;
-            gl.Uniform1(rockStrengthLocation, 0f);
-            gl.Enable(EnableCap.PolygonOffsetFill);
-            gl.PolygonOffset(-1f, -2f);
+            // DEM (LiDAR 1 m) i skan roznia sie o metry, wiec zwykly test glebi (LEQUAL + polygon offset)
+            // oddawal wiekszosc pikseli DEM-owi (granit) - ze strony zostawaly skrawki (kadr 09-05 11:51:
+            // 18,6 % zmienionych pikseli, "wielokaty dalej widoczne"). Jak w torze skanu Codexa: bramka
+            // "do 4 m ZA terenem". PASS 1 (tylko glebia, DepthFunc Always + bramka w shaderze + polygon offset
+            // +1) przepycha glebie DEM-u do glebi strony tam, gdzie strona lezy <= 4 m za nim; strony dalej za
+            // terenem (zasloniete graniami) sa odrzucane. PASS 2 (kolor, DepthFunc Less): strona wygrywa z
+            // wlasnym DEM-em (jej glebia < glebia z passu 1), a najblizsza strona wygrywa z dalszymi.
+            // Granit proceduralny (rockW) wylaczony na stronach - relief jest prawdziwy.
+            rockPagesVisible.Clear();
             foreach (TerrainShadedPage page in photogrammetricRock.TerrainShadedPages())
             {
-                if (!frustumCullOff
-                    && !MapaTur.Application.Terrain.FrustumCuller.IsAabbVisible(mvp, page.WorldMin, page.WorldMax))
+                if (frustumCullOff
+                    || MapaTur.Application.Terrain.FrustumCuller.IsAabbVisible(mvp, page.WorldMin, page.WorldMax))
                 {
-                    continue;
+                    rockPagesVisible.Add(page);
                 }
+            }
 
+            int rockPagesDrawn = 0;
+            int rockPagesNoOrtho = 0;
+            bool rockDepthGate = false;
+            if (rockPagesVisible.Count > 0)
+            {
+                gl.Uniform1(rockStrengthLocation, 0f);
                 if (lastIsBaseSkin != 0f)
                 {
                     gl.Uniform1(isBaseSkinLocation, 0f);
                     lastIsBaseSkin = 0f;
-                }
-
-                OrthoTile? pot = anyOrtho && (uint)page.OrthoTileIndex < (uint)orthoTiles.Count && orthoTiles[page.OrthoTileIndex].Texture != 0
-                    ? orthoTiles[page.OrthoTileIndex]
-                    : null;
-                if (pot is not null)
-                {
-                    if (pot.Texture != boundTexture)
-                    {
-                        gl.BindTexture(TextureTarget.Texture2D, pot.Texture);
-                        boundTexture = pot.Texture;
-                    }
-
-                    gl.Uniform2(orthoTexelLocation, pot.Width > 0 ? 1f / pot.Width : 0f, pot.Height > 0 ? 1f / pot.Height : 0f);
-                    gl.Uniform1(sharpenLocation, OrthoSharpenStrength);
-                    gl.Uniform1(useOrthoLocation, 1);
-                    gl.Uniform1(orthoGlobalFadeLocation, OrthoGlobalFade);
-                }
-                else
-                {
-                    gl.Uniform1(useOrthoLocation, 0);
                 }
 
                 BindDet25ForTile(gl, tiles[0], tiles[0]); // sciezka tablicowa ignoruje kafel - lookup per piksel po XY swiata
@@ -6951,17 +6974,87 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     BindDet05ForTile(gl, tiles[0], tiles[0]);
                 }
 
-                gl.BindVertexArray(page.Vao);
-                gl.DrawElements(PrimitiveType.Triangles, (uint)page.IndexCount, DrawElementsType.UnsignedInt, (void*)0);
-                rockPagesDrawn++;
+                rockDepthGate = ResolveSceneDepthToGhost(gl, useMsaa ? msaaFbo : presentFbo, width, height);
+                if (rockDepthGate)
+                {
+                    gl.ActiveTexture(TextureUnit.Texture1); // jak tor skanu: unit 1 (odbicie) pozyczony na glebie sceny
+                    gl.BindTexture(TextureTarget.Texture2D, ghostDepthTex);
+                    gl.ActiveTexture(TextureUnit.Texture0);
+                    gl.Uniform1(pageDepthOnLocation, 1f);
+                    gl.Uniform2(pageDepthNearFarLocation, camera.NearPlane, camera.FarPlane);
+                    gl.Uniform1(pageMaxBehindLocation, RockPageMaxBehindMeters);
+                    gl.ColorMask(false, false, false, false);
+                    gl.DepthFunc(DepthFunction.Always);
+                    gl.Enable(EnableCap.PolygonOffsetFill);
+                    gl.PolygonOffset(1f, 2f);
+                    foreach (TerrainShadedPage page in rockPagesVisible)
+                    {
+                        gl.BindVertexArray(page.Vao);
+                        gl.DrawElements(PrimitiveType.Triangles, (uint)page.IndexCount, DrawElementsType.UnsignedInt, (void*)0);
+                    }
+
+                    gl.PolygonOffset(0f, 0f);
+                    gl.Disable(EnableCap.PolygonOffsetFill);
+                    gl.DepthFunc(DepthFunction.Less);
+                    gl.ColorMask(true, true, true, true);
+                    gl.Uniform1(pageDepthOnLocation, 0f);
+                    gl.ActiveTexture(TextureUnit.Texture1);
+                    gl.BindTexture(TextureTarget.Texture2D, reflectionColorTex);
+                    gl.ActiveTexture(TextureUnit.Texture0);
+                    ghostDepthFrameValid = false; // strony zmienily glebie - pozniejsi konsumenci musza odswiezyc snapshot
+                }
+                else
+                {
+                    gl.Enable(EnableCap.PolygonOffsetFill);
+                    gl.PolygonOffset(-1f, -2f);
+                }
+
+                foreach (TerrainShadedPage page in rockPagesVisible)
+                {
+                    OrthoTile? pot = anyOrtho && (uint)page.OrthoTileIndex < (uint)orthoTiles.Count && orthoTiles[page.OrthoTileIndex].Texture != 0
+                        ? orthoTiles[page.OrthoTileIndex]
+                        : null;
+                    if (pot is not null)
+                    {
+                        if (pot.Texture != boundTexture)
+                        {
+                            gl.BindTexture(TextureTarget.Texture2D, pot.Texture);
+                            boundTexture = pot.Texture;
+                        }
+
+                        gl.Uniform2(orthoTexelLocation, pot.Width > 0 ? 1f / pot.Width : 0f, pot.Height > 0 ? 1f / pot.Height : 0f);
+                        gl.Uniform1(sharpenLocation, OrthoSharpenStrength);
+                        gl.Uniform1(useOrthoLocation, 1);
+                        gl.Uniform1(orthoGlobalFadeLocation, OrthoGlobalFade);
+                    }
+                    else
+                    {
+                        gl.Uniform1(useOrthoLocation, 0);
+                        rockPagesNoOrtho++;
+                    }
+
+                    gl.BindVertexArray(page.Vao);
+                    gl.DrawElements(PrimitiveType.Triangles, (uint)page.IndexCount, DrawElementsType.UnsignedInt, (void*)0);
+                    rockPagesDrawn++;
+                }
+
+                if (!rockDepthGate)
+                {
+                    gl.Disable(EnableCap.PolygonOffsetFill);
+                }
+
+                gl.Uniform1(rockStrengthLocation, RockStrength);
             }
 
-            gl.Disable(EnableCap.PolygonOffsetFill);
-            gl.Uniform1(rockStrengthLocation, RockStrength);
-            if (rockPagesDrawn > 0 && !rockTerrainShadedLogged)
+            rockPageLogFrame++;
+            if ((rockPagesDrawn != rockPagesDrawnLast && rockPageLogFrame - rockPageLogLastFrame >= 60)
+                || rockPageLogFrame - rockPageLogLastFrame >= 600)
             {
-                rockTerrainShadedLogged = true;
-                Log.Information("[RockRMP2] terrain-shaded: {Pages} stron narysowanych programem terenu (kolor z orto)", rockPagesDrawn);
+                rockPagesDrawnLast = rockPagesDrawn;
+                rockPageLogLastFrame = rockPageLogFrame;
+                Log.Information(
+                    "[RockRMP2] terrain-shaded: {Pages} stron w kadrze ({NoOrtho} bez tekstury orto), bramka glebi={Gate}",
+                    rockPagesDrawn, rockPagesNoOrtho, rockDepthGate);
             }
         }
         else if (PhotogrammetricRockEnabled)
@@ -9481,6 +9574,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         useOrthoLocation = g.GetUniformLocation(program, "uUseOrtho");
         orthoGlobalFadeLocation = g.GetUniformLocation(program, "uOrthoGlobalFade");
         orthoTexelLocation = g.GetUniformLocation(program, "uOrthoTexel");
+        pageDepthOnLocation = g.GetUniformLocation(program, "uPageDepthOn");
+        pageSceneDepthLocation = g.GetUniformLocation(program, "uPageSceneDepth");
+        pageDepthNearFarLocation = g.GetUniformLocation(program, "uPageDepthNearFar");
+        pageMaxBehindLocation = g.GetUniformLocation(program, "uPageMaxBehind");
         slopeModeLocation = g.GetUniformLocation(program, "uSlopeMode");
         slopePaletteLocation = g.GetUniformLocation(program, "uSlopePalette");
         sharpenLocation = g.GetUniformLocation(program, "uSharpen");
@@ -9620,6 +9717,8 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.Uniform1(det05ArrSamplerLocation, 12);
         g.Uniform1(det05ArrBSamplerLocation, 13);
         g.Uniform1(det05ArrCSamplerLocation, 7);
+        g.Uniform1(pageSceneDepthLocation, 1); // pożyczony unit odbicia (16 unitów ANGLE zajętych) — jak tor skanu
+        g.Uniform1(pageDepthOnLocation, 0f);
         g.Uniform1(det1mSamplerLoc, 14);
         g.Uniform1(det1mCovLoc, 15);
         g.UseProgram(0);

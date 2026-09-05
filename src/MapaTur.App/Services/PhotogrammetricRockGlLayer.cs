@@ -145,6 +145,9 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
     private bool unsupportedLogged;
     private bool drawableLogged;
     private bool mainDrawLogged;
+    private int residencyFrame;
+    private int residencyLastLogFrame = -600;
+    private int residencyLastDrawable = -1;
 
     private uint program;
     private uint shadowProgram;
@@ -320,6 +323,26 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
                 update.ResidentPages.Count,
                 update.Desired,
                 update.InFlight);
+        }
+
+        residencyFrame++;
+        if ((drawableKeys.Count != residencyLastDrawable && residencyFrame - residencyLastLogFrame >= 60)
+            || residencyFrame - residencyLastLogFrame >= 600
+            || update.FailedKeys.Count > 0)
+        {
+            residencyLastDrawable = drawableKeys.Count;
+            residencyLastLogFrame = residencyFrame;
+            Log.Information(
+                "[RockRMP2] residency: drawable={Drawable} gpu={Gpu} cpu={Cpu} desired={Desired} inFlight={InFlight} "
+                + "loaded={Loaded} failed={Failed} residentMB={MB:F1}",
+                drawableKeys.Count,
+                gpuPages.Count,
+                update.ResidentPages.Count,
+                update.Desired,
+                update.InFlight,
+                update.LoadedKeys.Count,
+                update.FailedKeys.Count,
+                streaming.ResidentBytes / 1048576.0);
         }
 
         DeleteReplacedPages(g, update.DesiredKeys);
