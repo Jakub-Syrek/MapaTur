@@ -875,6 +875,11 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
 
     private void ReleaseGpu(GL g)
     {
+        if (gpuPages.Count > 0 || gpuMaterials.Count > 0)
+        {
+            Log.Information("[RockRMP2] GPU released: {Pages} pages, {Materials} materials (przełącznik OFF / reset)", gpuPages.Count, gpuMaterials.Count);
+        }
+
         foreach (GpuPage page in gpuPages.Values)
         {
             DeletePage(g, page);
