@@ -172,6 +172,20 @@ Env `MAPATUR_ROCK_RMP2=0` = OFF od startu. Kadry: `rysy-150m-przelacznik-on-off.
 | **sumCpu** | **16,75 / 17,83** | **5,85 / 6,28** | **+10,9 ms** (391 stron × 3 passy = 1173 draw calli + bindy per strona) |
 
 Wcześniejszy pomiar między sesjami (16:0x) dał GPU +1,4/+1,4 ms i CPU +4,5 ms — rozrzut 2× między przebiegami
+## Demo materiału stromizn (09-06 12:0x, „zrób próbkę demo")
+
+Werdykt usera 09-05 wieczorem: „orto rozwleczone na ścianie = punkt wyjścia", „szare wielokąty" = komórki granitu v7,
+punkt odniesienia = seria Codexa `full-rock-shell-v13…v24` (arkusz 6 ze 135 serii; najbliżej 67 = v20 continuous3m).
+Demo: ciągły materiał skanu (strona 20 RMP2, BC1, ten sam plik co tor Codexa) jako `rockCol` w gałęzi `rockW`
+shadera terenu — port `worldTriplanar` (okres 43 m, mirrorUv, wagi |n|^5), sampler przez `uReflectionTex`
+(unit 1 pożyczony na czas pętli kafli/stron, przywracany przed jeziorami; 16 unitów ANGLE zajętych).
+Env: `MAPATUR_ROCK_MATERIAL=scan` (domyślnie `granite` = bez zmian), `MAPATUR_ROCK_RMP2_GRANITE=0` = czyste orto
+na stronach (domyślnie strony dostają materiał stromizn jak DEM = hybryda). Kadry: `rysy-150m-material-demo-{full,zoom}.png`
+(granit DEM 21:57 / skan+strony 12:09 / czyste orto 21:56, ta sama poza). Ściana (wycinek): luma 52,8 / 46,2 / 45,5.
+Sesje 12:05 i 12:11 miały przesuniętą kamerę (ktoś ruszał instancją na DELL) — kadr skanu z 12:09 jest w zadanej pozie.
+Znane braki demo: ton albedo skanu nieharmonizowany z lokalnym orto (ciemniejszy o ~12 %), brak makro-wariacji
+(jeden skan, okres 43 m → możliwa powtarzalność), pass odbić zostaje na granicie. Werdykt usera ⏳.
+
 (znana cecha: jeden pomiar to za mało). WNIOSEK: koszt GPU stron to +3–5 ms w passach shadow+terrain przy
 391 stronach; koszt CPU +5–11 ms na klatkę jest DYSKWALIFIKUJĄCY bez batchingu (wątek UI = renderer).
 Warunek wdrożenia: batching stron (1 VAO/draw na grupę komórek lub LOD, uniformy raz na pass) i upload poza
