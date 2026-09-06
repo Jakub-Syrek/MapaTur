@@ -156,6 +156,10 @@ internal sealed unsafe class PhotogrammetricRockGlLayer
 
     public int LastSingleUnits { get; private set; }
 
+    /// <summary>Tekstura ciągłego materiału skanu (strona 20, BC1 + mipy) — demo „skan zamiast granitu" na stromiznach terenu; 0 = jeszcze nie wgrana.</summary>
+    public uint ContinuousMaterialTexture =>
+        gpuMaterials.TryGetValue(ContinuousWorldMaterialPageId, out GpuMaterial? material) ? material.Texture : 0;
+
     private static int GroupCellsFromEnv() =>
         int.TryParse(Environment.GetEnvironmentVariable("MAPATUR_ROCK_RMP2_GROUP"), out int n) && n >= 1 ? n : 4;
 

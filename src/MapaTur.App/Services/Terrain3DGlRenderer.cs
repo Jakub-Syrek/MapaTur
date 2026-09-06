@@ -120,6 +120,10 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // przesuwany wzdłuż normalnej o tyle samo (normal-offset): DEM przed stroną przestaje ją zacieniać; cienie
         // krótsze niż lift giną (świadome pominięcie pilota). 0 = kafle terenu bez zmian.
         "uniform float uPageShadowLift;\n" +
+        // DEMO 2026-09-05 („zrób próbkę demo"): albedo skanu Codexa (ciągły materiał RMP2, strona 20, jak w jego serii
+        // full-rock-shell-v20-continuous3m) zamiast granitu v7 na stromiznach. Sampler = uReflectionTex: unit 1 pożyczony
+        // na czas pętli kafli/stron (16 unitów ANGLE zajętych), przywracany przed jeziorami. 0 = granit jak dotąd.
+        "uniform float uRockScanOn;\n" +
         "uniform vec2 uOrthoMinXY;\n" +     // ortho coverage AABB (world XY about the scene anchor) — beyond it the UV clamps
         "uniform vec2 uOrthoMaxXY;\n" +
         "uniform float uOrthoBlendMeters;\n" + // soft fade ortho→hypsometric at the coverage edge; 0 = no cull (pure ortho)
@@ -655,6 +659,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         "  return (ci == 0) ? pcfShadow(uShadowMap0, p.xy, d, rot)\n" +
         "       : ((ci == 1) ? pcfShadow(uShadowMap1, p.xy, d, rot) : pcfShadow(uShadowMap2, p.xy, d, rot));\n" +
         "}\n" +
+        // Port z PhotogrammetricRockGlLayer (mirrorUv/worldPattern/worldTriplanar): okres 43 m, odbicie lustrzane
+        // zamiast repeat (tekstura CLAMP), wagi triplanarne |n|^5.
+        "vec2 rockMirrorUv(vec2 v){ vec2 m = mod(v, 2.0); return 1.0 - abs(m - 1.0); }\n" +
+        "vec3 rockScanPattern(vec2 p, vec2 offset){ return texture(uReflectionTex, rockMirrorUv((p / 43.0) + offset)).rgb; }\n" +
+        "vec3 rockScanTriplanar(vec3 p, vec3 n){\n" +
+        "  vec3 w = pow(abs(n), vec3(5.0)); w /= max(w.x + w.y + w.z, 0.0001);\n" +
+        "  return (rockScanPattern(p.yz, vec2(0.11, 0.47)) * w.x) + (rockScanPattern(p.xz, vec2(0.53, 0.19)) * w.y) + (rockScanPattern(p.xy, vec2(0.79, 0.31)) * w.z);\n" +
+        "}\n" +
         "float csmShadow(float viewDist, vec3 worldPos, float ndotl){\n" +
         "  if (uShadowStrength < 0.001) return 1.0;\n" +
         "  if (uPageShadowLift > 0.0) { worldPos += normalize(vNormal) * uPageShadowLift; }\n" +
@@ -997,6 +1009,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // faces picked up the snow pass's cool-blue blend and "łapały zajebistą szarość" (user) — so the
         // rock wears that cool grey permanently, snow or not.
         "    vec3 rockCol = vec3(0.44, 0.46, 0.49) * (0.52 + 0.92 * rk);\n" +
+        "    if (uRockScanOn > 0.5 && uReflectionPass < 0.5) { rockCol = rockScanTriplanar(vStableWorldPos, shN); }\n" + // DEMO: albedo skanu
         "    base = mix(base, rockCol, rockW);\n" +
         "  }\n" +
         // Avalanche slope-steepness map: replace the base colour with the band colour for this fragment's
@@ -2315,7 +2328,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
     private int pageDepthNearFarLocation = -1;
     private int pageMaxBehindLocation = -1;
     private int pageShadowLiftLocation = -1;
+    private int rockScanOnLocation = -1;
+    private static readonly bool RockScanMaterial =
+        string.Equals(Environment.GetEnvironmentVariable("MAPATUR_ROCK_MATERIAL"), "scan", StringComparison.OrdinalIgnoreCase);
     private const float RockPageMaxBehindMeters = 4f; // jak tor skanu Codexa (maxBehindTerrain 4 m)
+    private static readonly bool RockPagesGranite = Environment.GetEnvironmentVariable("MAPATUR_ROCK_RMP2_GRANITE") != "0";
     private readonly List<TerrainShadedPage> rockPagesVisible = new();
     private int rockPagesDrawnLast = -1;
     private int rockPageLogFrame;
@@ -5739,6 +5756,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             pageDepthNearFarLocation = -1;
             pageMaxBehindLocation = -1;
             pageShadowLiftLocation = -1;
+            rockScanOnLocation = -1;
             orthoGlobalFadeLocation = -1;
             orthoTexelLocation = -1;
             sharpenLocation = -1;
@@ -6871,6 +6889,16 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         // Drape the ortho: bind each mesh tile's own cell texture (OrthoTileIndex) so a multi-cell ortho
         // stays sharp. Without textures the shader uses the hypsometric tint.
         bool anyOrtho = orthoTiles.Count > 0 && OrthoEnabled;
+        // DEMO: albedo skanu na stromiznach (MAPATUR_ROCK_MATERIAL=scan) — tekstura strony 20 warstwy RMP2 na unicie 1
+        // przez pętlę kafli i stron; przywracana na odbicie przed jeziorami (patrz koniec passu terenu).
+        uint rockScanTex = RockScanMaterial && PhotogrammetricRockEnabled ? photogrammetricRock.ContinuousMaterialTexture : 0;
+        if (rockScanTex != 0)
+        {
+            gl.ActiveTexture(TextureUnit.Texture1);
+            gl.BindTexture(TextureTarget.Texture2D, rockScanTex);
+            gl.ActiveTexture(TextureUnit.Texture0);
+            gl.Uniform1(rockScanOnLocation, 1f);
+        }
         gl.ActiveTexture(TextureUnit.Texture0);
         gl.Uniform1(orthoSamplerLocation, 0);
         uint boundTexture = 0;
@@ -6985,7 +7013,11 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
             bool rockDepthGate = false;
             if (rockPagesVisible.Count > 0)
             {
-                gl.Uniform1(rockStrengthLocation, 0f);
+                // Hybryda (werdykt usera 09-05 22:1x: „orto rozwleczone na scianie = punkt wyjscia"): na stronach
+                // dziala TA SAMA logika co na DEM-ie - rockW = smoothstep(45,60,nachylenie) * uRockStrength miesza
+                // material skalny tam, gdzie zdjecie z gory sie rozciaga; ponizej zostaje orto. Teraz na prawdziwej
+                // rzezbie skanu. MAPATUR_ROCK_RMP2_GRANITE=0 = czyste orto na stronach (kadr porownawczy).
+                gl.Uniform1(rockStrengthLocation, RockPagesGranite ? RockStrength : 0f);
                 if (lastIsBaseSkin != 0f)
                 {
                     gl.Uniform1(isBaseSkinLocation, 0f);
@@ -7023,7 +7055,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                     gl.ColorMask(true, true, true, true);
                     gl.Uniform1(pageDepthOnLocation, 0f);
                     gl.ActiveTexture(TextureUnit.Texture1);
-                    gl.BindTexture(TextureTarget.Texture2D, reflectionColorTex);
+                    gl.BindTexture(TextureTarget.Texture2D, rockScanTex != 0 ? rockScanTex : reflectionColorTex);
                     gl.ActiveTexture(TextureUnit.Texture0);
                     ghostDepthFrameValid = false; // strony zmienily glebie - pozniejsi konsumenci musza odswiezyc snapshot
                 }
@@ -7123,6 +7155,14 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
                 gl.ActiveTexture(TextureUnit.Texture0);
             }
         }
+        if (rockScanTex != 0)
+        {
+            gl.Uniform1(rockScanOnLocation, 0f);
+            gl.ActiveTexture(TextureUnit.Texture1);
+            gl.BindTexture(TextureTarget.Texture2D, reflectionColorTex);
+            gl.ActiveTexture(TextureUnit.Texture0);
+        }
+
         GpuEnd(gl); // Terrain
         gl.Uniform1(useDet25Location, 0); // det25 is per-tile terrain only — don't leak it into lake/forest draws
         if (det05StreamOn)
@@ -9604,6 +9644,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         pageDepthNearFarLocation = g.GetUniformLocation(program, "uPageDepthNearFar");
         pageMaxBehindLocation = g.GetUniformLocation(program, "uPageMaxBehind");
         pageShadowLiftLocation = g.GetUniformLocation(program, "uPageShadowLift");
+        rockScanOnLocation = g.GetUniformLocation(program, "uRockScanOn");
         slopeModeLocation = g.GetUniformLocation(program, "uSlopeMode");
         slopePaletteLocation = g.GetUniformLocation(program, "uSlopePalette");
         sharpenLocation = g.GetUniformLocation(program, "uSharpen");
@@ -9745,6 +9786,7 @@ internal sealed unsafe class Terrain3DGlRenderer : IDisposable
         g.Uniform1(det05ArrCSamplerLocation, 7);
         g.Uniform1(pageDepthOnLocation, 0f);
         g.Uniform1(pageShadowLiftLocation, 0f);
+        g.Uniform1(rockScanOnLocation, 0f);
         g.Uniform1(det1mSamplerLoc, 14);
         g.Uniform1(det1mCovLoc, 15);
         g.UseProgram(0);
